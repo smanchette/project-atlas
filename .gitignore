@@ -1,0 +1,32 @@
+# Environment
+.env
+backend/.env
+frontend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.db
+backend/backups/*.json
+backend/backups/*.sql
+!backend/backups/.gitkeep
+backend/media/originals/*
+backend/media/optimized/*
+backend/media/thumbnails/*
+!backend/media/originals/.gitkeep
+!backend/media/optimized/.gitkeep
+!backend/media/thumbnails/.gitkeep
+backend/test_media/
+
+# Frontend
+node_modules/
+dist/
+
+# Local editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
