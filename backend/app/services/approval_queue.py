@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func
@@ -61,7 +61,10 @@ def _queue_item(
     )
     edited_since_last_qa = bool(
         latest_revision_at
-        and (page.qa_checked_at is None or latest_revision_at > page.qa_checked_at)
+        and (
+            page.qa_checked_at is None
+            or _utc_timestamp(latest_revision_at) > _utc_timestamp(page.qa_checked_at)
+        )
     )
     missing_media = hero_image_status != "reviewed"
     approved_but_unpublished = page.status == "approved" and not page.wordpress_url
@@ -193,6 +196,12 @@ def _notes_snippet(notes: str | None) -> str | None:
     if not normalized:
         return None
     return normalized if len(normalized) <= 120 else f"{normalized[:117]}..."
+
+
+def _utc_timestamp(value: datetime) -> float:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.timestamp()
 
 
 def _next_action(

@@ -142,6 +142,39 @@ export type ApprovalHistorySummary = {
   approval_count: number;
 };
 
+export type ApprovalQueueItem = {
+  page_id: number;
+  page_title: string;
+  city_id?: number | null;
+  city_name: string;
+  county_id?: number | null;
+  county_name: string;
+  service_id: number;
+  service_name: string;
+  page_status: string;
+  qa_status: "not_run" | "ready" | "needs_review" | "blocked";
+  qa_checked_at?: string | null;
+  latest_revision_at?: string | null;
+  revision_count: number;
+  approval_history_count: number;
+  hero_image_status: "missing" | "unreviewed" | "missing_alt_text" | "reviewed";
+  last_reviewed_at?: string | null;
+  internal_notes_snippet?: string | null;
+  is_ready_for_approval: boolean;
+  has_blockers: boolean;
+  has_warnings: boolean;
+  edited_since_last_qa: boolean;
+  approved_but_unpublished: boolean;
+  missing_media: boolean;
+  needs_manual_review: boolean;
+  next_recommended_action: string;
+};
+
+export type ApprovalQueueResponse = {
+  total_count: number;
+  items: ApprovalQueueItem[];
+};
+
 export type DraftContent = {
   title: string;
   meta_title: string;

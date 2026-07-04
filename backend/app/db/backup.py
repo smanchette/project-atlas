@@ -395,6 +395,19 @@ def resolve_backup_path(backup_file: str | Path) -> Path:
     raise BackupValidationError(f"Backup file not found: {backup_file}")
 
 
+def resolve_backup_download(file_name: str) -> Path:
+    if (
+        Path(file_name).name != file_name
+        or not file_name.startswith("atlas-backup-")
+        or not file_name.endswith(".json")
+    ):
+        raise BackupValidationError("Invalid Atlas backup filename.")
+    backup_path = (BACKUP_DIR / file_name).resolve()
+    if backup_path.parent != BACKUP_DIR.resolve() or not backup_path.is_file():
+        raise BackupValidationError(f"Backup file not found: {file_name}")
+    return backup_path
+
+
 def _available_backup_path(destination: Path, timestamp: datetime) -> Path:
     candidate_time = timestamp
     while True:

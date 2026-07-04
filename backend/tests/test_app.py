@@ -23,6 +23,7 @@ if test_media_path.exists():
     shutil.rmtree(test_media_path)
 
 from app.db.city_data import TARGET_COUNTIES
+from app.db import backup as backup_module
 from app.db.backup import BACKUP_MODELS, BackupValidationError, export_backup, restore_backup
 from app.db.knowledge_block_data import KNOWLEDGE_BLOCKS
 from app.db.seed import seed_database
@@ -53,8 +54,10 @@ from app.services.draft_generation import (
     validate_safe_content,
 )
 from app.services.approval_audit import draft_content_hash
+from app.services.approval_queue import build_approval_queue
 from app.services.page_queue import create_city_service_page_queue
 from app.services import media_backup
+from app.services import program_backup
 from app.schemas.qa import QABatchRequest
 from app.services.page_qa import evaluate_page_qa, preview_qa_batch, run_qa_batch, save_page_qa
 from fastapi.testclient import TestClient
@@ -248,6 +251,24 @@ def test_backup_restore_is_idempotent_and_does_not_duplicate_records(tmp_path: P
     assert second_counts == before_counts
 
 
+def test_data_backup_download_is_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    file_name = "atlas-backup-2026-07-03-120000.json"
+    backup_path = tmp_path / file_name
+    content = b'{"metadata":{"app":"Project Atlas"},"data":{}}\n'
+    backup_path.write_bytes(content)
+    before = _file_tree_snapshot(tmp_path)
+    monkeypatch.setattr(backup_module, "BACKUP_DIR", tmp_path)
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/backups/data/{file_name}")
+
+    assert response.status_code == 200
+    assert response.content == content
+    assert response.headers["content-type"].startswith("application/json")
+    assert file_name in response.headers["content-disposition"]
+    assert _file_tree_snapshot(tmp_path) == before
+
+
 def test_invalid_backup_fails_without_modifying_database(tmp_path: Path) -> None:
     invalid_backup = tmp_path / "atlas-backup-invalid.json"
     invalid_backup.write_text('{"metadata": {}, "data": {}}', encoding="utf-8")
@@ -321,6 +342,78 @@ def test_media_backup_endpoint_fails_when_a_required_folder_is_missing(
     assert response.status_code == 500
     assert "requires both media folders" in response.json()["detail"]
     assert str(missing_frontend_media) in response.json()["detail"]
+
+
+def test_program_backup_endpoint_contains_rebuild_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = _program_backup_project(tmp_path)
+    monkeypatch.setattr(program_backup, "PROJECT_ROOT", project_root)
+
+    with TestClient(app) as client:
+        response = client.post("/api/backups/program")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert "atlas-program-backup-" in response.headers["content-disposition"]
+    assert response.headers["content-disposition"].endswith('.zip"')
+    with ZipFile(BytesIO(response.content)) as archive:
+        names = set(archive.namelist())
+
+    assert {
+        "backend/app/main.py",
+        "backend/alembic/env.py",
+        "backend/tests/test_app.py",
+        "backend/requirements.txt",
+        "backend/Dockerfile",
+        "frontend/src/main.tsx",
+        "frontend/public/robots.txt",
+        "frontend/package.json",
+        "frontend/index.html",
+        "frontend/vite.config.ts",
+        "frontend/tsconfig.json",
+        "frontend/Dockerfile",
+        "docker-compose.yml",
+        "README.md",
+    }.issubset(names)
+
+
+def test_program_backup_excludes_generated_private_and_protected_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = _program_backup_project(tmp_path)
+    before = _file_tree_snapshot(project_root)
+    monkeypatch.setattr(program_backup, "PROJECT_ROOT", project_root)
+
+    with TestClient(app) as client:
+        response = client.post("/api/backups/program")
+
+    after = _file_tree_snapshot(project_root)
+    with ZipFile(BytesIO(response.content)) as archive:
+        names = archive.namelist()
+
+    excluded_fragments = (
+        ".git/",
+        ".pytest_cache/",
+        "__pycache__/",
+        "backend/backups/",
+        "backend/media/",
+        "frontend/public/media/",
+        "frontend/node_modules/",
+        "frontend/dist/",
+    )
+    assert response.status_code == 200
+    assert after == before
+    assert not any(fragment in name for name in names for fragment in excluded_fragments)
+    assert not any(
+        Path(name).name.lower() == ".env"
+        or Path(name).name.lower().startswith(".env.")
+        or "secret" in Path(name).name.lower()
+        or Path(name).suffix.lower() in {".db", ".key", ".pem", ".pyc"}
+        for name in names
+    )
 
 
 def test_generation_prompt_includes_location_business_service_and_knowledge() -> None:
@@ -1752,11 +1845,231 @@ def test_approval_gate_rejects_page_with_qa_blockers() -> None:
     assert status_after == status_before
 
 
+def test_approval_queue_detects_ready_page() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            qa = evaluate_page_qa(session, page.id)
+            assert qa.readiness_status == "ready"
+            page.qa_status = qa.readiness_status
+            page.qa_result = qa.model_dump(mode="json", exclude={"persisted"})
+            page.qa_checked_at = qa.checked_at
+            page.status = "draft"
+            session.add(page)
+            session.flush()
+
+            item = _approval_queue_item(session, page.id)
+            session.rollback()
+
+    assert item.is_ready_for_approval is True
+    assert item.has_blockers is False
+    assert item.has_warnings is False
+    assert item.next_recommended_action.startswith("Review the preview")
+
+
+def test_approval_queue_detects_blocked_page() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-deltona-fl")
+            qa = evaluate_page_qa(session, page.id)
+            page.qa_status = qa.readiness_status
+            page.qa_result = qa.model_dump(mode="json", exclude={"persisted"})
+            page.qa_checked_at = qa.checked_at
+            session.add(page)
+            session.flush()
+
+            item = _approval_queue_item(session, page.id)
+            session.rollback()
+
+    assert item.has_blockers is True
+    assert item.is_ready_for_approval is False
+    assert item.needs_manual_review is True
+
+
+def test_approval_queue_detects_warnings() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page.qa_status = "needs_review"
+            page.qa_result = {
+                "warning_count": 1,
+                "failed_count": 0,
+                "checks": [{"status": "warning"}],
+            }
+            page.qa_checked_at = datetime.now(UTC)
+            page.status = "draft"
+            session.add(page)
+            session.flush()
+
+            item = _approval_queue_item(session, page.id)
+            session.rollback()
+
+    assert item.has_warnings is True
+    assert item.has_blockers is False
+    assert item.is_ready_for_approval is False
+
+
+def test_approval_queue_detects_edit_after_last_qa() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page.qa_status = "ready"
+            page.qa_result = {"warning_count": 0, "failed_count": 0, "checks": []}
+            page.qa_checked_at = datetime(2026, 1, 1, tzinfo=UTC)
+            revision = GeneratedPageRevision(
+                generated_page_id=page.id,
+                created_at=datetime(2026, 1, 2, tzinfo=UTC),
+                created_by="Queue test",
+                draft_hash_before="before",
+                draft_hash_after="after",
+                draft_content_before=deepcopy(page.draft_content or {}),
+                draft_content_after=deepcopy(page.draft_content or {}),
+                changed_fields=["intro"],
+            )
+            session.add(page)
+            session.add(revision)
+            session.flush()
+
+            item = _approval_queue_item(session, page.id)
+            session.rollback()
+
+    assert item.edited_since_last_qa is True
+    assert item.is_ready_for_approval is False
+    assert item.next_recommended_action == "Run QA again after the latest manual edit."
+
+
+def test_approval_queue_detects_approved_but_unpublished() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page.status = "approved"
+            page.wordpress_url = None
+            session.add(page)
+            session.flush()
+
+            item = _approval_queue_item(session, page.id)
+            session.rollback()
+
+    assert item.approved_but_unpublished is True
+    assert item.is_ready_for_approval is False
+    assert item.next_recommended_action.startswith("Hold for a future")
+
+
+def test_approval_queue_detects_missing_media() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-deltona-fl")
+            item = _approval_queue_item(session, page.id)
+
+    assert item.missing_media is True
+    assert item.hero_image_status == "missing"
+    assert item.is_ready_for_approval is False
+
+
+def test_approval_queue_endpoint_is_read_only() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            before = _approval_queue_database_snapshot(session)
+
+        response = client.get("/api/generated-pages/approval-queue")
+
+        with Session(engine) as session:
+            after = _approval_queue_database_snapshot(session)
+
+    assert response.status_code == 200
+    assert response.json()["total_count"] == 55
+    assert len(response.json()["items"]) == 55
+    assert after == before
+
+
 def _database_counts(session: Session) -> dict[str, int]:
     return {
         group: len(session.exec(select(model)).all())
         for group, model in BACKUP_MODELS.items()
     }
+
+
+def _approval_queue_item(session: Session, page_id: int):
+    return next(
+        item
+        for item in build_approval_queue(session).items
+        if item.page_id == page_id
+    )
+
+
+def _approval_queue_database_snapshot(session: Session) -> dict:
+    pages = session.exec(select(GeneratedPage).order_by(GeneratedPage.id)).all()
+    revisions = session.exec(
+        select(GeneratedPageRevision).order_by(GeneratedPageRevision.id)
+    ).all()
+    audits = session.exec(select(ApprovalAudit).order_by(ApprovalAudit.id)).all()
+    assignments = session.exec(
+        select(PageImageAssignment).order_by(PageImageAssignment.id)
+    ).all()
+    images = session.exec(select(ImageMetadata).order_by(ImageMetadata.id)).all()
+    backup_root = Path("backups")
+    return {
+        "pages": [
+            (
+                page.id,
+                page.status,
+                deepcopy(page.draft_content),
+                page.qa_status,
+                deepcopy(page.qa_result),
+                page.qa_checked_at,
+                page.updated_at,
+            )
+            for page in pages
+        ],
+        "revisions": [revision.model_dump() for revision in revisions],
+        "approval_audits": [audit.model_dump() for audit in audits],
+        "media_assignments": [assignment.model_dump() for assignment in assignments],
+        "image_metadata": [image.model_dump() for image in images],
+        "backup_files": _file_tree_snapshot(backup_root) if backup_root.exists() else {},
+    }
+
+
+def _program_backup_project(root: Path) -> Path:
+    included_files = {
+        "backend/app/main.py": "print('atlas')\n",
+        "backend/alembic/env.py": "# migrations\n",
+        "backend/tests/test_app.py": "def test_placeholder(): pass\n",
+        "backend/requirements.txt": "fastapi\n",
+        "backend/Dockerfile": "FROM python:3.12\n",
+        "backend/alembic.ini": "[alembic]\n",
+        "frontend/src/main.tsx": "export {};\n",
+        "frontend/public/robots.txt": "User-agent: *\n",
+        "frontend/package.json": '{"name":"atlas"}\n',
+        "frontend/index.html": "<div id=\"root\"></div>\n",
+        "frontend/vite.config.ts": "export default {};\n",
+        "frontend/tsconfig.json": "{}\n",
+        "frontend/Dockerfile": "FROM node:20\n",
+        "docker-compose.yml": "services: {}\n",
+        "README.md": "# Atlas\n",
+    }
+    excluded_files = {
+        ".git/config": "private git metadata\n",
+        "backend/.env": "DATABASE_URL=secret\n",
+        "backend/app/.env.local": "SECRET=hidden\n",
+        "backend/app/private_key.pem": "private\n",
+        "backend/app/secrets.json": "{}\n",
+        "backend/app/cache.db": "database\n",
+        "backend/app/__pycache__/main.pyc": "cache\n",
+        "backend/alembic/.pytest_cache/state": "cache\n",
+        "backend/backups/atlas-backup-old.json": "backup\n",
+        "backend/media/originals/image.jpg": "media\n",
+        "frontend/.env": "VITE_SECRET=hidden\n",
+        "frontend/src/.env.production": "VITE_SECRET=hidden\n",
+        "frontend/public/media/hero.png": "media\n",
+        "frontend/node_modules/pkg/index.js": "dependency\n",
+        "frontend/dist/index.html": "build output\n",
+    }
+    for relative_path, content in {**included_files, **excluded_files}.items():
+        destination = root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content, encoding="utf-8")
+    return root
 
 
 def _file_tree_snapshot(root: Path) -> dict[str, tuple[int, int, str]]:

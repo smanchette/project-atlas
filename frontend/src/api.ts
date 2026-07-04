@@ -59,7 +59,18 @@ function isMessageDetail(value: unknown): value is { message: string } {
 }
 
 export async function requestMediaBackup(): Promise<{ blob: Blob; fileName: string }> {
-  const response = await fetch(`${API_BASE_URL}/api/backups/media`, { method: "POST" });
+  return requestZipBackup("/api/backups/media", "atlas-media-backup.zip");
+}
+
+export async function requestProgramBackup(): Promise<{ blob: Blob; fileName: string }> {
+  return requestZipBackup("/api/backups/program", "atlas-program-backup.zip");
+}
+
+async function requestZipBackup(
+  path: string,
+  fallbackFileName: string
+): Promise<{ blob: Blob; fileName: string }> {
+  const response = await fetch(`${API_BASE_URL}${path}`, { method: "POST" });
   if (!response.ok) {
     let message = await response.text();
     try {
@@ -75,8 +86,21 @@ export async function requestMediaBackup(): Promise<{ blob: Blob; fileName: stri
   const fileNameMatch = disposition.match(/filename="?([^";]+)"?/i);
   return {
     blob: await response.blob(),
-    fileName: fileNameMatch?.[1] ?? "atlas-media-backup.zip"
+    fileName: fileNameMatch?.[1] ?? fallbackFileName
   };
+}
+
+export async function requestDataBackup<T>(): Promise<{ backup: T; blob: Blob; fileName: string }> {
+  const backup = await apiRequest<T>("/api/backups/export", { method: "POST" });
+  const fileName = (backup as { file_name?: string }).file_name;
+  if (!fileName) {
+    throw new Error("Atlas did not return a data backup filename.");
+  }
+  const response = await fetch(`${API_BASE_URL}/api/backups/data/${encodeURIComponent(fileName)}`);
+  if (!response.ok) {
+    throw new Error((await response.text()) || `Request failed with ${response.status}`);
+  }
+  return { backup, blob: await response.blob(), fileName };
 }
 
 export function listItems<T>(endpoint: string): Promise<T[]> {

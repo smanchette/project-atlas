@@ -340,6 +340,8 @@ def run_qa_batch(session: Session, payload: QABatchRequest) -> QABatchResponse:
 
 def _filtered_pages(session: Session, payload: QABatchRequest) -> list[GeneratedPage]:
     statement = select(GeneratedPage)
+    if payload.page_ids:
+        statement = statement.where(GeneratedPage.id.in_(payload.page_ids))
     if payload.county_ids:
         statement = statement.where(GeneratedPage.county_id.in_(payload.county_ids))
     if payload.city_ids:

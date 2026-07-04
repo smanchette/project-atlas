@@ -29,6 +29,7 @@ services:
       - "8000:8000"
     volumes:
       - ./backend:/app
+      - ./:/atlas-program:ro
       - ./frontend/public/media:/frontend/public/media:ro
     depends_on:
       postgres:

@@ -1,6 +1,7 @@
 import {
   Building2,
   BookOpenText,
+  ClipboardCheck,
   DatabaseBackup,
   Images,
   FileText,
@@ -14,6 +15,7 @@ import { NavLink, Route, Routes } from "react-router-dom";
 
 import Dashboard from "./pages/Dashboard";
 import BackupsPage from "./pages/BackupsPage";
+import ApprovalQueuePage from "./pages/ApprovalQueuePage";
 import CitiesPage from "./pages/CitiesPage";
 import GeneratedPagesPage from "./pages/GeneratedPagesPage";
 import GeneratedPagePreview from "./pages/GeneratedPagePreview";
@@ -30,6 +32,7 @@ const navItems = [
   { to: "/counties", label: "Counties", icon: Map },
   { to: "/cities", label: "Cities", icon: MapPin },
   { to: "/generated-pages", label: "Generated Pages", icon: FileText },
+  { to: "/approval-queue", label: "Approval Queue", icon: ClipboardCheck },
   { to: "/image-metadata", label: "Media Library", icon: Images },
   { to: "/backups", label: "Backups", icon: DatabaseBackup },
   { to: "/settings", label: "Settings", icon: Settings }
@@ -161,6 +164,7 @@ function DashboardShell() {
             element={<CitiesPage />}
           />
           <Route path="/generated-pages" element={<GeneratedPagesPage />} />
+          <Route path="/approval-queue" element={<ApprovalQueuePage />} />
           <Route path="/image-metadata" element={<MediaLibraryPage />} />
           <Route path="/backups" element={<BackupsPage />} />
           <Route

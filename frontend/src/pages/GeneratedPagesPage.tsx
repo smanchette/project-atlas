@@ -1,6 +1,6 @@
 import { CSSProperties, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ArrowDown, ArrowUp, CheckCircle2, CircleCheck, ClipboardList, Eye, FileClock, Image as ImageIcon, ListChecks, Monitor, Pencil, Plus, RotateCcw, Save, ShieldCheck, Sparkles, Trash2, X, XCircle } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { ApiError, apiRequest, listItems } from "../api";
 import type { ApprovalAudit, ApprovalHistorySummary, AssignedMedia, City, County, GeneratedPage, GeneratedPageRevision, ImageMetadata, ManualDraftFields, ManualDraftSaveResponse, PageQAResult, QABatchResponse } from "../types";
@@ -35,6 +35,7 @@ type EditorValidationError = {
 };
 
 function GeneratedPagesPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [pages, setPages] = useState<GeneratedPage[]>([]);
   const [cities, setCities] = useState<City[]>([]);
   const [counties, setCounties] = useState<County[]>([]);
@@ -102,6 +103,24 @@ function GeneratedPagesPage() {
   useEffect(() => {
     loadData();
   }, []);
+
+  useEffect(() => {
+    if (loading || pages.length === 0) return;
+    const pageId = Number(searchParams.get("page"));
+    const action = searchParams.get("action");
+    if (!pageId || !action) return;
+    const page = pages.find((item) => item.id === pageId);
+    if (!page) return;
+    setSelectedPageId(page.id);
+    if (action === "edit" && page.status === "draft" && page.draft_content) {
+      openEditor(page);
+    }
+    const targetId = action === "history" ? "approval-history-panel" : action === "issues" ? "qa-panel" : null;
+    if (targetId) {
+      window.setTimeout(() => document.getElementById(targetId)?.scrollIntoView({ behavior: "smooth" }), 250);
+    }
+    setSearchParams({}, { replace: true });
+  }, [loading, pages, searchParams, setSearchParams]);
 
   useEffect(() => {
     if (!selectedPageId) {
@@ -1235,7 +1254,7 @@ function QAPanel({
 }) {
   const issues = result?.checks.filter((check) => check.status !== "pass") ?? [];
   return (
-    <section className="panel qaPanel">
+    <section className="panel qaPanel" id="qa-panel">
       <div className="panelHeader">
         <div>
           <h2>Publication Readiness</h2>
@@ -1767,7 +1786,7 @@ function ApprovalHistoryPanel({
   history: ApprovalAudit[];
 }) {
   return (
-    <section className="panel approvalHistoryPanel">
+    <section className="panel approvalHistoryPanel" id="approval-history-panel">
       <div className="panelHeader">
         <div>
           <h2>Approval History</h2>

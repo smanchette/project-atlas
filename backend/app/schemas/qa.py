@@ -33,6 +33,7 @@ class PageQAResult(SQLModel):
 
 
 class QABatchRequest(SQLModel):
+    page_ids: list[int] = Field(default_factory=list)
     county_ids: list[int] = Field(default_factory=list)
     city_ids: list[int] = Field(default_factory=list)
     page_status: str | None = None
