@@ -548,6 +548,43 @@ select {
   font-weight: 650;
 }
 
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid #d9e0dc;
+  background: #f7f9f8;
+  color: #3f4d47;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.2;
+  text-transform: capitalize;
+}
+
+.statusBadge.ready {
+  border-color: #9fc9b5;
+  background: #edf8f1;
+  color: #176443;
+}
+
+.statusBadge.warning {
+  border-color: #e0b35d;
+  background: #fff8e8;
+  color: #694b0d;
+}
+
+.statusBadge.danger {
+  border-color: #e0a6a0;
+  background: #fff1ef;
+  color: #8b2f26;
+}
+
+.statusBadge.muted {
+  color: #52625b;
+}
+
 .recordForm {
   display: grid;
   gap: 12px;
@@ -3114,6 +3151,754 @@ th {
   }
 
   .backupTypeGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.exportPackageTitle {
+  margin: 7px 0 0;
+  color: #596965;
+}
+
+.exportNotice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 18px;
+  padding: 11px 13px;
+  border: 1px solid #b9ccc4;
+  border-radius: 7px;
+  background: #edf4f1;
+  color: #284d40;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.exportStatusGrid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.exportStatusTile {
+  display: grid;
+  min-height: 80px;
+  gap: 7px;
+  padding: 13px;
+  border: 1px solid #dfe6e3;
+  border-left: 4px solid #778681;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.exportStatusTile.ready {
+  border-left-color: #277a55;
+}
+
+.exportStatusTile.blocked {
+  border-left-color: #b43a35;
+}
+
+.exportStatusTile span {
+  color: #63716d;
+  font-size: 12px;
+}
+
+.exportStatusTile strong {
+  font-size: 18px;
+}
+
+.exportWarningsPanel,
+.exportTwoColumn,
+.exportPackagePage > .panel {
+  margin-bottom: 18px;
+}
+
+.exportWarningList {
+  display: grid;
+  gap: 8px;
+}
+
+.exportWarningList article {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 9px;
+  padding: 11px;
+  border-left: 3px solid #c17a16;
+  background: #fff8eb;
+}
+
+.exportWarningList article.blocker {
+  border-left-color: #b43a35;
+  background: #fff1f0;
+}
+
+.exportWarningList p,
+.exportPass {
+  margin: 4px 0 0;
+  color: #596965;
+  font-size: 13px;
+}
+
+.exportPass {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #216543;
+}
+
+.exportTwoColumn {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.detailsList.compact div {
+  padding: 7px 0;
+}
+
+.exportMetadataList,
+.exportContentSections,
+.exportFaqList,
+.exportMediaList {
+  display: grid;
+  gap: 10px;
+}
+
+.exportCopyRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid #e0e7e4;
+  background: #f8faf9;
+}
+
+.exportCopyRow > div {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.exportCopyRow span {
+  color: #596965;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.exportCopyRow code {
+  overflow-wrap: anywhere;
+  color: #253c34;
+  font-size: 12px;
+}
+
+.fieldWarning {
+  color: #9b2d29;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.exportContentSections {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.exportContentSections article,
+.exportFaqList article {
+  padding: 12px;
+  border-left: 3px solid #b9ccc4;
+  background: #f8faf9;
+}
+
+.exportContentSections h3,
+.exportFaqHeading {
+  margin: 0 0 7px;
+  font-size: 14px;
+}
+
+.exportContentSections p,
+.exportFaqList p {
+  margin: 0;
+  color: #4e5e59;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.exportFaqHeading {
+  margin-top: 18px;
+}
+
+.exportFaqList article strong {
+  font-size: 13px;
+}
+
+.exportFaqList article p {
+  margin-top: 6px;
+}
+
+.exportMediaList article {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 9px;
+  padding: 10px;
+  border-bottom: 1px solid #e4eae7;
+}
+
+.exportMediaList article > div {
+  display: grid;
+  gap: 3px;
+}
+
+.exportMediaList span,
+.exportMediaList small {
+  color: #5d6d68;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.jsonLdPreview {
+  max-height: 520px;
+  overflow: auto;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid #d8e0dd;
+  background: #17201d;
+  color: #e7f2ee;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.exportPackageStandalone {
+  width: min(100% - 32px, 900px);
+  margin: 40px auto;
+}
+
+.exportBulkPreview {
+  margin-bottom: 18px;
+}
+
+.exportBulkCandidates {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.exportBulkCandidates > div {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) auto;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid #e4eae7;
+  font-size: 12px;
+}
+
+.exportBulkCandidates code {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .exportStatusGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .exportTwoColumn,
+  .exportContentSections {
+    grid-template-columns: 1fr;
+  }
+
+  .exportBulkCandidates > div {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 520px) {
+  .exportStatusGrid {
+    grid-template-columns: 1fr;
+  }
+}
+.wordpressSafetyNotice {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px 16px;
+  border: 1px solid #e0b35d;
+  background: #fff8e8;
+  color: #694b0d;
+}
+
+.wordpressSafetyNotice div,
+.wordpressSecretNote {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.wordpressSafetyNotice span,
+.wordpressSecretNote {
+  font-size: 13px;
+}
+
+.wordpressSettingsGrid,
+.wordpressPreviewGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(300px, 0.85fr);
+  gap: 16px;
+}
+
+.wordpressSettingsForm {
+  display: grid;
+  gap: 14px;
+}
+
+.wordpressSettingsForm label,
+.wordpressPagePicker label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.wordpressSettingsForm input,
+.wordpressSettingsForm select,
+.wordpressPagePicker select {
+  width: 100%;
+}
+
+.wordpressSettingsForm .checkboxRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.wordpressSettingsForm .checkboxRow input {
+  width: auto;
+}
+
+.wordpressSecretNote {
+  flex-direction: row;
+  align-items: center;
+  color: #52625b;
+  margin: 0;
+}
+
+.wordpressConnectionPanel {
+  align-self: start;
+}
+
+.wordpressSessionPanel {
+  align-self: start;
+}
+
+.wordpressSessionPanel .helperText {
+  margin-top: 10px;
+}
+
+.connectionHeadline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.connectionHeadline.connected {
+  color: #176443;
+}
+
+.connectionHeadline.failed,
+.connectionHeadline.disabled {
+  color: #8a5710;
+}
+
+.inlineSuccess {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid #b9d8c8;
+  background: #eefaf3;
+  color: #176443;
+  font-size: 13px;
+}
+
+.wordpressPagePicker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 420px);
+  align-items: end;
+  gap: 20px;
+}
+
+.wordpressPagePicker h2,
+.wordpressPagePicker p {
+  margin-bottom: 4px;
+}
+
+.wordpressPayloadSummary {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) minmax(180px, 1.3fr) minmax(130px, 0.7fr) minmax(140px, 0.8fr);
+  border: 1px solid #d9e0dc;
+  background: #fff;
+}
+
+.wordpressPayloadSummary > div {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  padding: 14px;
+  border-right: 1px solid #e5e9e7;
+}
+
+.wordpressPayloadSummary > div:last-child {
+  border-right: 0;
+}
+
+.wordpressPayloadSummary span {
+  color: #64716b;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.wordpressPayloadSummary strong,
+.wordpressPayloadSummary code {
+  overflow-wrap: anywhere;
+}
+
+.wordpressContentFrame {
+  width: 100%;
+  min-height: 620px;
+  border: 1px solid #d9e0dc;
+  background: #fff;
+}
+
+.wordpressPreviewGrid .jsonLdPreview {
+  max-height: 430px;
+}
+
+.wordpressWarningsPanel .formActions {
+  margin-top: 16px;
+}
+
+.wordpressDraftSandbox {
+  display: grid;
+  gap: 18px;
+  border-top: 3px solid #1f5c48;
+}
+
+.wordpressDraftEmpty,
+.dryRunHeadline,
+.wordpressCreateConfirmation {
+  display: flex;
+  gap: 11px;
+  align-items: flex-start;
+  padding: 14px;
+  border: 1px solid #d9e0dc;
+  background: #f7f9f8;
+}
+
+.wordpressDraftEmpty p,
+.dryRunHeadline span,
+.wordpressCreateConfirmation p {
+  margin: 0;
+}
+
+.wordpressDraftEmpty > div {
+  display: grid;
+  gap: 10px;
+}
+
+.dryRunHeadline > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.dryRunHeadline.ready {
+  border-color: #8fc8ad;
+  background: #edf8f1;
+  color: #176443;
+}
+
+.dryRunHeadline.blocked,
+.wordpressCreateConfirmation {
+  border-color: #e0b35d;
+  background: #fff8e8;
+  color: #694b0d;
+}
+
+.wordpressGateList {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.wordpressGateList article {
+  display: flex;
+  gap: 9px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #d9e0dc;
+  background: #fff;
+}
+
+.wordpressGateList article.passed {
+  border-left: 3px solid #2d7a58;
+}
+
+.wordpressGateList article.failed {
+  border-left: 3px solid #b36b20;
+}
+
+.wordpressGateList article div,
+.wordpressCreateConfirmation > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.wordpressGateList p {
+  margin: 0;
+  color: #5e6b65;
+  font-size: 13px;
+}
+
+.wordpressExactPayload {
+  display: grid;
+  gap: 12px;
+}
+
+.wordpressExactPayload h3,
+.wordpressExactPayload p {
+  margin-bottom: 4px;
+}
+
+.wordpressExactPayload code,
+.wordpressCreateConfirmation code {
+  overflow-wrap: anywhere;
+}
+
+.wordpressCreateConfirmation label {
+  display: grid;
+  gap: 7px;
+  margin: 8px 0;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.wordpressCreateConfirmation input {
+  width: 100%;
+  max-width: 680px;
+}
+
+.wordpressReviewSummary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid #d9e0dc;
+  background: #fff;
+}
+
+.wordpressReviewSummary > div {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border-right: 1px solid #e5e9e7;
+}
+
+.wordpressReviewSummary > div:last-child {
+  border-right: 0;
+}
+
+.wordpressReviewSummary span {
+  color: #64716b;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.wordpressReviewSummary strong {
+  font-size: 22px;
+}
+
+.wordpressDraftListPanel table td {
+  vertical-align: top;
+}
+
+.wordpressDraftListPanel td strong,
+.wordpressDraftListPanel td span {
+  display: block;
+}
+
+.wordpressDraftListPanel td span {
+  color: #64716b;
+  font-size: 13px;
+}
+
+.wordpressDraftListPanel td a {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  margin-top: 7px;
+}
+
+.selectedRow {
+  background: #f1f7f4;
+}
+
+.badgeStack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wordpressReviewGrid {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(280px, 0.9fr) minmax(360px, 1.2fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.wordpressComparisonPanel {
+  grid-column: span 1;
+}
+
+.wordpressQueueLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(360px, 0.85fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.wordpressQueueGroups {
+  display: grid;
+  gap: 18px;
+}
+
+.wordpressQueueGroup {
+  border-top: 1px solid #d9e0dc;
+  padding-top: 14px;
+}
+
+.queueGroupHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.queueGroupHeader h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.wordpressQueueWorkflow {
+  position: sticky;
+  top: 18px;
+}
+
+.wordpressDraftQueuePage code {
+  overflow-wrap: anywhere;
+}
+
+.comparisonList {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  border: 1px solid #d9e0dc;
+}
+
+.comparisonList div {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.7fr) minmax(0, 1.3fr);
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #e5e9e7;
+}
+
+.comparisonList div:last-child {
+  border-bottom: 0;
+}
+
+.comparisonList dt {
+  color: #64716b;
+  font-size: 12px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.comparisonList dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.wordpressDraftReviewPage .inlineWarning {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+@media (max-width: 900px) {
+  .wordpressSettingsGrid,
+  .wordpressPreviewGrid,
+  .wordpressPagePicker,
+  .wordpressReviewGrid,
+  .wordpressQueueLayout {
+    grid-template-columns: 1fr;
+  }
+
+  .wordpressQueueWorkflow {
+    position: static;
+  }
+
+  .wordpressGateList {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .wordpressPayloadSummary {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .wordpressReviewSummary {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .wordpressPayloadSummary > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .wordpressPayloadSummary > div:nth-child(-n + 2) {
+    border-bottom: 1px solid #e5e9e7;
+  }
+}
+
+@media (max-width: 560px) {
+  .wordpressPayloadSummary,
+  .wordpressReviewSummary {
+    grid-template-columns: 1fr;
+  }
+
+  .wordpressPayloadSummary > div,
+  .wordpressReviewSummary > div {
+    border-right: 0;
+    border-bottom: 1px solid #e5e9e7;
+  }
+
+  .wordpressPayloadSummary > div:last-child,
+  .wordpressReviewSummary > div:last-child {
+    border-bottom: 0;
+  }
+
+  .comparisonList div {
+    grid-template-columns: 1fr;
+  }
+
+  .wordpressContentFrame {
+    min-height: 520px;
+  }
+
+  .wordpressGateList {
     grid-template-columns: 1fr;
   }
 }

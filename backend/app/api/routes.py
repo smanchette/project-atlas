@@ -4,8 +4,10 @@ from app.api.backup_routes import router as backup_router
 from app.api.media_routes import router as media_router
 from app.api.page_generation_routes import router as page_generation_router
 from app.api.page_editor_routes import router as page_editor_router
+from app.api.page_export_routes import router as page_export_router
 from app.api.page_media_routes import router as page_media_router
 from app.api.qa_routes import router as qa_router
+from app.api.wordpress_routes import router as wordpress_router
 from app.api.router_factory import build_crud_router
 from app.models import Business, City, County, GeneratedPage, ImageMetadata, KnowledgeBlock, Service, Setting
 from app.schemas.entities import (
@@ -40,8 +42,10 @@ api_router.include_router(backup_router)
 api_router.include_router(media_router)
 api_router.include_router(page_generation_router)
 api_router.include_router(page_editor_router)
+api_router.include_router(page_export_router)
 api_router.include_router(page_media_router)
 api_router.include_router(qa_router)
+api_router.include_router(wordpress_router)
 
 api_router.include_router(
     build_crud_router(

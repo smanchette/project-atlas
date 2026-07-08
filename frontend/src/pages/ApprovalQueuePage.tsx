@@ -3,8 +3,10 @@ import {
   AlertTriangle,
   CheckCircle2,
   ClipboardList,
+  Download,
   Eye,
   FileClock,
+  FileJson,
   ImageOff,
   Monitor,
   Pencil,
@@ -12,8 +14,8 @@ import {
 } from "lucide-react";
 import { Link } from "react-router-dom";
 
-import { apiRequest } from "../api";
-import type { ApprovalQueueItem, ApprovalQueueResponse, QABatchResponse } from "../types";
+import { apiRequest, requestBulkPageExport } from "../api";
+import type { ApprovalQueueItem, ApprovalQueueResponse, BulkExportPreview, QABatchResponse } from "../types";
 
 type QueueFilter =
   | "all"
@@ -45,6 +47,8 @@ function ApprovalQueuePage() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
+  const [exportWorking, setExportWorking] = useState(false);
+  const [exportPreview, setExportPreview] = useState<BulkExportPreview | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -82,6 +86,7 @@ function ApprovalQueuePage() {
   );
 
   function toggleSelected(pageId: number) {
+    setExportPreview(null);
     setSelectedIds((current) => {
       const next = new Set(current);
       if (next.has(pageId)) next.delete(pageId);
@@ -91,6 +96,7 @@ function ApprovalQueuePage() {
   }
 
   function toggleVisible() {
+    setExportPreview(null);
     const visibleIds = visibleItems.map((item) => item.page_id);
     const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
     setSelectedIds((current) => {
@@ -135,6 +141,40 @@ function ApprovalQueuePage() {
     }
   }
 
+  async function previewSelectedExports() {
+    if (selectedIds.size === 0) return;
+    setExportWorking(true);
+    setError(null);
+    setMessage(null);
+    try {
+      setExportPreview(
+        await apiRequest<BulkExportPreview>("/api/generated-pages/export/bulk-preview", {
+          method: "POST",
+          body: JSON.stringify({ page_ids: Array.from(selectedIds) })
+        })
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to preview selected exports.");
+    } finally {
+      setExportWorking(false);
+    }
+  }
+
+  async function downloadSelectedExports() {
+    if (selectedIds.size === 0) return;
+    setExportWorking(true);
+    setError(null);
+    try {
+      const download = await requestBulkPageExport(Array.from(selectedIds));
+      downloadBlob(download.blob, download.fileName);
+      setMessage(`${download.fileName} downloaded. No media binaries were included.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to download selected exports.");
+    } finally {
+      setExportWorking(false);
+    }
+  }
+
   const allVisibleSelected =
     visibleItems.length > 0 && visibleItems.every((item) => selectedIds.has(item.page_id));
 
@@ -145,15 +185,23 @@ function ApprovalQueuePage() {
           <p className="eyebrow">Publishing readiness</p>
           <h1>Approval Queue</h1>
         </div>
-        <button
-          className="primaryButton buttonWithIcon"
-          type="button"
-          disabled={selectedIds.size === 0 || working}
-          onClick={runSelectedQa}
-        >
-          <ShieldCheck size={17} aria-hidden="true" />
-          {working ? "Running QA..." : `Run QA on selected (${selectedIds.size})`}
-        </button>
+        <div className="headerActions">
+          <button className="secondaryButton buttonWithIcon" type="button" disabled={selectedIds.size === 0 || exportWorking} onClick={previewSelectedExports}>
+            <FileJson size={17} aria-hidden="true" /> Preview Exports
+          </button>
+          <button className="secondaryButton buttonWithIcon" type="button" disabled={selectedIds.size === 0 || exportWorking} onClick={downloadSelectedExports}>
+            <Download size={17} aria-hidden="true" /> Download Export ZIP
+          </button>
+          <button
+            className="primaryButton buttonWithIcon"
+            type="button"
+            disabled={selectedIds.size === 0 || working}
+            onClick={runSelectedQa}
+          >
+            <ShieldCheck size={17} aria-hidden="true" />
+            {working ? "Running QA..." : `Run QA on selected (${selectedIds.size})`}
+          </button>
+        </div>
       </header>
       <p className="helperText">
         Review readiness across generated pages. This workspace cannot approve or publish pages.
@@ -161,6 +209,32 @@ function ApprovalQueuePage() {
 
       {error && <div className="alert">{error}</div>}
       {message && <div className="successMessage">{message}</div>}
+
+      {exportPreview && (
+        <section className="panel exportBulkPreview">
+          <div className="panelHeader">
+            <div><h2>Selected Export Preview</h2><p>Review-only packages. Downloading does not approve or publish pages.</p></div>
+            <button className="primaryButton buttonWithIcon" type="button" disabled={exportWorking} onClick={downloadSelectedExports}>
+              <Download size={16} aria-hidden="true" /> Download {exportPreview.selected_count} JSON Packages
+            </button>
+          </div>
+          <div className="batchSummary">
+            <span>Selected: {exportPreview.selected_count}</span>
+            <span className="ready">Export ready: {exportPreview.export_ready_count}</span>
+            <span className="needs_review">Warnings: {exportPreview.warning_count}</span>
+            <span className="blocked">Blockers: {exportPreview.blocker_count}</span>
+          </div>
+          <div className="exportBulkCandidates">
+            {exportPreview.candidates.map((candidate) => (
+              <div key={candidate.page_id}>
+                <strong>{candidate.page_title}</strong>
+                <code>{candidate.url_slug}</code>
+                <span>{candidate.blocker_count} blockers · {candidate.warning_count} warnings</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <div className="queueSummaryGrid" aria-label="Approval queue summary">
         <QueueSummary label="Ready" value={counts.ready} tone="ready" />
@@ -203,7 +277,7 @@ function ApprovalQueuePage() {
         <div className="panelHeader">
           <div>
             <h2>{visibleItems.length} pages</h2>
-            <p>{selectedIds.size} selected for the safe QA-only bulk action.</p>
+            <p>{selectedIds.size} selected for QA or review-only export actions.</p>
           </div>
         </div>
         {loading ? (
@@ -302,6 +376,9 @@ function ApprovalQueuePage() {
                         <Link to={`/generated-pages?page=${item.page_id}&action=history`}>
                           <FileClock size={15} aria-hidden="true" /> Approval History
                         </Link>
+                        <Link to={`/generated-pages/${item.page_id}/export`}>
+                          <FileJson size={15} aria-hidden="true" /> View Export Package
+                        </Link>
                       </div>
                     </td>
                   </tr>
@@ -369,6 +446,17 @@ function formatDate(value: string) {
 
 function humanize(value: string) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (letter: string) => letter.toUpperCase());
+}
+
+function downloadBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export default ApprovalQueuePage;

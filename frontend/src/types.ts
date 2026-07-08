@@ -79,7 +79,11 @@ export type GeneratedPage = {
   last_reviewed_at?: string | null;
   last_reviewed_by?: string | null;
   status: string;
+  wordpress_post_id?: number | null;
   wordpress_url?: string;
+  wordpress_status?: string | null;
+  wordpress_created_at?: string | null;
+  last_wordpress_sync_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -173,6 +177,272 @@ export type ApprovalQueueItem = {
 export type ApprovalQueueResponse = {
   total_count: number;
   items: ApprovalQueueItem[];
+};
+
+export type ExportWarning = {
+  code: string;
+  severity: "warning" | "blocker";
+  message: string;
+};
+
+export type ExportSEO = {
+  meta_title: string;
+  meta_description: string;
+  social_title: string;
+  social_description: string;
+  suggested_url_slug: string;
+};
+
+export type ExportMediaReference = {
+  image_id: number;
+  image_role: string;
+  sort_order: number;
+  image_title?: string | null;
+  alt_text: string;
+  asset_url?: string | null;
+  optimized_url?: string | null;
+  thumbnail_url?: string | null;
+  display_preset: string;
+  focal_x: number;
+  focal_y: number;
+  review_status: string;
+};
+
+export type PageExportPackage = {
+  format_version: string;
+  page_id: number;
+  page_status: string;
+  qa_status: string;
+  page_title: string;
+  url_slug: string;
+  h1: string;
+  seo: ExportSEO;
+  content_sections: Record<string, string>;
+  faq_items: { question: string; answer: string }[];
+  cta_block: string;
+  city: string;
+  county: string;
+  state: string;
+  service: string;
+  business_name: string;
+  phone?: string | null;
+  website?: string | null;
+  email?: string | null;
+  license_number?: string | null;
+  certified_operator?: string | null;
+  assigned_media: ExportMediaReference[];
+  json_ld: Record<string, unknown>;
+  canonical_url_preview: string;
+  slug_conflicts: number[];
+  export_ready: boolean;
+  warnings: ExportWarning[];
+};
+
+export type BulkExportCandidate = {
+  page_id: number;
+  page_title: string;
+  url_slug: string;
+  export_ready: boolean;
+  warning_count: number;
+  blocker_count: number;
+};
+
+export type BulkExportPreview = {
+  selected_count: number;
+  export_ready_count: number;
+  warning_count: number;
+  blocker_count: number;
+  candidates: BulkExportCandidate[];
+};
+
+export type WordPressPublishingMode = "disabled" | "sandbox" | "draft_only_future";
+
+export type WordPressSettings = {
+  site_url: string;
+  username: string;
+  publishing_mode: WordPressPublishingMode;
+  has_application_password: boolean;
+  password_storage: string;
+};
+
+export type WordPressConnectionResult = {
+  connection_status: "disabled" | "connected" | "failed";
+  rest_api_reachable: boolean;
+  authenticated: boolean;
+  credentials_present: boolean;
+  site_name?: string | null;
+  error_message?: string | null;
+  endpoint?: string | null;
+};
+
+export type WordPressPayload = {
+  title: string;
+  slug: string;
+  status: "draft";
+  content: string;
+  excerpt: string;
+  featured_media_reference?: Record<string, unknown> | null;
+  meta: Record<string, string>;
+  schema_block_preview: Record<string, unknown>;
+};
+
+export type WordPressPayloadPreview = {
+  page_id: number;
+  export_package: PageExportPackage;
+  payload: WordPressPayload;
+  warnings: ExportWarning[];
+  sandbox_only: boolean;
+};
+
+export type WordPressDraftGateResult = {
+  code: string;
+  label: string;
+  passed: boolean;
+  message: string;
+};
+
+export type WordPressDraftRequestPayload = {
+  title: string;
+  slug: string;
+  status: "draft";
+  content: string;
+  excerpt: string;
+};
+
+export type WordPressDraftDryRun = {
+  page_id: number;
+  status: "blocked" | "dry_run_ready";
+  ready: boolean;
+  payload: WordPressDraftRequestPayload;
+  payload_hash: string;
+  draft_hash: string;
+  gate_results: WordPressDraftGateResult[];
+  confirmation_token?: string | null;
+  confirmation_phrase?: string | null;
+  expires_at?: string | null;
+};
+
+export type WordPressDraftCreateResult = {
+  page_id: number;
+  status: "created";
+  wordpress_post_id: number;
+  wordpress_status: "draft";
+  wordpress_url?: string | null;
+  audit_id: number;
+  payload_hash: string;
+  gate_results: WordPressDraftGateResult[];
+};
+
+export type WordPressDraftReviewItem = {
+  page_id: number;
+  page_title: string;
+  city?: string | null;
+  county?: string | null;
+  service?: string | null;
+  atlas_status: string;
+  qa_status: string;
+  wordpress_post_id: number;
+  wordpress_status?: string | null;
+  wordpress_url?: string | null;
+  last_wordpress_sync_at?: string | null;
+  successful_draft_audit_count: number;
+  latest_draft_audit_at?: string | null;
+  audit_payload_hash?: string | null;
+  audit_draft_hash?: string | null;
+  admin_edit_url?: string | null;
+  badges: string[];
+};
+
+export type WordPressDraftReviewList = {
+  total_count: number;
+  items: WordPressDraftReviewItem[];
+};
+
+export type WordPressLiveDraftStatus = {
+  page_id: number;
+  wordpress_post_id: number;
+  rest_api_reachable?: boolean | null;
+  authenticated?: boolean | null;
+  credentials_present: boolean;
+  wordpress_status?: string | null;
+  wordpress_link?: string | null;
+  wordpress_modified?: string | null;
+  wordpress_title?: string | null;
+  wordpress_slug?: string | null;
+  is_still_draft: boolean;
+  appears_published: boolean;
+  error_message?: string | null;
+};
+
+export type WordPressDraftComparison = {
+  page_id: number;
+  atlas_saved_title: string;
+  wordpress_title?: string | null;
+  atlas_saved_slug: string;
+  wordpress_slug?: string | null;
+  atlas_expected_status: "draft";
+  wordpress_actual_status?: string | null;
+  atlas_wordpress_url?: string | null;
+  wordpress_link?: string | null;
+  audit_payload_hash?: string | null;
+  current_export_payload_hash: string;
+  audit_draft_hash?: string | null;
+  atlas_export_differs_from_original: boolean;
+  message?: string | null;
+};
+
+export type WordPressDraftReviewDetail = {
+  item: WordPressDraftReviewItem;
+  comparison: WordPressDraftComparison;
+};
+
+export type WordPressDraftQueueGroup =
+  | "eligible"
+  | "blocked_approval"
+  | "blocked_qa"
+  | "blocked_stale_qa"
+  | "blocked_missing_media"
+  | "already_has_draft"
+  | "blocked_credentials"
+  | "blocked_export";
+
+export type WordPressDraftQueueItem = {
+  page_id: number;
+  page_title: string;
+  city?: string | null;
+  county?: string | null;
+  service?: string | null;
+  atlas_status: string;
+  qa_status: string;
+  qa_checked_at?: string | null;
+  revision_count: number;
+  latest_revision_at?: string | null;
+  approval_audit_count: number;
+  export_ready: boolean;
+  export_blocker_count: number;
+  export_warning_count: number;
+  slug: string;
+  slug_conflicts: number[];
+  wordpress_post_id?: number | null;
+  wordpress_status?: string | null;
+  wordpress_url?: string | null;
+  payload_status: "draft";
+  queue_group: WordPressDraftQueueGroup;
+  eligible: boolean;
+  gate_results: WordPressDraftGateResult[];
+  next_required_action: string;
+};
+
+export type WordPressDraftQueueResponse = {
+  total_count: number;
+  eligible_count: number;
+  blocked_count: number;
+  already_has_draft_count: number;
+  wordpress_mode: WordPressPublishingMode;
+  has_application_password: boolean;
+  site_url_configured: boolean;
+  username_configured: boolean;
+  items: WordPressDraftQueueItem[];
 };
 
 export type DraftContent = {

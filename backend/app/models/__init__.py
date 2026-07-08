@@ -10,6 +10,7 @@ from app.models.entities import (
     PageImageAssignment,
     Service,
     Setting,
+    WordPressDraftAudit,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "PageImageAssignment",
     "Service",
     "Setting",
+    "WordPressDraftAudit",
 ]

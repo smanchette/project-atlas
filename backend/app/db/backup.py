@@ -19,10 +19,11 @@ from app.models import (
     PageImageAssignment,
     Service,
     Setting,
+    WordPressDraftAudit,
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.13"
+BACKUP_VERSION = "0.17"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -33,9 +34,18 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.11",
     "0.12",
     "0.13",
+    "0.17",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
+SENSITIVE_SETTING_MARKERS = (
+    "api_key",
+    "application_password",
+    "password",
+    "private_key",
+    "secret",
+    "token",
+)
 
 BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "businesses": Business,
@@ -45,6 +55,7 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "generated_pages": GeneratedPage,
     "approval_audits": ApprovalAudit,
     "page_revisions": GeneratedPageRevision,
+    "wordpress_draft_audits": WordPressDraftAudit,
     "image_metadata": ImageMetadata,
     "page_image_assignments": PageImageAssignment,
     "settings": Setting,
@@ -67,10 +78,16 @@ def export_backup(
     timestamp = (created_at or datetime.now(UTC)).astimezone(UTC)
     backup_path = _available_backup_path(destination, timestamp)
 
-    data = {
-        group: [record.model_dump(mode="json") for record in session.exec(select(model).order_by(model.id)).all()]
-        for group, model in BACKUP_MODELS.items()
-    }
+    data = {}
+    for group, model in BACKUP_MODELS.items():
+        records = session.exec(select(model).order_by(model.id)).all()
+        if group == "settings":
+            records = [
+                record
+                for record in records
+                if not is_sensitive_setting_key(record.setting_key)
+            ]
+        data[group] = [record.model_dump(mode="json") for record in records]
     table_counts = {group: len(records) for group, records in data.items()}
     payload = {
         "metadata": {
@@ -244,6 +261,40 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 restored_record,
             )
 
+        for record in data["wordpress_draft_audits"]:
+            page_id = _mapped_id(
+                generated_page_ids,
+                record["generated_page_id"],
+                "wordpress_draft_audits.generated_page_id",
+            )
+            attempted_at = _datetime_value(
+                record["attempted_at"],
+                "wordpress_draft_audits.attempted_at",
+            )
+            restored_record = {
+                **record,
+                "generated_page_id": page_id,
+                "attempted_at": attempted_at,
+                "qa_checked_at": (
+                    _datetime_value(
+                        record["qa_checked_at"],
+                        "wordpress_draft_audits.qa_checked_at",
+                    )
+                    if record.get("qa_checked_at")
+                    else None
+                ),
+            }
+            _upsert(
+                session,
+                WordPressDraftAudit,
+                select(WordPressDraftAudit).where(
+                    WordPressDraftAudit.generated_page_id == page_id,
+                    WordPressDraftAudit.attempted_at == attempted_at,
+                    WordPressDraftAudit.payload_hash == record["payload_hash"],
+                ),
+                restored_record,
+            )
+
         image_metadata_ids: dict[int, int] = {}
         for record in data["image_metadata"]:
             old_id = _record_id(record, "image_metadata")
@@ -293,6 +344,8 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             )
 
         for record in data["settings"]:
+            if is_sensitive_setting_key(record["setting_key"]):
+                continue
             _upsert(
                 session,
                 Setting,
@@ -326,6 +379,11 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
         "records_processed": sum(payload["metadata"]["table_counts"].values()),
         "table_counts": payload["metadata"]["table_counts"],
     }
+
+
+def is_sensitive_setting_key(setting_key: str) -> bool:
+    normalized = setting_key.strip().lower().replace("-", "_").replace(" ", "_")
+    return any(marker in normalized for marker in SENSITIVE_SETTING_MARKERS)
 
 
 def load_backup(backup_path: Path) -> dict[str, Any]:
@@ -367,6 +425,9 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if backup_version != "0.13" and "page_revisions" not in data:
         data["page_revisions"] = []
         counts["page_revisions"] = 0
+    if backup_version != "0.17" and "wordpress_draft_audits" not in data:
+        data["wordpress_draft_audits"] = []
+        counts["wordpress_draft_audits"] = 0
 
     for group in BACKUP_MODELS:
         records = data.get(group)
@@ -483,6 +544,7 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         "generated_pages": ("page_slug",),
         "approval_audits": ("generated_page_id", "approved_at", "draft_hash_at_approval"),
         "page_revisions": ("generated_page_id", "created_at", "draft_hash_after"),
+        "wordpress_draft_audits": ("generated_page_id", "attempted_at", "payload_hash"),
         "image_metadata": ("business_id", "file_name"),
         "page_image_assignments": ("generated_page_id", "image_metadata_id", "image_role"),
         "settings": ("setting_key",),
@@ -531,6 +593,9 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
             ("generated_page_id", "generated_pages", False),
         ),
         "page_revisions": (
+            ("generated_page_id", "generated_pages", False),
+        ),
+        "wordpress_draft_audits": (
             ("generated_page_id", "generated_pages", False),
         ),
     }

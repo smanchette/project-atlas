@@ -3,11 +3,14 @@ import {
   BookOpenText,
   ClipboardCheck,
   DatabaseBackup,
+  FileSearch,
   Images,
   FileText,
   Home,
+  ListChecks,
   Map,
   MapPin,
+  Plug,
   Settings,
   Wrench
 } from "lucide-react";
@@ -19,9 +22,13 @@ import ApprovalQueuePage from "./pages/ApprovalQueuePage";
 import CitiesPage from "./pages/CitiesPage";
 import GeneratedPagesPage from "./pages/GeneratedPagesPage";
 import GeneratedPagePreview from "./pages/GeneratedPagePreview";
+import ExportPackagePage from "./pages/ExportPackagePage";
 import KnowledgeBlocksPage from "./pages/KnowledgeBlocksPage";
 import MediaLibraryPage from "./pages/MediaLibraryPage";
 import ModulePage from "./pages/ModulePage";
+import WordPressDraftReviewPage from "./pages/WordPressDraftReviewPage";
+import WordPressDraftQueuePage from "./pages/WordPressDraftQueuePage";
+import WordPressSandboxPage from "./pages/WordPressSandboxPage";
 import type { Business, City, County, FieldConfig, GeneratedPage, Service } from "./types";
 
 const navItems = [
@@ -35,6 +42,9 @@ const navItems = [
   { to: "/approval-queue", label: "Approval Queue", icon: ClipboardCheck },
   { to: "/image-metadata", label: "Media Library", icon: Images },
   { to: "/backups", label: "Backups", icon: DatabaseBackup },
+  { to: "/wordpress-sandbox", label: "WordPress Sandbox", icon: Plug },
+  { to: "/wordpress-draft-queue", label: "WP Draft Queue", icon: ListChecks },
+  { to: "/wordpress-draft-review", label: "WP Draft Review", icon: FileSearch },
   { to: "/settings", label: "Settings", icon: Settings }
 ];
 
@@ -164,9 +174,13 @@ function DashboardShell() {
             element={<CitiesPage />}
           />
           <Route path="/generated-pages" element={<GeneratedPagesPage />} />
+          <Route path="/generated-pages/:id/export" element={<ExportPackagePage />} />
           <Route path="/approval-queue" element={<ApprovalQueuePage />} />
           <Route path="/image-metadata" element={<MediaLibraryPage />} />
           <Route path="/backups" element={<BackupsPage />} />
+          <Route path="/wordpress-sandbox" element={<WordPressSandboxPage />} />
+          <Route path="/wordpress-draft-queue" element={<WordPressDraftQueuePage />} />
+          <Route path="/wordpress-draft-review" element={<WordPressDraftReviewPage />} />
           <Route
             path="/settings"
             element={

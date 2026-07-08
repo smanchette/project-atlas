@@ -103,6 +103,43 @@ export async function requestDataBackup<T>(): Promise<{ backup: T; blob: Blob; f
   return { backup, blob: await response.blob(), fileName };
 }
 
+export function requestPageExport(pageId: number): Promise<{ blob: Blob; fileName: string }> {
+  return requestFileDownload(
+    `/api/generated-pages/${pageId}/export-package/download`,
+    { method: "GET" },
+    `atlas-page-export-${pageId}.json`
+  );
+}
+
+export function requestBulkPageExport(pageIds: number[]): Promise<{ blob: Blob; fileName: string }> {
+  return requestFileDownload(
+    "/api/generated-pages/export/bulk",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page_ids: pageIds })
+    },
+    "atlas-page-exports.zip"
+  );
+}
+
+async function requestFileDownload(
+  path: string,
+  options: RequestInit,
+  fallbackFileName: string
+): Promise<{ blob: Blob; fileName: string }> {
+  const response = await fetch(`${API_BASE_URL}${path}`, options);
+  if (!response.ok) {
+    throw new Error((await response.text()) || `Request failed with ${response.status}`);
+  }
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const fileNameMatch = disposition.match(/filename="?([^";]+)"?/i);
+  return {
+    blob: await response.blob(),
+    fileName: fileNameMatch?.[1] ?? fallbackFileName
+  };
+}
+
 export function listItems<T>(endpoint: string): Promise<T[]> {
   return apiRequest<T[]>(endpoint);
 }

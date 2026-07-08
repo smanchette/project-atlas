@@ -40,6 +40,8 @@ from app.models import (
     KnowledgeBlock,
     PageImageAssignment,
     Service,
+    Setting,
+    WordPressDraftAudit,
 )
 from app.services.draft_generation import (
     DeterministicMockProvider,
@@ -56,8 +58,13 @@ from app.services.draft_generation import (
 from app.services.approval_audit import draft_content_hash
 from app.services.approval_queue import build_approval_queue
 from app.services.page_queue import create_city_service_page_queue
+from app.services.page_export import build_page_export_package, generate_suggested_slug, slugify
 from app.services import media_backup
 from app.services import program_backup
+from app.services import wordpress_sandbox
+from app.services import wordpress_drafts
+from app.services import wordpress_draft_review
+from app.services import wordpress_draft_queue
 from app.schemas.qa import QABatchRequest
 from app.services.page_qa import evaluate_page_qa, preview_qa_batch, run_qa_batch, save_page_qa
 from fastapi.testclient import TestClient
@@ -223,7 +230,7 @@ def test_backup_export_contains_metadata_counts_and_all_data_groups(tmp_path: Pa
 
     assert backup_path.is_file()
     assert payload["metadata"]["app"] == "Project Atlas"
-    assert payload["metadata"]["version"] == "0.13"
+    assert payload["metadata"]["version"] == "0.17"
     assert isinstance(payload["metadata"]["created_at"], str)
     assert payload["metadata"]["table_counts"] == before_counts
     assert set(payload["data"]) == set(BACKUP_MODELS)
@@ -414,6 +421,193 @@ def test_program_backup_excludes_generated_private_and_protected_files(
         or Path(name).suffix.lower() in {".db", ".key", ".pem", ".pyc"}
         for name in names
     )
+
+
+def test_page_export_package_builds_from_existing_atlas_data() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            package = build_page_export_package(session, page.id)
+
+    assert package.page_title == "Drywood Termite Tenting in Orlando, FL"
+    assert package.url_slug == "drywood-termite-tenting-orlando-fl"
+    assert package.city == "Orlando"
+    assert package.county == "Orange County"
+    assert package.service == "Drywood Termite Tenting"
+    assert package.business_name == FLO_ZONE_COMPANY_NAME
+    assert package.phone and "(844) 600-8368" in package.phone
+    assert package.content_sections["intro"]
+    assert package.faq_items
+    assert package.cta_block
+    assert package.assigned_media[0].image_role == "hero"
+    assert package.assigned_media[0].alt_text
+    assert package.canonical_url_preview.endswith("/drywood-termite-tenting-orlando-fl/")
+    assert any(warning.code == "page_not_approved" for warning in package.warnings)
+    assert package.export_ready is False
+
+
+def test_page_export_slug_generation_is_deterministic_and_safe() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            service = session.get(Service, page.service_id)
+            city = session.get(City, page.city_id)
+            assert service is not None
+            assert city is not None
+            first = generate_suggested_slug(service, city)
+            second = generate_suggested_slug(service, city)
+
+    assert first == second == "drywood-termite-tenting-orlando-fl"
+    assert slugify("Drywood Termite Tenting / St. Cloud, FL!") == "drywood-termite-tenting-st-cloud-fl"
+
+
+def test_page_export_detects_duplicate_suggested_slug_conflict() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            original_slug = page.page_slug
+            page.page_slug = "custom-orlando-export"
+            session.add(page)
+            session.flush()
+            conflict = GeneratedPage(
+                business_id=page.business_id,
+                service_id=page.service_id,
+                city_id=page.city_id,
+                county_id=page.county_id,
+                page_type="city_service",
+                page_title="Slug Conflict Test",
+                page_slug=original_slug,
+                status="draft",
+            )
+            session.add(conflict)
+            session.flush()
+
+            package = build_page_export_package(session, page.id)
+            conflict_id = conflict.id
+            session.rollback()
+
+    assert package.seo.suggested_url_slug == original_slug
+    assert package.slug_conflicts == [conflict_id]
+    assert any(warning.code == "slug_conflict" for warning in package.warnings)
+    assert package.export_ready is False
+
+
+def test_page_export_warns_for_unsafe_absolute_claims() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            original = deepcopy(page.draft_content)
+            draft = deepcopy(page.draft_content or {})
+            draft["intro"] = f"{draft.get('intro', '')} Results are guaranteed."
+            page.draft_content = draft
+            session.add(page)
+            session.flush()
+
+            package = build_page_export_package(session, page.id)
+            page.draft_content = original
+            session.rollback()
+
+    unsafe = next(warning for warning in package.warnings if warning.code == "unsafe_phrase")
+    assert unsafe.severity == "blocker"
+    assert "guaranteed" in unsafe.message
+
+
+def test_page_export_json_ld_contains_only_supported_facts() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            package = build_page_export_package(session, page.id)
+
+    graph = package.json_ld["@graph"]
+    assert [item["@type"] for item in graph] == [
+        "LocalBusiness",
+        "Service",
+        "FAQPage",
+        "BreadcrumbList",
+    ]
+    serialized = json.dumps(package.json_ld)
+    assert FLO_ZONE_COMPANY_NAME in serialized
+    assert "(844) 600-8368" in serialized
+    assert "JB360566" in serialized
+    assert "Jordan Ward" in serialized
+    assert "Orlando" in serialized
+    assert "aggregateRating" not in serialized
+    assert '"review"' not in serialized
+    assert '"offers"' not in serialized
+    assert '"price"' not in serialized
+
+
+def test_page_export_endpoint_is_read_only() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page_id = page.id
+            before = _approval_queue_database_snapshot(session)
+
+        response = client.get(f"/api/generated-pages/{page_id}/export-package")
+
+        with Session(engine) as session:
+            after = _approval_queue_database_snapshot(session)
+
+    assert response.status_code == 200
+    assert response.json()["page_id"] == page_id
+    assert after == before
+
+
+def test_single_page_export_download_returns_json_without_mutation() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page_id = page.id
+            before = _approval_queue_database_snapshot(session)
+
+        response = client.get(f"/api/generated-pages/{page_id}/export-package/download")
+
+        with Session(engine) as session:
+            after = _approval_queue_database_snapshot(session)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert "atlas-page-export-drywood-termite-tenting-orlando-fl.json" in response.headers[
+        "content-disposition"
+    ]
+    assert response.json()["page_id"] == page_id
+    assert after == before
+
+
+def test_bulk_page_export_contains_only_selected_json_packages() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            orlando = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            deltona = _page_by_slug(session, "drywood-termite-tenting-deltona-fl")
+            selected_ids = {orlando.id, deltona.id}
+            before = _approval_queue_database_snapshot(session)
+
+        preview = client.post(
+            "/api/generated-pages/export/bulk-preview",
+            json={"page_ids": list(selected_ids)},
+        )
+        response = client.post(
+            "/api/generated-pages/export/bulk",
+            json={"page_ids": list(selected_ids)},
+        )
+
+        with Session(engine) as session:
+            after = _approval_queue_database_snapshot(session)
+
+    assert preview.status_code == 200
+    assert preview.json()["selected_count"] == 2
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    with ZipFile(BytesIO(response.content)) as archive:
+        names = archive.namelist()
+        packages = [json.loads(archive.read(name)) for name in names]
+    assert len(names) == 2
+    assert all(name.endswith(".json") for name in names)
+    assert {package["page_id"] for package in packages} == selected_ids
+    assert not any(name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")) for name in names)
+    assert after == before
 
 
 def test_generation_prompt_includes_location_business_service_and_knowledge() -> None:
@@ -1554,7 +1748,7 @@ def test_backup_restore_preserves_review_notes_and_approval_audits_idempotently(
                 session.delete(record)
             session.commit()
 
-    assert payload["metadata"]["version"] == "0.13"
+    assert payload["metadata"]["version"] == "0.17"
     assert payload["data"]["approval_audits"]
     exported_page = next(
         record
@@ -1792,7 +1986,7 @@ def test_backup_restore_preserves_page_revisions_idempotently(tmp_path: Path) ->
                 revisions=restored_revisions,
             )
 
-    assert payload_json["metadata"]["version"] == "0.13"
+    assert payload_json["metadata"]["version"] == "0.17"
     assert payload_json["data"]["page_revisions"]
     assert len(restored_revisions) == 1
     assert restored_after["hero_subheadline"].endswith("Reviewed for backup.")
@@ -1983,11 +2177,1210 @@ def test_approval_queue_endpoint_is_read_only() -> None:
     assert after == before
 
 
+def test_wordpress_settings_default_to_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("WORDPRESS_APPLICATION_PASSWORD", raising=False)
+    wordpress_sandbox.clear_wordpress_application_password()
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+        response = client.get("/api/wordpress/settings")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "site_url": "",
+        "username": "",
+        "publishing_mode": "disabled",
+        "has_application_password": False,
+        "password_storage": "Process memory only. It is cleared when the backend restarts.",
+    }
+
+
+def test_wordpress_settings_save_without_exposing_or_persisting_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "atlas-local-application-password"
+    monkeypatch.delenv("WORDPRESS_APPLICATION_PASSWORD", raising=False)
+    wordpress_sandbox.clear_wordpress_application_password()
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+        response = client.put(
+            "/api/wordpress/settings",
+            json={
+                "site_url": "https://example.test/",
+                "username": "atlas-editor",
+                "application_password": secret,
+                "publishing_mode": "sandbox",
+            },
+        )
+        read_response = client.get("/api/wordpress/settings")
+        with Session(engine) as session:
+            stored = {
+                setting.setting_key: setting.setting_value
+                for setting in session.exec(
+                    select(Setting).where(Setting.setting_key.startswith("wordpress_"))
+                ).all()
+            }
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert read_response.status_code == 200
+    assert response.json()["has_application_password"] is True
+    assert read_response.json()["has_application_password"] is True
+    assert secret not in response.text
+    assert secret not in read_response.text
+    assert stored == {
+        "wordpress_site_url": "https://example.test",
+        "wordpress_username": "atlas-editor",
+        "wordpress_publishing_mode": "sandbox",
+    }
+
+
+def test_wordpress_connection_requires_process_memory_password_when_username_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("WORDPRESS_APPLICATION_PASSWORD", raising=False)
+    wordpress_sandbox.clear_wordpress_application_password()
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+        save = client.put(
+            "/api/wordpress/settings",
+            json={
+                "site_url": "https://wordpress.example",
+                "username": "atlas",
+                "publishing_mode": "sandbox",
+            },
+        )
+        response = client.post("/api/wordpress/test-connection")
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+
+    assert save.status_code == 200
+    assert save.json()["has_application_password"] is False
+    assert response.status_code == 200
+    assert response.json()["connection_status"] == "failed"
+    assert response.json()["rest_api_reachable"] is False
+    assert response.json()["authenticated"] is False
+    assert response.json()["credentials_present"] is False
+    assert "application password is not stored" in response.json()["error_message"]
+    assert "Re-enter it after backend restart" in response.json()["error_message"]
+
+
+def test_data_backup_and_restore_exclude_wordpress_secrets(tmp_path: Path) -> None:
+    secret_key = "wordpress_application_password"
+    secret_value = "must-never-enter-a-backup"
+    with TestClient(app):
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+            session.add(Setting(setting_key=secret_key, setting_value=secret_value))
+            session.commit()
+            export = export_backup(session, backup_dir=tmp_path)
+            payload = json.loads(Path(export["path"]).read_text(encoding="utf-8"))
+            assert not any(
+                record["setting_key"] == secret_key
+                for record in payload["data"]["settings"]
+            )
+
+            secret = session.exec(
+                select(Setting).where(Setting.setting_key == secret_key)
+            ).one()
+            session.delete(secret)
+            session.commit()
+            payload["data"]["settings"].append(
+                {
+                    "id": 999999,
+                    "setting_key": secret_key,
+                    "setting_value": secret_value,
+                    "description": "Legacy secret that must be ignored.",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            payload["metadata"]["table_counts"]["settings"] += 1
+            legacy_path = tmp_path / "atlas-backup-legacy-secret.json"
+            legacy_path.write_text(json.dumps(payload), encoding="utf-8")
+            restore_backup(session, legacy_path)
+            restored = session.exec(
+                select(Setting).where(Setting.setting_key == secret_key)
+            ).first()
+            _clear_wordpress_settings(session)
+
+    assert secret_value not in json.dumps(payload["data"]["settings"][:-1])
+    assert restored is None
+
+
+def test_wordpress_connection_test_uses_get_requests_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, str, bool]] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, str]:
+            return {"name": "Atlas WordPress Sandbox"}
+
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def get(self, url: str, *, auth: object | None = None) -> FakeResponse:
+            requests.append(("GET", url, auth is not None))
+            return FakeResponse()
+
+    monkeypatch.setattr(wordpress_sandbox.httpx, "Client", FakeClient)
+    wordpress_sandbox.clear_wordpress_application_password()
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+        save = client.put(
+            "/api/wordpress/settings",
+            json={
+                "site_url": "https://wordpress.example",
+                "username": "atlas",
+                "application_password": "local-only",
+                "publishing_mode": "sandbox",
+            },
+        )
+        response = client.post("/api/wordpress/test-connection")
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert save.status_code == 200
+    assert response.status_code == 200
+    assert response.json()["connection_status"] == "connected"
+    assert response.json()["rest_api_reachable"] is True
+    assert response.json()["authenticated"] is True
+    assert response.json()["credentials_present"] is True
+    assert response.json()["site_name"] == "Atlas WordPress Sandbox"
+    assert [request[0] for request in requests] == ["GET", "GET"]
+    assert requests[0][1].endswith("/wp-json/")
+    assert requests[1][1].endswith("/wp-json/wp/v2/users/me?context=edit")
+    assert requests[0][2] is False
+    assert requests[1][2] is True
+
+
+def test_wordpress_connection_reachable_without_auth_is_not_authenticated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, bool]] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, str]:
+            return {"name": "Public REST"}
+
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def get(self, url: str, *, auth: object | None = None) -> FakeResponse:
+            requests.append((url, auth is not None))
+            return FakeResponse()
+
+    monkeypatch.setattr(wordpress_sandbox.httpx, "Client", FakeClient)
+    wordpress_sandbox.clear_wordpress_application_password()
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+        save = client.put(
+            "/api/wordpress/settings",
+            json={
+                "site_url": "https://wordpress.example",
+                "username": "",
+                "publishing_mode": "sandbox",
+            },
+        )
+        response = client.post("/api/wordpress/test-connection")
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+
+    assert save.status_code == 200
+    assert response.status_code == 200
+    assert response.json()["connection_status"] == "connected"
+    assert response.json()["rest_api_reachable"] is True
+    assert response.json()["authenticated"] is False
+    assert response.json()["credentials_present"] is False
+    assert len(requests) == 1
+    assert requests[0][0].endswith("/wp-json/")
+    assert requests[0][1] is False
+
+
+def test_wordpress_payload_preview_is_draft_and_read_only() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page_id = page.id
+            before = _approval_queue_database_snapshot(session)
+
+        response = client.get(f"/api/wordpress/pages/{page_id}/payload-preview")
+
+        with Session(engine) as session:
+            after = _approval_queue_database_snapshot(session)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sandbox_only"] is True
+    assert payload["payload"]["status"] == "draft"
+    assert payload["payload"]["title"] == payload["export_package"]["page_title"]
+    assert payload["payload"]["slug"] == payload["export_package"]["url_slug"]
+    assert "<h1>" in payload["payload"]["content"]
+    assert payload["payload"]["schema_block_preview"]["@context"] == "https://schema.org"
+    assert after == before
+
+
+def test_wordpress_draft_review_list_includes_orlando_with_reference() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            audit_id = audit.id
+            page_id = page.id
+        response = client.get("/api/wordpress/draft-review")
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[session.get(WordPressDraftAudit, audit_id)],
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_count"] >= 1
+    item = next(item for item in payload["items"] if item["page_id"] == page_id)
+    assert item["city"] == "Orlando"
+    assert item["wordpress_post_id"] == 712
+    assert item["wordpress_status"] == "draft"
+    assert item["successful_draft_audit_count"] == 1
+    assert item["admin_edit_url"] == "https://wordpress.example/wp-admin/post.php?post=712&action=edit"
+    assert "Draft Confirmed" in item["badges"]
+
+
+def test_wordpress_draft_live_status_check_uses_get_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, str]] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {
+                "id": 712,
+                "status": "draft",
+                "link": "https://wordpress.example/?page_id=712",
+                "modified_gmt": "2026-07-07T04:48:40",
+                "title": {"rendered": "Drywood Termite Tenting in Orlando, FL"},
+                "slug": "drywood-termite-tenting-orlando-fl",
+            }
+
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def get(self, url: str, *, auth: object | None = None) -> FakeResponse:
+            requests.append(("GET", url))
+            assert auth is not None
+            return FakeResponse()
+
+        def post(self, *_: object, **__: object) -> None:
+            raise AssertionError("WordPress draft review must not POST")
+
+        def put(self, *_: object, **__: object) -> None:
+            raise AssertionError("WordPress draft review must not PUT")
+
+        def patch(self, *_: object, **__: object) -> None:
+            raise AssertionError("WordPress draft review must not PATCH")
+
+        def delete(self, *_: object, **__: object) -> None:
+            raise AssertionError("WordPress draft review must not DELETE")
+
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", FakeClient)
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            audit_id = audit.id
+            page_id = page.id
+        response = client.get(f"/api/wordpress/draft-review/{page_id}/live-status")
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[session.get(WordPressDraftAudit, audit_id)],
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["wordpress_post_id"] == 712
+    assert payload["wordpress_status"] == "draft"
+    assert payload["is_still_draft"] is True
+    assert payload["appears_published"] is False
+    assert [item[0] for item in requests] == ["GET"]
+    assert requests[0][1] == "https://wordpress.example/wp-json/wp/v2/pages/712?context=edit"
+
+
+def test_wordpress_draft_review_comparison_detects_matching_payload_hash() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            audit_id = audit.id
+            page_id = page.id
+        response = client.get(f"/api/wordpress/draft-review/{page_id}")
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[session.get(WordPressDraftAudit, audit_id)],
+            )
+
+    assert response.status_code == 200
+    comparison = response.json()["comparison"]
+    assert comparison["audit_payload_hash"] == comparison["current_export_payload_hash"]
+    assert comparison["atlas_export_differs_from_original"] is False
+
+
+def test_wordpress_draft_review_comparison_detects_changed_atlas_export_hash() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            audit_id = audit.id
+            draft = deepcopy(page.draft_content or {})
+            draft["intro"] = f"{draft.get('intro', '')} Internal review changed this Atlas draft."
+            page.draft_content = draft
+            session.add(page)
+            session.commit()
+            page_id = page.id
+        response = client.get(f"/api/wordpress/draft-review/{page_id}")
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[session.get(WordPressDraftAudit, audit_id)],
+            )
+
+    assert response.status_code == 200
+    comparison = response.json()["comparison"]
+    assert comparison["audit_payload_hash"] != comparison["current_export_payload_hash"]
+    assert comparison["atlas_export_differs_from_original"] is True
+    assert "Atlas content has changed" in comparison["message"]
+
+
+def test_wordpress_draft_review_admin_edit_link_is_generated_safely() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            item = next(
+                item
+                for item in wordpress_draft_review.list_wordpress_draft_reviews(session).items
+                if item.page_id == page.id
+            )
+            _restore_wordpress_page(
+                session,
+                page,
+                original,
+                audits=[audit],
+            )
+
+    assert item.admin_edit_url == "https://wordpress.example/wp-admin/post.php?post=712&action=edit"
+    assert item.admin_edit_url.startswith("https://")
+    assert "password" not in item.admin_edit_url.lower()
+
+
+def test_wordpress_draft_queue_lists_orlando_as_already_has_draft() -> None:
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            page_id = page.id
+
+        response = client.get("/api/wordpress/draft-queue")
+
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[session.get(WordPressDraftAudit, audit.id)],
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    item = next(item for item in response.json()["items"] if item["page_id"] == page_id)
+    assert item["queue_group"] == "already_has_draft"
+    assert item["eligible"] is False
+    assert item["wordpress_post_id"] == 712
+
+
+def test_wordpress_draft_queue_identifies_eligible_approved_ready_page() -> None:
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            page_id = page.id
+
+        response = client.get("/api/wordpress/draft-queue")
+
+        with Session(engine) as session:
+            _restore_wordpress_page(session, session.get(GeneratedPage, page_id), original)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    item = next(item for item in response.json()["items"] if item["page_id"] == page_id)
+    assert item["queue_group"] == "eligible"
+    assert item["eligible"] is True
+    assert item["payload_status"] == "draft"
+
+
+def test_wordpress_draft_queue_blocks_unapproved_pages() -> None:
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            page.status = "draft"
+            session.add(page)
+            session.commit()
+            page_id = page.id
+
+        response = client.get("/api/wordpress/draft-queue")
+
+        with Session(engine) as session:
+            _restore_wordpress_page(session, session.get(GeneratedPage, page_id), original)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    item = next(item for item in response.json()["items"] if item["page_id"] == page_id)
+    assert item["queue_group"] == "blocked_approval"
+    assert item["eligible"] is False
+
+
+def test_wordpress_draft_queue_blocks_stale_qa_after_edits() -> None:
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            revision = GeneratedPageRevision(
+                generated_page_id=page.id,
+                draft_hash_before="before",
+                draft_hash_after="after",
+                draft_content_before=page.draft_content,
+                draft_content_after=page.draft_content,
+                changed_fields=["intro"],
+            )
+            session.add(revision)
+            session.commit()
+            page_id = page.id
+            revision_id = revision.id
+
+        response = client.get("/api/wordpress/draft-queue")
+
+        with Session(engine) as session:
+            revision = session.get(GeneratedPageRevision, revision_id)
+            if revision:
+                session.delete(revision)
+                session.commit()
+            _restore_wordpress_page(session, session.get(GeneratedPage, page_id), original)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    item = next(item for item in response.json()["items"] if item["page_id"] == page_id)
+    assert item["queue_group"] == "blocked_stale_qa"
+    assert item["eligible"] is False
+
+
+def test_wordpress_draft_queue_blocks_missing_credentials() -> None:
+    wordpress_sandbox.clear_wordpress_application_password()
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+        client.put(
+            "/api/wordpress/settings",
+            json={
+                "site_url": "https://wordpress.example",
+                "username": "atlas",
+                "publishing_mode": "sandbox",
+            },
+        )
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            page_id = page.id
+
+        response = client.get("/api/wordpress/draft-queue")
+
+        with Session(engine) as session:
+            _restore_wordpress_page(session, session.get(GeneratedPage, page_id), original)
+            _clear_wordpress_settings(session)
+
+    assert response.status_code == 200
+    item = next(item for item in response.json()["items"] if item["page_id"] == page_id)
+    assert response.json()["has_application_password"] is False
+    assert item["queue_group"] == "blocked_credentials"
+    assert item["eligible"] is False
+
+
+def test_wordpress_draft_queue_endpoint_is_read_only() -> None:
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            page_id = page.id
+            before = _approval_queue_database_snapshot(session)
+            before_page = _wordpress_page_state(page)
+
+        response = client.get("/api/wordpress/draft-queue")
+
+        with Session(engine) as session:
+            page = session.get(GeneratedPage, page_id)
+            after = _approval_queue_database_snapshot(session)
+            after_page = _wordpress_page_state(page)
+            _restore_wordpress_page(session, page, original)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert after == before
+    assert after_page == before_page
+
+
+def test_wordpress_api_exposes_no_publish_create_delete_or_upload_route() -> None:
+    wordpress_routes = [
+        (route.path, method)
+        for route in app.routes
+        if route.path.startswith("/api/wordpress")
+        for method in (route.methods or set())
+    ]
+    write_routes = {
+        item
+        for item in wordpress_routes
+        if item[1] in {"POST", "PUT", "PATCH", "DELETE"}
+    }
+
+    assert write_routes == {
+        ("/api/wordpress/settings", "PUT"),
+        ("/api/wordpress/test-connection", "POST"),
+        ("/api/wordpress/draft/dry-run/{page_id}", "POST"),
+        ("/api/wordpress/draft/create/{page_id}", "POST"),
+    }
+    assert not any(
+        forbidden in path.lower()
+        for path, _ in wordpress_routes
+        for forbidden in ("publish", "update", "delete", "upload", "media", "bulk")
+    )
+
+
+def test_wordpress_dry_run_blocked_when_mode_disabled() -> None:
+    wordpress_sandbox.clear_wordpress_application_password()
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page_id = page.id
+        response = client.post(f"/api/wordpress/draft/dry-run/{page_id}")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "blocked"
+    assert _gate_response(response.json(), "sandbox_mode")["passed"] is False
+    assert response.json()["confirmation_token"] is None
+
+
+def test_wordpress_dry_run_blocked_when_page_not_approved() -> None:
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            original = _wordpress_page_state(page)
+            page.status = "draft"
+            page.qa_status = "ready"
+            page.qa_checked_at = datetime.now(UTC)
+            session.add(page)
+            session.commit()
+            page_id = page.id
+        response = client.post(f"/api/wordpress/draft/dry-run/{page_id}")
+        with Session(engine) as session:
+            _restore_wordpress_page(session, session.get(GeneratedPage, page_id), original)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert _gate_response(response.json(), "page_approved")["passed"] is False
+
+
+def test_wordpress_dry_run_blocked_when_qa_not_ready() -> None:
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            original = _wordpress_page_state(page)
+            page.status = "approved"
+            page.qa_status = "blocked"
+            page.qa_checked_at = datetime.now(UTC)
+            session.add(page)
+            session.commit()
+            page_id = page.id
+        response = client.post(f"/api/wordpress/draft/dry-run/{page_id}")
+        with Session(engine) as session:
+            _restore_wordpress_page(session, session.get(GeneratedPage, page_id), original)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert _gate_response(response.json(), "qa_ready")["passed"] is False
+
+
+def test_wordpress_dry_run_blocked_when_qa_is_stale_after_revision() -> None:
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            page.qa_checked_at = datetime(2026, 1, 1, tzinfo=UTC)
+            revision = GeneratedPageRevision(
+                generated_page_id=page.id,
+                created_at=datetime(2026, 1, 2, tzinfo=UTC),
+                draft_hash_before="before-stale",
+                draft_hash_after="after-stale",
+                draft_content_before=deepcopy(page.draft_content or {}),
+                draft_content_after=deepcopy(page.draft_content or {}),
+                changed_fields=["intro"],
+            )
+            session.add(page)
+            session.add(revision)
+            session.commit()
+            page_id = page.id
+        response = client.post(f"/api/wordpress/draft/dry-run/{page_id}")
+        with Session(engine) as session:
+            revisions = session.exec(
+                select(GeneratedPageRevision).where(
+                    GeneratedPageRevision.generated_page_id == page_id,
+                    GeneratedPageRevision.draft_hash_after == "after-stale",
+                )
+            ).all()
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                revisions=revisions,
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert _gate_response(response.json(), "qa_current")["passed"] is False
+
+
+def test_wordpress_dry_run_detects_slug_conflict() -> None:
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            other = _page_by_slug(session, "drywood-termite-tenting-deltona-fl")
+            other_slug = other.page_slug
+            page.page_slug = "orlando-temporary-for-conflict-test"
+            session.add(page)
+            session.commit()
+            other.page_slug = "drywood-termite-tenting-orlando-fl"
+            session.add(other)
+            session.commit()
+            page_id = page.id
+        response = client.post(f"/api/wordpress/draft/dry-run/{page_id}")
+        with Session(engine) as session:
+            page = session.get(GeneratedPage, page_id)
+            other = session.exec(
+                select(GeneratedPage).where(
+                    GeneratedPage.page_slug == "drywood-termite-tenting-orlando-fl"
+                )
+            ).one()
+            other.page_slug = other_slug
+            session.add(other)
+            session.commit()
+            _restore_wordpress_page(session, page, original)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert _gate_response(response.json(), "slug_unique")["passed"] is False
+
+
+def test_wordpress_dry_run_is_read_only() -> None:
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            page_id = page.id
+            before = _approval_queue_database_snapshot(session)
+        response = client.post(f"/api/wordpress/draft/dry-run/{page_id}")
+        with Session(engine) as session:
+            after = _approval_queue_database_snapshot(session)
+            _restore_wordpress_page(session, session.get(GeneratedPage, page_id), original)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "dry_run_ready"
+    assert response.json()["payload"]["status"] == "draft"
+    assert response.json()["confirmation_token"]
+    assert response.json()["confirmation_phrase"]
+    assert after == before
+
+
+def test_wordpress_dry_run_uses_saved_process_memory_password() -> None:
+    wordpress_sandbox.clear_wordpress_application_password()
+    with TestClient(app) as client:
+        save = _configure_wordpress_sandbox(client)
+        settings = client.get("/api/wordpress/settings")
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            page_id = page.id
+        response = client.post(f"/api/wordpress/draft/dry-run/{page_id}")
+        with Session(engine) as session:
+            _restore_wordpress_page(session, session.get(GeneratedPage, page_id), original)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert save.status_code == 200
+    assert save.json()["has_application_password"] is True
+    assert settings.json()["has_application_password"] is True
+    assert response.status_code == 200
+    assert response.json()["status"] == "dry_run_ready"
+    assert _gate_response(response.json(), "credentials_ready")["passed"] is True
+    assert response.json()["confirmation_token"]
+    assert response.json()["confirmation_phrase"] == "CREATE WORDPRESS DRAFT drywood-termite-tenting-orlando-fl"
+
+
+def test_wordpress_create_requires_valid_confirmation_without_audit() -> None:
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            page_id = page.id
+            audit_count_before = len(session.exec(select(WordPressDraftAudit)).all())
+        response = client.post(
+            f"/api/wordpress/draft/create/{page_id}",
+            json={"confirmation_token": "invalid", "confirmation_phrase": "invalid"},
+        )
+        with Session(engine) as session:
+            audit_count_after = len(session.exec(select(WordPressDraftAudit)).all())
+            _restore_wordpress_page(session, session.get(GeneratedPage, page_id), original)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 422
+    assert audit_count_after == audit_count_before
+
+
+def test_wordpress_create_reruns_gates_and_records_blocked_attempt() -> None:
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            page_id = page.id
+        dry_run = client.post(f"/api/wordpress/draft/dry-run/{page_id}").json()
+        with Session(engine) as session:
+            page = session.get(GeneratedPage, page_id)
+            page.qa_status = "blocked"
+            session.add(page)
+            session.commit()
+        response = client.post(
+            f"/api/wordpress/draft/create/{page_id}",
+            json={
+                "confirmation_token": dry_run["confirmation_token"],
+                "confirmation_phrase": dry_run["confirmation_phrase"],
+            },
+        )
+        with Session(engine) as session:
+            audits = session.exec(
+                select(WordPressDraftAudit).where(
+                    WordPressDraftAudit.generated_page_id == page_id
+                )
+            ).all()
+            blocked = [audit for audit in audits if audit.status == "blocked"]
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=blocked,
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 409
+    assert blocked
+    assert any(
+        item["code"] == "qa_ready" and item["passed"] is False
+        for item in blocked[0].gate_results
+    )
+
+
+def test_wordpress_create_sends_draft_only_and_records_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[dict] = []
+
+    class FakeResponse:
+        status_code = 201
+
+        def json(self) -> dict:
+            return {
+                "id": 712,
+                "status": "draft",
+                "link": "https://wordpress.example/?page_id=712",
+            }
+
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict, auth: object) -> FakeResponse:
+            sent.append({"url": url, "json": deepcopy(json), "auth": auth is not None})
+            return FakeResponse()
+
+    monkeypatch.setattr(wordpress_drafts.httpx, "Client", FakeClient)
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            original_draft = deepcopy(page.draft_content)
+            page_id = page.id
+        dry_run = client.post(f"/api/wordpress/draft/dry-run/{page_id}").json()
+        response = client.post(
+            f"/api/wordpress/draft/create/{page_id}",
+            json={
+                "confirmation_token": dry_run["confirmation_token"],
+                "confirmation_phrase": dry_run["confirmation_phrase"],
+            },
+        )
+        with Session(engine) as session:
+            page = session.get(GeneratedPage, page_id)
+            audits = session.exec(
+                select(WordPressDraftAudit).where(
+                    WordPressDraftAudit.generated_page_id == page_id
+                )
+            ).all()
+            created = [audit for audit in audits if audit.status == "created"]
+            saved = {
+                "status": page.status,
+                "wordpress_post_id": page.wordpress_post_id,
+                "wordpress_status": page.wordpress_status,
+                "wordpress_url": page.wordpress_url,
+                "draft_content": deepcopy(page.draft_content),
+            }
+            _restore_wordpress_page(session, page, original, audits=created)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert sent[0]["url"] == "https://wordpress.example/wp-json/wp/v2/pages"
+    assert sent[0]["json"]["status"] == "draft"
+    assert set(sent[0]["json"]) == {"title", "slug", "status", "content", "excerpt"}
+    assert sent[0]["auth"] is True
+    assert saved["status"] == "approved"
+    assert saved["wordpress_post_id"] == 712
+    assert saved["wordpress_status"] == "draft"
+    assert saved["draft_content"] == original_draft
+    assert len(created) == 1
+    assert created[0].wordpress_post_id == 712
+    assert created[0].payload_hash == dry_run["payload_hash"]
+    assert "password" not in json.dumps(created[0].model_dump(mode="json")).lower()
+
+
+def test_wordpress_create_records_failed_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResponse:
+        status_code = 500
+
+        def json(self) -> dict:
+            return {}
+
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def post(self, *_: object, **__: object) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(wordpress_drafts.httpx, "Client", FakeClient)
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            page_id = page.id
+        dry_run = client.post(f"/api/wordpress/draft/dry-run/{page_id}").json()
+        response = client.post(
+            f"/api/wordpress/draft/create/{page_id}",
+            json={
+                "confirmation_token": dry_run["confirmation_token"],
+                "confirmation_phrase": dry_run["confirmation_phrase"],
+            },
+        )
+        with Session(engine) as session:
+            failed = session.exec(
+                select(WordPressDraftAudit).where(
+                    WordPressDraftAudit.generated_page_id == page_id,
+                    WordPressDraftAudit.status == "failed",
+                )
+            ).all()
+            page = session.get(GeneratedPage, page_id)
+            wordpress_post_id = page.wordpress_post_id
+            _restore_wordpress_page(session, page, original, audits=failed)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 502
+    assert len(failed) == 1
+    assert failed[0].error_message == "WordPress returned HTTP 500."
+    assert wordpress_post_id is None
+
+
+def test_backup_restore_preserves_wordpress_audits_and_safe_references_idempotently(
+    tmp_path: Path,
+) -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            original = _wordpress_page_state(page)
+            now = datetime.now(UTC)
+            page.wordpress_post_id = 911
+            page.wordpress_url = "https://wordpress.example/?page_id=911"
+            page.wordpress_status = "draft"
+            page.wordpress_created_at = now
+            page.last_wordpress_sync_at = now
+            audit = WordPressDraftAudit(
+                generated_page_id=page.id,
+                attempted_at=now,
+                action_type="create_draft",
+                status="created",
+                wordpress_site_url="https://wordpress.example",
+                wordpress_post_id=911,
+                wordpress_status="draft",
+                slug=page.page_slug,
+                payload_hash="payload-backup-hash",
+                qa_status_at_attempt="ready",
+                qa_checked_at=now,
+                draft_hash_at_attempt="draft-backup-hash",
+                gate_results=[{"code": "draft_status", "passed": True}],
+            )
+            session.add(page)
+            session.add(audit)
+            session.commit()
+            export = export_backup(session, backup_dir=tmp_path)
+            payload = json.loads(Path(export["path"]).read_text(encoding="utf-8"))
+            session.delete(audit)
+            page.wordpress_post_id = None
+            page.wordpress_url = None
+            page.wordpress_status = None
+            page.wordpress_created_at = None
+            page.last_wordpress_sync_at = None
+            session.add(page)
+            session.commit()
+
+            restore_backup(session, export["path"])
+            restore_backup(session, export["path"])
+            restored_page = session.get(GeneratedPage, page.id)
+            restored_audits = session.exec(
+                select(WordPressDraftAudit).where(
+                    WordPressDraftAudit.generated_page_id == page.id,
+                    WordPressDraftAudit.payload_hash == "payload-backup-hash",
+                )
+            ).all()
+            restored_post_id = restored_page.wordpress_post_id
+            _restore_wordpress_page(
+                session,
+                restored_page,
+                original,
+                audits=restored_audits,
+            )
+
+    assert payload["metadata"]["version"] == "0.17"
+    assert payload["data"]["wordpress_draft_audits"]
+    assert payload["data"]["generated_pages"][0].get("wordpress_post_id") is not None or any(
+        item.get("wordpress_post_id") == 911
+        for item in payload["data"]["generated_pages"]
+    )
+    assert len(restored_audits) == 1
+    assert restored_post_id == 911
+
+
 def _database_counts(session: Session) -> dict[str, int]:
     return {
         group: len(session.exec(select(model)).all())
         for group, model in BACKUP_MODELS.items()
     }
+
+
+def _clear_wordpress_settings(session: Session) -> None:
+    settings = session.exec(
+        select(Setting).where(Setting.setting_key.startswith("wordpress_"))
+    ).all()
+    for setting in settings:
+        session.delete(setting)
+    session.commit()
+
+
+def _configure_wordpress_sandbox(client: TestClient):
+    response = client.put(
+        "/api/wordpress/settings",
+        json={
+            "site_url": "https://wordpress.example",
+            "username": "atlas",
+            "application_password": "local-test-only",
+            "publishing_mode": "sandbox",
+        },
+    )
+    assert response.status_code == 200
+    return response
+
+
+def _prepare_wordpress_draft_page(
+    session: Session,
+) -> tuple[GeneratedPage, dict]:
+    page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+    page = _ensure_complete_page(session, page)
+    original = _wordpress_page_state(page)
+    qa = evaluate_page_qa(session, page.id)
+    assert qa.readiness_status == "ready"
+    page.status = "approved"
+    page.qa_status = "ready"
+    page.qa_result = qa.model_dump(mode="json", exclude={"persisted"})
+    page.qa_checked_at = datetime.now(UTC)
+    page.wordpress_post_id = None
+    page.wordpress_url = None
+    page.wordpress_status = None
+    page.wordpress_created_at = None
+    page.last_wordpress_sync_at = None
+    session.add(page)
+    session.commit()
+    session.refresh(page)
+    return page, original
+
+
+def _add_wordpress_draft_audit(
+    session: Session,
+    page: GeneratedPage,
+    *,
+    status: str,
+) -> WordPressDraftAudit:
+    now = datetime.now(UTC)
+    page.wordpress_post_id = 712
+    page.wordpress_url = "https://wordpress.example/?page_id=712"
+    page.wordpress_status = "draft"
+    page.wordpress_created_at = now
+    page.last_wordpress_sync_at = now
+    session.add(page)
+    session.flush()
+    current_hash = wordpress_draft_review.compare_wordpress_draft(
+        session,
+        page.id,
+    ).current_export_payload_hash
+    audit = WordPressDraftAudit(
+        generated_page_id=page.id,
+        attempted_at=now,
+        action_type="create_draft",
+        status=status,
+        wordpress_site_url="https://wordpress.example",
+        wordpress_post_id=712,
+        wordpress_status="draft",
+        slug=page.page_slug,
+        payload_hash=current_hash,
+        qa_status_at_attempt=page.qa_status,
+        qa_checked_at=page.qa_checked_at,
+        draft_hash_at_attempt=draft_content_hash(page.draft_content),
+        gate_results=[{"code": "draft_status", "passed": True}],
+    )
+    session.add(audit)
+    session.commit()
+    session.refresh(page)
+    session.refresh(audit)
+    return audit
+
+
+def _wordpress_page_state(page: GeneratedPage) -> dict:
+    return {
+        "page_slug": page.page_slug,
+        "status": page.status,
+        "qa_status": page.qa_status,
+        "qa_result": deepcopy(page.qa_result),
+        "qa_checked_at": page.qa_checked_at,
+        "wordpress_post_id": page.wordpress_post_id,
+        "wordpress_url": page.wordpress_url,
+        "wordpress_status": page.wordpress_status,
+        "wordpress_created_at": page.wordpress_created_at,
+        "last_wordpress_sync_at": page.last_wordpress_sync_at,
+        "updated_at": page.updated_at,
+    }
+
+
+def _restore_wordpress_page(
+    session: Session,
+    page: GeneratedPage | None,
+    state: dict,
+    *,
+    revisions: list[GeneratedPageRevision] | None = None,
+    audits: list[WordPressDraftAudit] | None = None,
+) -> None:
+    assert page is not None
+    for key, value in state.items():
+        setattr(page, key, value)
+    session.add(page)
+    for revision in revisions or []:
+        session.delete(revision)
+    for audit in audits or []:
+        session.delete(audit)
+    session.commit()
+
+
+def _gate_response(payload: dict, code: str) -> dict:
+    return next(item for item in payload["gate_results"] if item["code"] == code)
 
 
 def _approval_queue_item(session: Session, page_id: int):
@@ -2008,6 +3401,9 @@ def _approval_queue_database_snapshot(session: Session) -> dict:
         select(PageImageAssignment).order_by(PageImageAssignment.id)
     ).all()
     images = session.exec(select(ImageMetadata).order_by(ImageMetadata.id)).all()
+    wordpress_audits = session.exec(
+        select(WordPressDraftAudit).order_by(WordPressDraftAudit.id)
+    ).all()
     backup_root = Path("backups")
     return {
         "pages": [
@@ -2026,6 +3422,7 @@ def _approval_queue_database_snapshot(session: Session) -> dict:
         "approval_audits": [audit.model_dump() for audit in audits],
         "media_assignments": [assignment.model_dump() for assignment in assignments],
         "image_metadata": [image.model_dump() for image in images],
+        "wordpress_draft_audits": [audit.model_dump() for audit in wordpress_audits],
         "backup_files": _file_tree_snapshot(backup_root) if backup_root.exists() else {},
     }
 

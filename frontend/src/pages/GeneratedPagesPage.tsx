@@ -1,5 +1,5 @@
 import { CSSProperties, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ArrowDown, ArrowUp, CheckCircle2, CircleCheck, ClipboardList, Eye, FileClock, Image as ImageIcon, ListChecks, Monitor, Pencil, Plus, RotateCcw, Save, ShieldCheck, Sparkles, Trash2, X, XCircle } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, CheckCircle2, CircleCheck, ClipboardList, Eye, FileClock, FileJson, Image as ImageIcon, ListChecks, Monitor, Pencil, Plus, RotateCcw, Save, ShieldCheck, Sparkles, Trash2, X, XCircle } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { ApiError, apiRequest, listItems } from "../api";
@@ -826,6 +826,13 @@ function GeneratedPagesPage() {
                             Preview Page
                           </Link>
                         )}
+                        <Link
+                          className="linkButton buttonWithIcon"
+                          to={`/generated-pages/${page.id}/export`}
+                        >
+                          <FileJson size={15} aria-hidden="true" />
+                          View Export Package
+                        </Link>
                         <button
                           className="secondaryButton buttonWithIcon"
                           type="button"

@@ -82,7 +82,11 @@ class GeneratedPage(TimestampMixin, table=True):
     last_reviewed_at: datetime | None = None
     last_reviewed_by: str | None = None
     status: str = Field(default="draft", index=True)
+    wordpress_post_id: int | None = Field(default=None, index=True)
     wordpress_url: str | None = None
+    wordpress_status: str | None = Field(default=None, index=True)
+    wordpress_created_at: datetime | None = None
+    last_wordpress_sync_at: datetime | None = None
 
 
 class ApprovalAudit(SQLModel, table=True):
@@ -127,6 +131,33 @@ class GeneratedPageRevision(SQLModel, table=True):
     draft_content_before: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
     draft_content_after: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
     changed_fields: list[str] = Field(sa_column=Column(JSON, nullable=False))
+
+
+class WordPressDraftAudit(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "generated_page_id",
+            "attempted_at",
+            "payload_hash",
+            name="uq_wordpressdraftaudit_page_time_hash",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
+    attempted_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    action_type: str = Field(default="create_draft", index=True)
+    status: str = Field(index=True)
+    wordpress_site_url: str
+    wordpress_post_id: int | None = Field(default=None, index=True)
+    wordpress_status: str | None = Field(default=None, index=True)
+    slug: str = Field(index=True)
+    payload_hash: str = Field(index=True)
+    qa_status_at_attempt: str
+    qa_checked_at: datetime | None = None
+    draft_hash_at_attempt: str = Field(index=True)
+    gate_results: list[dict[str, Any]] = Field(sa_column=Column(JSON, nullable=False))
+    error_message: str | None = None
 
 
 class ImageMetadata(TimestampMixin, table=True):

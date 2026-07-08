@@ -145,7 +145,11 @@ class GeneratedPageBase(SQLModel):
     last_reviewed_at: datetime | None = None
     last_reviewed_by: str | None = None
     status: str = "draft"
+    wordpress_post_id: int | None = None
     wordpress_url: str | None = None
+    wordpress_status: str | None = None
+    wordpress_created_at: datetime | None = None
+    last_wordpress_sync_at: datetime | None = None
 
 
 class GeneratedPageCreate(GeneratedPageBase):
@@ -174,7 +178,11 @@ class GeneratedPageUpdate(SQLModel):
     last_reviewed_at: datetime | None = None
     last_reviewed_by: str | None = None
     status: str | None = None
+    wordpress_post_id: int | None = None
     wordpress_url: str | None = None
+    wordpress_status: str | None = None
+    wordpress_created_at: datetime | None = None
+    last_wordpress_sync_at: datetime | None = None
 
 
 class GeneratedPageRead(GeneratedPageBase):
