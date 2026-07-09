@@ -396,6 +396,48 @@ export type WordPressDraftReviewDetail = {
   comparison: WordPressDraftComparison;
 };
 
+export type WordPressQualityCheckStatus = "pass" | "warning" | "fail";
+export type WordPressQualityReadinessStatus = "ready" | "needs_review" | "blocked";
+
+export type WordPressQualityCheck = {
+  key: string;
+  label: string;
+  status: WordPressQualityCheckStatus;
+  message: string;
+  review_field: string;
+};
+
+export type WordPressDraftQualityReviewItem = {
+  page_id: number;
+  page_title: string;
+  city?: string | null;
+  county?: string | null;
+  service?: string | null;
+  atlas_status: string;
+  qa_status: string;
+  wordpress_post_id: number;
+  wordpress_status?: string | null;
+  wordpress_url?: string | null;
+  admin_edit_url?: string | null;
+  slug: string;
+  payload_hash_matches_audit: boolean;
+  pass_count: number;
+  warning_count: number;
+  fail_count: number;
+  overall_publish_readiness: WordPressQualityReadinessStatus;
+  blockers_or_issues: string[];
+  safe_for_future_manual_review: boolean;
+  checklist: WordPressQualityCheck[];
+};
+
+export type WordPressDraftQualityReviewList = {
+  total_count: number;
+  ready_count: number;
+  needs_review_count: number;
+  blocked_count: number;
+  items: WordPressDraftQualityReviewItem[];
+};
+
 export type WordPressDraftQueueGroup =
   | "eligible"
   | "blocked_approval"

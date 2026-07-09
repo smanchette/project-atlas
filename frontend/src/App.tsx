@@ -7,6 +7,7 @@ import {
   Images,
   FileText,
   Home,
+  ListTodo,
   ListChecks,
   Map,
   MapPin,
@@ -27,6 +28,7 @@ import KnowledgeBlocksPage from "./pages/KnowledgeBlocksPage";
 import MediaLibraryPage from "./pages/MediaLibraryPage";
 import ModulePage from "./pages/ModulePage";
 import WordPressDraftReviewPage from "./pages/WordPressDraftReviewPage";
+import WordPressDraftQualityReviewPage from "./pages/WordPressDraftQualityReviewPage";
 import WordPressDraftQueuePage from "./pages/WordPressDraftQueuePage";
 import WordPressSandboxPage from "./pages/WordPressSandboxPage";
 import type { Business, City, County, FieldConfig, GeneratedPage, Service } from "./types";
@@ -45,6 +47,7 @@ const navItems = [
   { to: "/wordpress-sandbox", label: "WordPress Sandbox", icon: Plug },
   { to: "/wordpress-draft-queue", label: "WP Draft Queue", icon: ListChecks },
   { to: "/wordpress-draft-review", label: "WP Draft Review", icon: FileSearch },
+  { to: "/wordpress-quality-review", label: "WP Quality Review", icon: ListTodo },
   { to: "/settings", label: "Settings", icon: Settings }
 ];
 
@@ -181,6 +184,7 @@ function DashboardShell() {
           <Route path="/wordpress-sandbox" element={<WordPressSandboxPage />} />
           <Route path="/wordpress-draft-queue" element={<WordPressDraftQueuePage />} />
           <Route path="/wordpress-draft-review" element={<WordPressDraftReviewPage />} />
+          <Route path="/wordpress-quality-review" element={<WordPressDraftQualityReviewPage />} />
           <Route
             path="/settings"
             element={

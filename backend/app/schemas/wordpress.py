@@ -163,6 +163,49 @@ class WordPressDraftReviewDetail(SQLModel):
     comparison: WordPressDraftComparison
 
 
+QualityCheckStatus = Literal["pass", "warning", "fail"]
+QualityReadinessStatus = Literal["ready", "needs_review", "blocked"]
+
+
+class WordPressQualityCheck(SQLModel):
+    key: str
+    label: str
+    status: QualityCheckStatus
+    message: str
+    review_field: str
+
+
+class WordPressDraftQualityReviewItem(SQLModel):
+    page_id: int
+    page_title: str
+    city: str | None = None
+    county: str | None = None
+    service: str | None = None
+    atlas_status: str
+    qa_status: str
+    wordpress_post_id: int
+    wordpress_status: str | None = None
+    wordpress_url: str | None = None
+    admin_edit_url: str | None = None
+    slug: str
+    payload_hash_matches_audit: bool
+    pass_count: int
+    warning_count: int
+    fail_count: int
+    overall_publish_readiness: QualityReadinessStatus
+    blockers_or_issues: list[str] = []
+    safe_for_future_manual_review: bool
+    checklist: list[WordPressQualityCheck]
+
+
+class WordPressDraftQualityReviewList(SQLModel):
+    total_count: int
+    ready_count: int
+    needs_review_count: int
+    blocked_count: int
+    items: list[WordPressDraftQualityReviewItem]
+
+
 class WordPressDraftQueueItem(SQLModel):
     page_id: int
     page_title: str

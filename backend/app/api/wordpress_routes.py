@@ -7,6 +7,8 @@ from app.schemas.wordpress import (
     WordPressDraftCreateRequest,
     WordPressDraftCreateResult,
     WordPressDraftDryRun,
+    WordPressDraftQualityReviewItem,
+    WordPressDraftQualityReviewList,
     WordPressDraftQueueResponse,
     WordPressDraftReviewDetail,
     WordPressDraftReviewList,
@@ -22,6 +24,10 @@ from app.services.wordpress_draft_review import (
 )
 from app.services.wordpress_draft_queue import build_wordpress_draft_queue
 from app.services.wordpress_drafts import create_wordpress_draft, dry_run_wordpress_draft
+from app.services.wordpress_quality_review import (
+    build_wordpress_draft_quality_review,
+    list_wordpress_draft_quality_reviews,
+)
 from app.services.wordpress_sandbox import (
     build_wordpress_payload_preview,
     read_wordpress_settings,
@@ -74,6 +80,21 @@ def draft_queue(
     session: Session = Depends(get_session),
 ) -> WordPressDraftQueueResponse:
     return build_wordpress_draft_queue(session)
+
+
+@router.get("/draft-quality-review", response_model=WordPressDraftQualityReviewList)
+def draft_quality_review_list(
+    session: Session = Depends(get_session),
+) -> WordPressDraftQualityReviewList:
+    return list_wordpress_draft_quality_reviews(session)
+
+
+@router.get("/draft-quality-review/{page_id}", response_model=WordPressDraftQualityReviewItem)
+def draft_quality_review_detail(
+    page_id: int,
+    session: Session = Depends(get_session),
+) -> WordPressDraftQualityReviewItem:
+    return build_wordpress_draft_quality_review(session, page_id)
 
 
 @router.get("/draft-review/{page_id}", response_model=WordPressDraftReviewDetail)

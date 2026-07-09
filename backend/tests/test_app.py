@@ -2621,6 +2621,66 @@ def test_wordpress_draft_review_admin_edit_link_is_generated_safely() -> None:
     assert "password" not in item.admin_edit_url.lower()
 
 
+def test_wordpress_draft_quality_review_returns_manual_checklist() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            audit_id = audit.id
+            page_id = page.id
+        response = client.get(f"/api/wordpress/draft-quality-review/{page_id}")
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[session.get(WordPressDraftAudit, audit_id)],
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["city"] == "Orlando"
+    assert payload["wordpress_post_id"] == 712
+    assert payload["wordpress_status"] == "draft"
+    assert payload["payload_hash_matches_audit"] is True
+    assert payload["overall_publish_readiness"] == "needs_review"
+    checks = {item["key"]: item for item in payload["checklist"]}
+    assert checks["wordpress_draft_exists"]["status"] == "pass"
+    assert checks["wordpress_status_draft"]["status"] == "pass"
+    assert checks["manual_wordpress_visual_review_needed"]["status"] == "warning"
+    assert checks["reviewer_notes"]["status"] == "warning"
+    assert payload["safe_for_future_manual_review"] is True
+
+
+def test_wordpress_draft_quality_review_endpoint_is_read_only() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            audit_id = audit.id
+            page_id = page.id
+            before_page = _wordpress_page_state(page)
+            before_audit_count = len(session.exec(select(WordPressDraftAudit)).all())
+            before_media_count = len(session.exec(select(ImageMetadata)).all())
+        response = client.get("/api/wordpress/draft-quality-review")
+        with Session(engine) as session:
+            page = session.get(GeneratedPage, page_id)
+            after_page = _wordpress_page_state(page)
+            after_audit_count = len(session.exec(select(WordPressDraftAudit)).all())
+            after_media_count = len(session.exec(select(ImageMetadata)).all())
+            _restore_wordpress_page(
+                session,
+                page,
+                original,
+                audits=[session.get(WordPressDraftAudit, audit_id)],
+            )
+
+    assert response.status_code == 200
+    assert after_page == before_page
+    assert after_audit_count == before_audit_count
+    assert after_media_count == before_media_count
+
+
 def test_wordpress_draft_queue_lists_orlando_as_already_has_draft() -> None:
     with TestClient(app) as client:
         _configure_wordpress_sandbox(client)
