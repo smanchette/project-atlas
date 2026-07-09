@@ -4,6 +4,114 @@ Project Atlas is a local SEO publishing platform foundation for service business
 
 The initial seeded business is Flo-Zone Pest And Termite Solutions Inc, but the app structure is business-agnostic so future companies and industries can be added without changing core code.
 
+## Project Atlas Command Center
+
+Project Atlas is a local SEO and service-business publishing platform for Flo-Zone Pest And Termite Solutions Inc, starting with drywood termite tenting city pages.
+
+### Current local URLs
+
+- Frontend: http://localhost:5173
+- Backend: http://localhost:8000
+- Generated Pages: http://localhost:5173/generated-pages
+- Approval Queue: http://localhost:5173/approval-queue
+
+WordPress Sandbox, Draft Queue, Draft Review, and Export Package tools are also part of the platform.
+
+### Current verified version
+
+- Latest checkpoint: v0.16
+- Backend tests verified: 119 passed
+- Frontend build verified
+- Machine setup hardened
+- Restore drill documented
+
+### Protected paths
+
+Never delete, move, rename, clean up, overwrite, or modify these paths unless Shawn explicitly asks:
+
+- backend/backups
+- backend/media
+- frontend/public/media
+
+See:
+
+- docs/PROTECTED_PATHS.md
+- docs/BACKUP_AND_RESTORE.md
+
+### Required backups before major work
+
+Before major build steps, run all three Atlas backups:
+
+- Data Backup JSON
+- Media Backup ZIP
+- Program Backup ZIP
+
+### Start Atlas
+
+From the project root:
+
+docker compose up -d
+
+### Check running containers
+
+docker ps
+
+Expected containers:
+
+- atlas_frontend
+- atlas_backend
+- atlas_postgres
+
+### Verify frontend inside Docker
+
+docker exec -it atlas_frontend npm run build
+
+### Verify frontend on Windows
+
+cd frontend
+npm install
+npm run build
+cd ..
+
+### Verify backend tests
+
+docker exec atlas_backend sh -lc "PYTHONPATH=/app pytest"
+
+Expected backend result as of v0.16:
+
+119 passed
+
+### Git safety check
+
+git status
+
+Safe result:
+
+nothing to commit, working tree clean
+
+### Version checkpoint process
+
+For each major version:
+
+1. Run backups.
+2. Verify current app works.
+3. Make one controlled improvement.
+4. Run frontend build.
+5. Run backend tests.
+6. Commit.
+7. Tag the version.
+8. Push commit and tag.
+9. Confirm git status is clean.
+
+### Important docs
+
+- docs/NEW_COMPUTER_SETUP.md
+- docs/BACKUP_AND_RESTORE.md
+- docs/PROTECTED_PATHS.md
+- docs/VERSION_HISTORY.md
+- docs/RESTORE_DRILL.md
+- docs/MACHINE_SETUP.md
+
 ## Stack
 
 - Backend: Python FastAPI
