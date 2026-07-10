@@ -3975,6 +3975,27 @@ th {
   resize: vertical;
 }
 
+.atlasRepairForm {
+  margin-top: 18px;
+}
+
+.wordpressSafetyNotice.compact {
+  margin: 12px 0;
+  padding: 12px 14px;
+}
+
+.atlasRepairFields {
+  grid-template-columns: 1fr;
+}
+
+.atlasRepairFields textarea {
+  min-height: 135px;
+}
+
+.repairResultSummary {
+  margin-top: 14px;
+}
+
 .manualQualityTimestamp {
   margin: 0;
   align-self: center;

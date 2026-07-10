@@ -4,10 +4,13 @@ from sqlmodel import Session, select
 from app.db.session import get_session
 from app.models import GeneratedPage, GeneratedPageRevision
 from app.schemas.page_editor import (
+    ApprovedPageRepairRequest,
+    ApprovedPageRepairResponse,
     GeneratedPageRevisionRead,
     ManualDraftSaveRequest,
     ManualDraftSaveResponse,
 )
+from app.services.approved_page_repair import repair_approved_page
 from app.services.page_editor import save_manual_draft
 
 router = APIRouter(prefix="/generated-pages", tags=["page editor"])
@@ -52,3 +55,12 @@ def update_manual_draft_and_run_qa(
         run_qa=True,
     )
     return {"page": page, "revision": revision, "qa_result": qa_result}
+
+
+@router.put("/{page_id}/approved-repair", response_model=ApprovedPageRepairResponse)
+def repair_approved_draft_content(
+    page_id: int,
+    payload: ApprovedPageRepairRequest,
+    session: Session = Depends(get_session),
+) -> ApprovedPageRepairResponse:
+    return repair_approved_page(session, page_id, payload)

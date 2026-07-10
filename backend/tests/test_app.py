@@ -1849,6 +1849,152 @@ def test_unsafe_manual_draft_save_is_rejected_without_revision() -> None:
     assert revisions_after == revisions_before
 
 
+def test_approved_wp_ref_page_can_be_repaired_with_revision_and_qa() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            original = _approved_repair_page_state(page)
+            page.status = "approved"
+            page.wordpress_post_id = 8001
+            page.wordpress_status = "draft"
+            page.wordpress_url = "https://example.test/?page_id=8001"
+            session.add(page)
+            session.commit()
+            page_id = page.id
+            before_refs = (page.wordpress_post_id, page.wordpress_status, page.wordpress_url)
+            before_audit_count = _wordpress_draft_audit_count(session, page_id)
+            revisions_before = _revision_count(session, page_id)
+            payload = {
+                "draft": {
+                    "intro": f"{page.draft_content['intro']} Atlas-only approved repair context.",
+                    "internal_notes": "v0.31 approved repair verification.",
+                },
+                "repaired_by": "Atlas Repair Test",
+                "reason": "Approved page Atlas-only repair test",
+            }
+
+        response = client.put(f"/api/generated-pages/{page_id}/approved-repair", json=payload)
+
+        with Session(engine) as session:
+            page = session.get(GeneratedPage, page_id)
+            assert page is not None
+            revisions = session.exec(
+                select(GeneratedPageRevision)
+                .where(GeneratedPageRevision.generated_page_id == page_id)
+                .order_by(GeneratedPageRevision.id)
+            ).all()
+            after_refs = (page.wordpress_post_id, page.wordpress_status, page.wordpress_url)
+            after_audit_count = _wordpress_draft_audit_count(session, page_id)
+            repaired_draft = deepcopy(page.draft_content)
+            repaired_status = page.status
+            repaired_qa_status = page.qa_status
+            manual_review = session.exec(
+                select(WordPressQualityReview).where(
+                    WordPressQualityReview.generated_page_id == page_id
+                )
+            ).first()
+            new_revisions = revisions[revisions_before:]
+            _restore_approved_repair_page(session, page, original, revisions=new_revisions)
+            if manual_review:
+                session.delete(manual_review)
+                session.commit()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert repaired_status == "approved"
+    assert repaired_qa_status == "ready"
+    assert after_refs == before_refs
+    assert after_audit_count == before_audit_count
+    assert repaired_draft["intro"].endswith("Atlas-only approved repair context.")
+    assert repaired_draft["internal_notes"] == "v0.31 approved repair verification."
+    assert len(new_revisions) == 1
+    assert set(new_revisions[0].changed_fields) == {"intro", "internal_notes"}
+    assert body["page"]["status"] == "approved"
+    assert body["qa_result"]["readiness_status"] == "ready"
+    assert body["export_blocker_count"] == 0
+    assert body["draft_hash_before"] != body["draft_hash_after"]
+    assert body["payload_hash_before"] != body["payload_hash_after"]
+    assert body["wordpress_post_id"] == 8001
+    assert manual_review is not None
+    assert manual_review.review_status == "needs_changes"
+    assert "Atlas content repair completed" in (manual_review.reviewer_notes or "")
+    assert manual_review.reviewed_by == "Atlas Repair Test"
+
+
+def test_approved_repair_rejects_draft_page_without_revision() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            original = _approved_repair_page_state(page)
+            page.status = "draft"
+            page.wordpress_post_id = 8002
+            page.wordpress_status = "draft"
+            page.wordpress_url = "https://example.test/?page_id=8002"
+            session.add(page)
+            session.commit()
+            page_id = page.id
+            before_draft = deepcopy(page.draft_content)
+            revisions_before = _revision_count(session, page_id)
+
+        response = client.put(
+            f"/api/generated-pages/{page_id}/approved-repair",
+            json={
+                "draft": {"intro": f"{before_draft['intro']} Should not save."},
+                "repaired_by": "Atlas Repair Test",
+            },
+        )
+
+        with Session(engine) as session:
+            page = session.get(GeneratedPage, page_id)
+            assert page is not None
+            after_draft = deepcopy(page.draft_content)
+            revisions_after = _revision_count(session, page_id)
+            _restore_approved_repair_page(session, page, original)
+
+    assert response.status_code == 409
+    assert after_draft == before_draft
+    assert revisions_after == revisions_before
+
+
+def test_approved_repair_rejects_unsafe_wording_without_revision() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            original = _approved_repair_page_state(page)
+            page.status = "approved"
+            page.wordpress_post_id = 8003
+            page.wordpress_status = "draft"
+            page.wordpress_url = "https://example.test/?page_id=8003"
+            session.add(page)
+            session.commit()
+            page_id = page.id
+            before_draft = deepcopy(page.draft_content)
+            revisions_before = _revision_count(session, page_id)
+
+        response = client.put(
+            f"/api/generated-pages/{page_id}/approved-repair",
+            json={
+                "draft": {"intro": f"{before_draft['intro']} This is 100% guaranteed."},
+                "repaired_by": "Atlas Repair Test",
+            },
+        )
+
+        with Session(engine) as session:
+            page = session.get(GeneratedPage, page_id)
+            assert page is not None
+            after_draft = deepcopy(page.draft_content)
+            revisions_after = _revision_count(session, page_id)
+            _restore_approved_repair_page(session, page, original)
+
+    assert response.status_code == 422
+    assert "unsafe wording" in str(response.json()["detail"]).lower()
+    assert after_draft == before_draft
+    assert revisions_after == revisions_before
+
+
 def test_qa_run_does_not_create_page_revision() -> None:
     with TestClient(app) as client:
         with Session(engine) as session:
@@ -3756,6 +3902,20 @@ def _editor_page_state(page: GeneratedPage) -> dict:
     }
 
 
+def _approved_repair_page_state(page: GeneratedPage) -> dict:
+    state = _editor_page_state(page)
+    state.update(
+        {
+            "wordpress_post_id": page.wordpress_post_id,
+            "wordpress_url": page.wordpress_url,
+            "wordpress_status": page.wordpress_status,
+            "wordpress_created_at": page.wordpress_created_at,
+            "last_wordpress_sync_at": page.last_wordpress_sync_at,
+        }
+    )
+    return state
+
+
 def _restore_editor_page(
     session: Session,
     page: GeneratedPage,
@@ -3780,11 +3940,47 @@ def _restore_editor_page(
     session.commit()
 
 
+def _restore_approved_repair_page(
+    session: Session,
+    page: GeneratedPage,
+    state: dict,
+    *,
+    revisions: list[GeneratedPageRevision] | None = None,
+) -> None:
+    page.draft_content = state["draft_content"]
+    page.h1 = state["h1"]
+    page.content_body = state["content_body"]
+    page.qa_status = state["qa_status"]
+    page.qa_result = state["qa_result"]
+    page.qa_checked_at = state["qa_checked_at"]
+    page.updated_at = state["updated_at"]
+    page.status = state["status"]
+    page.wordpress_post_id = state["wordpress_post_id"]
+    page.wordpress_url = state["wordpress_url"]
+    page.wordpress_status = state["wordpress_status"]
+    page.wordpress_created_at = state["wordpress_created_at"]
+    page.last_wordpress_sync_at = state["last_wordpress_sync_at"]
+    session.add(page)
+    for revision in revisions or []:
+        session.delete(revision)
+    session.commit()
+
+
 def _revision_count(session: Session, page_id: int) -> int:
     return len(
         session.exec(
             select(GeneratedPageRevision).where(
                 GeneratedPageRevision.generated_page_id == page_id
+            )
+        ).all()
+    )
+
+
+def _wordpress_draft_audit_count(session: Session, page_id: int) -> int:
+    return len(
+        session.exec(
+            select(WordPressDraftAudit).where(
+                WordPressDraftAudit.generated_page_id == page_id
             )
         ).all()
     )

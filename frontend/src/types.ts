@@ -557,6 +557,31 @@ export type ManualDraftSaveResponse = {
   qa_result?: PageQAResult | null;
 };
 
+export type ApprovedPageRepairFields = {
+  intro?: string | null;
+  why_it_matters?: string | null;
+  realtor_property_manager_section?: string | null;
+  faq_items?: { question: string; answer: string }[] | null;
+  internal_notes?: string | null;
+};
+
+export type ApprovedPageRepairResponse = {
+  page: GeneratedPage;
+  revision: GeneratedPageRevision;
+  qa_result: PageQAResult;
+  export_ready: boolean;
+  export_blocker_count: number;
+  export_warning_count: number;
+  export_warnings: ExportWarning[];
+  draft_hash_before: string;
+  draft_hash_after: string;
+  payload_hash_before: string;
+  payload_hash_after: string;
+  wordpress_post_id: number;
+  wordpress_status?: string | null;
+  wordpress_url?: string | null;
+};
+
 export type ImageMetadata = {
   id: number;
   business_id: number;

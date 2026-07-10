@@ -11,6 +11,8 @@ import { Link } from "react-router-dom";
 
 import { apiRequest } from "../api";
 import type {
+  ApprovedPageRepairResponse,
+  GeneratedPage,
   WordPressDraftQualityReviewItem,
   WordPressDraftQualityReviewList,
   WordPressManualQualityReviewStatus,
@@ -166,6 +168,13 @@ function WordPressDraftQualityReviewPage() {
       {selected && (
         <QualityDetail
           item={selected}
+          onRepaired={(updated) => {
+            setList((current) => ({
+              ...current,
+              items: current.items.map((item) => item.page_id === updated.page_id ? updated : item)
+            }));
+            setMessage("Atlas-only repair saved, revision recorded, QA rerun.");
+          }}
           onSaved={(updated) => {
             setList((current) => ({
               ...current,
@@ -182,10 +191,12 @@ function WordPressDraftQualityReviewPage() {
 
 function QualityDetail({
   item,
+  onRepaired,
   onSaved,
   onError
 }: {
   item: WordPressDraftQualityReviewItem;
+  onRepaired: (item: WordPressDraftQualityReviewItem) => void;
   onSaved: (item: WordPressDraftQualityReviewItem) => void;
   onError: (message: string) => void;
 }) {
@@ -193,12 +204,45 @@ function QualityDetail({
   const [reviewerNotes, setReviewerNotes] = useState(item.manual_review.reviewer_notes ?? "");
   const [reviewedBy, setReviewedBy] = useState(item.manual_review.reviewed_by ?? "");
   const [saving, setSaving] = useState(false);
+  const [repairPage, setRepairPage] = useState<GeneratedPage | null>(null);
+  const [repairIntro, setRepairIntro] = useState("");
+  const [repairWhyItMatters, setRepairWhyItMatters] = useState("");
+  const [repairRealtorSection, setRepairRealtorSection] = useState("");
+  const [repairInternalNotes, setRepairInternalNotes] = useState("");
+  const [repairReason, setRepairReason] = useState("Atlas-only approved page content repair");
+  const [repairing, setRepairing] = useState(false);
+  const [repairResult, setRepairResult] = useState<ApprovedPageRepairResponse | null>(null);
 
   useEffect(() => {
     setReviewStatus(item.manual_review.review_status);
     setReviewerNotes(item.manual_review.reviewer_notes ?? "");
     setReviewedBy(item.manual_review.reviewed_by ?? "");
+    setRepairResult(null);
   }, [item]);
+
+  useEffect(() => {
+    let active = true;
+    async function loadRepairPage() {
+      try {
+        const page = await apiRequest<GeneratedPage>(`/api/generated-pages/${item.page_id}`);
+        if (!active) return;
+        setRepairPage(page);
+        setRepairIntro(page.draft_content?.intro ?? "");
+        setRepairWhyItMatters(page.draft_content?.why_it_matters ?? "");
+        setRepairRealtorSection(page.draft_content?.realtor_property_manager_section ?? "");
+        setRepairInternalNotes(page.draft_content?.internal_notes ?? "");
+        setRepairReason("Atlas-only approved page content repair");
+      } catch (err) {
+        if (active) {
+          onError(err instanceof Error ? err.message : "Unable to load Atlas draft for repair.");
+        }
+      }
+    }
+    loadRepairPage();
+    return () => {
+      active = false;
+    };
+  }, [item.page_id, onError]);
 
   const grouped = item.checklist.reduce<Record<string, WordPressQualityCheck[]>>((acc, check) => {
     acc[check.review_field] = [...(acc[check.review_field] ?? []), check];
@@ -208,6 +252,15 @@ function QualityDetail({
     reviewStatus !== item.manual_review.review_status ||
     reviewerNotes !== (item.manual_review.reviewer_notes ?? "") ||
     reviewedBy !== (item.manual_review.reviewed_by ?? "");
+  const hasRepairChanges = Boolean(
+    repairPage?.draft_content &&
+    (
+      repairIntro !== (repairPage.draft_content.intro ?? "") ||
+      repairWhyItMatters !== (repairPage.draft_content.why_it_matters ?? "") ||
+      repairRealtorSection !== (repairPage.draft_content.realtor_property_manager_section ?? "") ||
+      repairInternalNotes !== (repairPage.draft_content.internal_notes ?? "")
+    )
+  );
 
   async function saveManualReview() {
     setSaving(true);
@@ -229,6 +282,43 @@ function QualityDetail({
       onError(err instanceof Error ? err.message : "Unable to save manual review notes.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function saveAtlasRepair() {
+    if (!repairPage?.draft_content) return;
+    setRepairing(true);
+    setRepairResult(null);
+    onError("");
+    try {
+      const result = await apiRequest<ApprovedPageRepairResponse>(
+        `/api/generated-pages/${item.page_id}/approved-repair`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            draft: {
+              intro: repairIntro,
+              why_it_matters: repairWhyItMatters,
+              realtor_property_manager_section: repairRealtorSection,
+              internal_notes: repairInternalNotes
+            },
+            repaired_by: item.manual_review.reviewed_by || "Atlas repair reviewer",
+            reason: repairReason
+          })
+        }
+      );
+      setRepairResult(result);
+      setRepairPage(result.page);
+      setRepairIntro(result.page.draft_content?.intro ?? "");
+      setRepairWhyItMatters(result.page.draft_content?.why_it_matters ?? "");
+      setRepairRealtorSection(result.page.draft_content?.realtor_property_manager_section ?? "");
+      setRepairInternalNotes(result.page.draft_content?.internal_notes ?? "");
+      const updatedQuality = await apiRequest<WordPressDraftQualityReviewItem>(`/api/wordpress/draft-quality-review/${item.page_id}`);
+      onRepaired(updatedQuality);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Unable to save Atlas-only repair.");
+    } finally {
+      setRepairing(false);
     }
   }
 
@@ -317,6 +407,69 @@ function QualityDetail({
             Last reviewed: {formatDateTime(item.manual_review.reviewed_at)}
           </span>
         </div>
+      </section>
+
+      <section className="manualQualityReviewForm atlasRepairForm">
+        <div className="panelHeader">
+          <div>
+            <h3>Atlas-Only Approved Page Repair</h3>
+            <p>Repairs Atlas draft content only. Saves a revision, reruns QA, and does not update WordPress.</p>
+          </div>
+          {hasRepairChanges && <span className="unsavedBadge">Repair changes</span>}
+        </div>
+        <div className="wordpressSafetyNotice compact">
+          <ShieldCheck size={18} aria-hidden="true" />
+          <div>
+            <strong>WordPress references stay locked.</strong>
+            <span>This workflow cannot publish, create drafts, update WordPress, upload media, or change page approval status.</span>
+          </div>
+        </div>
+        {!repairPage?.draft_content ? (
+          <p>Loading Atlas draft content...</p>
+        ) : (
+          <>
+            <div className="manualQualityFields atlasRepairFields">
+              <label className="manualQualityNotes">
+                <span>Intro</span>
+                <textarea value={repairIntro} onChange={(event) => setRepairIntro(event.target.value)} />
+              </label>
+              <label className="manualQualityNotes">
+                <span>Why it matters</span>
+                <textarea value={repairWhyItMatters} onChange={(event) => setRepairWhyItMatters(event.target.value)} />
+              </label>
+              <label className="manualQualityNotes">
+                <span>Realtor / property manager section</span>
+                <textarea value={repairRealtorSection} onChange={(event) => setRepairRealtorSection(event.target.value)} />
+              </label>
+              <label className="manualQualityNotes">
+                <span>Internal notes</span>
+                <textarea value={repairInternalNotes} onChange={(event) => setRepairInternalNotes(event.target.value)} />
+              </label>
+              <label className="manualQualityNotes">
+                <span>Revision reason</span>
+                <input value={repairReason} onChange={(event) => setRepairReason(event.target.value)} />
+              </label>
+            </div>
+            <div className="formActions">
+              <button className="primaryButton" type="button" onClick={saveAtlasRepair} disabled={repairing || !hasRepairChanges}>
+                {repairing ? "Saving Repair..." : "Save Atlas Repair + Run QA"}
+              </button>
+              <span className="helperText">Page remains {humanize(repairPage.status)}. WordPress post ID {item.wordpress_post_id} is not changed.</span>
+            </div>
+          </>
+        )}
+        {repairResult && (
+          <div className="qualityIssueSummary repairResultSummary">
+            <CheckCircle2 size={18} aria-hidden="true" />
+            <div>
+              <strong>Repair saved</strong>
+              <p>
+                Revision #{repairResult.revision.id} recorded. QA: {humanize(repairResult.qa_result.readiness_status)}.
+                Export blockers: {repairResult.export_blocker_count}. Payload hash changed: {repairResult.payload_hash_before !== repairResult.payload_hash_after ? "yes" : "no"}.
+              </p>
+            </div>
+          </div>
+        )}
       </section>
 
       <div className="qualityChecklistGroups">
