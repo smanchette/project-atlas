@@ -2310,6 +2310,55 @@ th {
   font-weight: 700;
 }
 
+.checklistGrid {
+  display: grid;
+  gap: 12px;
+}
+
+.checkItem {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 12px;
+  border: 1px solid #d8e0dd;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.checkItem.pass {
+  border-color: #99c9b2;
+}
+
+.checkItem.fail {
+  border-color: #efb6b6;
+}
+
+.checkItem strong,
+.checkItem span {
+  display: block;
+}
+
+.plainList {
+  margin: 12px 0 0;
+  padding-left: 20px;
+}
+
+.plainList li + li {
+  margin-top: 6px;
+}
+
+.codeBlock {
+  max-height: 360px;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid #d8e0dd;
+  border-radius: 8px;
+  background: #f3f6f5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .mediaWorkspace {
   display: grid;
   grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);

@@ -322,6 +322,33 @@ export type WordPressDraftDryRun = {
   expires_at?: string | null;
 };
 
+export type WordPressDraftUpdateComparison = {
+  original_create_audit_id?: number | null;
+  original_payload_hash?: string | null;
+  current_payload_hash: string;
+  original_draft_hash?: string | null;
+  current_draft_hash: string;
+  payload_changed_since_create: boolean;
+  media_reference_hash: string;
+  media_reference_warning?: string | null;
+  changed_summary: string[];
+};
+
+export type WordPressDraftUpdateDryRun = {
+  page_id: number;
+  status: "blocked" | "dry_run_ready";
+  ready: boolean;
+  wordpress_post_id?: number | null;
+  live_status?: WordPressLiveDraftStatus | null;
+  payload: WordPressDraftRequestPayload;
+  comparison: WordPressDraftUpdateComparison;
+  gate_results: WordPressDraftGateResult[];
+  confirmation_token?: string | null;
+  confirmation_phrase?: string | null;
+  expires_at?: string | null;
+  dry_run_only: boolean;
+};
+
 export type WordPressDraftCreateResult = {
   page_id: number;
   status: "created";

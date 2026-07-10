@@ -66,6 +66,7 @@ from app.services import wordpress_sandbox
 from app.services import wordpress_drafts
 from app.services import wordpress_draft_review
 from app.services import wordpress_draft_queue
+from app.services import wordpress_draft_update
 from app.schemas.qa import QABatchRequest
 from app.services.page_qa import evaluate_page_qa, preview_qa_batch, run_qa_batch, save_page_qa
 from fastapi.testclient import TestClient
@@ -3185,11 +3186,17 @@ def test_wordpress_api_exposes_no_publish_create_delete_or_upload_route() -> Non
         ("/api/wordpress/draft-quality-review/{page_id}/manual-review", "PATCH"),
         ("/api/wordpress/draft/dry-run/{page_id}", "POST"),
         ("/api/wordpress/draft/create/{page_id}", "POST"),
+        ("/api/wordpress/draft-update/dry-run/{page_id}", "POST"),
     }
     assert not any(
         forbidden in path.lower()
         for path, _ in wordpress_routes
-        for forbidden in ("publish", "update", "delete", "upload", "media", "bulk")
+        for forbidden in ("publish", "delete", "upload", "media", "bulk")
+    )
+    assert not any(
+        path.lower().startswith("/api/wordpress/draft-update/")
+        and "dry-run" not in path.lower()
+        for path, _ in wordpress_routes
     )
 
 
@@ -3369,6 +3376,185 @@ def test_wordpress_dry_run_uses_saved_process_memory_password() -> None:
     assert _gate_response(response.json(), "credentials_ready")["passed"] is True
     assert response.json()["confirmation_token"]
     assert response.json()["confirmation_phrase"] == "CREATE WORDPRESS DRAFT drywood-termite-tenting-orlando-fl"
+
+
+def test_wordpress_update_dry_run_blocks_missing_credentials() -> None:
+    wordpress_sandbox.clear_wordpress_application_password()
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            page_id = page.id
+        response = client.post(f"/api/wordpress/draft-update/dry-run/{page_id}")
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[audit],
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "blocked"
+    assert _gate_response(response.json(), "credentials_ready")["passed"] is False
+    assert response.json()["confirmation_token"] is None
+
+
+def test_wordpress_update_dry_run_blocks_non_approved_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="draft"))
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            page.status = "draft"
+            session.add(page)
+            session.commit()
+            page_id = page.id
+        response = client.post(f"/api/wordpress/draft-update/dry-run/{page_id}")
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[audit],
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert _gate_response(response.json(), "page_approved")["passed"] is False
+    assert response.json()["status"] == "blocked"
+
+
+def test_wordpress_update_dry_run_blocks_stale_qa(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="draft"))
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            page.qa_checked_at = datetime(2026, 1, 1, tzinfo=UTC)
+            revision = GeneratedPageRevision(
+                generated_page_id=page.id,
+                created_at=datetime(2026, 1, 2, tzinfo=UTC),
+                draft_hash_before="update-before-stale",
+                draft_hash_after="update-after-stale",
+                draft_content_before=deepcopy(page.draft_content or {}),
+                draft_content_after=deepcopy(page.draft_content or {}),
+                changed_fields=["intro"],
+            )
+            session.add(page)
+            session.add(revision)
+            session.commit()
+            page_id = page.id
+        response = client.post(f"/api/wordpress/draft-update/dry-run/{page_id}")
+        with Session(engine) as session:
+            revisions = session.exec(
+                select(GeneratedPageRevision).where(
+                    GeneratedPageRevision.generated_page_id == page_id,
+                    GeneratedPageRevision.draft_hash_after == "update-after-stale",
+                )
+            ).all()
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                revisions=revisions,
+                audits=[audit],
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert _gate_response(response.json(), "qa_current")["passed"] is False
+    assert response.json()["status"] == "blocked"
+
+
+def test_wordpress_update_dry_run_blocks_missing_wp_ref() -> None:
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            page_id = page.id
+        response = client.post(f"/api/wordpress/draft-update/dry-run/{page_id}")
+        with Session(engine) as session:
+            _restore_wordpress_page(session, session.get(GeneratedPage, page_id), original)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert _gate_response(response.json(), "has_wordpress_ref")["passed"] is False
+    assert response.json()["status"] == "blocked"
+
+
+def test_wordpress_update_dry_run_blocks_live_status_not_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="publish"))
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            page_id = page.id
+        response = client.post(f"/api/wordpress/draft-update/dry-run/{page_id}")
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[audit],
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert _gate_response(response.json(), "live_wordpress_status_draft")["passed"] is False
+    assert response.json()["live_status"]["appears_published"] is True
+    assert response.json()["confirmation_token"] is None
+
+
+def test_wordpress_update_dry_run_is_read_only_and_returns_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="draft"))
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            page_id = page.id
+            before = _approval_queue_database_snapshot(session)
+        response = client.post(f"/api/wordpress/draft-update/dry-run/{page_id}")
+        with Session(engine) as session:
+            after = _approval_queue_database_snapshot(session)
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[audit],
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["status"] == "dry_run_ready"
+    assert body["payload"]["status"] == "draft"
+    assert body["comparison"]["original_payload_hash"]
+    assert body["comparison"]["current_payload_hash"]
+    assert body["comparison"]["media_reference_warning"]
+    assert body["confirmation_phrase"].startswith("UPDATE WORDPRESS DRAFT ")
+    assert body["confirmation_token"]
+    assert after == before
 
 
 def test_wordpress_create_requires_valid_confirmation_without_audit() -> None:
@@ -3984,6 +4170,36 @@ def _wordpress_draft_audit_count(session: Session, page_id: int) -> int:
             )
         ).all()
     )
+
+
+def _fake_wordpress_get_client(*, status: str = "draft"):
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {
+                "id": 712,
+                "status": status,
+                "link": "https://wordpress.example/?page_id=712",
+                "modified_gmt": "2026-07-10T00:00:00",
+                "title": {"rendered": "Drywood Termite Tenting in Orlando, FL"},
+                "slug": "drywood-termite-tenting-orlando-fl",
+            }
+
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def get(self, *_: object, **__: object) -> FakeResponse:
+            return FakeResponse()
+
+    return FakeClient
 
 
 def _page_by_slug(session: Session, slug: str) -> GeneratedPage:

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Any, Literal
 
@@ -83,6 +85,33 @@ class WordPressDraftDryRun(SQLModel):
     confirmation_token: str | None = None
     confirmation_phrase: str | None = None
     expires_at: str | None = None
+
+
+class WordPressDraftUpdateComparison(SQLModel):
+    original_create_audit_id: int | None = None
+    original_payload_hash: str | None = None
+    current_payload_hash: str
+    original_draft_hash: str | None = None
+    current_draft_hash: str
+    payload_changed_since_create: bool = False
+    media_reference_hash: str
+    media_reference_warning: str | None = None
+    changed_summary: list[str] = []
+
+
+class WordPressDraftUpdateDryRun(SQLModel):
+    page_id: int
+    status: Literal["blocked", "dry_run_ready"]
+    ready: bool
+    wordpress_post_id: int | None = None
+    live_status: WordPressLiveDraftStatus | None = None
+    payload: WordPressDraftRequestPayload
+    comparison: WordPressDraftUpdateComparison
+    gate_results: list[WordPressDraftGateResult]
+    confirmation_token: str | None = None
+    confirmation_phrase: str | None = None
+    expires_at: str | None = None
+    dry_run_only: bool = True
 
 
 class WordPressDraftCreateRequest(SQLModel):
