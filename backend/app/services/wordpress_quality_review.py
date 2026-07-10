@@ -317,7 +317,7 @@ def _checklist(
         _manual_warning(
             "reviewer_notes",
             "Reviewer notes",
-            "Add reviewer notes outside Atlas v0.26; note persistence is intentionally not included.",
+            "Manual review notes/status are saved separately from computed read-only checklist results and should capture human review before future publish consideration.",
             "review",
         ),
     ]
