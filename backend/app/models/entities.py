@@ -160,6 +160,22 @@ class WordPressDraftAudit(SQLModel, table=True):
     error_message: str | None = None
 
 
+class WordPressQualityReview(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "generated_page_id",
+            name="uq_wordpressqualityreview_generated_page_id",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
+    review_status: str = Field(default="not_reviewed", index=True)
+    reviewer_notes: str | None = None
+    reviewed_at: datetime | None = None
+    reviewed_by: str | None = None
+
+
 class ImageMetadata(TimestampMixin, table=True):
     __table_args__ = (
         CheckConstraint("focal_x >= 0 AND focal_x <= 1", name="ck_imagemetadata_focal_x_range"),

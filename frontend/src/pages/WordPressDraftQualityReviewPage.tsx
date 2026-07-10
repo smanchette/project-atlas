@@ -13,6 +13,7 @@ import { apiRequest } from "../api";
 import type {
   WordPressDraftQualityReviewItem,
   WordPressDraftQualityReviewList,
+  WordPressManualQualityReviewStatus,
   WordPressQualityCheck
 } from "../types";
 
@@ -27,6 +28,7 @@ function WordPressDraftQualityReviewPage() {
   const [selectedPageId, setSelectedPageId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
     loadQualityReview();
@@ -35,6 +37,7 @@ function WordPressDraftQualityReviewPage() {
   async function loadQualityReview() {
     setLoading(true);
     setError(null);
+    setMessage(null);
     try {
       const response = await apiRequest<WordPressDraftQualityReviewList>("/api/wordpress/draft-quality-review");
       setList(response);
@@ -68,12 +71,13 @@ function WordPressDraftQualityReviewPage() {
       <div className="wordpressSafetyNotice">
         <ShieldCheck size={19} aria-hidden="true" />
         <div>
-          <strong>Read-only checklist. This page has no publish, create, update, delete, media upload, or bulk actions.</strong>
-          <span>Reviewer notes and final publish decisions are intentionally not saved in v0.26.</span>
+          <strong>Computed checklist with manual notes. This page has no publish, create, update, delete, media upload, or bulk actions.</strong>
+          <span>Only manual review status, reviewer notes, reviewer name, and reviewed timestamp are saved in Atlas.</span>
         </div>
       </div>
 
       {error && <div className="alert">{error}</div>}
+      {message && <div className="successAlert">{message}</div>}
 
       <div className="wordpressReviewSummary">
         <div><span>Drafts</span><strong>{list.total_count}</strong></div>
@@ -159,16 +163,74 @@ function WordPressDraftQualityReviewPage() {
         )}
       </section>
 
-      {selected && <QualityDetail item={selected} />}
+      {selected && (
+        <QualityDetail
+          item={selected}
+          onSaved={(updated) => {
+            setList((current) => ({
+              ...current,
+              items: current.items.map((item) => item.page_id === updated.page_id ? updated : item)
+            }));
+            setMessage("Manual review notes saved.");
+          }}
+          onError={setError}
+        />
+      )}
     </section>
   );
 }
 
-function QualityDetail({ item }: { item: WordPressDraftQualityReviewItem }) {
+function QualityDetail({
+  item,
+  onSaved,
+  onError
+}: {
+  item: WordPressDraftQualityReviewItem;
+  onSaved: (item: WordPressDraftQualityReviewItem) => void;
+  onError: (message: string) => void;
+}) {
+  const [reviewStatus, setReviewStatus] = useState<WordPressManualQualityReviewStatus>(item.manual_review.review_status);
+  const [reviewerNotes, setReviewerNotes] = useState(item.manual_review.reviewer_notes ?? "");
+  const [reviewedBy, setReviewedBy] = useState(item.manual_review.reviewed_by ?? "");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setReviewStatus(item.manual_review.review_status);
+    setReviewerNotes(item.manual_review.reviewer_notes ?? "");
+    setReviewedBy(item.manual_review.reviewed_by ?? "");
+  }, [item]);
+
   const grouped = item.checklist.reduce<Record<string, WordPressQualityCheck[]>>((acc, check) => {
     acc[check.review_field] = [...(acc[check.review_field] ?? []), check];
     return acc;
   }, {});
+  const hasUnsavedChanges =
+    reviewStatus !== item.manual_review.review_status ||
+    reviewerNotes !== (item.manual_review.reviewer_notes ?? "") ||
+    reviewedBy !== (item.manual_review.reviewed_by ?? "");
+
+  async function saveManualReview() {
+    setSaving(true);
+    onError("");
+    try {
+      const updated = await apiRequest<WordPressDraftQualityReviewItem>(
+        `/api/wordpress/draft-quality-review/${item.page_id}/manual-review`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            review_status: reviewStatus,
+            reviewer_notes: reviewerNotes,
+            reviewed_by: reviewedBy
+          })
+        }
+      );
+      onSaved(updated);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Unable to save manual review notes.");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
     <section className="panel wordpressQualityDetail">
@@ -215,6 +277,47 @@ function QualityDetail({ item }: { item: WordPressDraftQualityReviewItem }) {
           </div>
         </div>
       )}
+
+      <section className="manualQualityReviewForm">
+        <div className="panelHeader">
+          <div>
+            <h3>Manual Review Notes</h3>
+            <p>Saved in Atlas only. This does not approve, publish, update WordPress, or change the computed checklist.</p>
+          </div>
+          {hasUnsavedChanges && <span className="unsavedBadge">Unsaved changes</span>}
+        </div>
+        <div className="manualQualityFields">
+          <label>
+            <span>Review status</span>
+            <select value={reviewStatus} onChange={(event) => setReviewStatus(event.target.value as WordPressManualQualityReviewStatus)}>
+              <option value="not_reviewed">Not reviewed</option>
+              <option value="in_review">In review</option>
+              <option value="needs_changes">Needs changes</option>
+              <option value="ready_for_manual_publish_review">Ready for manual publish review</option>
+            </select>
+          </label>
+          <label>
+            <span>Reviewed by</span>
+            <input value={reviewedBy} onChange={(event) => setReviewedBy(event.target.value)} placeholder="Optional reviewer name" />
+          </label>
+          <label className="manualQualityNotes">
+            <span>Reviewer notes</span>
+            <textarea
+              value={reviewerNotes}
+              onChange={(event) => setReviewerNotes(event.target.value)}
+              placeholder="Add notes from the manual WordPress draft review."
+            />
+          </label>
+        </div>
+        <div className="formActions">
+          <button className="primaryButton" type="button" onClick={saveManualReview} disabled={saving || !hasUnsavedChanges}>
+            {saving ? "Saving..." : "Save Manual Review"}
+          </button>
+          <span className="helperText manualQualityTimestamp">
+            Last reviewed: {formatDateTime(item.manual_review.reviewed_at)}
+          </span>
+        </div>
+      </section>
 
       <div className="qualityChecklistGroups">
         {Object.entries(grouped).map(([group, checks]) => (
@@ -265,6 +368,10 @@ function readinessTone(item: WordPressDraftQualityReviewItem): "ready" | "warnin
 
 function humanize(value: string) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatDateTime(value?: string | null) {
+  return value ? new Date(value).toLocaleString() : "Not reviewed yet";
 }
 
 export default WordPressDraftQualityReviewPage;

@@ -398,6 +398,11 @@ export type WordPressDraftReviewDetail = {
 
 export type WordPressQualityCheckStatus = "pass" | "warning" | "fail";
 export type WordPressQualityReadinessStatus = "ready" | "needs_review" | "blocked";
+export type WordPressManualQualityReviewStatus =
+  | "not_reviewed"
+  | "in_review"
+  | "needs_changes"
+  | "ready_for_manual_publish_review";
 
 export type WordPressQualityCheck = {
   key: string;
@@ -405,6 +410,17 @@ export type WordPressQualityCheck = {
   status: WordPressQualityCheckStatus;
   message: string;
   review_field: string;
+};
+
+export type WordPressManualQualityReview = {
+  id?: number | null;
+  generated_page_id: number;
+  review_status: WordPressManualQualityReviewStatus;
+  reviewer_notes?: string | null;
+  reviewed_at?: string | null;
+  reviewed_by?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
 export type WordPressDraftQualityReviewItem = {
@@ -427,6 +443,7 @@ export type WordPressDraftQualityReviewItem = {
   overall_publish_readiness: WordPressQualityReadinessStatus;
   blockers_or_issues: string[];
   safe_for_future_manual_review: boolean;
+  manual_review: WordPressManualQualityReview;
   checklist: WordPressQualityCheck[];
 };
 

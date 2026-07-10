@@ -1,7 +1,13 @@
-from sqlmodel import Session
+from datetime import UTC, datetime
 
+from fastapi import HTTPException
+from sqlmodel import Session, select
+
+from app.models import GeneratedPage, WordPressQualityReview
 from app.schemas.page_export import PageExportPackage
 from app.schemas.wordpress import (
+    WordPressManualQualityReviewRead,
+    WordPressManualQualityReviewUpdate,
     WordPressDraftQualityReviewItem,
     WordPressDraftQualityReviewList,
     WordPressDraftReviewDetail,
@@ -45,6 +51,7 @@ def build_wordpress_draft_quality_review(
 ) -> WordPressDraftQualityReviewItem:
     detail = get_wordpress_draft_review(session, page_id)
     package = build_page_export_package(session, page_id)
+    manual_review = get_manual_quality_review(session, page_id)
     checklist = _checklist(detail, package)
     fail_count = sum(item.status == "fail" for item in checklist)
     warning_count = sum(item.status == "warning" for item in checklist)
@@ -78,8 +85,57 @@ def build_wordpress_draft_quality_review(
         overall_publish_readiness=readiness,
         blockers_or_issues=issues,
         safe_for_future_manual_review=fail_count == 0,
+        manual_review=manual_review,
         checklist=checklist,
     )
+
+
+def get_manual_quality_review(
+    session: Session,
+    page_id: int,
+) -> WordPressManualQualityReviewRead:
+    record = session.exec(
+        select(WordPressQualityReview).where(
+            WordPressQualityReview.generated_page_id == page_id
+        )
+    ).first()
+    if record:
+        return WordPressManualQualityReviewRead.model_validate(record)
+    return WordPressManualQualityReviewRead(generated_page_id=page_id)
+
+
+def update_manual_quality_review(
+    session: Session,
+    page_id: int,
+    payload: WordPressManualQualityReviewUpdate,
+) -> WordPressDraftQualityReviewItem:
+    page = session.get(GeneratedPage, page_id)
+    if not page:
+        raise HTTPException(status_code=404, detail="Generated page not found")
+    if page.wordpress_post_id is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Generated page does not have a WordPress draft reference",
+        )
+
+    record = session.exec(
+        select(WordPressQualityReview).where(
+            WordPressQualityReview.generated_page_id == page_id
+        )
+    ).first()
+    now = datetime.now(UTC)
+    values = payload.model_dump()
+    if record is None:
+        record = WordPressQualityReview(generated_page_id=page_id)
+    record.review_status = values["review_status"]
+    record.reviewer_notes = values.get("reviewer_notes")
+    record.reviewed_by = values.get("reviewed_by")
+    record.reviewed_at = now
+    record.updated_at = now
+    session.add(record)
+    session.commit()
+    session.refresh(record)
+    return build_wordpress_draft_quality_review(session, page_id)
 
 
 def _checklist(

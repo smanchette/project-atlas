@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import field_validator
@@ -165,6 +166,12 @@ class WordPressDraftReviewDetail(SQLModel):
 
 QualityCheckStatus = Literal["pass", "warning", "fail"]
 QualityReadinessStatus = Literal["ready", "needs_review", "blocked"]
+ManualQualityReviewStatus = Literal[
+    "not_reviewed",
+    "in_review",
+    "needs_changes",
+    "ready_for_manual_publish_review",
+]
 
 
 class WordPressQualityCheck(SQLModel):
@@ -173,6 +180,31 @@ class WordPressQualityCheck(SQLModel):
     status: QualityCheckStatus
     message: str
     review_field: str
+
+
+class WordPressManualQualityReviewRead(SQLModel):
+    id: int | None = None
+    generated_page_id: int
+    review_status: ManualQualityReviewStatus = "not_reviewed"
+    reviewer_notes: str | None = None
+    reviewed_at: datetime | None = None
+    reviewed_by: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class WordPressManualQualityReviewUpdate(SQLModel):
+    review_status: ManualQualityReviewStatus = "not_reviewed"
+    reviewer_notes: str | None = Field(default=None, max_length=5000)
+    reviewed_by: str | None = Field(default=None, max_length=200)
+
+    @field_validator("reviewer_notes", "reviewed_by", mode="before")
+    @classmethod
+    def trim_optional_text(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        return stripped or None
 
 
 class WordPressDraftQualityReviewItem(SQLModel):
@@ -195,6 +227,7 @@ class WordPressDraftQualityReviewItem(SQLModel):
     overall_publish_readiness: QualityReadinessStatus
     blockers_or_issues: list[str] = []
     safe_for_future_manual_review: bool
+    manual_review: WordPressManualQualityReviewRead
     checklist: list[WordPressQualityCheck]
 
 

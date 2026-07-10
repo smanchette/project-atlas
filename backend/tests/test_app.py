@@ -42,6 +42,7 @@ from app.models import (
     Service,
     Setting,
     WordPressDraftAudit,
+    WordPressQualityReview,
 )
 from app.services.draft_generation import (
     DeterministicMockProvider,
@@ -230,7 +231,7 @@ def test_backup_export_contains_metadata_counts_and_all_data_groups(tmp_path: Pa
 
     assert backup_path.is_file()
     assert payload["metadata"]["app"] == "Project Atlas"
-    assert payload["metadata"]["version"] == "0.17"
+    assert payload["metadata"]["version"] == "0.27"
     assert isinstance(payload["metadata"]["created_at"], str)
     assert payload["metadata"]["table_counts"] == before_counts
     assert set(payload["data"]) == set(BACKUP_MODELS)
@@ -1748,7 +1749,7 @@ def test_backup_restore_preserves_review_notes_and_approval_audits_idempotently(
                 session.delete(record)
             session.commit()
 
-    assert payload["metadata"]["version"] == "0.17"
+    assert payload["metadata"]["version"] == "0.27"
     assert payload["data"]["approval_audits"]
     exported_page = next(
         record
@@ -1986,7 +1987,7 @@ def test_backup_restore_preserves_page_revisions_idempotently(tmp_path: Path) ->
                 revisions=restored_revisions,
             )
 
-    assert payload_json["metadata"]["version"] == "0.17"
+    assert payload_json["metadata"]["version"] == "0.27"
     assert payload_json["data"]["page_revisions"]
     assert len(restored_revisions) == 1
     assert restored_after["hero_subheadline"].endswith("Reviewed for backup.")
@@ -2681,6 +2682,184 @@ def test_wordpress_draft_quality_review_endpoint_is_read_only() -> None:
     assert after_media_count == before_media_count
 
 
+def test_wordpress_quality_manual_review_can_be_saved_and_reloaded() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            audit_id = audit.id
+            page_id = page.id
+        response = client.patch(
+            f"/api/wordpress/draft-quality-review/{page_id}/manual-review",
+            json={
+                "review_status": "needs_changes",
+                "reviewer_notes": "  Needs visual spacing review.  ",
+                "reviewed_by": "  Jordan  ",
+            },
+        )
+        reload_response = client.get(f"/api/wordpress/draft-quality-review/{page_id}")
+        with Session(engine) as session:
+            saved = session.exec(
+                select(WordPressQualityReview).where(
+                    WordPressQualityReview.generated_page_id == page_id
+                )
+            ).first()
+            if saved:
+                session.delete(saved)
+                session.commit()
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[session.get(WordPressDraftAudit, audit_id)],
+            )
+
+    assert response.status_code == 200
+    manual = response.json()["manual_review"]
+    assert manual["review_status"] == "needs_changes"
+    assert manual["reviewer_notes"] == "Needs visual spacing review."
+    assert manual["reviewed_by"] == "Jordan"
+    assert manual["reviewed_at"]
+    assert reload_response.json()["manual_review"] == manual
+
+
+def test_wordpress_quality_manual_review_rejects_invalid_status() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            audit_id = audit.id
+            page_id = page.id
+        response = client.patch(
+            f"/api/wordpress/draft-quality-review/{page_id}/manual-review",
+            json={
+                "review_status": "published",
+                "reviewer_notes": "Not a valid manual review status.",
+            },
+        )
+        with Session(engine) as session:
+            saved = session.exec(
+                select(WordPressQualityReview).where(
+                    WordPressQualityReview.generated_page_id == page_id
+                )
+            ).first()
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[session.get(WordPressDraftAudit, audit_id)],
+            )
+
+    assert response.status_code == 422
+    assert saved is None
+
+
+def test_wordpress_quality_manual_review_save_only_changes_review_record() -> None:
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            audit_id = audit.id
+            page_id = page.id
+            before_page = _wordpress_page_state(page)
+            before_audit_count = len(session.exec(select(WordPressDraftAudit)).all())
+            before_media_count = len(session.exec(select(ImageMetadata)).all())
+            before_approval_count = len(session.exec(select(ApprovalAudit)).all())
+        response = client.patch(
+            f"/api/wordpress/draft-quality-review/{page_id}/manual-review",
+            json={
+                "review_status": "in_review",
+                "reviewer_notes": "Manual review started.",
+            },
+        )
+        with Session(engine) as session:
+            page = session.get(GeneratedPage, page_id)
+            after_page = _wordpress_page_state(page)
+            after_audit_count = len(session.exec(select(WordPressDraftAudit)).all())
+            after_media_count = len(session.exec(select(ImageMetadata)).all())
+            after_approval_count = len(session.exec(select(ApprovalAudit)).all())
+            saved = session.exec(
+                select(WordPressQualityReview).where(
+                    WordPressQualityReview.generated_page_id == page_id
+                )
+            ).first()
+            if saved:
+                session.delete(saved)
+                session.commit()
+            _restore_wordpress_page(
+                session,
+                page,
+                original,
+                audits=[session.get(WordPressDraftAudit, audit_id)],
+            )
+
+    assert response.status_code == 200
+    assert after_page == before_page
+    assert after_audit_count == before_audit_count
+    assert after_media_count == before_media_count
+    assert after_approval_count == before_approval_count
+
+
+def test_backup_restore_preserves_wordpress_quality_review_idempotently(tmp_path: Path) -> None:
+    with Session(engine) as session:
+        page, original = _prepare_wordpress_draft_page(session)
+        audit = _add_wordpress_draft_audit(session, page, status="created")
+        audit_id = audit.id
+        page_id = page.id
+        review = WordPressQualityReview(
+            generated_page_id=page_id,
+            review_status="ready_for_manual_publish_review",
+            reviewer_notes="Ready after manual review.",
+            reviewed_by="Jordan",
+            reviewed_at=datetime.now(UTC),
+        )
+        session.add(review)
+        session.commit()
+        result = export_backup(session, backup_dir=tmp_path)
+        backup_payload = json.loads((tmp_path / result["file_name"]).read_text(encoding="utf-8"))
+        review_count = len(backup_payload["data"]["wordpress_quality_reviews"])
+        session.delete(review)
+        session.commit()
+        restore_backup(session, tmp_path / result["file_name"])
+        restore_backup(session, tmp_path / result["file_name"])
+        restored = session.exec(
+            select(WordPressQualityReview).where(
+                WordPressQualityReview.generated_page_id == page_id
+            )
+        ).all()
+        restored_review = restored[0]
+        session.delete(restored_review)
+        session.commit()
+        _restore_wordpress_page(
+            session,
+            session.get(GeneratedPage, page_id),
+            original,
+            audits=[session.get(WordPressDraftAudit, audit_id)],
+        )
+
+    assert review_count >= 1
+    assert len(restored) == 1
+    assert restored_review.review_status == "ready_for_manual_publish_review"
+    assert restored_review.reviewer_notes == "Ready after manual review."
+
+
+def test_old_backup_without_wordpress_quality_reviews_still_restores(tmp_path: Path) -> None:
+    with Session(engine) as session:
+        result = export_backup(session, backup_dir=tmp_path)
+    backup_path = tmp_path / result["file_name"]
+    payload = json.loads(backup_path.read_text(encoding="utf-8"))
+    payload["metadata"]["version"] = "0.17"
+    payload["metadata"]["table_counts"].pop("wordpress_quality_reviews", None)
+    payload["data"].pop("wordpress_quality_reviews", None)
+    backup_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with Session(engine) as session:
+        result = restore_backup(session, backup_path)
+
+    assert result["status"] == "restored"
+    assert result["table_counts"]["wordpress_quality_reviews"] == 0
+
+
 def test_wordpress_draft_queue_lists_orlando_as_already_has_draft() -> None:
     with TestClient(app) as client:
         _configure_wordpress_sandbox(client)
@@ -2857,6 +3036,7 @@ def test_wordpress_api_exposes_no_publish_create_delete_or_upload_route() -> Non
     assert write_routes == {
         ("/api/wordpress/settings", "PUT"),
         ("/api/wordpress/test-connection", "POST"),
+        ("/api/wordpress/draft-quality-review/{page_id}/manual-review", "PATCH"),
         ("/api/wordpress/draft/dry-run/{page_id}", "POST"),
         ("/api/wordpress/draft/create/{page_id}", "POST"),
     }
@@ -3301,7 +3481,7 @@ def test_backup_restore_preserves_wordpress_audits_and_safe_references_idempoten
                 audits=restored_audits,
             )
 
-    assert payload["metadata"]["version"] == "0.17"
+    assert payload["metadata"]["version"] == "0.27"
     assert payload["data"]["wordpress_draft_audits"]
     assert payload["data"]["generated_pages"][0].get("wordpress_post_id") is not None or any(
         item.get("wordpress_post_id") == 911

@@ -16,6 +16,7 @@ def create_db_and_tables() -> None:
     ensure_generated_page_schema()
     ensure_image_metadata_schema()
     ensure_page_image_assignment_schema()
+    ensure_wordpress_quality_review_schema()
 
 
 def ensure_city_schema() -> None:
@@ -198,6 +199,54 @@ def ensure_page_image_assignment_schema() -> None:
                     "(generated_page_id, image_metadata_id, image_role)"
                 )
             )
+
+
+def ensure_wordpress_quality_review_schema() -> None:
+    inspector = inspect(engine)
+    if "wordpressqualityreview" not in inspector.get_table_names():
+        return
+
+    existing_columns = {
+        column["name"] for column in inspector.get_columns("wordpressqualityreview")
+    }
+    statements: list[str] = []
+
+    if "review_status" not in existing_columns:
+        statements.append(
+            "ALTER TABLE wordpressqualityreview ADD COLUMN "
+            "review_status VARCHAR NOT NULL DEFAULT 'not_reviewed'"
+        )
+    if "reviewer_notes" not in existing_columns:
+        statements.append("ALTER TABLE wordpressqualityreview ADD COLUMN reviewer_notes VARCHAR")
+    if "reviewed_at" not in existing_columns:
+        statements.append("ALTER TABLE wordpressqualityreview ADD COLUMN reviewed_at TIMESTAMP")
+    if "reviewed_by" not in existing_columns:
+        statements.append("ALTER TABLE wordpressqualityreview ADD COLUMN reviewed_by VARCHAR")
+    if "created_at" not in existing_columns:
+        statements.append("ALTER TABLE wordpressqualityreview ADD COLUMN created_at TIMESTAMP")
+    if "updated_at" not in existing_columns:
+        statements.append("ALTER TABLE wordpressqualityreview ADD COLUMN updated_at TIMESTAMP")
+
+    if not statements:
+        return
+
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
+        connection.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_wordpressqualityreview_generated_page_id "
+                "ON wordpressqualityreview (generated_page_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_wordpressqualityreview_review_status "
+                "ON wordpressqualityreview (review_status)"
+            )
+        )
 
 
 def get_session() -> Generator[Session, None, None]:

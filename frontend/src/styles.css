@@ -3922,6 +3922,64 @@ th {
   gap: 16px;
 }
 
+.manualQualityReviewForm {
+  margin: 18px 0;
+  padding: 14px;
+  border: 1px solid #dfe6e3;
+  border-left: 3px solid #2f6653;
+  background: #f8fbfa;
+}
+
+.manualQualityReviewForm .panelHeader h3,
+.manualQualityReviewForm .panelHeader p {
+  margin: 0;
+}
+
+.manualQualityReviewForm .panelHeader p {
+  margin-top: 4px;
+  color: #596965;
+  font-size: 13px;
+}
+
+.manualQualityFields {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(180px, 0.8fr) minmax(280px, 1.4fr);
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.manualQualityFields label {
+  display: grid;
+  gap: 6px;
+}
+
+.manualQualityFields label span {
+  color: #394743;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.manualQualityFields input,
+.manualQualityFields select,
+.manualQualityFields textarea {
+  width: 100%;
+  border: 1px solid #cbd7d2;
+  border-radius: 7px;
+  padding: 10px 11px;
+  color: #18211e;
+  background: #ffffff;
+}
+
+.manualQualityFields textarea {
+  min-height: 92px;
+  resize: vertical;
+}
+
+.manualQualityTimestamp {
+  margin: 0;
+  align-self: center;
+}
+
 .qualityChecklistGroup {
   padding-top: 12px;
   border-top: 1px solid #e1e7e4;
@@ -4003,6 +4061,10 @@ th {
   }
 
   .qualityChecklist {
+    grid-template-columns: 1fr;
+  }
+
+  .manualQualityFields {
     grid-template-columns: 1fr;
   }
 

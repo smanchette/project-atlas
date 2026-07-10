@@ -20,10 +20,11 @@ from app.models import (
     Service,
     Setting,
     WordPressDraftAudit,
+    WordPressQualityReview,
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.17"
+BACKUP_VERSION = "0.27"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -35,6 +36,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.12",
     "0.13",
     "0.17",
+    "0.27",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -56,6 +58,7 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "approval_audits": ApprovalAudit,
     "page_revisions": GeneratedPageRevision,
     "wordpress_draft_audits": WordPressDraftAudit,
+    "wordpress_quality_reviews": WordPressQualityReview,
     "image_metadata": ImageMetadata,
     "page_image_assignments": PageImageAssignment,
     "settings": Setting,
@@ -295,6 +298,41 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 restored_record,
             )
 
+        for record in data["wordpress_quality_reviews"]:
+            page_id = _mapped_id(
+                generated_page_ids,
+                record["generated_page_id"],
+                "wordpress_quality_reviews.generated_page_id",
+            )
+            restored_record = {
+                **record,
+                "generated_page_id": page_id,
+                "reviewed_at": (
+                    _datetime_value(
+                        record["reviewed_at"],
+                        "wordpress_quality_reviews.reviewed_at",
+                    )
+                    if record.get("reviewed_at")
+                    else None
+                ),
+                "created_at": _datetime_value(
+                    record["created_at"],
+                    "wordpress_quality_reviews.created_at",
+                ),
+                "updated_at": _datetime_value(
+                    record["updated_at"],
+                    "wordpress_quality_reviews.updated_at",
+                ),
+            }
+            _upsert(
+                session,
+                WordPressQualityReview,
+                select(WordPressQualityReview).where(
+                    WordPressQualityReview.generated_page_id == page_id,
+                ),
+                restored_record,
+            )
+
         image_metadata_ids: dict[int, int] = {}
         for record in data["image_metadata"]:
             old_id = _record_id(record, "image_metadata")
@@ -428,6 +466,9 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if backup_version != "0.17" and "wordpress_draft_audits" not in data:
         data["wordpress_draft_audits"] = []
         counts["wordpress_draft_audits"] = 0
+    if backup_version != "0.27" and "wordpress_quality_reviews" not in data:
+        data["wordpress_quality_reviews"] = []
+        counts["wordpress_quality_reviews"] = 0
 
     for group in BACKUP_MODELS:
         records = data.get(group)
@@ -545,6 +586,7 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         "approval_audits": ("generated_page_id", "approved_at", "draft_hash_at_approval"),
         "page_revisions": ("generated_page_id", "created_at", "draft_hash_after"),
         "wordpress_draft_audits": ("generated_page_id", "attempted_at", "payload_hash"),
+        "wordpress_quality_reviews": ("generated_page_id",),
         "image_metadata": ("business_id", "file_name"),
         "page_image_assignments": ("generated_page_id", "image_metadata_id", "image_role"),
         "settings": ("setting_key",),
@@ -596,6 +638,9 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
             ("generated_page_id", "generated_pages", False),
         ),
         "wordpress_draft_audits": (
+            ("generated_page_id", "generated_pages", False),
+        ),
+        "wordpress_quality_reviews": (
             ("generated_page_id", "generated_pages", False),
         ),
     }
