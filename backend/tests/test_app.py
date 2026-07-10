@@ -3187,6 +3187,7 @@ def test_wordpress_api_exposes_no_publish_create_delete_or_upload_route() -> Non
         ("/api/wordpress/draft/dry-run/{page_id}", "POST"),
         ("/api/wordpress/draft/create/{page_id}", "POST"),
         ("/api/wordpress/draft-update/dry-run/{page_id}", "POST"),
+        ("/api/wordpress/draft-update/apply/{page_id}", "POST"),
     }
     assert not any(
         forbidden in path.lower()
@@ -3195,7 +3196,10 @@ def test_wordpress_api_exposes_no_publish_create_delete_or_upload_route() -> Non
     )
     assert not any(
         path.lower().startswith("/api/wordpress/draft-update/")
-        and "dry-run" not in path.lower()
+        and not (
+            path.lower().endswith("/dry-run/{page_id}")
+            or path.lower().endswith("/apply/{page_id}")
+        )
         for path, _ in wordpress_routes
     )
 
@@ -3555,6 +3559,356 @@ def test_wordpress_update_dry_run_is_read_only_and_returns_comparison(
     assert body["confirmation_phrase"].startswith("UPDATE WORDPRESS DRAFT ")
     assert body["confirmation_token"]
     assert after == before
+
+
+def test_wordpress_update_apply_requires_valid_confirmation_without_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="draft"))
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            page_id = page.id
+            audit_count_before = len(session.exec(select(WordPressDraftAudit)).all())
+        response = client.post(
+            f"/api/wordpress/draft-update/apply/{page_id}",
+            json={"confirmation_token": "invalid", "confirmation_phrase": "invalid"},
+        )
+        with Session(engine) as session:
+            audit_count_after = len(session.exec(select(WordPressDraftAudit)).all())
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[audit],
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 422
+    assert audit_count_after == audit_count_before
+
+
+def test_wordpress_update_apply_blocks_expired_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="draft"))
+    monkeypatch.setattr(wordpress_draft_update, "TOKEN_TTL_MINUTES", -1)
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            page_id = page.id
+        dry_run = client.post(f"/api/wordpress/draft-update/dry-run/{page_id}").json()
+        response = client.post(
+            f"/api/wordpress/draft-update/apply/{page_id}",
+            json={
+                "confirmation_token": dry_run["confirmation_token"],
+                "confirmation_phrase": dry_run["confirmation_phrase"],
+            },
+        )
+        with Session(engine) as session:
+            update_audits = session.exec(
+                select(WordPressDraftAudit).where(
+                    WordPressDraftAudit.generated_page_id == page_id,
+                    WordPressDraftAudit.action_type == "update_draft",
+                )
+            ).all()
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[audit, *update_audits],
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "The dry-run confirmation token expired."
+    assert update_audits == []
+
+
+def test_wordpress_update_apply_blocks_wrong_confirmation_phrase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="draft"))
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            page_id = page.id
+        dry_run = client.post(f"/api/wordpress/draft-update/dry-run/{page_id}").json()
+        response = client.post(
+            f"/api/wordpress/draft-update/apply/{page_id}",
+            json={
+                "confirmation_token": dry_run["confirmation_token"],
+                "confirmation_phrase": "UPDATE WORDPRESS DRAFT wrong-slug",
+            },
+        )
+        with Session(engine) as session:
+            update_audits = session.exec(
+                select(WordPressDraftAudit).where(
+                    WordPressDraftAudit.generated_page_id == page_id,
+                    WordPressDraftAudit.action_type == "update_draft",
+                )
+            ).all()
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[audit, *update_audits],
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 422
+    assert update_audits == []
+
+
+def test_wordpress_update_apply_reruns_gates_and_records_blocked_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="draft"))
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            page_id = page.id
+        dry_run = client.post(f"/api/wordpress/draft-update/dry-run/{page_id}").json()
+        with Session(engine) as session:
+            page = session.get(GeneratedPage, page_id)
+            page.qa_status = "blocked"
+            session.add(page)
+            session.commit()
+        response = client.post(
+            f"/api/wordpress/draft-update/apply/{page_id}",
+            json={
+                "confirmation_token": dry_run["confirmation_token"],
+                "confirmation_phrase": dry_run["confirmation_phrase"],
+            },
+        )
+        with Session(engine) as session:
+            update_audits = session.exec(
+                select(WordPressDraftAudit).where(
+                    WordPressDraftAudit.generated_page_id == page_id,
+                    WordPressDraftAudit.action_type == "update_draft",
+                )
+            ).all()
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[audit, *update_audits],
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 409
+    assert len(update_audits) == 1
+    assert update_audits[0].status == "blocked"
+    assert any(
+        item["code"] == "qa_ready" and item["passed"] is False
+        for item in update_audits[0].gate_results
+    )
+
+
+def test_wordpress_update_apply_blocks_live_status_not_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="draft"))
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            audit = _add_wordpress_draft_audit(session, page, status="created")
+            page_id = page.id
+        dry_run = client.post(f"/api/wordpress/draft-update/dry-run/{page_id}").json()
+        monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="publish"))
+        response = client.post(
+            f"/api/wordpress/draft-update/apply/{page_id}",
+            json={
+                "confirmation_token": dry_run["confirmation_token"],
+                "confirmation_phrase": dry_run["confirmation_phrase"],
+            },
+        )
+        with Session(engine) as session:
+            update_audits = session.exec(
+                select(WordPressDraftAudit).where(
+                    WordPressDraftAudit.generated_page_id == page_id,
+                    WordPressDraftAudit.action_type == "update_draft",
+                )
+            ).all()
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[audit, *update_audits],
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 409
+    assert len(update_audits) == 1
+    assert any(
+        item["code"] == "live_wordpress_status_draft" and item["passed"] is False
+        for item in update_audits[0].gate_results
+    )
+
+
+def test_wordpress_update_apply_sends_draft_only_and_records_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[dict] = []
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="draft"))
+    monkeypatch.setattr(
+        wordpress_draft_update.httpx,
+        "Client",
+        _fake_wordpress_update_client(sent=sent, status="draft"),
+    )
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            original_draft = deepcopy(page.draft_content)
+            create_audit = _add_wordpress_draft_audit(session, page, status="created")
+            original_created_at = page.wordpress_created_at
+            revisions_before = _revision_count(session, page.id)
+            create_count_before = len(
+                session.exec(
+                    select(WordPressDraftAudit).where(
+                        WordPressDraftAudit.generated_page_id == page.id,
+                        WordPressDraftAudit.action_type == "create_draft",
+                    )
+                ).all()
+            )
+            page_id = page.id
+        dry_run = client.post(f"/api/wordpress/draft-update/dry-run/{page_id}").json()
+        response = client.post(
+            f"/api/wordpress/draft-update/apply/{page_id}",
+            json={
+                "confirmation_token": dry_run["confirmation_token"],
+                "confirmation_phrase": dry_run["confirmation_phrase"],
+            },
+        )
+        with Session(engine) as session:
+            page = session.get(GeneratedPage, page_id)
+            update_audits = session.exec(
+                select(WordPressDraftAudit).where(
+                    WordPressDraftAudit.generated_page_id == page_id,
+                    WordPressDraftAudit.action_type == "update_draft",
+                )
+            ).all()
+            create_count_after = len(
+                session.exec(
+                    select(WordPressDraftAudit).where(
+                        WordPressDraftAudit.generated_page_id == page_id,
+                        WordPressDraftAudit.action_type == "create_draft",
+                    )
+                ).all()
+            )
+            saved = {
+                "status": page.status,
+                "wordpress_post_id": page.wordpress_post_id,
+                "wordpress_status": page.wordpress_status,
+                "wordpress_url": page.wordpress_url,
+                "wordpress_created_at": page.wordpress_created_at,
+                "last_wordpress_sync_at": page.last_wordpress_sync_at,
+                "draft_content": deepcopy(page.draft_content),
+                "revision_count": _revision_count(session, page_id),
+            }
+            _restore_wordpress_page(
+                session,
+                page,
+                original,
+                audits=[create_audit, *update_audits],
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert sent[0]["url"] == "https://wordpress.example/wp-json/wp/v2/pages/712"
+    assert sent[0]["json"]["status"] == "draft"
+    assert set(sent[0]["json"]) == {"title", "slug", "status", "content", "excerpt"}
+    assert sent[0]["auth"] is True
+    assert saved["status"] == "approved"
+    assert saved["wordpress_post_id"] == 712
+    assert saved["wordpress_status"] == "draft"
+    assert saved["wordpress_url"] == "https://wordpress.example/?page_id=712"
+    assert saved["wordpress_created_at"] == original_created_at
+    assert saved["last_wordpress_sync_at"] is not None
+    assert saved["draft_content"] == original_draft
+    assert saved["revision_count"] == revisions_before
+    assert len(update_audits) == 1
+    assert update_audits[0].status == "updated"
+    assert update_audits[0].payload_hash == dry_run["comparison"]["current_payload_hash"]
+    assert create_count_after == create_count_before
+    assert "password" not in json.dumps(update_audits[0].model_dump(mode="json")).lower()
+
+
+def test_wordpress_update_apply_records_failed_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="draft"))
+    monkeypatch.setattr(
+        wordpress_draft_update.httpx,
+        "Client",
+        _fake_wordpress_update_client(sent=[], status="draft", response_status_code=500),
+    )
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            create_audit = _add_wordpress_draft_audit(session, page, status="created")
+            page_id = page.id
+        dry_run = client.post(f"/api/wordpress/draft-update/dry-run/{page_id}").json()
+        response = client.post(
+            f"/api/wordpress/draft-update/apply/{page_id}",
+            json={
+                "confirmation_token": dry_run["confirmation_token"],
+                "confirmation_phrase": dry_run["confirmation_phrase"],
+            },
+        )
+        with Session(engine) as session:
+            update_audits = session.exec(
+                select(WordPressDraftAudit).where(
+                    WordPressDraftAudit.generated_page_id == page_id,
+                    WordPressDraftAudit.action_type == "update_draft",
+                )
+            ).all()
+            page = session.get(GeneratedPage, page_id)
+            wordpress_status = page.wordpress_status
+            _restore_wordpress_page(
+                session,
+                page,
+                original,
+                audits=[create_audit, *update_audits],
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 502
+    assert len(update_audits) == 1
+    assert update_audits[0].status == "failed"
+    assert update_audits[0].error_message == "WordPress returned HTTP 500."
+    assert wordpress_status == "draft"
+
+
+def test_wordpress_update_apply_does_not_add_broader_wordpress_routes() -> None:
+    with TestClient(app) as client:
+        responses = [
+            client.post("/api/wordpress/draft-update/bulk"),
+            client.post("/api/wordpress/draft-update/create/1"),
+            client.post("/api/wordpress/draft-update/publish/1"),
+            client.post("/api/wordpress/draft-update/delete/1"),
+            client.post("/api/wordpress/draft-update/media/1"),
+        ]
+
+    assert [response.status_code for response in responses] == [404, 404, 404, 404, 404]
 
 
 def test_wordpress_create_requires_valid_confirmation_without_audit() -> None:
@@ -4198,6 +4552,55 @@ def _fake_wordpress_get_client(*, status: str = "draft"):
 
         def get(self, *_: object, **__: object) -> FakeResponse:
             return FakeResponse()
+
+    return FakeClient
+
+
+def _fake_wordpress_update_client(
+    *,
+    sent: list[dict],
+    status: str = "draft",
+    response_status_code: int = 200,
+):
+    class FakeGetResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {
+                "id": 712,
+                "status": status,
+                "link": "https://wordpress.example/?page_id=712",
+                "modified_gmt": "2026-07-10T00:00:00",
+                "title": {"rendered": "Drywood Termite Tenting in Orlando, FL"},
+                "slug": "drywood-termite-tenting-orlando-fl",
+            }
+
+    class FakePostResponse:
+        status_code = response_status_code
+
+        def json(self) -> dict:
+            return {
+                "id": 712,
+                "status": status,
+                "link": "https://wordpress.example/?page_id=712",
+            }
+
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def get(self, *_: object, **__: object) -> FakeGetResponse:
+            return FakeGetResponse()
+
+        def post(self, url: str, *, json: dict, auth: object) -> FakePostResponse:
+            sent.append({"url": url, "json": deepcopy(json), "auth": auth is not None})
+            return FakePostResponse()
 
     return FakeClient
 

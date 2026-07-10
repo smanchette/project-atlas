@@ -6,11 +6,15 @@ import json
 import secrets
 from typing import Any
 
+import httpx
+from fastapi import HTTPException
 from sqlalchemy import func
 from sqlmodel import Session, select
 
 from app.models import GeneratedPage, GeneratedPageRevision, WordPressDraftAudit
 from app.schemas.wordpress import (
+    WordPressDraftUpdateApplyRequest,
+    WordPressDraftUpdateApplyResult,
     WordPressDraftGateResult,
     WordPressDraftRequestPayload,
     WordPressDraftUpdateComparison,
@@ -204,6 +208,162 @@ def dry_run_wordpress_draft_update(session: Session, page_id: int) -> WordPressD
     )
 
 
+def apply_wordpress_draft_update(
+    session: Session,
+    page_id: int,
+    confirmation: WordPressDraftUpdateApplyRequest,
+) -> WordPressDraftUpdateApplyResult:
+    token = _verify_token(confirmation.confirmation_token, page_id)
+    dry_run = dry_run_wordpress_draft_update(session, page_id)
+    expected_phrase = _confirmation_phrase(dry_run.payload.slug)
+    if not hmac.compare_digest(confirmation.confirmation_phrase.strip(), expected_phrase):
+        raise HTTPException(status_code=422, detail="The confirmation phrase does not match the dry run.")
+    if token["payload_hash"] != dry_run.comparison.current_payload_hash:
+        dry_run.gate_results.append(
+            WordPressDraftGateResult(
+                code="dry_run_current",
+                label="Dry run is current",
+                passed=False,
+                message="The WordPress update payload changed after the dry run. Run a new dry run.",
+            )
+        )
+
+    page = session.get(GeneratedPage, page_id)
+    if not page:
+        raise HTTPException(status_code=404, detail="Generated page not found")
+    settings = read_wordpress_settings(session)
+    if not all(gate.passed for gate in dry_run.gate_results):
+        audit = _record_update_audit(
+            session,
+            page=page,
+            settings_site_url=settings.site_url,
+            payload=dry_run.payload,
+            payload_hash=dry_run.comparison.current_payload_hash,
+            draft_hash=dry_run.comparison.current_draft_hash,
+            gates=dry_run.gate_results,
+            status="blocked",
+            wordpress_post_id=page.wordpress_post_id,
+            wordpress_status=page.wordpress_status,
+            error_message="Confirmed update was blocked because one or more gates failed.",
+        )
+        session.commit()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "WordPress draft update is blocked.",
+                "audit_id": audit.id,
+                "gate_results": [gate.model_dump(mode="json") for gate in dry_run.gate_results],
+            },
+        )
+
+    password = get_wordpress_application_password()
+    endpoint = f"{settings.site_url.rstrip('/')}/wp-json/wp/v2/pages/{page.wordpress_post_id}"
+    request_payload = dry_run.payload.model_dump(mode="json")
+    request_payload["status"] = "draft"
+    try:
+        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+            response = client.post(
+                endpoint,
+                json=request_payload,
+                auth=httpx.BasicAuth(settings.username, password or ""),
+            )
+    except httpx.HTTPError as exc:
+        _record_update_audit(
+            session,
+            page=page,
+            settings_site_url=settings.site_url,
+            payload=dry_run.payload,
+            payload_hash=dry_run.comparison.current_payload_hash,
+            draft_hash=dry_run.comparison.current_draft_hash,
+            gates=dry_run.gate_results,
+            status="failed",
+            wordpress_post_id=page.wordpress_post_id,
+            wordpress_status=page.wordpress_status,
+            error_message=f"WordPress request failed: {exc.__class__.__name__}.",
+        )
+        session.commit()
+        raise HTTPException(status_code=502, detail="WordPress draft update request failed.") from exc
+
+    if response.status_code not in {200, 201}:
+        _record_update_audit(
+            session,
+            page=page,
+            settings_site_url=settings.site_url,
+            payload=dry_run.payload,
+            payload_hash=dry_run.comparison.current_payload_hash,
+            draft_hash=dry_run.comparison.current_draft_hash,
+            gates=dry_run.gate_results,
+            status="failed",
+            wordpress_post_id=page.wordpress_post_id,
+            wordpress_status=page.wordpress_status,
+            error_message=f"WordPress returned HTTP {response.status_code}.",
+        )
+        session.commit()
+        raise HTTPException(
+            status_code=502,
+            detail=f"WordPress draft update returned HTTP {response.status_code}.",
+        )
+
+    try:
+        response_data = response.json()
+    except ValueError:
+        response_data = {}
+    post_id = response_data.get("id")
+    wordpress_status = response_data.get("status")
+    if post_id != page.wordpress_post_id or wordpress_status != "draft":
+        _record_update_audit(
+            session,
+            page=page,
+            settings_site_url=settings.site_url,
+            payload=dry_run.payload,
+            payload_hash=dry_run.comparison.current_payload_hash,
+            draft_hash=dry_run.comparison.current_draft_hash,
+            gates=dry_run.gate_results,
+            status="failed",
+            wordpress_post_id=post_id if isinstance(post_id, int) else page.wordpress_post_id,
+            wordpress_status=wordpress_status if isinstance(wordpress_status, str) else None,
+            error_message="WordPress did not confirm that the updated target is the saved draft page.",
+        )
+        session.commit()
+        raise HTTPException(
+            status_code=502,
+            detail="WordPress did not confirm that the updated page remains a draft.",
+        )
+
+    now = datetime.now(UTC)
+    wordpress_url = response_data.get("link")
+    page.wordpress_status = "draft"
+    if isinstance(wordpress_url, str):
+        page.wordpress_url = wordpress_url
+    page.last_wordpress_sync_at = now
+    page.updated_at = now
+    audit = _record_update_audit(
+        session,
+        page=page,
+        settings_site_url=settings.site_url,
+        payload=dry_run.payload,
+        payload_hash=dry_run.comparison.current_payload_hash,
+        draft_hash=dry_run.comparison.current_draft_hash,
+        gates=dry_run.gate_results,
+        status="updated",
+        wordpress_post_id=post_id,
+        wordpress_status="draft",
+    )
+    session.add(page)
+    session.commit()
+    session.refresh(audit)
+    return WordPressDraftUpdateApplyResult(
+        page_id=page_id,
+        status="updated",
+        wordpress_post_id=post_id,
+        wordpress_status="draft",
+        wordpress_url=page.wordpress_url,
+        audit_id=audit.id or 0,
+        payload_hash=dry_run.comparison.current_payload_hash,
+        gate_results=dry_run.gate_results,
+    )
+
+
 def _latest_successful_create_audit(session: Session, page_id: int) -> WordPressDraftAudit | None:
     return session.exec(
         select(WordPressDraftAudit)
@@ -286,8 +446,78 @@ def _sign_token(page_id: int, payload_hash: str, expires_at: datetime) -> str:
     return f"{encoded}.{signature}"
 
 
+def _verify_token(token: str, page_id: int) -> dict[str, Any]:
+    try:
+        encoded, supplied_signature = token.split(".", 1)
+        expected_signature = _encode(
+            hmac.new(_update_confirmation_secret, encoded.encode("ascii"), hashlib.sha256).digest()
+        )
+        if not hmac.compare_digest(supplied_signature, expected_signature):
+            raise ValueError
+        payload = json.loads(_decode(encoded))
+        if payload.get("action") != "update_draft":
+            raise ValueError
+        if payload.get("page_id") != page_id:
+            raise ValueError
+        if not isinstance(payload.get("payload_hash"), str):
+            raise ValueError
+        if int(payload.get("expires_at", 0)) < int(datetime.now(UTC).timestamp()):
+            raise HTTPException(status_code=409, detail="The dry-run confirmation token expired.")
+        return payload
+    except HTTPException:
+        raise
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="A valid dry-run confirmation token is required.",
+        ) from exc
+
+
+def _record_update_audit(
+    session: Session,
+    *,
+    page: GeneratedPage,
+    settings_site_url: str,
+    payload: WordPressDraftRequestPayload,
+    payload_hash: str,
+    draft_hash: str,
+    gates: list[WordPressDraftGateResult],
+    status: str,
+    wordpress_post_id: int | None,
+    wordpress_status: str | None,
+    error_message: str | None = None,
+) -> WordPressDraftAudit:
+    audit = WordPressDraftAudit(
+        generated_page_id=page.id,
+        action_type="update_draft",
+        status=status,
+        wordpress_site_url=settings_site_url,
+        wordpress_post_id=wordpress_post_id,
+        wordpress_status=wordpress_status,
+        slug=payload.slug,
+        payload_hash=payload_hash,
+        qa_status_at_attempt=page.qa_status,
+        qa_checked_at=page.qa_checked_at,
+        draft_hash_at_attempt=draft_hash,
+        gate_results=[gate.model_dump(mode="json") for gate in gates],
+        error_message=error_message,
+    )
+    session.add(audit)
+    session.flush()
+    return audit
+
+
 def _encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _decode(value: str) -> str:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value + padding).decode("utf-8")
+
+
+def _confirmation_phrase(slug: str) -> str:
+    return f"UPDATE WORDPRESS DRAFT {slug}"
 
 
 def _timestamp(value: datetime) -> float:

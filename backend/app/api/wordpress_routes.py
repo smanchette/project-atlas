@@ -12,6 +12,8 @@ from app.schemas.wordpress import (
     WordPressDraftQueueResponse,
     WordPressDraftReviewDetail,
     WordPressDraftReviewList,
+    WordPressDraftUpdateApplyRequest,
+    WordPressDraftUpdateApplyResult,
     WordPressDraftUpdateDryRun,
     WordPressLiveDraftStatus,
     WordPressManualQualityReviewUpdate,
@@ -26,7 +28,10 @@ from app.services.wordpress_draft_review import (
 )
 from app.services.wordpress_draft_queue import build_wordpress_draft_queue
 from app.services.wordpress_drafts import create_wordpress_draft, dry_run_wordpress_draft
-from app.services.wordpress_draft_update import dry_run_wordpress_draft_update
+from app.services.wordpress_draft_update import (
+    apply_wordpress_draft_update,
+    dry_run_wordpress_draft_update,
+)
 from app.services.wordpress_quality_review import (
     build_wordpress_draft_quality_review,
     list_wordpress_draft_quality_reviews,
@@ -149,3 +154,12 @@ def draft_update_dry_run(
     session: Session = Depends(get_session),
 ) -> WordPressDraftUpdateDryRun:
     return dry_run_wordpress_draft_update(session, page_id)
+
+
+@router.post("/draft-update/apply/{page_id}", response_model=WordPressDraftUpdateApplyResult)
+def draft_update_apply(
+    page_id: int,
+    payload: WordPressDraftUpdateApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressDraftUpdateApplyResult:
+    return apply_wordpress_draft_update(session, page_id, payload)

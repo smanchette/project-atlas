@@ -114,6 +114,22 @@ class WordPressDraftUpdateDryRun(SQLModel):
     dry_run_only: bool = True
 
 
+class WordPressDraftUpdateApplyRequest(SQLModel):
+    confirmation_token: str = Field(min_length=1)
+    confirmation_phrase: str = Field(min_length=1, max_length=300)
+
+
+class WordPressDraftUpdateApplyResult(SQLModel):
+    page_id: int
+    status: Literal["updated"]
+    wordpress_post_id: int
+    wordpress_status: Literal["draft"]
+    wordpress_url: str | None = None
+    audit_id: int
+    payload_hash: str
+    gate_results: list[WordPressDraftGateResult]
+
+
 class WordPressDraftCreateRequest(SQLModel):
     confirmation_token: str = Field(min_length=1)
     confirmation_phrase: str = Field(min_length=1, max_length=300)

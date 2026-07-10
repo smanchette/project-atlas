@@ -13,6 +13,7 @@ import { apiRequest } from "../api";
 import type {
   WordPressDraftReviewItem,
   WordPressDraftReviewList,
+  WordPressDraftUpdateApplyResult,
   WordPressDraftUpdateDryRun,
   WordPressSettings
 } from "../types";
@@ -22,7 +23,9 @@ function WordPressDraftUpdateSandboxPage() {
   const [drafts, setDrafts] = useState<WordPressDraftReviewItem[]>([]);
   const [selectedPageId, setSelectedPageId] = useState<number | null>(null);
   const [dryRun, setDryRun] = useState<WordPressDraftUpdateDryRun | null>(null);
-  const [busy, setBusy] = useState<"load" | "dry-run" | null>("load");
+  const [confirmationPhrase, setConfirmationPhrase] = useState("");
+  const [applyResult, setApplyResult] = useState<WordPressDraftUpdateApplyResult | null>(null);
+  const [busy, setBusy] = useState<"load" | "dry-run" | "apply" | null>("load");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -54,6 +57,8 @@ function WordPressDraftUpdateSandboxPage() {
     setError(null);
     setMessage(null);
     setDryRun(null);
+    setConfirmationPhrase("");
+    setApplyResult(null);
     try {
       const result = await apiRequest<WordPressDraftUpdateDryRun>(
         `/api/wordpress/draft-update/dry-run/${selectedPageId}`,
@@ -67,6 +72,32 @@ function WordPressDraftUpdateSandboxPage() {
       );
     } catch (err) {
       setError(messageFrom(err, "Unable to run the WordPress draft update dry run."));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function applyUpdate() {
+    if (!selectedPageId || !dryRun?.confirmation_token) return;
+    setBusy("apply");
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await apiRequest<WordPressDraftUpdateApplyResult>(
+        `/api/wordpress/draft-update/apply/${selectedPageId}`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            confirmation_token: dryRun.confirmation_token,
+            confirmation_phrase: confirmationPhrase
+          })
+        }
+      );
+      setApplyResult(result);
+      setMessage("WordPress draft update completed. WordPress status remained draft.");
+      await loadWorkspace();
+    } catch (err) {
+      setError(messageFrom(err, "Unable to apply the WordPress draft update."));
     } finally {
       setBusy(null);
     }
@@ -90,8 +121,8 @@ function WordPressDraftUpdateSandboxPage() {
       <div className="wordpressSafetyNotice">
         <LockKeyhole size={19} aria-hidden="true" />
         <div>
-          <strong>Dry run only. This does not update WordPress.</strong>
-          <span>No apply button, publishing, draft creation, deletion, media upload, or bulk update is available in v0.34.</span>
+          <strong>Controlled draft-only update sandbox.</strong>
+          <span>Apply stays locked until a dry run passes and the exact confirmation phrase is entered. No publishing, draft creation, deletion, media upload, or bulk update is available.</span>
         </div>
       </div>
 
@@ -141,6 +172,8 @@ function WordPressDraftUpdateSandboxPage() {
                 onChange={(event) => {
                   setSelectedPageId(Number(event.target.value));
                   setDryRun(null);
+                  setConfirmationPhrase("");
+                  setApplyResult(null);
                   setMessage(null);
                   setError(null);
                 }}
@@ -186,6 +219,16 @@ function WordPressDraftUpdateSandboxPage() {
           <PayloadPanel dryRun={dryRun} />
         </div>
       )}
+      {dryRun && (
+        <ApplyPanel
+          busy={busy === "apply"}
+          confirmationPhrase={confirmationPhrase}
+          dryRun={dryRun}
+          applyResult={applyResult}
+          onApply={applyUpdate}
+          onConfirmationPhraseChange={setConfirmationPhrase}
+        />
+      )}
     </section>
   );
 }
@@ -196,7 +239,7 @@ function GatePanel({ dryRun }: { dryRun: WordPressDraftUpdateDryRun | null }) {
       <div className="panelHeader">
         <div>
           <h2>Gate Checklist</h2>
-          <p>Every gate must pass before a future v0.35 controlled update could be considered.</p>
+          <p>Every gate must pass before the controlled draft-only update can be applied.</p>
         </div>
         {dryRun ? (
           <span className={`statusBadge ${dryRun.ready ? "ready" : "warning"}`}>
@@ -259,11 +302,11 @@ function ComparisonPanel({ dryRun }: { dryRun: WordPressDraftUpdateDryRun }) {
       </ul>
       {dryRun.confirmation_phrase && (
         <div className="inlineSuccess">
-          Future confirmation phrase generated for v0.35: <code>{dryRun.confirmation_phrase}</code>
+          Confirmation phrase generated: <code>{dryRun.confirmation_phrase}</code>
         </div>
       )}
       {dryRun.confirmation_token && (
-        <p className="helperText">Signed token generated for future controlled update preparation. v0.34 has no apply endpoint.</p>
+        <p className="helperText">Signed token generated. It expires and is valid only for this page and current payload hash.</p>
       )}
     </section>
   );
@@ -288,6 +331,77 @@ function PayloadPanel({ dryRun }: { dryRun: WordPressDraftUpdateDryRun }) {
         <summary>Content HTML preview</summary>
         <pre className="codeBlock">{dryRun.payload.content}</pre>
       </details>
+    </section>
+  );
+}
+
+function ApplyPanel({
+  applyResult,
+  busy,
+  confirmationPhrase,
+  dryRun,
+  onApply,
+  onConfirmationPhraseChange
+}: {
+  applyResult: WordPressDraftUpdateApplyResult | null;
+  busy: boolean;
+  confirmationPhrase: string;
+  dryRun: WordPressDraftUpdateDryRun;
+  onApply: () => void;
+  onConfirmationPhraseChange: (value: string) => void;
+}) {
+  const expectedPhrase = dryRun.confirmation_phrase ?? "";
+  const phraseMatches = Boolean(expectedPhrase) && confirmationPhrase.trim() === expectedPhrase;
+  const canApply = dryRun.ready && Boolean(dryRun.confirmation_token) && phraseMatches && !busy;
+
+  return (
+    <section className="panel wordpressApplyPanel">
+      <div className="panelHeader">
+        <div>
+          <h2>Controlled Draft Update Apply</h2>
+          <p>Updates existing WordPress DRAFT only. Does not publish.</p>
+        </div>
+        <span className={`statusBadge ${canApply ? "ready" : "warning"}`}>
+          {canApply ? "Ready To Apply" : "Locked"}
+        </span>
+      </div>
+      <div className="wordpressSafetyNotice compact">
+        <LockKeyhole size={18} aria-hidden="true" />
+        <div>
+          <strong>One page only. Status is forced to draft.</strong>
+          <span>No publishing, media upload, deletion, draft creation, or bulk update controls are available.</span>
+        </div>
+      </div>
+      {dryRun.comparison.media_reference_warning && (
+        <div className="inlineWarning">
+          <AlertTriangle size={17} aria-hidden="true" />
+          Media references and assignment-level alt text may not be fully represented in the payload hash. Review the WordPress draft visually after update.
+        </div>
+      )}
+      <label>
+        Type the exact confirmation phrase
+        <input
+          value={confirmationPhrase}
+          onChange={(event) => onConfirmationPhraseChange(event.target.value)}
+          placeholder={expectedPhrase || "Run a passing dry run first"}
+          disabled={!dryRun.ready}
+        />
+      </label>
+      <div className="formActions">
+        <button className="primaryButton buttonWithIcon" type="button" onClick={onApply} disabled={!canApply}>
+          <ShieldCheck size={16} aria-hidden="true" />
+          {busy ? "Applying..." : "Apply Draft Update"}
+        </button>
+      </div>
+      {!dryRun.ready && <p className="helperText">Apply is disabled because the dry run gates are not all passing.</p>}
+      {dryRun.ready && !phraseMatches && (
+        <p className="helperText">Apply remains disabled until the exact confirmation phrase is entered.</p>
+      )}
+      {applyResult && (
+        <div className="inlineSuccess">
+          Updated WordPress post {applyResult.wordpress_post_id}; returned status {applyResult.wordpress_status}. Audit {applyResult.audit_id} recorded.
+        </div>
+      )}
     </section>
   );
 }
