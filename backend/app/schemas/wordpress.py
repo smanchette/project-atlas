@@ -130,6 +130,32 @@ class WordPressDraftUpdateApplyResult(SQLModel):
     gate_results: list[WordPressDraftGateResult]
 
 
+class WordPressPublishRequestPayload(SQLModel):
+    title: str
+    slug: str
+    status: Literal["publish"] = "publish"
+    content: str
+    excerpt: str
+
+
+class WordPressPublishDryRun(SQLModel):
+    page_id: int
+    status: Literal["blocked", "dry_run_ready"]
+    ready: bool
+    wordpress_post_id: int | None = None
+    live_status: WordPressLiveDraftStatus | None = None
+    payload: WordPressPublishRequestPayload
+    current_payload_hash: str
+    latest_update_audit_hash: str | None = None
+    publish_payload_hash: str
+    gate_results: list[WordPressDraftGateResult]
+    confirmation_token: str | None = None
+    confirmation_phrase: str | None = None
+    expires_at: str | None = None
+    public_publish_warning: str = "Publishing makes the WordPress page public. v0.44 does not publish."
+    dry_run_only: bool = True
+
+
 class WordPressDraftCreateRequest(SQLModel):
     confirmation_token: str = Field(min_length=1)
     confirmation_phrase: str = Field(min_length=1, max_length=300)

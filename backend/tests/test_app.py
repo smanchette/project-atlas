@@ -67,6 +67,7 @@ from app.services import wordpress_drafts
 from app.services import wordpress_draft_review
 from app.services import wordpress_draft_queue
 from app.services import wordpress_draft_update
+from app.services import wordpress_publish
 from app.schemas.qa import QABatchRequest
 from app.services.page_qa import evaluate_page_qa, preview_qa_batch, run_qa_batch, save_page_qa
 from fastapi.testclient import TestClient
@@ -3188,11 +3189,12 @@ def test_wordpress_api_exposes_no_publish_create_delete_or_upload_route() -> Non
         ("/api/wordpress/draft/create/{page_id}", "POST"),
         ("/api/wordpress/draft-update/dry-run/{page_id}", "POST"),
         ("/api/wordpress/draft-update/apply/{page_id}", "POST"),
+        ("/api/wordpress/publish/dry-run/{page_id}", "POST"),
     }
     assert not any(
         forbidden in path.lower()
         for path, _ in wordpress_routes
-        for forbidden in ("publish", "delete", "upload", "media", "bulk")
+        for forbidden in ("delete", "upload", "media", "bulk")
     )
     assert not any(
         path.lower().startswith("/api/wordpress/draft-update/")
@@ -3200,6 +3202,11 @@ def test_wordpress_api_exposes_no_publish_create_delete_or_upload_route() -> Non
             path.lower().endswith("/dry-run/{page_id}")
             or path.lower().endswith("/apply/{page_id}")
         )
+        for path, _ in wordpress_routes
+    )
+    assert not any(
+        path.lower().startswith("/api/wordpress/publish/")
+        and not path.lower().endswith("/dry-run/{page_id}")
         for path, _ in wordpress_routes
     )
 
@@ -3911,6 +3918,189 @@ def test_wordpress_update_apply_does_not_add_broader_wordpress_routes() -> None:
     assert [response.status_code for response in responses] == [404, 404, 404, 404, 404]
 
 
+def test_wordpress_publish_dry_run_blocks_missing_credentials() -> None:
+    wordpress_sandbox.clear_wordpress_application_password()
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+            page, original = _prepare_wordpress_draft_page(session)
+            create_audit = _add_wordpress_draft_audit(session, page, status="created")
+            update_audit = _add_wordpress_update_audit(session, page)
+            review = _set_manual_publish_ready(session, page.id)
+            review_id = review.id
+            page_id = page.id
+        response = client.post(f"/api/wordpress/publish/dry-run/{page_id}")
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[create_audit, update_audit],
+            )
+            session.delete(session.get(WordPressQualityReview, review_id))
+            session.commit()
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "blocked"
+    assert _gate_response(response.json(), "credentials_ready")["passed"] is False
+    assert response.json()["confirmation_token"] is None
+
+
+def test_wordpress_publish_dry_run_blocks_manual_review_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="draft"))
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            create_audit = _add_wordpress_draft_audit(session, page, status="created")
+            update_audit = _add_wordpress_update_audit(session, page)
+            review = _set_manual_publish_ready(session, page.id)
+            review.review_status = "needs_changes"
+            session.add(review)
+            session.commit()
+            review_id = review.id
+            page_id = page.id
+        response = client.post(f"/api/wordpress/publish/dry-run/{page_id}")
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[create_audit, update_audit],
+            )
+            session.delete(session.get(WordPressQualityReview, review_id))
+            session.commit()
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert _gate_response(response.json(), "manual_review_ready")["passed"] is False
+    assert response.json()["status"] == "blocked"
+
+
+def test_wordpress_publish_dry_run_blocks_live_status_not_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="publish"))
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            create_audit = _add_wordpress_draft_audit(session, page, status="created")
+            update_audit = _add_wordpress_update_audit(session, page)
+            review = _set_manual_publish_ready(session, page.id)
+            review_id = review.id
+            page_id = page.id
+        response = client.post(f"/api/wordpress/publish/dry-run/{page_id}")
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[create_audit, update_audit],
+            )
+            session.delete(session.get(WordPressQualityReview, review_id))
+            session.commit()
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert _gate_response(response.json(), "live_wordpress_status_draft")["passed"] is False
+    assert response.json()["live_status"]["appears_published"] is True
+    assert response.json()["confirmation_token"] is None
+
+
+def test_wordpress_publish_dry_run_blocks_hash_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="draft"))
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            create_audit = _add_wordpress_draft_audit(session, page, status="created")
+            update_audit = _add_wordpress_update_audit(session, page)
+            update_audit.payload_hash = "stale-update-hash"
+            session.add(update_audit)
+            review = _set_manual_publish_ready(session, page.id)
+            session.commit()
+            review_id = review.id
+            page_id = page.id
+        response = client.post(f"/api/wordpress/publish/dry-run/{page_id}")
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[create_audit, update_audit],
+            )
+            session.delete(session.get(WordPressQualityReview, review_id))
+            session.commit()
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert _gate_response(response.json(), "latest_update_hash_matches")["passed"] is False
+    assert response.json()["status"] == "blocked"
+
+
+def test_wordpress_publish_dry_run_is_read_only_and_returns_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wordpress_draft_review.httpx, "Client", _fake_wordpress_get_client(status="draft"))
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            create_audit = _add_wordpress_draft_audit(session, page, status="created")
+            update_audit = _add_wordpress_update_audit(session, page)
+            review = _set_manual_publish_ready(session, page.id)
+            review_id = review.id
+            page_id = page.id
+            before = _approval_queue_database_snapshot(session)
+        response = client.post(f"/api/wordpress/publish/dry-run/{page_id}")
+        with Session(engine) as session:
+            after = _approval_queue_database_snapshot(session)
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[create_audit, update_audit],
+            )
+            session.delete(session.get(WordPressQualityReview, review_id))
+            session.commit()
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["status"] == "dry_run_ready"
+    assert body["payload"]["status"] == "publish"
+    assert body["current_payload_hash"] == body["latest_update_audit_hash"]
+    assert body["publish_payload_hash"] != body["current_payload_hash"]
+    assert body["confirmation_phrase"] == "PUBLISH WORDPRESS PAGE drywood-termite-tenting-orlando-fl"
+    assert body["confirmation_token"]
+    assert "public" in body["public_publish_warning"].lower()
+    assert after == before
+
+
+def test_wordpress_publish_dry_run_exposes_no_apply_or_bulk_routes() -> None:
+    with TestClient(app) as client:
+        responses = [
+            client.post("/api/wordpress/publish/apply/1"),
+            client.post("/api/wordpress/publish/bulk"),
+            client.post("/api/wordpress/publish/create/1"),
+            client.post("/api/wordpress/publish/delete/1"),
+            client.post("/api/wordpress/publish/media/1"),
+        ]
+
+    assert [response.status_code for response in responses] == [404, 404, 404, 404, 404]
+
+
 def test_wordpress_create_requires_valid_confirmation_without_audit() -> None:
     with TestClient(app) as client:
         _configure_wordpress_sandbox(client)
@@ -4270,6 +4460,59 @@ def _add_wordpress_draft_audit(
     return audit
 
 
+def _add_wordpress_update_audit(
+    session: Session,
+    page: GeneratedPage,
+) -> WordPressDraftAudit:
+    now = datetime.now(UTC)
+    current_hash = wordpress_draft_review.compare_wordpress_draft(
+        session,
+        page.id,
+    ).current_export_payload_hash
+    audit = WordPressDraftAudit(
+        generated_page_id=page.id,
+        attempted_at=now,
+        action_type="update_draft",
+        status="updated",
+        wordpress_site_url="https://wordpress.example",
+        wordpress_post_id=page.wordpress_post_id,
+        wordpress_status="draft",
+        slug=page.page_slug,
+        payload_hash=current_hash,
+        qa_status_at_attempt=page.qa_status,
+        qa_checked_at=page.qa_checked_at,
+        draft_hash_at_attempt=draft_content_hash(page.draft_content),
+        gate_results=[{"code": "draft_status", "passed": True}],
+    )
+    session.add(audit)
+    session.commit()
+    session.refresh(audit)
+    return audit
+
+
+def _set_manual_publish_ready(
+    session: Session,
+    page_id: int,
+) -> WordPressQualityReview:
+    now = datetime.now(UTC)
+    record = session.exec(
+        select(WordPressQualityReview).where(
+            WordPressQualityReview.generated_page_id == page_id
+        )
+    ).first()
+    if record is None:
+        record = WordPressQualityReview(generated_page_id=page_id)
+    record.review_status = "ready_for_manual_publish_review"
+    record.reviewer_notes = "Manual visual review complete for publish dry-run tests."
+    record.reviewed_by = "pytest"
+    record.reviewed_at = now
+    record.updated_at = now
+    session.add(record)
+    session.commit()
+    session.refresh(record)
+    return record
+
+
 def _wordpress_page_state(page: GeneratedPage) -> dict:
     return {
         "page_slug": page.page_slug,
@@ -4330,6 +4573,9 @@ def _approval_queue_database_snapshot(session: Session) -> dict:
     wordpress_audits = session.exec(
         select(WordPressDraftAudit).order_by(WordPressDraftAudit.id)
     ).all()
+    quality_reviews = session.exec(
+        select(WordPressQualityReview).order_by(WordPressQualityReview.id)
+    ).all()
     backup_root = Path("backups")
     return {
         "pages": [
@@ -4349,6 +4595,7 @@ def _approval_queue_database_snapshot(session: Session) -> dict:
         "media_assignments": [assignment.model_dump() for assignment in assignments],
         "image_metadata": [image.model_dump() for image in images],
         "wordpress_draft_audits": [audit.model_dump() for audit in wordpress_audits],
+        "wordpress_quality_reviews": [review.model_dump() for review in quality_reviews],
         "backup_files": _file_tree_snapshot(backup_root) if backup_root.exists() else {},
     }
 

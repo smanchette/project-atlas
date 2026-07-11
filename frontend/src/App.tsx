@@ -12,6 +12,7 @@ import {
   Map,
   MapPin,
   Plug,
+  ShieldCheck,
   Settings,
   Wrench
 } from "lucide-react";
@@ -32,6 +33,7 @@ import WordPressDraftQualityReviewPage from "./pages/WordPressDraftQualityReview
 import WordPressDraftQueuePage from "./pages/WordPressDraftQueuePage";
 import WordPressSandboxPage from "./pages/WordPressSandboxPage";
 import WordPressDraftUpdateSandboxPage from "./pages/WordPressDraftUpdateSandboxPage";
+import WordPressPublishSafetySandboxPage from "./pages/WordPressPublishSafetySandboxPage";
 import type { Business, City, County, FieldConfig, GeneratedPage, Service } from "./types";
 
 const navItems = [
@@ -49,6 +51,7 @@ const navItems = [
   { to: "/wordpress-draft-queue", label: "WP Draft Queue", icon: ListChecks },
   { to: "/wordpress-draft-review", label: "WP Draft Review", icon: FileSearch },
   { to: "/wordpress-draft-update", label: "WP Draft Update", icon: ClipboardCheck },
+  { to: "/wordpress-publish-safety", label: "WP Publish Safety", icon: ShieldCheck },
   { to: "/wordpress-quality-review", label: "WP Quality Review", icon: ListTodo },
   { to: "/settings", label: "Settings", icon: Settings }
 ];
@@ -187,6 +190,7 @@ function DashboardShell() {
           <Route path="/wordpress-draft-queue" element={<WordPressDraftQueuePage />} />
           <Route path="/wordpress-draft-review" element={<WordPressDraftReviewPage />} />
           <Route path="/wordpress-draft-update" element={<WordPressDraftUpdateSandboxPage />} />
+          <Route path="/wordpress-publish-safety" element={<WordPressPublishSafetySandboxPage />} />
           <Route path="/wordpress-quality-review" element={<WordPressDraftQualityReviewPage />} />
           <Route
             path="/settings"

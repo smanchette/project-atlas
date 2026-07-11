@@ -360,6 +360,32 @@ export type WordPressDraftUpdateApplyResult = {
   gate_results: WordPressDraftGateResult[];
 };
 
+export type WordPressPublishRequestPayload = {
+  title: string;
+  slug: string;
+  status: "publish";
+  content: string;
+  excerpt: string;
+};
+
+export type WordPressPublishDryRun = {
+  page_id: number;
+  status: "blocked" | "dry_run_ready";
+  ready: boolean;
+  wordpress_post_id?: number | null;
+  live_status?: WordPressLiveDraftStatus | null;
+  payload: WordPressPublishRequestPayload;
+  current_payload_hash: string;
+  latest_update_audit_hash?: string | null;
+  publish_payload_hash: string;
+  gate_results: WordPressDraftGateResult[];
+  confirmation_token?: string | null;
+  confirmation_phrase?: string | null;
+  expires_at?: string | null;
+  public_publish_warning: string;
+  dry_run_only: boolean;
+};
+
 export type WordPressDraftCreateResult = {
   page_id: number;
   status: "created";
