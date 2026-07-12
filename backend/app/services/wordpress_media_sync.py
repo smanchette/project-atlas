@@ -24,7 +24,7 @@ from app.schemas.wordpress import (
     WordPressMediaFeaturedReference, WordPressMediaReconciliationCandidate,
     WordPressMediaReconciliationDryRun,
     WordPressFeaturedImageApplyRequest, WordPressFeaturedImageApplyResult,
-    WordPressFeaturedImageDryRun,
+    WordPressFeaturedImageDryRun, WordPressFeaturedImageVerification,
     WordPressMediaUploadRequest, WordPressMediaUploadResult,
 )
 from app.services.wordpress_draft_review import check_live_wordpress_draft_status
@@ -617,6 +617,101 @@ def apply_wordpress_featured_image(
     )
 
 
+def verify_wordpress_featured_image(
+    session: Session, page_id: int,
+) -> WordPressFeaturedImageVerification:
+    if page_id != TARGET_PAGE_ID:
+        raise HTTPException(status_code=404, detail="Featured-image verification is limited to Orlando page 41.")
+    page = session.get(GeneratedPage, 41)
+    image = session.get(ImageMetadata, 1)
+    assignment = session.get(PageImageAssignment, 1)
+    if not page or not image or not assignment:
+        raise HTTPException(status_code=404, detail="The Orlando featured-image verification target is incomplete.")
+    reconciliation_audit = session.exec(
+        select(WordPressMediaSyncAudit).where(
+            WordPressMediaSyncAudit.generated_page_id == 41,
+            WordPressMediaSyncAudit.image_metadata_id == 1,
+            WordPressMediaSyncAudit.wordpress_media_id == 31,
+            WordPressMediaSyncAudit.action_type == "reconcile_existing_media",
+            WordPressMediaSyncAudit.status == "reconciled",
+        ).order_by(WordPressMediaSyncAudit.attempted_at.desc())
+    ).first()
+    featured_audit = session.exec(
+        select(WordPressMediaSyncAudit).where(
+            WordPressMediaSyncAudit.generated_page_id == 41,
+            WordPressMediaSyncAudit.image_metadata_id == 1,
+            WordPressMediaSyncAudit.wordpress_media_id == 31,
+            WordPressMediaSyncAudit.action_type == "set_featured_image",
+            WordPressMediaSyncAudit.status == "featured_image_set",
+        ).order_by(WordPressMediaSyncAudit.attempted_at.desc())
+    ).first()
+    path, path_error = _resolve_media_path(image)
+    _, _, _, _, local_checksum, file_error = _inspect_file(path) if path else ("", 0, 0, 0, "", path_error)
+    settings = read_wordpress_settings(session)
+    password = get_wordpress_application_password()
+    gates = [
+        _gate("fixed_target", "Atlas page 41 maps to post 8", page.wordpress_post_id == 8 and assignment.generated_page_id == 41 and assignment.image_metadata_id == 1, "Atlas page, post, image, or assignment mapping changed."),
+        _gate("atlas_published", "Atlas Orlando remains published", page.status == "published" and page.wordpress_status == "publish", "Atlas or saved WordPress status changed."),
+        _gate("media_mapping", "ImageMetadata 1 remains reconciled to media 31", image.wordpress_media_id == 31 and image.wordpress_media_status == "reconciled", "Media mapping or status changed."),
+        _gate("checksum", "Atlas and local checksums remain exact", image.wordpress_media_checksum == EXPECTED_CHECKSUM and local_checksum == EXPECTED_CHECKSUM and file_error is None, file_error or "Atlas or local checksum changed."),
+        _gate("reconciliation_audit", "Successful reconciliation audit exists", reconciliation_audit is not None, "Successful reconciliation audit is missing."),
+        _gate("featured_image_audit", "Successful featured-image audit exists", featured_audit is not None, "Successful set_featured_image audit is missing."),
+        _gate("credentials", "WordPress credentials are available", bool(settings.site_url and settings.username and password), "WordPress credentials are unavailable."),
+    ]
+    post_data: dict = {}
+    media_31: WordPressMediaReconciliationCandidate | None = None
+    media_32: WordPressMediaReconciliationCandidate | None = None
+    if settings.site_url and settings.username and password and local_checksum:
+        auth = httpx.BasicAuth(settings.username, password)
+        api = f"{settings.site_url.rstrip('/')}/wp-json/wp/v2"
+        try:
+            with httpx.Client(timeout=httpx.Timeout(20.0, read=30.0), follow_redirects=False) as client:
+                post_response = client.get(f"{api}/pages/8?context=edit", auth=auth)
+                if post_response.status_code >= 400:
+                    raise RuntimeError(f"WordPress post verification returned HTTP {post_response.status_code}.")
+                post_data = post_response.json()
+                exact_title = image.image_title or image.file_name
+                exact_alt = (assignment.override_alt_text or image.reviewed_alt_text or "").strip()
+                media_31 = _inspect_reconciliation_candidate(
+                    client, api, auth, settings.site_url, 31,
+                    title=exact_title, alt_text=exact_alt, checksum=local_checksum,
+                    allowed_featured_references={("page", 8)},
+                )
+                media_32 = _inspect_reconciliation_candidate(
+                    client, api, auth, settings.site_url, 32,
+                    title=exact_title, alt_text=exact_alt, checksum=local_checksum,
+                    allowed_featured_references=set(),
+                )
+        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+            gates.append(_gate("wordpress_inspection", "Authenticated WordPress verification succeeds", False, str(exc)))
+    post_url = post_data.get("link") if isinstance(post_data.get("link"), str) else None
+    media_31_refs = {(reference.object_type, reference.object_id) for reference in media_31.featured_references} if media_31 else set()
+    media_32_refs = {(reference.object_type, reference.object_id) for reference in media_32.featured_references} if media_32 else set()
+    gates += [
+        *_final_featured_post_gates(post_data),
+        _gate("media_31_integrity", "Media 31 remains byte-for-byte verified", bool(media_31 and media_31.valid), "Media 31 integrity or usage verification failed."),
+        _gate("media_31_orlando_reference", "Media 31 is featured by Orlando page 8 only", media_31_refs == {("page", 8)}, "Media 31 featured references are missing or include another object."),
+        _gate("media_32_untouched", "Duplicate media 32 remains unattached and unfeatured", bool(media_32 and media_32.parent_post_id in {None, 0} and not media_32_refs), "Media 32 is attached or featured."),
+    ]
+    verified = all(gate.passed for gate in gates)
+    return WordPressFeaturedImageVerification(
+        page_id=41, wordpress_post_id=8, wordpress_media_id=31,
+        post_status=post_data.get("status"), post_slug=post_data.get("slug"),
+        post_url=post_url, featured_media=post_data.get("featured_media"),
+        media_31=media_31, media_32=media_32, gate_results=gates,
+        status="verified" if verified else "failed", ready=False,
+        apply_needed=False, featured_image_correct=verified,
+    )
+
+
+def _final_featured_post_gates(post_data: dict) -> list[WordPressDraftGateResult]:
+    return [
+        _gate("post_identity", "Live post 8 identity matches", post_data.get("id") == 8 and post_data.get("slug") == EXPECTED_SLUG and post_data.get("link") == EXPECTED_ORLANDO_URL, "Live post ID, slug, or URL changed."),
+        _gate("post_publish", "Live post 8 remains publish", post_data.get("status") == "publish", "Live post 8 is not publish."),
+        _gate("featured_media", "Post 8 featured_media is media 31", post_data.get("featured_media") == 31, "Live post 8 featured_media is not 31."),
+    ]
+
+
 def _verify_featured_post(data: dict, source: str) -> None:
     mismatches = []
     for key, expected in (("id", 8), ("status", "publish"), ("featured_media", 31), ("slug", EXPECTED_SLUG), ("link", EXPECTED_ORLANDO_URL)):
@@ -685,6 +780,7 @@ def _archive_backup_gate(name: str, kind: str) -> WordPressDraftGateResult:
 def _inspect_reconciliation_candidate(
     client: httpx.Client, api: str, auth: httpx.BasicAuth, site_url: str,
     media_id: int, *, title: str, alt_text: str, checksum: str,
+    allowed_featured_references: set[tuple[str, int]] | None = None,
 ) -> WordPressMediaReconciliationCandidate:
     response = client.get(f"{api}/media/{media_id}?context=edit", auth=auth)
     if response.status_code >= 400:
@@ -711,6 +807,9 @@ def _inspect_reconciliation_candidate(
         featured_refs = _find_featured_references(client, api, auth, media_id)
     except (httpx.HTTPError, ValueError) as exc:
         featured_error = str(exc)
+    allowed = allowed_featured_references or set()
+    actual_references = {(reference.object_type, reference.object_id) for reference in featured_refs}
+    featured_safe = featured_error is None and _featured_references_allowed(actual_references, allowed)
     gates = [
         _gate("media_id", f"Media {media_id} identity", data.get("id") == media_id, "Media ID mismatch."),
         _gate("title", f"Media {media_id} title", record_title == title, "Title mismatch."),
@@ -722,7 +821,7 @@ def _inspect_reconciliation_candidate(
         _gate("parent", f"Media {media_id} is unattached", parent in {None, 0}, "Attachment has a parent post."),
         _gate(
             "not_featured_elsewhere", f"Media {media_id} is not featured elsewhere",
-            featured_error is None and not featured_refs,
+            featured_safe,
             featured_error or _featured_reference_message(featured_refs),
         ),
         _gate("remote_download", f"Media {media_id} original downloads safely", download_error is None and remote_hash is not None, download_error or "Remote download failed."),
@@ -735,6 +834,12 @@ def _inspect_reconciliation_candidate(
         remote_checksum=remote_hash, featured_references=featured_refs,
         valid=all(g.passed for g in gates), gate_results=gates,
     )
+
+
+def _featured_references_allowed(
+    actual: set[tuple[str, int]], allowed: set[tuple[str, int]],
+) -> bool:
+    return actual.issubset(allowed)
 
 
 def _find_featured_references(

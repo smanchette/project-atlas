@@ -41,6 +41,7 @@ def test_media_routes_are_orlando_only_and_no_get_or_bulk_upload_route_exists() 
     assert ("/api/wordpress/media/reconciliation/apply/{page_id}", "POST") in routes
     assert ("/api/wordpress/media/featured-image/dry-run/{page_id}", "POST") in routes
     assert ("/api/wordpress/media/featured-image/apply/{page_id}", "POST") in routes
+    assert ("/api/wordpress/media/featured-image/verify/{page_id}", "POST") in routes
     assert not any("bulk" in path or "delete" in path for path, _ in routes if "/wordpress/media/" in path)
 
 
@@ -355,3 +356,35 @@ def test_featured_image_apply_has_exactly_one_wordpress_write_and_safe_payload()
     for forbidden in ('"title"', '"slug"', '"content"', '"excerpt"', '"status"', "client.patch(", "client.put(", "client.delete("):
         assert forbidden not in source
     assert "/media/32" not in source
+
+
+def test_final_featured_post_gates_pass_only_for_publish_media_31() -> None:
+    valid = {"id": 8, "status": "publish", "featured_media": 31, "slug": media_sync.EXPECTED_SLUG, "link": media_sync.EXPECTED_ORLANDO_URL}
+    assert all(gate.passed for gate in media_sync._final_featured_post_gates(valid))
+    for featured_media in (0, 32):
+        gates = media_sync._final_featured_post_gates({**valid, "featured_media": featured_media})
+        assert next(gate for gate in gates if gate.code == "featured_media").passed is False
+    gates = media_sync._final_featured_post_gates({**valid, "status": "draft"})
+    assert next(gate for gate in gates if gate.code == "post_publish").passed is False
+
+
+def test_post_featured_verification_is_read_only_and_creates_no_token() -> None:
+    source = inspect.getsource(media_sync.verify_wordpress_featured_image)
+    for forbidden in ("session.add(", "session.commit(", "client.post(", "client.patch(", "client.put(", "client.delete(", "_sign_"):
+        assert forbidden not in source
+    schema = media_sync.WordPressFeaturedImageVerification(
+        page_id=41, wordpress_post_id=8, wordpress_media_id=31,
+        gate_results=[], status="verified", apply_needed=False,
+        featured_image_correct=True,
+    )
+    assert schema.ready is False
+    assert schema.confirmation_token is None
+    assert schema.confirmation_phrase is None
+    assert schema.read_only is True
+
+
+def test_post_featured_reference_policy_allows_orlando_only() -> None:
+    assert media_sync._featured_references_allowed({("page", 8)}, {("page", 8)})
+    assert media_sync._featured_references_allowed(set(), set())
+    assert not media_sync._featured_references_allowed({("page", 8), ("post", 77)}, {("page", 8)})
+    assert not media_sync._featured_references_allowed({("page", 8)}, set())

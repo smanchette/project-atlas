@@ -369,6 +369,26 @@ class WordPressFeaturedImageApplyResult(SQLModel):
     gate_results: list[WordPressDraftGateResult]
 
 
+class WordPressFeaturedImageVerification(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    wordpress_media_id: int
+    post_status: str | None = None
+    post_slug: str | None = None
+    post_url: str | None = None
+    featured_media: int | None = None
+    media_31: WordPressMediaReconciliationCandidate | None = None
+    media_32: WordPressMediaReconciliationCandidate | None = None
+    gate_results: list[WordPressDraftGateResult]
+    status: Literal["verified", "failed"]
+    ready: bool = False
+    apply_needed: bool
+    featured_image_correct: bool
+    confirmation_token: None = None
+    confirmation_phrase: None = None
+    read_only: bool = True
+
+
 class WordPressDraftCreateRequest(SQLModel):
     confirmation_token: str = Field(min_length=1)
     confirmation_phrase: str = Field(min_length=1, max_length=300)

@@ -812,6 +812,26 @@ export type WordPressFeaturedImageApplyResult = {
   audit_id: number;
 };
 
+export type WordPressFeaturedImageVerification = {
+  page_id: number;
+  wordpress_post_id: number;
+  wordpress_media_id: number;
+  post_status?: string | null;
+  post_slug?: string | null;
+  post_url?: string | null;
+  featured_media?: number | null;
+  media_31?: WordPressMediaReconciliationCandidate | null;
+  media_32?: WordPressMediaReconciliationCandidate | null;
+  gate_results: { code: string; label: string; passed: boolean; message: string }[];
+  status: "verified" | "failed";
+  ready: false;
+  apply_needed: boolean;
+  featured_image_correct: boolean;
+  confirmation_token: null;
+  confirmation_phrase: null;
+  read_only: true;
+};
+
 export type AssignedMedia = {
   assignment_id: number;
   generated_page_id: number;

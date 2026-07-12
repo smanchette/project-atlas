@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, Image, LockKeyhole, RefreshCw } from "lucide-react";
 
 import { apiRequest } from "../api";
-import type { WordPressFeaturedImageApplyResult, WordPressFeaturedImageDryRun } from "../types";
+import type { WordPressFeaturedImageApplyResult, WordPressFeaturedImageDryRun, WordPressFeaturedImageVerification } from "../types";
 
 const PAGE_ID = 41;
 
@@ -15,6 +15,7 @@ export default function WordPressMediaSafetyPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<WordPressFeaturedImageApplyResult | null>(null);
+  const [verification, setVerification] = useState<WordPressFeaturedImageVerification | null>(null);
   const canApply = useMemo(() => Boolean(
     dryRun?.ready && dryRun.confirmation_token && phrase === dryRun.confirmation_phrase &&
     dataBackup.trim() && mediaBackup.trim() && programBackup.trim()
@@ -46,9 +47,18 @@ export default function WordPressMediaSafetyPage() {
     finally { setBusy(false); }
   }
 
+  async function verifyFinalState() {
+    setBusy(true); setError(null); setVerification(null);
+    try {
+      setVerification(await apiRequest<WordPressFeaturedImageVerification>(`/api/wordpress/media/featured-image/verify/${PAGE_ID}`, { method: "POST" }));
+    } catch (value) { setError(value instanceof Error ? value.message : "Post-featured verification failed."); }
+    finally { setBusy(false); }
+  }
+
   return <section className="page wordpressPublishSafetySandboxPage">
     <header className="pageHeader"><div><span className="eyebrow">Orlando only · page 41 · post 8</span><h1>WordPress Featured Image Safety</h1><p>Verify reconciled media 31, then set it as the featured image only after three backup confirmations and an exact phrase.</p></div></header>
     <div className="wordpressSafetyNotice"><LockKeyhole size={22}/><div><strong>One-field WordPress mutation</strong><p>The only planned payload is <code>{`{"featured_media":31}`}</code>. No upload, media edit, duplicate cleanup, content edit, status change, file picker, or bulk action is available.</p></div></div>
+    <section className="panel"><h2>Post-Featured Verification</h2><p>Read-only final-state inspection. It creates no token, audit, or WordPress request other than GET.</p><button className="secondaryButton buttonWithIcon" disabled={busy} onClick={verifyFinalState}><RefreshCw size={16}/>Verify final featured-image state</button>{verification && <><dl className="detailGrid"><div><dt>Status</dt><dd>{verification.status}</dd></div><div><dt>Post 8</dt><dd>{verification.post_status ?? "Unknown"}</dd></div><div><dt>featured_media</dt><dd>{verification.featured_media ?? "Unknown"}</dd></div><div><dt>Media 31</dt><dd>{verification.media_31?.valid ? "Verified; featured by Orlando page 8" : "Verification failed"}</dd></div><div><dt>Media 32</dt><dd>{verification.media_32 && !verification.media_32.featured_references.length && !verification.media_32.parent_post_id ? "Untouched and unused" : "Needs inspection"}</dd></div><div><dt>Apply needed</dt><dd>{verification.apply_needed ? "Yes" : "No"}</dd></div></dl><GateList gates={verification.gate_results}/></>}</section>
     <section className="panel"><h2>Fixed target</h2><dl className="detailGrid"><div><dt>Atlas target</dt><dd>Page 41 · Image 1 · Assignment 1</dd></div><div><dt>WordPress target</dt><dd>Post 8 · media 31</dd></div><div><dt>Excluded duplicate</dt><dd>Media 32 — untouched</dd></div></dl><button className="primaryButton buttonWithIcon" disabled={busy} onClick={inspect}><RefreshCw size={16}/>Run featured-image dry run</button></section>
     {error && <div className="errorBanner"><AlertTriangle size={18}/>{error}</div>}
     {dryRun && <>

@@ -24,6 +24,7 @@ from app.schemas.wordpress import (
     WordPressFeaturedImageApplyRequest,
     WordPressFeaturedImageApplyResult,
     WordPressFeaturedImageDryRun,
+    WordPressFeaturedImageVerification,
     WordPressMediaUploadRequest,
     WordPressMediaUploadResult,
     WordPressManualQualityReviewUpdate,
@@ -53,6 +54,7 @@ from app.services.wordpress_media_sync import (
     reconcile_wordpress_media,
     apply_wordpress_featured_image,
     dry_run_wordpress_featured_image,
+    verify_wordpress_featured_image,
     upload_wordpress_media,
 )
 from app.services.wordpress_quality_review import (
@@ -262,3 +264,11 @@ def featured_image_apply(
     session: Session = Depends(get_session),
 ) -> WordPressFeaturedImageApplyResult:
     return apply_wordpress_featured_image(session, page_id, payload)
+
+
+@router.post("/media/featured-image/verify/{page_id}", response_model=WordPressFeaturedImageVerification)
+def featured_image_verify(
+    page_id: int,
+    session: Session = Depends(get_session),
+) -> WordPressFeaturedImageVerification:
+    return verify_wordpress_featured_image(session, page_id)
