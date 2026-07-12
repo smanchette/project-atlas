@@ -732,6 +732,54 @@ export type WordPressMediaUploadResult = {
   audit_id: number;
 };
 
+export type WordPressMediaReconciliationCandidate = {
+  wordpress_media_id: number;
+  date_gmt?: string | null;
+  source_url?: string | null;
+  title?: string | null;
+  alt_text?: string | null;
+  mime_type?: string | null;
+  width?: number | null;
+  height?: number | null;
+  file_size?: number | null;
+  parent_post_id?: number | null;
+  remote_checksum?: string | null;
+  featured_references: { object_type: "page" | "post"; object_id: number; title?: string | null; status?: string | null; slug?: string | null; link?: string | null }[];
+  valid: boolean;
+  gate_results: { code: string; label: string; passed: boolean; message: string }[];
+};
+
+export type WordPressMediaReconciliationDryRun = {
+  page_id: number;
+  wordpress_post_id: number;
+  image_id: number;
+  assignment_id: number;
+  candidate_ids: number[];
+  local_checksum: string;
+  local_file_size: number;
+  candidates: WordPressMediaReconciliationCandidate[];
+  selected_media_id?: number | null;
+  selected_media_url?: string | null;
+  duplicate_candidate_ids: number[];
+  post_status?: string | null;
+  post_featured_media?: number | null;
+  gate_results: { code: string; label: string; passed: boolean; message: string }[];
+  status: "blocked" | "reconciliation_ready";
+  ready: boolean;
+  confirmation_token?: string | null;
+  confirmation_phrase?: string | null;
+  expires_at?: string | null;
+};
+
+export type WordPressMediaReconciliationApplyResult = {
+  status: "reconciled";
+  wordpress_media_id: number;
+  wordpress_media_url: string;
+  checksum: string;
+  duplicate_candidate_ids: number[];
+  audit_id: number;
+};
+
 export type AssignedMedia = {
   assignment_id: number;
   generated_page_id: number;

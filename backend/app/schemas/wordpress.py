@@ -227,6 +227,105 @@ class WordPressMediaUploadResult(SQLModel):
     gate_results: list[WordPressDraftGateResult]
 
 
+class WordPressMediaInspectionCandidate(SQLModel):
+    wordpress_media_id: int
+    date_gmt: str | None = None
+    modified_gmt: str | None = None
+    source_url: str | None = None
+    mime_type: str | None = None
+    slug: str | None = None
+    title: str | None = None
+    alt_text: str | None = None
+    media_file: str | None = None
+    atlas_meta: dict[str, Any] = {}
+    likely_target: bool
+    verification_mismatches: list[str] = []
+
+
+class WordPressMediaInspectionResult(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    image_id: int
+    source_file_name: str
+    expected_title: str
+    expected_alt_text: str
+    expected_mime_type: str
+    expected_checksum: str
+    candidate_count: int
+    possible_duplicate_count: int
+    candidates: list[WordPressMediaInspectionCandidate]
+    read_only: bool = True
+
+
+class WordPressMediaFeaturedReference(SQLModel):
+    object_type: Literal["page", "post"]
+    object_id: int
+    title: str | None = None
+    status: str | None = None
+    slug: str | None = None
+    link: str | None = None
+
+
+class WordPressMediaReconciliationCandidate(SQLModel):
+    wordpress_media_id: int
+    date_gmt: str | None = None
+    source_url: str | None = None
+    title: str | None = None
+    alt_text: str | None = None
+    mime_type: str | None = None
+    width: int | None = None
+    height: int | None = None
+    file_size: int | None = None
+    parent_post_id: int | None = None
+    remote_checksum: str | None = None
+    featured_references: list[WordPressMediaFeaturedReference] = []
+    valid: bool
+    gate_results: list[WordPressDraftGateResult]
+
+
+class WordPressMediaReconciliationDryRun(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    image_id: int
+    assignment_id: int
+    candidate_ids: list[int]
+    local_checksum: str
+    local_file_size: int
+    candidates: list[WordPressMediaReconciliationCandidate]
+    selected_media_id: int | None = None
+    selected_media_url: str | None = None
+    duplicate_candidate_ids: list[int] = []
+    post_status: str | None = None
+    post_featured_media: int | None = None
+    gate_results: list[WordPressDraftGateResult]
+    status: Literal["blocked", "reconciliation_ready"]
+    ready: bool
+    confirmation_token: str | None = None
+    confirmation_phrase: str | None = None
+    expires_at: str | None = None
+    dry_run_only: bool = True
+
+
+class WordPressMediaReconciliationApplyRequest(SQLModel):
+    confirmation_token: str = Field(min_length=1)
+    confirmation_phrase: str = Field(min_length=1, max_length=200)
+    confirmed_backup_file: str = Field(min_length=1, max_length=255)
+
+
+class WordPressMediaReconciliationApplyResult(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    image_id: int
+    assignment_id: int
+    status: Literal["reconciled"]
+    wordpress_media_id: int
+    wordpress_media_url: str
+    checksum: str
+    duplicate_candidate_ids: list[int]
+    audit_id: int
+    gate_results: list[WordPressDraftGateResult]
+
+
 class WordPressDraftCreateRequest(SQLModel):
     confirmation_token: str = Field(min_length=1)
     confirmation_phrase: str = Field(min_length=1, max_length=300)

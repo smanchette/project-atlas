@@ -17,6 +17,10 @@ from app.schemas.wordpress import (
     WordPressDraftUpdateDryRun,
     WordPressLiveDraftStatus,
     WordPressMediaDryRun,
+    WordPressMediaInspectionResult,
+    WordPressMediaReconciliationApplyRequest,
+    WordPressMediaReconciliationApplyResult,
+    WordPressMediaReconciliationDryRun,
     WordPressMediaUploadRequest,
     WordPressMediaUploadResult,
     WordPressManualQualityReviewUpdate,
@@ -39,7 +43,13 @@ from app.services.wordpress_draft_update import (
     dry_run_wordpress_draft_update,
 )
 from app.services.wordpress_publish import apply_wordpress_publish, dry_run_wordpress_publish
-from app.services.wordpress_media_sync import dry_run_wordpress_media, upload_wordpress_media
+from app.services.wordpress_media_sync import (
+    dry_run_wordpress_media,
+    dry_run_wordpress_media_reconciliation,
+    inspect_wordpress_media,
+    reconcile_wordpress_media,
+    upload_wordpress_media,
+)
 from app.services.wordpress_quality_review import (
     build_wordpress_draft_quality_review,
     list_wordpress_draft_quality_reviews,
@@ -205,3 +215,28 @@ def media_upload(
     session: Session = Depends(get_session),
 ) -> WordPressMediaUploadResult:
     return upload_wordpress_media(session, page_id, payload)
+
+
+@router.get("/media/inspect/{page_id}", response_model=WordPressMediaInspectionResult)
+def media_inspect(
+    page_id: int,
+    session: Session = Depends(get_session),
+) -> WordPressMediaInspectionResult:
+    return inspect_wordpress_media(session, page_id)
+
+
+@router.post("/media/reconciliation/dry-run/{page_id}", response_model=WordPressMediaReconciliationDryRun)
+def media_reconciliation_dry_run(
+    page_id: int,
+    session: Session = Depends(get_session),
+) -> WordPressMediaReconciliationDryRun:
+    return dry_run_wordpress_media_reconciliation(session, page_id)
+
+
+@router.post("/media/reconciliation/apply/{page_id}", response_model=WordPressMediaReconciliationApplyResult)
+def media_reconciliation_apply(
+    page_id: int,
+    payload: WordPressMediaReconciliationApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressMediaReconciliationApplyResult:
+    return reconcile_wordpress_media(session, page_id, payload)
