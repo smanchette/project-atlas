@@ -21,6 +21,9 @@ from app.schemas.wordpress import (
     WordPressMediaReconciliationApplyRequest,
     WordPressMediaReconciliationApplyResult,
     WordPressMediaReconciliationDryRun,
+    WordPressFeaturedImageApplyRequest,
+    WordPressFeaturedImageApplyResult,
+    WordPressFeaturedImageDryRun,
     WordPressMediaUploadRequest,
     WordPressMediaUploadResult,
     WordPressManualQualityReviewUpdate,
@@ -48,6 +51,8 @@ from app.services.wordpress_media_sync import (
     dry_run_wordpress_media_reconciliation,
     inspect_wordpress_media,
     reconcile_wordpress_media,
+    apply_wordpress_featured_image,
+    dry_run_wordpress_featured_image,
     upload_wordpress_media,
 )
 from app.services.wordpress_quality_review import (
@@ -240,3 +245,20 @@ def media_reconciliation_apply(
     session: Session = Depends(get_session),
 ) -> WordPressMediaReconciliationApplyResult:
     return reconcile_wordpress_media(session, page_id, payload)
+
+
+@router.post("/media/featured-image/dry-run/{page_id}", response_model=WordPressFeaturedImageDryRun)
+def featured_image_dry_run(
+    page_id: int,
+    session: Session = Depends(get_session),
+) -> WordPressFeaturedImageDryRun:
+    return dry_run_wordpress_featured_image(session, page_id)
+
+
+@router.post("/media/featured-image/apply/{page_id}", response_model=WordPressFeaturedImageApplyResult)
+def featured_image_apply(
+    page_id: int,
+    payload: WordPressFeaturedImageApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressFeaturedImageApplyResult:
+    return apply_wordpress_featured_image(session, page_id, payload)

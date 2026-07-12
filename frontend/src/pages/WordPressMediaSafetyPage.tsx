@@ -1,56 +1,61 @@
 import { useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, Link2, LockKeyhole, RefreshCw } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Image, LockKeyhole, RefreshCw } from "lucide-react";
 
 import { apiRequest } from "../api";
-import type { WordPressMediaReconciliationApplyResult, WordPressMediaReconciliationDryRun } from "../types";
+import type { WordPressFeaturedImageApplyResult, WordPressFeaturedImageDryRun } from "../types";
 
 const PAGE_ID = 41;
 
 export default function WordPressMediaSafetyPage() {
-  const [dryRun, setDryRun] = useState<WordPressMediaReconciliationDryRun | null>(null);
+  const [dryRun, setDryRun] = useState<WordPressFeaturedImageDryRun | null>(null);
   const [phrase, setPhrase] = useState("");
-  const [backup, setBackup] = useState("");
+  const [dataBackup, setDataBackup] = useState("");
+  const [mediaBackup, setMediaBackup] = useState("");
+  const [programBackup, setProgramBackup] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<WordPressMediaReconciliationApplyResult | null>(null);
-  const canReconcile = useMemo(() => Boolean(
-    dryRun?.ready && dryRun.confirmation_token && phrase === dryRun.confirmation_phrase && backup.trim()
-  ), [dryRun, phrase, backup]);
+  const [result, setResult] = useState<WordPressFeaturedImageApplyResult | null>(null);
+  const canApply = useMemo(() => Boolean(
+    dryRun?.ready && dryRun.confirmation_token && phrase === dryRun.confirmation_phrase &&
+    dataBackup.trim() && mediaBackup.trim() && programBackup.trim()
+  ), [dryRun, phrase, dataBackup, mediaBackup, programBackup]);
 
   async function inspect() {
-    setBusy(true); setError(null); setDryRun(null); setPhrase(""); setBackup(""); setResult(null);
+    setBusy(true); setError(null); setDryRun(null); setPhrase(""); setDataBackup(""); setMediaBackup(""); setProgramBackup(""); setResult(null);
     try {
-      setDryRun(await apiRequest<WordPressMediaReconciliationDryRun>(
-        `/api/wordpress/media/reconciliation/dry-run/${PAGE_ID}`, { method: "POST" }
-      ));
-    } catch (value) { setError(value instanceof Error ? value.message : "Reconciliation inspection failed."); }
+      setDryRun(await apiRequest<WordPressFeaturedImageDryRun>(`/api/wordpress/media/featured-image/dry-run/${PAGE_ID}`, { method: "POST" }));
+    } catch (value) { setError(value instanceof Error ? value.message : "Featured-image dry run failed."); }
     finally { setBusy(false); }
   }
 
-  async function reconcile() {
-    if (!canReconcile || !dryRun?.confirmation_token) return;
+  async function apply() {
+    if (!canApply || !dryRun?.confirmation_token) return;
     setBusy(true); setError(null);
     try {
-      setResult(await apiRequest<WordPressMediaReconciliationApplyResult>(
-        `/api/wordpress/media/reconciliation/apply/${PAGE_ID}`,
-        { method: "POST", body: JSON.stringify({ confirmation_token: dryRun.confirmation_token, confirmation_phrase: phrase, confirmed_backup_file: backup.trim() }) }
-      ));
-    } catch (value) { setError(value instanceof Error ? value.message : "Reconciliation was blocked."); }
+      setResult(await apiRequest<WordPressFeaturedImageApplyResult>(`/api/wordpress/media/featured-image/apply/${PAGE_ID}`, {
+        method: "POST",
+        body: JSON.stringify({
+          confirmation_token: dryRun.confirmation_token,
+          confirmation_phrase: phrase,
+          confirmed_data_backup_file: dataBackup.trim(),
+          confirmed_media_backup_file: mediaBackup.trim(),
+          confirmed_program_backup_file: programBackup.trim()
+        })
+      }));
+    } catch (value) { setError(value instanceof Error ? value.message : "Featured-image apply was blocked."); }
     finally { setBusy(false); }
   }
 
   return <section className="page wordpressPublishSafetySandboxPage">
-    <header className="pageHeader"><div><span className="eyebrow">Orlando only · page 41 · post 8</span><h1>WordPress Media Reconciliation</h1><p>Verify existing attachments 31 and 32 byte-for-byte, then map Atlas only after explicit confirmation.</p></div></header>
-    <div className="wordpressSafetyNotice"><LockKeyhole size={22}/><div><strong>Atlas mapping only</strong><p>No upload, retry, deletion, attachment edit, featured-image assignment, post edit, or bulk action exists on this page.</p></div></div>
-    <section className="panel"><h2>Fixed target</h2><dl className="detailGrid"><div><dt>Atlas target</dt><dd>Page 41 · Image 1 · Assignment 1</dd></div><div><dt>WordPress post</dt><dd>8 · must remain publish · featured_media 0</dd></div><div><dt>Candidate attachments</dt><dd>31 and 32 only</dd></div></dl><button className="primaryButton buttonWithIcon" disabled={busy} onClick={inspect}><RefreshCw size={16}/>Run read-only reconciliation inspection</button></section>
+    <header className="pageHeader"><div><span className="eyebrow">Orlando only · page 41 · post 8</span><h1>WordPress Featured Image Safety</h1><p>Verify reconciled media 31, then set it as the featured image only after three backup confirmations and an exact phrase.</p></div></header>
+    <div className="wordpressSafetyNotice"><LockKeyhole size={22}/><div><strong>One-field WordPress mutation</strong><p>The only planned payload is <code>{`{"featured_media":31}`}</code>. No upload, media edit, duplicate cleanup, content edit, status change, file picker, or bulk action is available.</p></div></div>
+    <section className="panel"><h2>Fixed target</h2><dl className="detailGrid"><div><dt>Atlas target</dt><dd>Page 41 · Image 1 · Assignment 1</dd></div><div><dt>WordPress target</dt><dd>Post 8 · media 31</dd></div><div><dt>Excluded duplicate</dt><dd>Media 32 — untouched</dd></div></dl><button className="primaryButton buttonWithIcon" disabled={busy} onClick={inspect}><RefreshCw size={16}/>Run featured-image dry run</button></section>
     {error && <div className="errorBanner"><AlertTriangle size={18}/>{error}</div>}
     {dryRun && <>
-      <section className="panel"><h2>Selection summary</h2><dl className="detailGrid"><div><dt>Local SHA-256</dt><dd><code>{dryRun.local_checksum}</code></dd></div><div><dt>Selected canonical ID</dt><dd>{dryRun.selected_media_id ?? "Blocked"}</dd></div><div><dt>Duplicate candidate IDs</dt><dd>{dryRun.duplicate_candidate_ids.join(", ") || "None"}</dd></div><div><dt>Post 8</dt><dd>{dryRun.post_status ?? "Unknown"}; featured_media {dryRun.post_featured_media ?? "Unknown"}</dd></div></dl></section>
-      {dryRun.candidates.map(candidate => <section className="panel" key={candidate.wordpress_media_id}><h2>Candidate {candidate.wordpress_media_id} {candidate.valid ? <CheckCircle2 size={18}/> : <AlertTriangle size={18}/>}</h2><dl className="detailGrid"><div><dt>Created</dt><dd>{candidate.date_gmt ?? "-"}</dd></div><div><dt>Title</dt><dd>{candidate.title ?? "-"}</dd></div><div><dt>Alt text</dt><dd>{candidate.alt_text ?? "-"}</dd></div><div><dt>MIME / size</dt><dd>{candidate.mime_type ?? "-"} · {candidate.file_size?.toLocaleString() ?? "-"}</dd></div><div><dt>Dimensions</dt><dd>{candidate.width ?? "-"} × {candidate.height ?? "-"}</dd></div><div><dt>Parent</dt><dd>{candidate.parent_post_id ?? "Unattached"}</dd></div><div><dt>Remote SHA-256</dt><dd><code>{candidate.remote_checksum ?? "Unavailable"}</code></dd></div><div><dt>Featured references</dt><dd>{candidate.featured_references.length ? candidate.featured_references.map(reference => `${reference.object_type} ${reference.object_id} (${reference.title ?? reference.slug ?? "untitled"}, ${reference.status ?? "unknown"})`).join("; ") : "None"}</dd></div><div><dt>Source URL</dt><dd>{candidate.source_url ? <a href={candidate.source_url} target="_blank" rel="noreferrer">Read-only source</a> : "-"}</dd></div></dl><GateList gates={candidate.gate_results}/></section>)}
-      <section className="panel"><h2>Required gates</h2><GateList gates={dryRun.gate_results}/></section>
-      <section className="panel wordpressApplyPanel"><h2><Link2 size={20}/>Guarded Atlas reconciliation</h2><label>Confirmed Data Backup JSON filename<input value={backup} onChange={event => setBackup(event.target.value)} placeholder="atlas-backup-....json" /></label><label>Type exact phrase: <code>{dryRun.confirmation_phrase ?? "Available only after every gate passes"}</code><input value={phrase} onChange={event => setPhrase(event.target.value)} /></label><button className="dangerButton" disabled={!canReconcile || busy} onClick={reconcile}>Map Atlas to verified existing attachment</button><p className="helperText">This updates ImageMetadata and its reconciliation audit only. It sends no WordPress write request.</p></section>
+      <section className="panel"><h2>Read-only verification</h2><dl className="detailGrid"><div><dt>Post status</dt><dd>{dryRun.post_status ?? "Unknown"}</dd></div><div><dt>Current featured_media</dt><dd>{dryRun.current_featured_media ?? "Unknown"}</dd></div><div><dt>Post slug</dt><dd>{dryRun.post_slug ?? "-"}</dd></div><div><dt>Post URL</dt><dd>{dryRun.post_url ?? "-"}</dd></div><div><dt>Media 31 remote SHA-256</dt><dd><code>{dryRun.media?.remote_checksum ?? "Unavailable"}</code></dd></div><div><dt>Planned payload</dt><dd><code>{JSON.stringify(dryRun.planned_payload)}</code></dd></div><div><dt>Excluded media IDs</dt><dd>{dryRun.excluded_media_ids.join(", ")}</dd></div></dl><GateList gates={dryRun.media?.gate_results ?? []}/><GateList gates={dryRun.gate_results}/></section>
+      <section className="panel wordpressApplyPanel"><h2><Image size={20}/>Guarded featured-image apply</h2><label>Confirmed Data Backup JSON<input value={dataBackup} onChange={event => setDataBackup(event.target.value)} placeholder="atlas-backup-....json" /></label><label>Confirmed Media Backup ZIP<input value={mediaBackup} onChange={event => setMediaBackup(event.target.value)} placeholder="atlas-media-backup-....zip" /></label><label>Confirmed Program Backup ZIP<input value={programBackup} onChange={event => setProgramBackup(event.target.value)} placeholder="atlas-program-backup-....zip" /></label><label>Type exact phrase: <code>{dryRun.confirmation_phrase ?? "Available only after every gate passes"}</code><input value={phrase} onChange={event => setPhrase(event.target.value)} /></label><button className="dangerButton" disabled={!canApply || busy} onClick={apply}>Set media 31 as Orlando featured image</button><p className="helperText">Disabled until dry run, signed token, all backup filenames, and the exact phrase are present. The backend reruns every gate before sending the one-field request.</p></section>
     </>}
-    {result && <section className="panel"><h2>Atlas mapping reconciled</h2><p>Atlas now references attachment {result.wordpress_media_id}. Duplicate candidates remain untouched. Audit {result.audit_id} recorded.</p></section>}
+    {result && <section className="panel"><h2>Featured image confirmed</h2><p>Post {result.wordpress_post_id} remains publish with featured_media {result.featured_media}. Audit {result.audit_id} recorded.</p></section>}
   </section>;
 }
 

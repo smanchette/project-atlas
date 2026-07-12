@@ -39,7 +39,9 @@ def test_media_routes_are_orlando_only_and_no_get_or_bulk_upload_route_exists() 
     assert ("/api/wordpress/media/inspect/{page_id}", "GET") in routes
     assert ("/api/wordpress/media/reconciliation/dry-run/{page_id}", "POST") in routes
     assert ("/api/wordpress/media/reconciliation/apply/{page_id}", "POST") in routes
-    assert not any("bulk" in path or "featured" in path for path, _ in routes if "/wordpress/media/" in path)
+    assert ("/api/wordpress/media/featured-image/dry-run/{page_id}", "POST") in routes
+    assert ("/api/wordpress/media/featured-image/apply/{page_id}", "POST") in routes
+    assert not any("bulk" in path or "delete" in path for path, _ in routes if "/wordpress/media/" in path)
 
 
 def test_media_path_traversal_and_outside_absolute_path_are_blocked() -> None:
@@ -312,3 +314,44 @@ def test_both_candidates_featured_elsewhere_block_with_reference_ids() -> None:
     message = media_sync._candidate_selection_failure(candidates)
     assert selected is None and duplicates == []
     assert "page 76" in message and "page 77" in message
+
+
+def test_featured_image_post_verification_requires_publish_media_31_and_identity() -> None:
+    valid = {"id": 8, "status": "publish", "featured_media": 31, "slug": media_sync.EXPECTED_SLUG, "link": media_sync.EXPECTED_ORLANDO_URL}
+    media_sync._verify_featured_post(valid, "test")
+    for key, value in (("id", 9), ("status", "draft"), ("featured_media", 32), ("slug", "wrong"), ("link", "https://example.test/wrong")):
+        changed = {**valid, key: value}
+        with pytest.raises(RuntimeError, match=key):
+            media_sync._verify_featured_post(changed, "test")
+
+
+def test_featured_image_token_is_fixed_to_media_31_and_tamper_evident() -> None:
+    candidate = _candidate(31, "2026-07-12T08:36:08")
+    post = {"status": "publish", "slug": media_sync.EXPECTED_SLUG, "link": media_sync.EXPECTED_ORLANDO_URL, "featured_media": 0}
+    token = media_sync._sign_featured_image("abc", candidate, post, datetime.now(UTC) + timedelta(minutes=1))
+    body = media_sync._verify_featured_image(token, 41)
+    assert body["wordpress_media_id"] == 31
+    assert body["snapshot"]["planned_payload"] == {"featured_media": 31}
+    assert body["snapshot"]["excluded_media_ids"] == [32]
+    encoded, signature = token.split(".", 1)
+    tampered = f"{encoded}.{'A' if signature[0] != 'A' else 'B'}{signature[1:]}"
+    with pytest.raises(HTTPException):
+        media_sync._verify_featured_image(tampered, 41)
+
+
+def test_featured_image_archive_backup_gates_require_current_exact_names() -> None:
+    stamp = datetime.now().astimezone().strftime("%Y-%m-%d-%H%M%S")
+    assert media_sync._archive_backup_gate(f"atlas-media-backup-{stamp}.zip", "media").passed
+    assert media_sync._archive_backup_gate(f"atlas-program-backup-{stamp}.zip", "program").passed
+    assert not media_sync._archive_backup_gate("../atlas-media-backup.zip", "media").passed
+    old = (datetime.now().astimezone() - timedelta(days=2)).strftime("%Y-%m-%d-%H%M%S")
+    assert not media_sync._archive_backup_gate(f"atlas-media-backup-{old}.zip", "media").passed
+
+
+def test_featured_image_apply_has_exactly_one_wordpress_write_and_safe_payload() -> None:
+    source = inspect.getsource(media_sync.apply_wordpress_featured_image)
+    assert source.count("client.post(") == 1
+    assert 'json={"featured_media": 31}' in source
+    for forbidden in ('"title"', '"slug"', '"content"', '"excerpt"', '"status"', "client.patch(", "client.put(", "client.delete("):
+        assert forbidden not in source
+    assert "/media/32" not in source

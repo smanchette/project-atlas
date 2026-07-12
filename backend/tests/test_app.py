@@ -3196,6 +3196,8 @@ def test_wordpress_api_exposes_only_controlled_publish_and_existing_write_routes
         ("/api/wordpress/media/upload/{page_id}", "POST"),
         ("/api/wordpress/media/reconciliation/dry-run/{page_id}", "POST"),
         ("/api/wordpress/media/reconciliation/apply/{page_id}", "POST"),
+        ("/api/wordpress/media/featured-image/dry-run/{page_id}", "POST"),
+        ("/api/wordpress/media/featured-image/apply/{page_id}", "POST"),
     }
     assert not any(
         forbidden in path.lower()

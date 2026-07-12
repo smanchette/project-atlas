@@ -5,6 +5,7 @@ import hmac
 import json
 import mimetypes
 from pathlib import Path
+import re
 import secrets
 from urllib.parse import quote, urljoin, urlparse
 
@@ -22,6 +23,8 @@ from app.schemas.wordpress import (
     WordPressMediaReconciliationApplyRequest, WordPressMediaReconciliationApplyResult,
     WordPressMediaFeaturedReference, WordPressMediaReconciliationCandidate,
     WordPressMediaReconciliationDryRun,
+    WordPressFeaturedImageApplyRequest, WordPressFeaturedImageApplyResult,
+    WordPressFeaturedImageDryRun,
     WordPressMediaUploadRequest, WordPressMediaUploadResult,
 )
 from app.services.wordpress_draft_review import check_live_wordpress_draft_status
@@ -34,8 +37,11 @@ TARGET_ASSIGNMENT_ID = 1
 TOKEN_TTL_MINUTES = 15
 UPLOAD_PHRASE = "UPLOAD ORLANDO HERO IMAGE"
 RECONCILIATION_PHRASE = "RECONCILE ORLANDO HERO MEDIA"
+FEATURED_IMAGE_PHRASE = "SET ORLANDO HERO AS FEATURED IMAGE"
 CANDIDATE_MEDIA_IDS = (31, 32)
 EXPECTED_SLUG = "drywood-termite-tenting-orlando-fl"
+EXPECTED_ORLANDO_URL = "https://www.drywoodtenting.com/drywood-termite-tenting-orlando-fl/"
+EXPECTED_CHECKSUM = "9f94d1ba555c2f3655bd600a61aac3247ab2a1a951a6cf73b1152d94fe40b2a0"
 ALLOWED_MIME = {"image/png": "PNG", "image/jpeg": "JPEG"}
 _secret = secrets.token_bytes(32)
 
@@ -444,6 +450,236 @@ def reconcile_wordpress_media(
         duplicate_candidate_ids=dry.duplicate_candidate_ids,
         audit_id=audit.id or 0, gate_results=gates,
     )
+
+
+def dry_run_wordpress_featured_image(
+    session: Session, page_id: int,
+) -> WordPressFeaturedImageDryRun:
+    if page_id != TARGET_PAGE_ID:
+        raise HTTPException(status_code=404, detail="Featured-image sync is limited to Orlando page 41.")
+    page = session.get(GeneratedPage, 41)
+    image = session.get(ImageMetadata, 1)
+    assignment = session.get(PageImageAssignment, 1)
+    if not page or not image or not assignment:
+        raise HTTPException(status_code=404, detail="The Orlando featured-image target is incomplete.")
+    settings = read_wordpress_settings(session)
+    password = get_wordpress_application_password()
+    path, path_error = _resolve_media_path(image)
+    local_mime, local_size, local_width, local_height, local_checksum, file_error = (
+        _inspect_file(path) if path else ("application/octet-stream", 0, 0, 0, "", path_error)
+    )
+    latest_reconciliation = session.exec(
+        select(WordPressMediaSyncAudit).where(
+            WordPressMediaSyncAudit.generated_page_id == 41,
+            WordPressMediaSyncAudit.image_metadata_id == 1,
+            WordPressMediaSyncAudit.action_type == "reconcile_existing_media",
+            WordPressMediaSyncAudit.status == "reconciled",
+            WordPressMediaSyncAudit.wordpress_media_id == 31,
+        ).order_by(WordPressMediaSyncAudit.attempted_at.desc())
+    ).first()
+    gates = [
+        _gate("fixed_target", "Fixed Orlando target", page.wordpress_post_id == 8 and assignment.generated_page_id == 41 and assignment.image_metadata_id == 1, "Page, post, image, or assignment target changed."),
+        _gate("atlas_published", "Atlas Orlando page remains published", page.status == "published" and page.wordpress_status == "publish", "Atlas Orlando page or saved WordPress status changed."),
+        _gate("media_mapping", "ImageMetadata 1 maps to media 31", image.wordpress_media_id == 31 and image.wordpress_media_status == "reconciled", "The reconciled WordPress media mapping is missing or changed."),
+        _gate("mapping_checksum", "Mapped checksum matches Atlas", image.wordpress_media_checksum == EXPECTED_CHECKSUM and local_checksum == EXPECTED_CHECKSUM, "The mapped or local checksum changed."),
+        _gate("local_source", "Local Orlando source remains exact", file_error is None and local_mime == "image/png" and local_size == 2_823_150 and local_width == 1672 and local_height == 941, file_error or "The local source MIME, size, or dimensions changed."),
+        _gate("reconciliation_audit", "Successful reconciliation audit exists", latest_reconciliation is not None, "No successful reconciliation audit for media 31 exists."),
+        _gate("credentials", "WordPress credentials are available", bool(settings.site_url and settings.username and password), "WordPress credentials are not available in backend memory."),
+        _gate("duplicate_excluded", "Duplicate media 32 is excluded", True, "Duplicate media 32 must remain excluded."),
+        _gate("planned_payload", "Planned payload contains featured_media only", True, "Featured-image payload shape is unsafe."),
+    ]
+    post_data: dict = {}
+    media: WordPressMediaReconciliationCandidate | None = None
+    if settings.site_url and settings.username and password and local_checksum:
+        auth = httpx.BasicAuth(settings.username, password)
+        api = f"{settings.site_url.rstrip('/')}/wp-json/wp/v2"
+        try:
+            with httpx.Client(timeout=httpx.Timeout(20.0, read=30.0), follow_redirects=False) as client:
+                post_response = client.get(f"{api}/pages/8?context=edit", auth=auth)
+                if post_response.status_code >= 400:
+                    raise RuntimeError(f"WordPress post inspection returned HTTP {post_response.status_code}.")
+                post_data = post_response.json()
+                media = _inspect_reconciliation_candidate(
+                    client, api, auth, settings.site_url, 31,
+                    title=image.image_title or image.file_name,
+                    alt_text=(assignment.override_alt_text or image.reviewed_alt_text or "").strip(),
+                    checksum=local_checksum,
+                )
+        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+            gates.append(_gate("wordpress_inspection", "Authenticated WordPress inspection succeeds", False, str(exc)))
+    post_url = post_data.get("link") if isinstance(post_data.get("link"), str) else None
+    gates += [
+        _gate("post_identity", "Live WordPress post 8 identity matches", post_data.get("id") == 8, "Live WordPress post ID changed."),
+        _gate("post_publish", "Live WordPress post 8 remains publish", post_data.get("status") == "publish", "Live WordPress post 8 is not publish."),
+        _gate("post_slug", "Live Orlando slug matches", post_data.get("slug") == EXPECTED_SLUG, "Live WordPress slug changed."),
+        _gate("post_url", "Live Orlando URL matches", post_url == EXPECTED_ORLANDO_URL, "Live WordPress URL changed."),
+        _gate("featured_media_zero", "Post 8 currently has no featured image", post_data.get("featured_media") == 0, "Post 8 featured_media is nonzero or unverifiable."),
+        _gate("media_31", "Media 31 passes complete verification", bool(media and media.valid), "Media 31 is missing, changed, attached, featured elsewhere, or byte-mismatched."),
+    ]
+    ready = all(gate.passed for gate in gates)
+    token = phrase = expires_at = None
+    if ready and media:
+        expires = datetime.now(UTC) + timedelta(minutes=TOKEN_TTL_MINUTES)
+        token = _sign_featured_image(local_checksum, media, post_data, expires)
+        phrase = FEATURED_IMAGE_PHRASE
+        expires_at = expires.isoformat()
+    return WordPressFeaturedImageDryRun(
+        page_id=41, wordpress_post_id=8, image_id=1, assignment_id=1,
+        wordpress_media_id=31, post_status=post_data.get("status"),
+        post_slug=post_data.get("slug"), post_url=post_url,
+        current_featured_media=post_data.get("featured_media"), media=media,
+        local_checksum=local_checksum, planned_payload={"featured_media": 31},
+        excluded_media_ids=[32], gate_results=gates,
+        status="featured_image_ready" if ready else "blocked", ready=ready,
+        confirmation_token=token, confirmation_phrase=phrase, expires_at=expires_at,
+    )
+
+
+def apply_wordpress_featured_image(
+    session: Session, page_id: int, request: WordPressFeaturedImageApplyRequest,
+) -> WordPressFeaturedImageApplyResult:
+    token = _verify_featured_image(request.confirmation_token, page_id)
+    if not hmac.compare_digest(request.confirmation_phrase, FEATURED_IMAGE_PHRASE):
+        raise HTTPException(status_code=422, detail="The featured-image confirmation phrase is incorrect.")
+    data_backup = _backup_gate(request.confirmed_data_backup_file)
+    media_backup = _archive_backup_gate(request.confirmed_media_backup_file, "media")
+    program_backup = _archive_backup_gate(request.confirmed_program_backup_file, "program")
+    dry = dry_run_wordpress_featured_image(session, page_id)
+    gates = [*dry.gate_results, data_backup, media_backup, program_backup]
+    current_snapshot = _featured_image_snapshot(dry)
+    if not dry.ready or not all(g.passed for g in (data_backup, media_backup, program_backup)) or token.get("snapshot") != current_snapshot:
+        raise HTTPException(status_code=409, detail="Featured-image state changed or a required gate is blocked. Run a new dry run.")
+    settings = read_wordpress_settings(session)
+    evidence = {
+        "code": "featured_image_evidence", "passed": True,
+        "request_payload": {"featured_media": 31}, "excluded_media_ids": [32],
+        "backups": {
+            "data": request.confirmed_data_backup_file,
+            "media": request.confirmed_media_backup_file,
+            "program": request.confirmed_program_backup_file,
+        },
+        "pre_observation": current_snapshot,
+    }
+    audit = WordPressMediaSyncAudit(
+        generated_page_id=41, image_metadata_id=1, page_image_assignment_id=1,
+        wordpress_post_id=8, wordpress_media_id=31,
+        action_type="set_featured_image", status="pending",
+        wordpress_site_url=settings.site_url,
+        source_file_name=Path(dry.media.source_url or "media-31.png").name if dry.media else "media-31.png",
+        source_mime_type="image/png", source_file_size=2_823_150,
+        source_width=1672, source_height=941, source_checksum=dry.local_checksum,
+        alt_text=dry.media.alt_text if dry.media and dry.media.alt_text else "",
+        returned_media_url=dry.media.source_url if dry.media else None,
+        gate_results=[g.model_dump(mode="json") for g in gates] + [evidence],
+        backup_file_name=request.confirmed_data_backup_file,
+    )
+    session.add(audit); session.commit(); session.refresh(audit)
+    auth = httpx.BasicAuth(settings.username, get_wordpress_application_password() or "")
+    api = f"{settings.site_url.rstrip('/')}/wp-json/wp/v2"
+    wordpress_updated = False
+    try:
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            response = client.post(f"{api}/pages/8", json={"featured_media": 31}, auth=auth)
+            if response.status_code not in {200, 201}:
+                raise RuntimeError(f"WordPress featured-image update returned HTTP {response.status_code}.")
+            wordpress_updated = True
+            update_data = response.json()
+            _verify_featured_post(update_data, "WordPress update response")
+            post_response = client.get(f"{api}/pages/8?context=edit", auth=auth)
+            if post_response.status_code >= 400:
+                raise RuntimeError(f"WordPress post verification GET returned HTTP {post_response.status_code}.")
+            verified_post = post_response.json()
+            _verify_featured_post(verified_post, "WordPress verification GET")
+            media_response = client.get(f"{api}/media/31?context=edit", auth=auth)
+            if media_response.status_code >= 400 or media_response.json().get("id") != 31:
+                raise RuntimeError("WordPress media 31 verification failed after featured-image update.")
+        audit.status = "featured_image_set"; audit.completed_at = datetime.now(UTC)
+        audit.gate_results = [*audit.gate_results, {
+            "code": "post_apply_observation", "passed": True,
+            "update_response": _post_observation(update_data),
+            "verification_get": _post_observation(verified_post),
+        }]
+        session.add(audit); session.commit()
+    except Exception as exc:
+        session.rollback()
+        persisted = session.get(WordPressMediaSyncAudit, audit.id)
+        if persisted:
+            persisted.status = "reconciliation_required" if wordpress_updated else "failed"
+            persisted.completed_at = datetime.now(UTC); persisted.error_message = str(exc)
+            session.add(persisted); session.commit()
+        status = 500 if wordpress_updated else 502
+        raise HTTPException(status_code=status, detail="Featured-image update requires inspection." if wordpress_updated else "Featured-image update failed before confirmation.") from exc
+    return WordPressFeaturedImageApplyResult(
+        page_id=41, wordpress_post_id=8, wordpress_media_id=31,
+        status="featured_image_set", wordpress_status="publish",
+        wordpress_url=EXPECTED_ORLANDO_URL, featured_media=31,
+        audit_id=audit.id or 0, gate_results=gates,
+    )
+
+
+def _verify_featured_post(data: dict, source: str) -> None:
+    mismatches = []
+    for key, expected in (("id", 8), ("status", "publish"), ("featured_media", 31), ("slug", EXPECTED_SLUG), ("link", EXPECTED_ORLANDO_URL)):
+        if data.get(key) != expected:
+            mismatches.append(f"{key} expected {expected!r}, got {data.get(key)!r}")
+    if mismatches:
+        raise RuntimeError(f"{source} verification failed: " + "; ".join(mismatches))
+
+
+def _post_observation(data: dict) -> dict:
+    return {key: data.get(key) for key in ("id", "status", "featured_media", "slug", "link")}
+
+
+def _featured_image_snapshot(dry: WordPressFeaturedImageDryRun) -> dict:
+    return {
+        "page_id": 41, "wordpress_post_id": 8, "image_id": 1,
+        "assignment_id": 1, "wordpress_media_id": 31,
+        "checksum": dry.local_checksum,
+        "remote_checksum": dry.media.remote_checksum if dry.media else None,
+        "media_url": dry.media.source_url if dry.media else None,
+        "post": {"status": dry.post_status, "slug": dry.post_slug, "url": dry.post_url, "featured_media": dry.current_featured_media},
+        "planned_payload": {"featured_media": 31}, "excluded_media_ids": [32],
+    }
+
+
+def _sign_featured_image(checksum: str, media: WordPressMediaReconciliationCandidate, post: dict, expires: datetime) -> str:
+    dry_shape = WordPressFeaturedImageDryRun(
+        page_id=41, wordpress_post_id=8, image_id=1, assignment_id=1,
+        wordpress_media_id=31, post_status=post.get("status"), post_slug=post.get("slug"),
+        post_url=post.get("link"), current_featured_media=post.get("featured_media"),
+        media=media, local_checksum=checksum, planned_payload={"featured_media": 31},
+        excluded_media_ids=[32], gate_results=[], status="featured_image_ready", ready=True,
+    )
+    body = {
+        "action": "set_featured_image", "page_id": 41, "wordpress_post_id": 8,
+        "image_id": 1, "assignment_id": 1, "wordpress_media_id": 31,
+        "snapshot": _featured_image_snapshot(dry_shape),
+        "expires_at": int(expires.timestamp()), "nonce": secrets.token_hex(8),
+    }
+    encoded = _encode(json.dumps(body, sort_keys=True, separators=(",", ":")).encode())
+    return f"{encoded}.{_encode(hmac.new(_secret, encoded.encode(), hashlib.sha256).digest())}"
+
+
+def _verify_featured_image(value: str, page_id: int) -> dict:
+    body = _verify_signed_body(value, "The featured-image token is invalid.")
+    if body.get("action") != "set_featured_image" or body.get("page_id") != page_id or body.get("wordpress_post_id") != 8 or body.get("image_id") != 1 or body.get("assignment_id") != 1 or body.get("wordpress_media_id") != 31:
+        raise HTTPException(status_code=422, detail="The featured-image token does not match the Orlando target.")
+    if int(body.get("expires_at", 0)) < int(datetime.now(UTC).timestamp()):
+        raise HTTPException(status_code=422, detail="The featured-image token expired.")
+    return body
+
+
+def _archive_backup_gate(name: str, kind: str) -> WordPressDraftGateResult:
+    pattern = rf"^atlas-{kind}-backup-(\d{{4}}-\d{{2}}-\d{{2}}-\d{{6}})\.zip$"
+    match = re.fullmatch(pattern, name)
+    passed = False
+    if match and Path(name).name == name:
+        try:
+            created = datetime.strptime(match.group(1), "%Y-%m-%d-%H%M%S").replace(tzinfo=datetime.now().astimezone().tzinfo)
+            passed = timedelta(0) <= datetime.now().astimezone() - created <= timedelta(hours=24)
+        except ValueError:
+            passed = False
+    return _gate(f"confirmed_{kind}_backup", f"Confirmed {kind.title()} Backup is current", passed, f"A valid {kind.title()} Backup filename from the last 24 hours is required.")
 
 
 def _inspect_reconciliation_candidate(

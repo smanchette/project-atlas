@@ -780,6 +780,38 @@ export type WordPressMediaReconciliationApplyResult = {
   audit_id: number;
 };
 
+export type WordPressFeaturedImageDryRun = {
+  page_id: number;
+  wordpress_post_id: number;
+  image_id: number;
+  assignment_id: number;
+  wordpress_media_id: number;
+  post_status?: string | null;
+  post_slug?: string | null;
+  post_url?: string | null;
+  current_featured_media?: number | null;
+  media?: WordPressMediaReconciliationCandidate | null;
+  local_checksum: string;
+  planned_payload: { featured_media: number };
+  excluded_media_ids: number[];
+  gate_results: { code: string; label: string; passed: boolean; message: string }[];
+  status: "blocked" | "featured_image_ready";
+  ready: boolean;
+  confirmation_token?: string | null;
+  confirmation_phrase?: string | null;
+  expires_at?: string | null;
+};
+
+export type WordPressFeaturedImageApplyResult = {
+  status: "featured_image_set";
+  wordpress_post_id: number;
+  wordpress_media_id: number;
+  wordpress_status: "publish";
+  wordpress_url: string;
+  featured_media: number;
+  audit_id: number;
+};
+
 export type AssignedMedia = {
   assignment_id: number;
   generated_page_id: number;

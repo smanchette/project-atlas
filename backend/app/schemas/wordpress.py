@@ -326,6 +326,49 @@ class WordPressMediaReconciliationApplyResult(SQLModel):
     gate_results: list[WordPressDraftGateResult]
 
 
+class WordPressFeaturedImageDryRun(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    image_id: int
+    assignment_id: int
+    wordpress_media_id: int
+    post_status: str | None = None
+    post_slug: str | None = None
+    post_url: str | None = None
+    current_featured_media: int | None = None
+    media: WordPressMediaReconciliationCandidate | None = None
+    local_checksum: str
+    planned_payload: dict[str, int]
+    excluded_media_ids: list[int] = []
+    gate_results: list[WordPressDraftGateResult]
+    status: Literal["blocked", "featured_image_ready"]
+    ready: bool
+    confirmation_token: str | None = None
+    confirmation_phrase: str | None = None
+    expires_at: str | None = None
+    dry_run_only: bool = True
+
+
+class WordPressFeaturedImageApplyRequest(SQLModel):
+    confirmation_token: str = Field(min_length=1)
+    confirmation_phrase: str = Field(min_length=1, max_length=200)
+    confirmed_data_backup_file: str = Field(min_length=1, max_length=255)
+    confirmed_media_backup_file: str = Field(min_length=1, max_length=255)
+    confirmed_program_backup_file: str = Field(min_length=1, max_length=255)
+
+
+class WordPressFeaturedImageApplyResult(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    wordpress_media_id: int
+    status: Literal["featured_image_set"]
+    wordpress_status: Literal["publish"]
+    wordpress_url: str
+    featured_media: int
+    audit_id: int
+    gate_results: list[WordPressDraftGateResult]
+
+
 class WordPressDraftCreateRequest(SQLModel):
     confirmation_token: str = Field(min_length=1)
     confirmation_phrase: str = Field(min_length=1, max_length=300)
