@@ -386,6 +386,17 @@ export type WordPressPublishDryRun = {
   dry_run_only: boolean;
 };
 
+export type WordPressPublishApplyResult = {
+  page_id: number;
+  status: "published";
+  wordpress_post_id: number;
+  wordpress_status: "publish";
+  wordpress_url: string;
+  audit_id: number;
+  publish_payload_hash: string;
+  gate_results: WordPressDraftGateResult[];
+};
+
 export type WordPressDraftCreateResult = {
   page_id: number;
   status: "created";

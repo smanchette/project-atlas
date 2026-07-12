@@ -19,6 +19,8 @@ from app.schemas.wordpress import (
     WordPressManualQualityReviewUpdate,
     WordPressPayloadPreview,
     WordPressPublishDryRun,
+    WordPressPublishApplyRequest,
+    WordPressPublishApplyResult,
     WordPressSettingsRead,
     WordPressSettingsUpdate,
 )
@@ -33,7 +35,7 @@ from app.services.wordpress_draft_update import (
     apply_wordpress_draft_update,
     dry_run_wordpress_draft_update,
 )
-from app.services.wordpress_publish import dry_run_wordpress_publish
+from app.services.wordpress_publish import apply_wordpress_publish, dry_run_wordpress_publish
 from app.services.wordpress_quality_review import (
     build_wordpress_draft_quality_review,
     list_wordpress_draft_quality_reviews,
@@ -173,3 +175,12 @@ def publish_dry_run(
     session: Session = Depends(get_session),
 ) -> WordPressPublishDryRun:
     return dry_run_wordpress_publish(session, page_id)
+
+
+@router.post("/publish/apply/{page_id}", response_model=WordPressPublishApplyResult)
+def publish_apply(
+    page_id: int,
+    payload: WordPressPublishApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressPublishApplyResult:
+    return apply_wordpress_publish(session, page_id, payload)

@@ -160,6 +160,32 @@ class WordPressDraftAudit(SQLModel, table=True):
     error_message: str | None = None
 
 
+class WordPressPublishAudit(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "generated_page_id", "attempted_at", "publish_payload_hash",
+            name="uq_wordpresspublishaudit_page_time_hash",
+        ),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
+    wordpress_post_id: int = Field(index=True)
+    wordpress_site_url: str
+    attempted_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    completed_at: datetime | None = None
+    status: str = Field(default="pending", index=True)
+    pre_publish_wordpress_status: str | None = None
+    returned_wordpress_status: str | None = None
+    returned_wordpress_url: str | None = None
+    current_draft_payload_hash: str = Field(index=True)
+    latest_update_audit_id: int | None = Field(default=None, foreign_key="wordpressdraftaudit.id")
+    latest_update_audit_hash: str
+    publish_payload_hash: str = Field(index=True)
+    gate_results: list[dict[str, Any]] = Field(sa_column=Column(JSON, nullable=False))
+    backup_file_name: str
+    error_message: str | None = None
+
+
 class WordPressQualityReview(TimestampMixin, table=True):
     __table_args__ = (
         UniqueConstraint(

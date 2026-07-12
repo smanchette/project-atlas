@@ -17,6 +17,7 @@ import type {
   WordPressDraftReviewItem,
   WordPressDraftReviewList,
   WordPressPublishDryRun,
+  WordPressPublishApplyResult,
   WordPressSettings
 } from "../types";
 
@@ -26,7 +27,10 @@ function WordPressPublishSafetySandboxPage() {
   const [qualityItems, setQualityItems] = useState<WordPressDraftQualityReviewItem[]>([]);
   const [selectedPageId, setSelectedPageId] = useState<number | null>(null);
   const [dryRun, setDryRun] = useState<WordPressPublishDryRun | null>(null);
-  const [busy, setBusy] = useState<"load" | "dry-run" | null>("load");
+  const [confirmationPhrase, setConfirmationPhrase] = useState("");
+  const [confirmedBackupFile, setConfirmedBackupFile] = useState("");
+  const [applyResult, setApplyResult] = useState<WordPressPublishApplyResult | null>(null);
+  const [busy, setBusy] = useState<"load" | "dry-run" | "apply" | null>("load");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -60,6 +64,9 @@ function WordPressPublishSafetySandboxPage() {
     setError(null);
     setMessage(null);
     setDryRun(null);
+    setConfirmationPhrase("");
+    setConfirmedBackupFile("");
+    setApplyResult(null);
     try {
       const result = await apiRequest<WordPressPublishDryRun>(
         `/api/wordpress/publish/dry-run/${selectedPageId}`,
@@ -78,6 +85,35 @@ function WordPressPublishSafetySandboxPage() {
     }
   }
 
+  async function applyPublish() {
+    if (!selectedPageId || !dryRun?.confirmation_token || !canApply) return;
+    setBusy("apply");
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await apiRequest<WordPressPublishApplyResult>(
+        `/api/wordpress/publish/apply/${selectedPageId}`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            confirmation_token: dryRun.confirmation_token,
+            confirmation_phrase: confirmationPhrase,
+            confirmed_backup_file: confirmedBackupFile.trim()
+          })
+        }
+      );
+      setApplyResult(result);
+      setDryRun(null);
+      setConfirmationPhrase("");
+      setConfirmedBackupFile("");
+      setMessage(`WordPress post ${result.wordpress_post_id} is published and Atlas was updated.`);
+    } catch (err) {
+      setError(messageFrom(err, "Unable to apply the controlled WordPress publish."));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const selectedDraft = useMemo(
     () => drafts.find((item) => item.page_id === selectedPageId) ?? null,
     [drafts, selectedPageId]
@@ -85,6 +121,12 @@ function WordPressPublishSafetySandboxPage() {
   const selectedQuality = useMemo(
     () => qualityItems.find((item) => item.page_id === selectedPageId) ?? null,
     [qualityItems, selectedPageId]
+  );
+  const tokenUnexpired = Boolean(dryRun?.expires_at && Date.parse(dryRun.expires_at) > Date.now());
+  const canApply = Boolean(
+    dryRun?.ready && dryRun.confirmation_token && tokenUnexpired &&
+    confirmationPhrase === dryRun.confirmation_phrase && confirmedBackupFile.trim() &&
+    selectedPageId === dryRun.page_id && busy === null
   );
 
   return (
@@ -100,8 +142,8 @@ function WordPressPublishSafetySandboxPage() {
       <div className="wordpressSafetyNotice">
         <LockKeyhole size={19} aria-hidden="true" />
         <div>
-          <strong>No publish apply control exists in v0.44.</strong>
-          <span>This page can only run a dry run. It cannot publish, update content, upload media, create drafts, delete pages, or run bulk actions.</span>
+          <strong>Controlled one-page publish only.</strong>
+          <span>Apply remains locked until a fresh dry run, exact phrase, and confirmed current Data Backup JSON pass every backend gate.</span>
         </div>
       </div>
 
@@ -151,6 +193,9 @@ function WordPressPublishSafetySandboxPage() {
                 onChange={(event) => {
                   setSelectedPageId(Number(event.target.value));
                   setDryRun(null);
+                  setConfirmationPhrase("");
+                  setConfirmedBackupFile("");
+                  setApplyResult(null);
                   setMessage(null);
                   setError(null);
                 }}
@@ -197,7 +242,26 @@ function WordPressPublishSafetySandboxPage() {
           <PayloadPanel dryRun={dryRun} />
         </div>
       )}
-      {dryRun && <FutureConfirmationPanel dryRun={dryRun} />}
+      {dryRun && (
+        <PublishApplyPanel
+          dryRun={dryRun}
+          city={selectedDraft?.city || selectedDraft?.page_title || "Selected"}
+          confirmationPhrase={confirmationPhrase}
+          confirmedBackupFile={confirmedBackupFile}
+          busy={busy}
+          canApply={canApply}
+          onPhraseChange={setConfirmationPhrase}
+          onBackupChange={setConfirmedBackupFile}
+          onApply={applyPublish}
+        />
+      )}
+      {applyResult && (
+        <section className="panel wordpressApplyPanel">
+          <h2>Publish Confirmed</h2>
+          <p>WordPress post {applyResult.wordpress_post_id} returned status publish.</p>
+          <a href={applyResult.wordpress_url} target="_blank" rel="noreferrer">Open confirmed public URL</a>
+        </section>
+      )}
     </section>
   );
 }
@@ -285,13 +349,26 @@ function PayloadPanel({ dryRun }: { dryRun: WordPressPublishDryRun }) {
   );
 }
 
-function FutureConfirmationPanel({ dryRun }: { dryRun: WordPressPublishDryRun }) {
+function PublishApplyPanel({
+  dryRun, city, confirmationPhrase, confirmedBackupFile, busy, canApply,
+  onPhraseChange, onBackupChange, onApply
+}: {
+  dryRun: WordPressPublishDryRun;
+  city: string;
+  confirmationPhrase: string;
+  confirmedBackupFile: string;
+  busy: "load" | "dry-run" | "apply" | null;
+  canApply: boolean;
+  onPhraseChange: (value: string) => void;
+  onBackupChange: (value: string) => void;
+  onApply: () => void;
+}) {
   return (
     <section className="panel wordpressApplyPanel">
       <div className="panelHeader">
         <div>
-          <h2>Future Confirmation</h2>
-          <p>Generated only for the future controlled apply version. v0.44 has no apply button.</p>
+          <h2>Controlled One-Page Publish</h2>
+          <p>This final action publishes only the selected existing WordPress draft.</p>
         </div>
         <span className={`statusBadge ${dryRun.ready ? "ready" : "warning"}`}>
           {dryRun.ready ? "Generated" : "Not Generated"}
@@ -300,19 +377,26 @@ function FutureConfirmationPanel({ dryRun }: { dryRun: WordPressPublishDryRun })
       <div className="wordpressSafetyNotice compact">
         <LockKeyhole size={18} aria-hidden="true" />
         <div>
-          <strong>Dry run only. Nothing is published from this screen.</strong>
-          <span>There is no publish button, bulk selector, media upload, content editor, create, or delete control.</span>
+          <strong>Publishing makes this page public.</strong>
+          <span>No bulk, media upload, content editor, create, delete, unpublish, or automatic rollback action is available.</span>
         </div>
       </div>
       {dryRun.confirmation_phrase && (
-        <div className="inlineSuccess">
-          Confirmation phrase generated: <code>{dryRun.confirmation_phrase}</code>
-        </div>
+        <>
+          <div className="inlineSuccess">Required phrase: <code>{dryRun.confirmation_phrase}</code></div>
+          <label>Exact confirmation phrase<input value={confirmationPhrase} onChange={(event) => onPhraseChange(event.target.value)} autoComplete="off" /></label>
+          <label>Confirmed Data Backup JSON filename<input value={confirmedBackupFile} onChange={(event) => onBackupChange(event.target.value)} placeholder="atlas-backup-YYYY-MM-DD-HHMMSS.json" autoComplete="off" /></label>
+          <div className="formActions">
+            <button className="primaryButton" type="button" disabled={!canApply} onClick={onApply}>
+              {busy === "apply" ? "Publishing..." : `Publish ${city} Page`}
+            </button>
+          </div>
+        </>
       )}
       {dryRun.confirmation_token && (
         <p className="helperText">Signed token generated for future v0.45 planning. It expires and is valid only for this page, post ID, action, and publish payload hash.</p>
       )}
-      {!dryRun.ready && <p className="helperText">Confirmation remains unavailable until every publish dry-run gate passes.</p>}
+      {!dryRun.ready && <p className="helperText">Publish remains unavailable until every publish dry-run gate passes.</p>}
     </section>
   );
 }

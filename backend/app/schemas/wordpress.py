@@ -152,8 +152,25 @@ class WordPressPublishDryRun(SQLModel):
     confirmation_token: str | None = None
     confirmation_phrase: str | None = None
     expires_at: str | None = None
-    public_publish_warning: str = "Publishing makes the WordPress page public. v0.44 does not publish."
+    public_publish_warning: str = "Publishing makes the WordPress page public. Only the guarded one-page apply flow can publish."
     dry_run_only: bool = True
+
+
+class WordPressPublishApplyRequest(SQLModel):
+    confirmation_token: str = Field(min_length=1)
+    confirmation_phrase: str = Field(min_length=1, max_length=300)
+    confirmed_backup_file: str = Field(min_length=1, max_length=255)
+
+
+class WordPressPublishApplyResult(SQLModel):
+    page_id: int
+    status: Literal["published"]
+    wordpress_post_id: int
+    wordpress_status: Literal["publish"]
+    wordpress_url: str
+    audit_id: int
+    publish_payload_hash: str
+    gate_results: list[WordPressDraftGateResult]
 
 
 class WordPressDraftCreateRequest(SQLModel):

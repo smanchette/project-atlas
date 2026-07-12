@@ -42,6 +42,7 @@ from app.models import (
     Service,
     Setting,
     WordPressDraftAudit,
+    WordPressPublishAudit,
     WordPressQualityReview,
 )
 from app.services.draft_generation import (
@@ -233,7 +234,7 @@ def test_backup_export_contains_metadata_counts_and_all_data_groups(tmp_path: Pa
 
     assert backup_path.is_file()
     assert payload["metadata"]["app"] == "Project Atlas"
-    assert payload["metadata"]["version"] == "0.27"
+    assert payload["metadata"]["version"] == "0.28"
     assert isinstance(payload["metadata"]["created_at"], str)
     assert payload["metadata"]["table_counts"] == before_counts
     assert set(payload["data"]) == set(BACKUP_MODELS)
@@ -1751,7 +1752,7 @@ def test_backup_restore_preserves_review_notes_and_approval_audits_idempotently(
                 session.delete(record)
             session.commit()
 
-    assert payload["metadata"]["version"] == "0.27"
+    assert payload["metadata"]["version"] == "0.28"
     assert payload["data"]["approval_audits"]
     exported_page = next(
         record
@@ -2135,7 +2136,7 @@ def test_backup_restore_preserves_page_revisions_idempotently(tmp_path: Path) ->
                 revisions=restored_revisions,
             )
 
-    assert payload_json["metadata"]["version"] == "0.27"
+    assert payload_json["metadata"]["version"] == "0.28"
     assert payload_json["data"]["page_revisions"]
     assert len(restored_revisions) == 1
     assert restored_after["hero_subheadline"].endswith("Reviewed for backup.")
@@ -3168,7 +3169,7 @@ def test_wordpress_draft_queue_endpoint_is_read_only() -> None:
     assert after_page == before_page
 
 
-def test_wordpress_api_exposes_no_publish_create_delete_or_upload_route() -> None:
+def test_wordpress_api_exposes_only_controlled_publish_and_existing_write_routes() -> None:
     wordpress_routes = [
         (route.path, method)
         for route in app.routes
@@ -3189,7 +3190,8 @@ def test_wordpress_api_exposes_no_publish_create_delete_or_upload_route() -> Non
         ("/api/wordpress/draft/create/{page_id}", "POST"),
         ("/api/wordpress/draft-update/dry-run/{page_id}", "POST"),
         ("/api/wordpress/draft-update/apply/{page_id}", "POST"),
-        ("/api/wordpress/publish/dry-run/{page_id}", "POST"),
+            ("/api/wordpress/publish/dry-run/{page_id}", "POST"),
+            ("/api/wordpress/publish/apply/{page_id}", "POST"),
     }
     assert not any(
         forbidden in path.lower()
@@ -3206,7 +3208,10 @@ def test_wordpress_api_exposes_no_publish_create_delete_or_upload_route() -> Non
     )
     assert not any(
         path.lower().startswith("/api/wordpress/publish/")
-        and not path.lower().endswith("/dry-run/{page_id}")
+        and not (
+            path.lower().endswith("/dry-run/{page_id}")
+            or path.lower().endswith("/apply/{page_id}")
+        )
         for path, _ in wordpress_routes
     )
 
@@ -4088,17 +4093,166 @@ def test_wordpress_publish_dry_run_is_read_only_and_returns_confirmation(
     assert after == before
 
 
-def test_wordpress_publish_dry_run_exposes_no_apply_or_bulk_routes() -> None:
+def test_wordpress_publish_exposes_no_bulk_or_unrelated_routes() -> None:
     with TestClient(app) as client:
         responses = [
-            client.post("/api/wordpress/publish/apply/1"),
             client.post("/api/wordpress/publish/bulk"),
             client.post("/api/wordpress/publish/create/1"),
             client.post("/api/wordpress/publish/delete/1"),
             client.post("/api/wordpress/publish/media/1"),
         ]
 
-    assert [response.status_code for response in responses] == [404, 404, 404, 404, 404]
+    assert [response.status_code for response in responses] == [404, 404, 404, 404]
+
+
+def test_wordpress_publish_apply_rejects_invalid_token_without_audit() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/wordpress/publish/apply/1",
+            json={"confirmation_token": "invalid", "confirmation_phrase": "invalid", "confirmed_backup_file": "atlas-backup-test.json"},
+        )
+        with Session(engine) as session:
+            assert session.exec(select(WordPressPublishAudit)).all() == []
+    assert response.status_code == 422
+
+
+def test_wordpress_publish_apply_reruns_gates_and_sends_no_request_when_credentials_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[dict] = []
+    monkeypatch.setattr(wordpress_publish.httpx, "Client", _fake_wordpress_publish_client(sent, []))
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            _add_wordpress_draft_audit(session, page, status="created")
+            _add_wordpress_update_audit(session, page)
+            review = _set_manual_publish_ready(session, page.id)
+            page_id, review_id = page.id, review.id
+        dry_run = client.post(f"/api/wordpress/publish/dry-run/{page_id}").json()
+        wordpress_sandbox.clear_wordpress_application_password()
+        response = client.post(
+            f"/api/wordpress/publish/apply/{page_id}",
+            json={"confirmation_token": dry_run["confirmation_token"], "confirmation_phrase": dry_run["confirmation_phrase"], "confirmed_backup_file": "atlas-backup-test.json"},
+        )
+        with Session(engine) as session:
+            assert session.exec(select(WordPressPublishAudit)).all() == []
+            session.delete(session.get(WordPressQualityReview, review_id))
+            draft_audits = session.exec(select(WordPressDraftAudit).where(WordPressDraftAudit.generated_page_id == page_id)).all()
+            _restore_wordpress_page(session, session.get(GeneratedPage, page_id), original, audits=draft_audits)
+            _clear_wordpress_settings(session)
+    assert response.status_code == 409
+    assert sent == []
+
+
+def test_wordpress_publish_apply_blocks_invalid_backup_without_wordpress_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[dict] = []
+    monkeypatch.setattr(wordpress_publish.httpx, "Client", _fake_wordpress_publish_client(sent, []))
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            _add_wordpress_draft_audit(session, page, status="created")
+            _add_wordpress_update_audit(session, page)
+            review = _set_manual_publish_ready(session, page.id)
+            page_id, review_id = page.id, review.id
+        dry_run = client.post(f"/api/wordpress/publish/dry-run/{page_id}").json()
+        response = client.post(
+            f"/api/wordpress/publish/apply/{page_id}",
+            json={"confirmation_token": dry_run["confirmation_token"], "confirmation_phrase": dry_run["confirmation_phrase"], "confirmed_backup_file": "missing.json"},
+        )
+        with Session(engine) as session:
+            assert session.exec(select(WordPressPublishAudit)).all() == []
+            session.delete(session.get(WordPressQualityReview, review_id))
+            draft_audits = session.exec(select(WordPressDraftAudit).where(WordPressDraftAudit.generated_page_id == page_id)).all()
+            _restore_wordpress_page(session, session.get(GeneratedPage, page_id), original, audits=draft_audits)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+    assert response.status_code == 409
+    assert sent == []
+
+
+def test_wordpress_publish_apply_publishes_one_confirmed_page_and_preserves_draft_audits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[dict] = []
+    pending_seen: list[bool] = []
+    monkeypatch.setattr(wordpress_publish.httpx, "Client", _fake_wordpress_publish_client(sent, pending_seen))
+    monkeypatch.setattr(wordpress_publish, "resolve_backup_download", lambda _: Path("atlas-backup-test.json"))
+    monkeypatch.setattr(wordpress_publish, "load_backup", lambda _: {"metadata": {"created_at": datetime.now(UTC).isoformat()}})
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            create_audit = _add_wordpress_draft_audit(session, page, status="created")
+            update_audit = _add_wordpress_update_audit(session, page)
+            review = _set_manual_publish_ready(session, page.id)
+            page_id, review_id = page.id, review.id
+            draft_count = _wordpress_draft_audit_count(session, page_id)
+        dry_run = client.post(f"/api/wordpress/publish/dry-run/{page_id}").json()
+        response = client.post(
+            f"/api/wordpress/publish/apply/{page_id}",
+            json={
+                "confirmation_token": dry_run["confirmation_token"],
+                "confirmation_phrase": dry_run["confirmation_phrase"],
+                "confirmed_backup_file": "atlas-backup-test.json",
+            },
+        )
+        with Session(engine) as session:
+            published = session.get(GeneratedPage, page_id)
+            audits = session.exec(select(WordPressPublishAudit).where(WordPressPublishAudit.generated_page_id == page_id)).all()
+            assert published.status == "published"
+            assert published.wordpress_status == "publish"
+            assert _wordpress_draft_audit_count(session, page_id) == draft_count
+            assert len(audits) == 1 and audits[0].status == "published"
+            session.delete(audits[0])
+            session.delete(session.get(WordPressQualityReview, review_id))
+            draft_audits = session.exec(select(WordPressDraftAudit).where(WordPressDraftAudit.generated_page_id == page_id)).all()
+            _restore_wordpress_page(session, published, original, audits=draft_audits)
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+    assert response.status_code == 200
+    assert response.json()["wordpress_post_id"] == 712
+    assert response.json()["wordpress_status"] == "publish"
+    assert pending_seen == [True]
+    assert len(sent) == 1 and sent[0]["json"]["status"] == "publish"
+
+
+def test_backup_restore_preserves_publish_audits_idempotently(tmp_path: Path) -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            now = datetime.now(UTC)
+            audit = WordPressPublishAudit(
+                generated_page_id=page.id,
+                wordpress_post_id=8,
+                wordpress_site_url="https://wordpress.example",
+                attempted_at=now,
+                completed_at=now,
+                status="published",
+                pre_publish_wordpress_status="draft",
+                returned_wordpress_status="publish",
+                returned_wordpress_url="https://wordpress.example/orlando/",
+                current_draft_payload_hash="current-draft-hash",
+                latest_update_audit_hash="current-draft-hash",
+                publish_payload_hash="publish-hash",
+                gate_results=[{"code": "one_page_only", "passed": True}],
+                backup_file_name="atlas-backup-before-publish.json",
+            )
+            session.add(audit)
+            session.commit()
+            export = export_backup(session, backup_dir=tmp_path)
+            session.delete(audit)
+            session.commit()
+            restore_backup(session, export["path"])
+            restore_backup(session, export["path"])
+            restored = session.exec(select(WordPressPublishAudit).where(WordPressPublishAudit.publish_payload_hash == "publish-hash")).all()
+            assert len(restored) == 1
+            assert restored[0].status == "published"
+            session.delete(restored[0])
+            session.commit()
 
 
 def test_wordpress_create_requires_valid_confirmation_without_audit() -> None:
@@ -4357,7 +4511,7 @@ def test_backup_restore_preserves_wordpress_audits_and_safe_references_idempoten
                 audits=restored_audits,
             )
 
-    assert payload["metadata"]["version"] == "0.27"
+    assert payload["metadata"]["version"] == "0.28"
     assert payload["data"]["wordpress_draft_audits"]
     assert payload["data"]["generated_pages"][0].get("wordpress_post_id") is not None or any(
         item.get("wordpress_post_id") == 911
@@ -4848,6 +5002,46 @@ def _fake_wordpress_update_client(
         def post(self, url: str, *, json: dict, auth: object) -> FakePostResponse:
             sent.append({"url": url, "json": deepcopy(json), "auth": auth is not None})
             return FakePostResponse()
+
+    return FakeClient
+
+
+def _fake_wordpress_publish_client(sent: list[dict], pending_seen: list[bool]):
+    class FakeGetResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {
+                "id": 712, "status": "draft", "link": "https://wordpress.example/?page_id=712",
+                "modified_gmt": "2026-07-10T00:00:00",
+                "title": {"rendered": "Drywood Termite Tenting in Orlando, FL"},
+                "slug": "drywood-termite-tenting-orlando-fl",
+            }
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {"id": 712, "status": "publish", "link": "https://wordpress.example/orlando/"}
+
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def get(self, *_: object, **__: object) -> FakeGetResponse:
+            return FakeGetResponse()
+
+        def post(self, url: str, *, json: dict, auth: object) -> FakeResponse:
+            with Session(engine) as verification_session:
+                pending_seen.append(bool(verification_session.exec(select(WordPressPublishAudit).where(WordPressPublishAudit.status == "pending")).first()))
+            sent.append({"url": url, "json": deepcopy(json), "auth": auth is not None})
+            return FakeResponse()
 
     return FakeClient
 

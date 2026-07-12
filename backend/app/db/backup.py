@@ -20,11 +20,12 @@ from app.models import (
     Service,
     Setting,
     WordPressDraftAudit,
+    WordPressPublishAudit,
     WordPressQualityReview,
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.27"
+BACKUP_VERSION = "0.28"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -37,6 +38,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.13",
     "0.17",
     "0.27",
+    "0.28",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -58,6 +60,7 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "approval_audits": ApprovalAudit,
     "page_revisions": GeneratedPageRevision,
     "wordpress_draft_audits": WordPressDraftAudit,
+    "wordpress_publish_audits": WordPressPublishAudit,
     "wordpress_quality_reviews": WordPressQualityReview,
     "image_metadata": ImageMetadata,
     "page_image_assignments": PageImageAssignment,
@@ -264,7 +267,9 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 restored_record,
             )
 
+        wordpress_draft_audit_ids: dict[int, int] = {}
         for record in data["wordpress_draft_audits"]:
+            old_audit_id = _record_id(record, "wordpress_draft_audits")
             page_id = _mapped_id(
                 generated_page_ids,
                 record["generated_page_id"],
@@ -287,13 +292,42 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     else None
                 ),
             }
-            _upsert(
+            restored_audit = _upsert(
                 session,
                 WordPressDraftAudit,
                 select(WordPressDraftAudit).where(
                     WordPressDraftAudit.generated_page_id == page_id,
                     WordPressDraftAudit.attempted_at == attempted_at,
                     WordPressDraftAudit.payload_hash == record["payload_hash"],
+                ),
+                restored_record,
+            )
+            wordpress_draft_audit_ids[old_audit_id] = _required_id(restored_audit)
+
+        for record in data["wordpress_publish_audits"]:
+            page_id = _mapped_id(generated_page_ids, record["generated_page_id"], "wordpress_publish_audits.generated_page_id")
+            attempted_at = _datetime_value(record["attempted_at"], "wordpress_publish_audits.attempted_at")
+            restored_record = {
+                **record,
+                "generated_page_id": page_id,
+                "attempted_at": attempted_at,
+                "completed_at": (
+                    _datetime_value(record["completed_at"], "wordpress_publish_audits.completed_at")
+                    if record.get("completed_at") else None
+                ),
+                "latest_update_audit_id": _mapped_optional_id(
+                    wordpress_draft_audit_ids,
+                    record.get("latest_update_audit_id"),
+                    "wordpress_publish_audits.latest_update_audit_id",
+                ),
+            }
+            _upsert(
+                session,
+                WordPressPublishAudit,
+                select(WordPressPublishAudit).where(
+                    WordPressPublishAudit.generated_page_id == page_id,
+                    WordPressPublishAudit.attempted_at == attempted_at,
+                    WordPressPublishAudit.publish_payload_hash == record["publish_payload_hash"],
                 ),
                 restored_record,
             )
@@ -469,6 +503,9 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if backup_version != "0.27" and "wordpress_quality_reviews" not in data:
         data["wordpress_quality_reviews"] = []
         counts["wordpress_quality_reviews"] = 0
+    if backup_version != "0.28" and "wordpress_publish_audits" not in data:
+        data["wordpress_publish_audits"] = []
+        counts["wordpress_publish_audits"] = 0
 
     for group in BACKUP_MODELS:
         records = data.get(group)
@@ -586,6 +623,7 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         "approval_audits": ("generated_page_id", "approved_at", "draft_hash_at_approval"),
         "page_revisions": ("generated_page_id", "created_at", "draft_hash_after"),
         "wordpress_draft_audits": ("generated_page_id", "attempted_at", "payload_hash"),
+        "wordpress_publish_audits": ("generated_page_id", "attempted_at", "publish_payload_hash"),
         "wordpress_quality_reviews": ("generated_page_id",),
         "image_metadata": ("business_id", "file_name"),
         "page_image_assignments": ("generated_page_id", "image_metadata_id", "image_role"),
@@ -639,6 +677,10 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
         ),
         "wordpress_draft_audits": (
             ("generated_page_id", "generated_pages", False),
+        ),
+        "wordpress_publish_audits": (
+            ("generated_page_id", "generated_pages", False),
+            ("latest_update_audit_id", "wordpress_draft_audits", True),
         ),
         "wordpress_quality_reviews": (
             ("generated_page_id", "generated_pages", False),
