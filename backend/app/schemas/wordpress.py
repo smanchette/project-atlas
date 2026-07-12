@@ -173,6 +173,60 @@ class WordPressPublishApplyResult(SQLModel):
     gate_results: list[WordPressDraftGateResult]
 
 
+class WordPressMediaAttachmentMatch(SQLModel):
+    status: Literal["missing", "matched", "blocked", "unavailable"]
+    wordpress_media_id: int | None = None
+    wordpress_media_url: str | None = None
+    message: str
+
+
+class WordPressMediaDryRun(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    assignment_id: int
+    image_id: int
+    status: Literal["blocked", "dry_run_ready"]
+    ready: bool
+    resolved_local_path: str
+    source_file_name: str
+    original_filename: str | None = None
+    mime_type: str
+    file_size: int
+    width: int
+    height: int
+    checksum: str
+    alt_text: str
+    image_title: str
+    existing_wordpress_media_id: int | None = None
+    existing_wordpress_media_url: str | None = None
+    attachment_match: WordPressMediaAttachmentMatch
+    gate_results: list[WordPressDraftGateResult]
+    confirmation_token: str | None = None
+    confirmation_phrase: str | None = None
+    expires_at: str | None = None
+    dry_run_only: bool = True
+
+
+class WordPressMediaUploadRequest(SQLModel):
+    confirmation_token: str = Field(min_length=1)
+    confirmation_phrase: str = Field(min_length=1, max_length=200)
+    confirmed_backup_file: str = Field(min_length=1, max_length=255)
+
+
+class WordPressMediaUploadResult(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    image_id: int
+    assignment_id: int
+    status: Literal["uploaded"]
+    wordpress_media_id: int
+    wordpress_media_url: str
+    checksum: str
+    alt_text: str
+    audit_id: int
+    gate_results: list[WordPressDraftGateResult]
+
+
 class WordPressDraftCreateRequest(SQLModel):
     confirmation_token: str = Field(min_length=1)
     confirmation_phrase: str = Field(min_length=1, max_length=300)

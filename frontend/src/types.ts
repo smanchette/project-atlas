@@ -684,6 +684,52 @@ export type ImageMetadata = {
   exif_status: string;
   created_at: string;
   updated_at: string;
+  wordpress_media_id?: number | null;
+  wordpress_media_url?: string | null;
+  wordpress_media_status?: string | null;
+  wordpress_media_checksum?: string | null;
+  wordpress_media_uploaded_at?: string | null;
+  last_wordpress_media_sync_at?: string | null;
+};
+
+export type WordPressMediaDryRun = {
+  page_id: number;
+  wordpress_post_id: number;
+  assignment_id: number;
+  image_id: number;
+  status: "blocked" | "dry_run_ready";
+  ready: boolean;
+  resolved_local_path: string;
+  source_file_name: string;
+  original_filename?: string | null;
+  mime_type: string;
+  file_size: number;
+  width: number;
+  height: number;
+  checksum: string;
+  alt_text: string;
+  image_title: string;
+  existing_wordpress_media_id?: number | null;
+  existing_wordpress_media_url?: string | null;
+  attachment_match: { status: string; wordpress_media_id?: number | null; wordpress_media_url?: string | null; message: string };
+  gate_results: { code: string; label: string; passed: boolean; message: string }[];
+  confirmation_token?: string | null;
+  confirmation_phrase?: string | null;
+  expires_at?: string | null;
+  dry_run_only: boolean;
+};
+
+export type WordPressMediaUploadResult = {
+  page_id: number;
+  wordpress_post_id: number;
+  image_id: number;
+  assignment_id: number;
+  status: "uploaded";
+  wordpress_media_id: number;
+  wordpress_media_url: string;
+  checksum: string;
+  alt_text: string;
+  audit_id: number;
 };
 
 export type AssignedMedia = {

@@ -232,6 +232,40 @@ class ImageMetadata(TimestampMixin, table=True):
     geo_state: str | None = Field(default="FL", max_length=2, index=True)
     image_prompt: str | None = None
     exif_status: str = Field(default="pending", index=True)
+    wordpress_media_id: int | None = Field(default=None, index=True)
+    wordpress_media_url: str | None = None
+    wordpress_media_status: str | None = Field(default=None, index=True)
+    wordpress_media_checksum: str | None = Field(default=None, index=True)
+    wordpress_media_uploaded_at: datetime | None = None
+    last_wordpress_media_sync_at: datetime | None = None
+
+
+class WordPressMediaSyncAudit(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("generated_page_id", "attempted_at", "source_checksum", name="uq_wordpressmediasyncaudit_page_time_checksum"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
+    image_metadata_id: int = Field(foreign_key="imagemetadata.id", index=True)
+    page_image_assignment_id: int = Field(foreign_key="pageimageassignment.id", index=True)
+    wordpress_post_id: int = Field(index=True)
+    wordpress_media_id: int | None = Field(default=None, index=True)
+    action_type: str = Field(default="upload_media", index=True)
+    status: str = Field(default="pending", index=True)
+    attempted_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    completed_at: datetime | None = None
+    wordpress_site_url: str
+    source_file_name: str
+    source_mime_type: str
+    source_file_size: int
+    source_width: int
+    source_height: int
+    source_checksum: str = Field(index=True)
+    alt_text: str
+    returned_media_url: str | None = None
+    gate_results: list[dict[str, Any]] = Field(sa_column=Column(JSON, nullable=False))
+    backup_file_name: str
+    error_message: str | None = None
 
 
 class PageImageAssignment(TimestampMixin, table=True):

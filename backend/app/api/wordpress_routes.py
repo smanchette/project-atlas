@@ -16,6 +16,9 @@ from app.schemas.wordpress import (
     WordPressDraftUpdateApplyResult,
     WordPressDraftUpdateDryRun,
     WordPressLiveDraftStatus,
+    WordPressMediaDryRun,
+    WordPressMediaUploadRequest,
+    WordPressMediaUploadResult,
     WordPressManualQualityReviewUpdate,
     WordPressPayloadPreview,
     WordPressPublishDryRun,
@@ -36,6 +39,7 @@ from app.services.wordpress_draft_update import (
     dry_run_wordpress_draft_update,
 )
 from app.services.wordpress_publish import apply_wordpress_publish, dry_run_wordpress_publish
+from app.services.wordpress_media_sync import dry_run_wordpress_media, upload_wordpress_media
 from app.services.wordpress_quality_review import (
     build_wordpress_draft_quality_review,
     list_wordpress_draft_quality_reviews,
@@ -184,3 +188,20 @@ def publish_apply(
     session: Session = Depends(get_session),
 ) -> WordPressPublishApplyResult:
     return apply_wordpress_publish(session, page_id, payload)
+
+
+@router.post("/media/dry-run/{page_id}", response_model=WordPressMediaDryRun)
+def media_dry_run(
+    page_id: int,
+    session: Session = Depends(get_session),
+) -> WordPressMediaDryRun:
+    return dry_run_wordpress_media(session, page_id)
+
+
+@router.post("/media/upload/{page_id}", response_model=WordPressMediaUploadResult)
+def media_upload(
+    page_id: int,
+    payload: WordPressMediaUploadRequest,
+    session: Session = Depends(get_session),
+) -> WordPressMediaUploadResult:
+    return upload_wordpress_media(session, page_id, payload)

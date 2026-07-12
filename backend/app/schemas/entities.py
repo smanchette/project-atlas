@@ -251,6 +251,12 @@ class ImageMetadataRead(ImageMetadataBase):
     id: int
     created_at: datetime
     updated_at: datetime
+    wordpress_media_id: int | None = None
+    wordpress_media_url: str | None = None
+    wordpress_media_status: str | None = None
+    wordpress_media_checksum: str | None = None
+    wordpress_media_uploaded_at: datetime | None = None
+    last_wordpress_media_sync_at: datetime | None = None
 
 
 class PageImageAssignmentBase(SQLModel):

@@ -11,6 +11,7 @@ from app.models.entities import (
     Service,
     Setting,
     WordPressDraftAudit,
+    WordPressMediaSyncAudit,
     WordPressPublishAudit,
     WordPressQualityReview,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "Service",
     "Setting",
     "WordPressDraftAudit",
+    "WordPressMediaSyncAudit",
     "WordPressPublishAudit",
     "WordPressQualityReview",
 ]

@@ -20,12 +20,13 @@ from app.models import (
     Service,
     Setting,
     WordPressDraftAudit,
+    WordPressMediaSyncAudit,
     WordPressPublishAudit,
     WordPressQualityReview,
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.28"
+BACKUP_VERSION = "0.29"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -39,6 +40,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.17",
     "0.27",
     "0.28",
+    "0.29",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -61,6 +63,7 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "page_revisions": GeneratedPageRevision,
     "wordpress_draft_audits": WordPressDraftAudit,
     "wordpress_publish_audits": WordPressPublishAudit,
+    "wordpress_media_sync_audits": WordPressMediaSyncAudit,
     "wordpress_quality_reviews": WordPressQualityReview,
     "image_metadata": ImageMetadata,
     "page_image_assignments": PageImageAssignment,
@@ -389,7 +392,9 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             )
             image_metadata_ids[old_id] = _required_id(restored)
 
+        page_image_assignment_ids: dict[int, int] = {}
         for record in data["page_image_assignments"]:
+            old_assignment_id = _record_id(record, "page_image_assignments")
             page_id = _mapped_id(
                 generated_page_ids,
                 record["generated_page_id"],
@@ -404,7 +409,7 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     "page_image_assignments.image_metadata_id",
                 ),
             }
-            _upsert(
+            restored_assignment = _upsert(
                 session,
                 PageImageAssignment,
                 select(PageImageAssignment).where(
@@ -413,6 +418,26 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     PageImageAssignment.image_role == record["image_role"],
                 ),
                 restored_record,
+            )
+            page_image_assignment_ids[old_assignment_id] = _required_id(restored_assignment)
+
+        for record in data["wordpress_media_sync_audits"]:
+            attempted_at = _datetime_value(record["attempted_at"], "wordpress_media_sync_audits.attempted_at")
+            restored_record = {
+                **record,
+                "generated_page_id": _mapped_id(generated_page_ids, record["generated_page_id"], "wordpress_media_sync_audits.generated_page_id"),
+                "image_metadata_id": _mapped_id(image_metadata_ids, record["image_metadata_id"], "wordpress_media_sync_audits.image_metadata_id"),
+                "page_image_assignment_id": _mapped_id(page_image_assignment_ids, record["page_image_assignment_id"], "wordpress_media_sync_audits.page_image_assignment_id"),
+                "attempted_at": attempted_at,
+                "completed_at": _datetime_value(record["completed_at"], "wordpress_media_sync_audits.completed_at") if record.get("completed_at") else None,
+            }
+            _upsert(
+                session, WordPressMediaSyncAudit,
+                select(WordPressMediaSyncAudit).where(
+                    WordPressMediaSyncAudit.generated_page_id == restored_record["generated_page_id"],
+                    WordPressMediaSyncAudit.attempted_at == attempted_at,
+                    WordPressMediaSyncAudit.source_checksum == record["source_checksum"],
+                ), restored_record,
             )
 
         for record in data["settings"]:
@@ -506,6 +531,9 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if backup_version != "0.28" and "wordpress_publish_audits" not in data:
         data["wordpress_publish_audits"] = []
         counts["wordpress_publish_audits"] = 0
+    if backup_version != "0.29" and "wordpress_media_sync_audits" not in data:
+        data["wordpress_media_sync_audits"] = []
+        counts["wordpress_media_sync_audits"] = 0
 
     for group in BACKUP_MODELS:
         records = data.get(group)
@@ -624,6 +652,7 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         "page_revisions": ("generated_page_id", "created_at", "draft_hash_after"),
         "wordpress_draft_audits": ("generated_page_id", "attempted_at", "payload_hash"),
         "wordpress_publish_audits": ("generated_page_id", "attempted_at", "publish_payload_hash"),
+        "wordpress_media_sync_audits": ("generated_page_id", "attempted_at", "source_checksum"),
         "wordpress_quality_reviews": ("generated_page_id",),
         "image_metadata": ("business_id", "file_name"),
         "page_image_assignments": ("generated_page_id", "image_metadata_id", "image_role"),
@@ -684,6 +713,11 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
         ),
         "wordpress_quality_reviews": (
             ("generated_page_id", "generated_pages", False),
+        ),
+        "wordpress_media_sync_audits": (
+            ("generated_page_id", "generated_pages", False),
+            ("image_metadata_id", "image_metadata", False),
+            ("page_image_assignment_id", "page_image_assignments", False),
         ),
     }
     for group, group_references in references.items():

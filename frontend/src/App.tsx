@@ -34,6 +34,7 @@ import WordPressDraftQueuePage from "./pages/WordPressDraftQueuePage";
 import WordPressSandboxPage from "./pages/WordPressSandboxPage";
 import WordPressDraftUpdateSandboxPage from "./pages/WordPressDraftUpdateSandboxPage";
 import WordPressPublishSafetySandboxPage from "./pages/WordPressPublishSafetySandboxPage";
+import WordPressMediaSafetyPage from "./pages/WordPressMediaSafetyPage";
 import type { Business, City, County, FieldConfig, GeneratedPage, Service } from "./types";
 
 const navItems = [
@@ -52,6 +53,7 @@ const navItems = [
   { to: "/wordpress-draft-review", label: "WP Draft Review", icon: FileSearch },
   { to: "/wordpress-draft-update", label: "WP Draft Update", icon: ClipboardCheck },
   { to: "/wordpress-publish-safety", label: "WP Publish Safety", icon: ShieldCheck },
+  { to: "/wordpress-media-safety", label: "WP Media Safety", icon: Images },
   { to: "/wordpress-quality-review", label: "WP Quality Review", icon: ListTodo },
   { to: "/settings", label: "Settings", icon: Settings }
 ];
@@ -191,6 +193,7 @@ function DashboardShell() {
           <Route path="/wordpress-draft-review" element={<WordPressDraftReviewPage />} />
           <Route path="/wordpress-draft-update" element={<WordPressDraftUpdateSandboxPage />} />
           <Route path="/wordpress-publish-safety" element={<WordPressPublishSafetySandboxPage />} />
+          <Route path="/wordpress-media-safety" element={<WordPressMediaSafetyPage />} />
           <Route path="/wordpress-quality-review" element={<WordPressDraftQualityReviewPage />} />
           <Route
             path="/settings"

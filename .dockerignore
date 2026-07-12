@@ -1,0 +1,7 @@
+.pytest_cache
+backend/.pytest_cache
+**/.pytest_cache
+**/__pycache__
+**/*.pyc
+**/test_atlas.db
+**/test_atlas.db-*
