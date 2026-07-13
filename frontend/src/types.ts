@@ -850,6 +850,20 @@ export type AssignedMedia = {
   image: ImageMetadata;
 };
 
+export type WordPressMetadataGate = { code: string; label: string; passed: boolean; message: string };
+
+export type WordPressMetadataDryRun = {
+  page_id: number; wordpress_post_id: number; status: "blocked" | "metadata_ready"; ready: boolean;
+  plugin_version: string; plugin_installed: boolean; plugin_active: boolean; plugin_rendering_enabled: boolean;
+  payload: { meta_description: string; open_graph: Record<string, string>; twitter: Record<string, string>; json_ld: Record<string, unknown>; media_id: 31; excluded_media_ids: number[] };
+  payload_hash: string; current_snapshot?: Record<string, unknown> | null; gate_results: WordPressMetadataGate[];
+  confirmation_token?: string | null; confirmation_phrase?: string | null; expires_at?: string | null;
+};
+
+export type WordPressMetadataApplyResult = { page_id: number; wordpress_post_id: number; status: "metadata_applied"; payload_hash: string; wordpress_revision: string; audit_id: number; verification: Record<string, unknown> };
+export type WordPressMetadataVerification = { status: "verified" | "failed" | "not_applied"; metadata_correct: boolean; apply_needed: boolean; payload_hash: string; live_payload_hash?: string | null; gate_results: WordPressMetadataGate[]; read_only: true };
+export type WordPressMetadataRollbackDryRun = { status: "blocked" | "rollback_ready"; ready: boolean; current_payload_hash?: string | null; gate_results: WordPressMetadataGate[]; confirmation_token?: string | null; confirmation_phrase?: string | null; expires_at?: string | null };
+
 export type KnowledgeBlock = {
   id: number;
   business_id: number;

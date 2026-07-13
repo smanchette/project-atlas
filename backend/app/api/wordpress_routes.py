@@ -34,6 +34,17 @@ from app.schemas.wordpress import (
     WordPressPublishApplyResult,
     WordPressSettingsRead,
     WordPressSettingsUpdate,
+    WordPressMetadataDryRun,
+    WordPressMetadataApplyRequest,
+    WordPressMetadataApplyResult,
+    WordPressMetadataVerification,
+    WordPressMetadataRollbackDryRun,
+    WordPressMetadataRollbackRequest,
+    WordPressMetadataRollbackResult,
+    WordPressMetadataBackupProof,
+    WordPressMetadataReconciliationDryRun,
+    WordPressMetadataReconciliationRequest,
+    WordPressMetadataReconciliationResult,
 )
 from app.services.wordpress_draft_review import (
     check_live_wordpress_draft_status,
@@ -67,6 +78,15 @@ from app.services.wordpress_sandbox import (
     read_wordpress_settings,
     save_wordpress_settings,
     test_wordpress_connection,
+)
+from app.services.wordpress_metadata import (
+    apply_wordpress_metadata,
+    dry_run_wordpress_metadata,
+    dry_run_wordpress_metadata_rollback,
+    rollback_wordpress_metadata,
+    verify_wordpress_metadata,
+    dry_run_wordpress_metadata_reconciliation,
+    reconcile_wordpress_metadata,
 )
 
 router = APIRouter(prefix="/wordpress", tags=["wordpress sandbox"])
@@ -272,3 +292,38 @@ def featured_image_verify(
     session: Session = Depends(get_session),
 ) -> WordPressFeaturedImageVerification:
     return verify_wordpress_featured_image(session, page_id)
+
+
+@router.post("/metadata/dry-run/{page_id}", response_model=WordPressMetadataDryRun)
+def metadata_dry_run(page_id: int, payload: WordPressMetadataBackupProof | None = None, session: Session = Depends(get_session)) -> WordPressMetadataDryRun:
+    return dry_run_wordpress_metadata(session, page_id, payload)
+
+
+@router.post("/metadata/apply/{page_id}", response_model=WordPressMetadataApplyResult)
+def metadata_apply(page_id: int, payload: WordPressMetadataApplyRequest, session: Session = Depends(get_session)) -> WordPressMetadataApplyResult:
+    return apply_wordpress_metadata(session, page_id, payload)
+
+
+@router.post("/metadata/verify/{page_id}", response_model=WordPressMetadataVerification)
+def metadata_verify(page_id: int, session: Session = Depends(get_session)) -> WordPressMetadataVerification:
+    return verify_wordpress_metadata(session, page_id)
+
+
+@router.post("/metadata/reconciliation/dry-run/{page_id}", response_model=WordPressMetadataReconciliationDryRun)
+def metadata_reconciliation_dry_run(page_id: int, payload: WordPressMetadataBackupProof | None = None, session: Session = Depends(get_session)) -> WordPressMetadataReconciliationDryRun:
+    return dry_run_wordpress_metadata_reconciliation(session, page_id, payload)
+
+
+@router.post("/metadata/reconciliation/apply/{page_id}", response_model=WordPressMetadataReconciliationResult)
+def metadata_reconciliation_apply(page_id: int, payload: WordPressMetadataReconciliationRequest, session: Session = Depends(get_session)) -> WordPressMetadataReconciliationResult:
+    return reconcile_wordpress_metadata(session, page_id, payload)
+
+
+@router.post("/metadata/rollback/dry-run/{page_id}", response_model=WordPressMetadataRollbackDryRun)
+def metadata_rollback_dry_run(page_id: int, payload: WordPressMetadataBackupProof | None = None, session: Session = Depends(get_session)) -> WordPressMetadataRollbackDryRun:
+    return dry_run_wordpress_metadata_rollback(session, page_id, payload)
+
+
+@router.post("/metadata/rollback/apply/{page_id}", response_model=WordPressMetadataRollbackResult)
+def metadata_rollback_apply(page_id: int, payload: WordPressMetadataRollbackRequest, session: Session = Depends(get_session)) -> WordPressMetadataRollbackResult:
+    return rollback_wordpress_metadata(session, page_id, payload)

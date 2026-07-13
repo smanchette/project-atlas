@@ -21,12 +21,14 @@ from app.models import (
     Setting,
     WordPressDraftAudit,
     WordPressMediaSyncAudit,
+    WordPressMetadataState,
+    WordPressMetadataSyncAudit,
     WordPressPublishAudit,
     WordPressQualityReview,
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.29"
+BACKUP_VERSION = "0.30"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -41,6 +43,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.27",
     "0.28",
     "0.29",
+    "0.30",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -64,6 +67,8 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "wordpress_draft_audits": WordPressDraftAudit,
     "wordpress_publish_audits": WordPressPublishAudit,
     "wordpress_media_sync_audits": WordPressMediaSyncAudit,
+    "wordpress_metadata_states": WordPressMetadataState,
+    "wordpress_metadata_sync_audits": WordPressMetadataSyncAudit,
     "wordpress_quality_reviews": WordPressQualityReview,
     "image_metadata": ImageMetadata,
     "page_image_assignments": PageImageAssignment,
@@ -440,6 +445,31 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 ), restored_record,
             )
 
+        for record in data["wordpress_metadata_states"]:
+            restored_record = {
+                **record,
+                "generated_page_id": _mapped_id(generated_page_ids, record["generated_page_id"], "wordpress_metadata_states.generated_page_id"),
+                "last_verified_at": _datetime_value(record["last_verified_at"], "wordpress_metadata_states.last_verified_at") if record.get("last_verified_at") else None,
+                "last_wordpress_metadata_sync_at": _datetime_value(record["last_wordpress_metadata_sync_at"], "wordpress_metadata_states.last_wordpress_metadata_sync_at") if record.get("last_wordpress_metadata_sync_at") else None,
+            }
+            _upsert(session, WordPressMetadataState,
+                select(WordPressMetadataState).where(WordPressMetadataState.generated_page_id == restored_record["generated_page_id"]), restored_record)
+
+        for record in data["wordpress_metadata_sync_audits"]:
+            attempted_at = _datetime_value(record["attempted_at"], "wordpress_metadata_sync_audits.attempted_at")
+            restored_record = {
+                **record,
+                "generated_page_id": _mapped_id(generated_page_ids, record["generated_page_id"], "wordpress_metadata_sync_audits.generated_page_id"),
+                "attempted_at": attempted_at,
+                "completed_at": _datetime_value(record["completed_at"], "wordpress_metadata_sync_audits.completed_at") if record.get("completed_at") else None,
+            }
+            _upsert(session, WordPressMetadataSyncAudit,
+                select(WordPressMetadataSyncAudit).where(
+                    WordPressMetadataSyncAudit.generated_page_id == restored_record["generated_page_id"],
+                    WordPressMetadataSyncAudit.attempted_at == attempted_at,
+                    WordPressMetadataSyncAudit.payload_hash == record["payload_hash"],
+                ), restored_record)
+
         for record in data["settings"]:
             if is_sensitive_setting_key(record["setting_key"]):
                 continue
@@ -534,6 +564,11 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if backup_version != "0.29" and "wordpress_media_sync_audits" not in data:
         data["wordpress_media_sync_audits"] = []
         counts["wordpress_media_sync_audits"] = 0
+    if backup_version != "0.30":
+        for group in ("wordpress_metadata_states", "wordpress_metadata_sync_audits"):
+            if group not in data:
+                data[group] = []
+                counts[group] = 0
 
     for group in BACKUP_MODELS:
         records = data.get(group)
@@ -653,6 +688,8 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         "wordpress_draft_audits": ("generated_page_id", "attempted_at", "payload_hash"),
         "wordpress_publish_audits": ("generated_page_id", "attempted_at", "publish_payload_hash"),
         "wordpress_media_sync_audits": ("generated_page_id", "attempted_at", "source_checksum"),
+        "wordpress_metadata_states": ("generated_page_id",),
+        "wordpress_metadata_sync_audits": ("generated_page_id", "attempted_at", "payload_hash"),
         "wordpress_quality_reviews": ("generated_page_id",),
         "image_metadata": ("business_id", "file_name"),
         "page_image_assignments": ("generated_page_id", "image_metadata_id", "image_role"),
@@ -718,6 +755,12 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
             ("generated_page_id", "generated_pages", False),
             ("image_metadata_id", "image_metadata", False),
             ("page_image_assignment_id", "page_image_assignments", False),
+        ),
+        "wordpress_metadata_states": (
+            ("generated_page_id", "generated_pages", False),
+        ),
+        "wordpress_metadata_sync_audits": (
+            ("generated_page_id", "generated_pages", False),
         ),
     }
     for group, group_references in references.items():

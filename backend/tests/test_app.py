@@ -1,26 +1,16 @@
 from collections import Counter
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 from io import BytesIO
 import json
-import os
 from pathlib import Path
 import shutil
 from zipfile import ZipFile
 
 import pytest
 from PIL import Image
-
-os.environ["DATABASE_URL"] = "sqlite:///./test_atlas.db"
-os.environ["MEDIA_ROOT"] = "test_media"
-os.environ["MEDIA_PUBLIC_URL"] = "http://testserver/media"
-test_db_path = Path("test_atlas.db")
-if test_db_path.exists():
-    test_db_path.unlink()
-test_media_path = Path("test_media")
-if test_media_path.exists():
-    shutil.rmtree(test_media_path)
+from conftest import TEST_MEDIA_PATH as test_media_path
 
 from app.db.city_data import TARGET_COUNTIES
 from app.db import backup as backup_module
@@ -234,7 +224,7 @@ def test_backup_export_contains_metadata_counts_and_all_data_groups(tmp_path: Pa
 
     assert backup_path.is_file()
     assert payload["metadata"]["app"] == "Project Atlas"
-    assert payload["metadata"]["version"] == "0.29"
+    assert payload["metadata"]["version"] == "0.30"
     assert isinstance(payload["metadata"]["created_at"], str)
     assert payload["metadata"]["table_counts"] == before_counts
     assert set(payload["data"]) == set(BACKUP_MODELS)
@@ -1752,7 +1742,7 @@ def test_backup_restore_preserves_review_notes_and_approval_audits_idempotently(
                 session.delete(record)
             session.commit()
 
-    assert payload["metadata"]["version"] == "0.29"
+    assert payload["metadata"]["version"] == "0.30"
     assert payload["data"]["approval_audits"]
     exported_page = next(
         record
@@ -2136,7 +2126,7 @@ def test_backup_restore_preserves_page_revisions_idempotently(tmp_path: Path) ->
                 revisions=restored_revisions,
             )
 
-    assert payload_json["metadata"]["version"] == "0.29"
+    assert payload_json["metadata"]["version"] == "0.30"
     assert payload_json["data"]["page_revisions"]
     assert len(restored_revisions) == 1
     assert restored_after["hero_subheadline"].endswith("Reviewed for backup.")
@@ -3081,12 +3071,17 @@ def test_wordpress_draft_queue_blocks_unapproved_pages() -> None:
 
 
 def test_wordpress_draft_queue_blocks_stale_qa_after_edits() -> None:
+    qa_time = datetime(2026, 7, 12, 12, 0, 0, tzinfo=UTC)
+    revision_time = qa_time + timedelta(seconds=1)
     with TestClient(app) as client:
         _configure_wordpress_sandbox(client)
         with Session(engine) as session:
             page, original = _prepare_wordpress_draft_page(session)
+            page.qa_checked_at = qa_time
+            session.add(page)
             revision = GeneratedPageRevision(
                 generated_page_id=page.id,
+                created_at=revision_time,
                 draft_hash_before="before",
                 draft_hash_after="after",
                 draft_content_before=page.draft_content,
@@ -3112,7 +3107,37 @@ def test_wordpress_draft_queue_blocks_stale_qa_after_edits() -> None:
     assert response.status_code == 200
     item = next(item for item in response.json()["items"] if item["page_id"] == page_id)
     assert item["queue_group"] == "blocked_stale_qa"
+    assert datetime.fromisoformat(item["latest_revision_at"]).replace(tzinfo=UTC) > datetime.fromisoformat(item["qa_checked_at"]).replace(tzinfo=UTC)
     assert item["eligible"] is False
+
+
+@pytest.mark.parametrize(
+    ("revision_offset", "expected_group"),
+    [(-1, "eligible"), (0, "eligible"), (1, "blocked_stale_qa")],
+    ids=["revision-before-qa", "revision-equal-qa", "revision-after-qa"],
+)
+def test_wordpress_draft_queue_qa_revision_timestamp_boundaries(revision_offset: int, expected_group: str) -> None:
+    qa_time = datetime(2026, 7, 12, 13, 0, 0, 123456, tzinfo=UTC)
+    revision_time = qa_time + timedelta(seconds=revision_offset)
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            page.qa_checked_at = qa_time
+            session.add(page)
+            revision = GeneratedPageRevision(generated_page_id=page.id, created_at=revision_time,
+                draft_hash_before="before", draft_hash_after=f"after-{revision_offset}",
+                draft_content_before=page.draft_content, draft_content_after=page.draft_content, changed_fields=["intro"])
+            session.add(revision); session.commit(); page_id, revision_id = page.id, revision.id
+        response = client.get("/api/wordpress/draft-queue")
+        with Session(engine) as session:
+            persisted_page = session.get(GeneratedPage, page_id); persisted_revision = session.get(GeneratedPageRevision, revision_id)
+            assert persisted_page.qa_checked_at.tzinfo is None and persisted_revision.created_at.tzinfo is None
+            session.delete(persisted_revision); _restore_wordpress_page(session, persisted_page, original); _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+    item = next(item for item in response.json()["items"] if item["page_id"] == page_id)
+    assert item["queue_group"] == expected_group
+    assert item["eligible"] is (expected_group == "eligible")
 
 
 def test_wordpress_draft_queue_blocks_missing_credentials() -> None:
@@ -3199,6 +3224,13 @@ def test_wordpress_api_exposes_only_controlled_publish_and_existing_write_routes
         ("/api/wordpress/media/featured-image/dry-run/{page_id}", "POST"),
         ("/api/wordpress/media/featured-image/apply/{page_id}", "POST"),
         ("/api/wordpress/media/featured-image/verify/{page_id}", "POST"),
+        ("/api/wordpress/metadata/dry-run/{page_id}", "POST"),
+        ("/api/wordpress/metadata/apply/{page_id}", "POST"),
+            ("/api/wordpress/metadata/verify/{page_id}", "POST"),
+                ("/api/wordpress/metadata/reconciliation/dry-run/{page_id}", "POST"),
+                ("/api/wordpress/metadata/reconciliation/apply/{page_id}", "POST"),
+        ("/api/wordpress/metadata/rollback/dry-run/{page_id}", "POST"),
+        ("/api/wordpress/metadata/rollback/apply/{page_id}", "POST"),
     }
     assert not any(
         forbidden in path.lower()
@@ -3960,6 +3992,20 @@ def test_wordpress_publish_dry_run_blocks_missing_credentials() -> None:
     assert response.json()["confirmation_token"] is None
 
 
+def test_wordpress_audit_helpers_are_monotonic_and_restore_removes_history() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            create_audit = _add_wordpress_draft_audit(session, page, status="created")
+            first = _add_wordpress_update_audit(session, page)
+            second = _add_wordpress_update_audit(session, page)
+            assert first.payload_hash == second.payload_hash
+            assert first.attempted_at != second.attempted_at
+            page_id = page.id
+            _restore_wordpress_page(session, page, original, audits=[create_audit, first, second])
+            assert session.exec(select(WordPressDraftAudit).where(WordPressDraftAudit.generated_page_id == page_id)).all() == []
+
+
 def test_wordpress_publish_dry_run_blocks_manual_review_not_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4518,7 +4564,7 @@ def test_backup_restore_preserves_wordpress_audits_and_safe_references_idempoten
                 audits=restored_audits,
             )
 
-    assert payload["metadata"]["version"] == "0.29"
+    assert payload["metadata"]["version"] == "0.30"
     assert payload["data"]["wordpress_draft_audits"]
     assert payload["data"]["generated_pages"][0].get("wordpress_post_id") is not None or any(
         item.get("wordpress_post_id") == 911
@@ -4625,11 +4671,11 @@ def _add_wordpress_update_audit(
     session: Session,
     page: GeneratedPage,
 ) -> WordPressDraftAudit:
-    now = datetime.now(UTC)
     current_hash = wordpress_draft_review.compare_wordpress_draft(
         session,
         page.id,
     ).current_export_payload_hash
+    now = _next_wordpress_audit_time(session, page.id, current_hash)
     audit = WordPressDraftAudit(
         generated_page_id=page.id,
         attempted_at=now,
@@ -4649,6 +4695,23 @@ def _add_wordpress_update_audit(
     session.commit()
     session.refresh(audit)
     return audit
+
+
+def _next_wordpress_audit_time(session: Session, page_id: int, payload_hash: str) -> datetime:
+    latest = session.exec(
+        select(WordPressDraftAudit).where(
+            WordPressDraftAudit.generated_page_id == page_id,
+            WordPressDraftAudit.payload_hash == payload_hash,
+        ).order_by(WordPressDraftAudit.attempted_at.desc())
+    ).first()
+    now = datetime.now(UTC)
+    if latest is not None:
+        latest_time = latest.attempted_at
+        if latest_time.tzinfo is None:
+            latest_time = latest_time.replace(tzinfo=UTC)
+        if now <= latest_time:
+            now = latest_time + timedelta(microseconds=1)
+    return now
 
 
 def _set_manual_publish_ready(

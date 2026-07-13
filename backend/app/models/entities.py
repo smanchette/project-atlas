@@ -268,6 +268,48 @@ class WordPressMediaSyncAudit(SQLModel, table=True):
     error_message: str | None = None
 
 
+class WordPressMetadataState(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint("generated_page_id", name="uq_wordpressmetadatastate_generated_page_id"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
+    wordpress_post_id: int = Field(index=True)
+    schema_version: str = Field(default="1.0")
+    status: str = Field(default="not_applied", index=True)
+    payload: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    payload_hash: str | None = Field(default=None, index=True)
+    wordpress_revision: str | None = None
+    last_verified_at: datetime | None = None
+    last_wordpress_metadata_sync_at: datetime | None = None
+
+
+class WordPressMetadataSyncAudit(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "generated_page_id", "attempted_at", "payload_hash",
+            name="uq_wordpressmetadatasyncaudit_page_time_hash",
+        ),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
+    wordpress_post_id: int = Field(index=True)
+    action_type: str = Field(index=True)
+    status: str = Field(default="pending", index=True)
+    attempted_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    completed_at: datetime | None = None
+    wordpress_site_url: str
+    payload_hash: str = Field(index=True)
+    payload_snapshot: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    previous_snapshot: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    returned_snapshot: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    gate_results: list[dict[str, Any]] = Field(sa_column=Column(JSON, nullable=False))
+    data_backup_file_name: str
+    wordpress_backup_reference: str
+    plugin_version: str
+    error_message: str | None = None
+
+
 class PageImageAssignment(TimestampMixin, table=True):
     __table_args__ = (
         UniqueConstraint(

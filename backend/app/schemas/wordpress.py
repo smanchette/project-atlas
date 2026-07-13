@@ -589,3 +589,132 @@ class WordPressDraftQueueResponse(SQLModel):
     site_url_configured: bool
     username_configured: bool
     items: list[WordPressDraftQueueItem]
+
+
+class WordPressMetadataPayload(SQLModel):
+    schema_version: Literal["1.0"] = "1.0"
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    meta_description: str
+    open_graph: dict[str, str]
+    twitter: dict[str, str]
+    json_ld: dict[str, Any]
+    media_id: Literal[31] = 31
+    excluded_media_ids: list[int] = [32]
+
+
+class WordPressMetadataBackupProof(SQLModel):
+    confirmed_data_backup_file: str = Field(min_length=1, max_length=255)
+    confirmed_media_backup_identity: str = Field(min_length=1, max_length=255)
+    confirmed_program_backup_identity: str = Field(min_length=1, max_length=255)
+    wordpress_backup_reference: str = Field(min_length=1, max_length=255)
+    wordpress_backup_timestamp: datetime
+    wordpress_backup_database_included: bool
+    wordpress_backup_plugin_files_included: bool
+    wordpress_restore_capability_confirmed: bool
+
+
+class WordPressMetadataDryRun(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    status: Literal["blocked", "metadata_ready"]
+    ready: bool
+    plugin_version: str
+    plugin_installed: bool
+    plugin_active: bool
+    plugin_rendering_enabled: bool
+    payload: WordPressMetadataPayload
+    payload_hash: str
+    current_snapshot: dict[str, Any] | None = None
+    gate_results: list[WordPressDraftGateResult]
+    confirmation_token: str | None = None
+    confirmation_phrase: str | None = None
+    expires_at: str | None = None
+    dry_run_only: bool = True
+    bound_state_hash: str | None = None
+
+
+class WordPressMetadataApplyRequest(WordPressMetadataBackupProof):
+    confirmation_token: str = Field(min_length=1)
+    confirmation_phrase: str = Field(min_length=1, max_length=200)
+
+
+class WordPressMetadataApplyResult(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    status: Literal["metadata_applied"]
+    payload_hash: str
+    wordpress_revision: str
+    audit_id: int
+    verification: dict[str, Any]
+
+
+class WordPressMetadataVerification(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    status: Literal["verified", "failed", "not_applied"]
+    ready: Literal[False] = False
+    apply_needed: bool
+    metadata_correct: bool
+    payload_hash: str
+    live_payload_hash: str | None = None
+    rendered: dict[str, Any] | None = None
+    gate_results: list[WordPressDraftGateResult]
+    confirmation_token: None = None
+    confirmation_phrase: None = None
+    read_only: Literal[True] = True
+
+
+class WordPressMetadataRollbackDryRun(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    status: Literal["blocked", "rollback_ready"]
+    ready: bool
+    current_payload_hash: str | None = None
+    restore_snapshot: dict[str, Any] | None = None
+    gate_results: list[WordPressDraftGateResult]
+    confirmation_token: str | None = None
+    confirmation_phrase: str | None = None
+    expires_at: str | None = None
+    successful_apply_audit_id: int | None = None
+    bound_state_hash: str | None = None
+
+
+class WordPressMetadataRollbackRequest(WordPressMetadataBackupProof):
+    confirmation_token: str = Field(min_length=1)
+    confirmation_phrase: str = Field(min_length=1, max_length=200)
+
+
+class WordPressMetadataRollbackResult(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    status: Literal["metadata_rolled_back"]
+    audit_id: int
+    wordpress_revision: str
+
+
+class WordPressMetadataReconciliationDryRun(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    status: Literal["blocked", "safe_to_finalize"]
+    safe_to_finalize: bool
+    original_audit_id: int | None = None
+    verification: WordPressMetadataVerification
+    gate_results: list[WordPressDraftGateResult]
+    confirmation_token: str | None = None
+    confirmation_phrase: str | None = None
+    expires_at: str | None = None
+    read_only: Literal[True] = True
+
+
+class WordPressMetadataReconciliationRequest(WordPressMetadataBackupProof):
+    confirmation_token: str = Field(min_length=1)
+    confirmation_phrase: str = Field(min_length=1, max_length=200)
+
+
+class WordPressMetadataReconciliationResult(SQLModel):
+    page_id: int
+    wordpress_post_id: int
+    status: Literal["metadata_reconciled"]
+    original_audit_id: int
+    wordpress_write_performed: Literal[False] = False

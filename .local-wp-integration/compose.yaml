@@ -1,0 +1,46 @@
+services:
+  db:
+    image: mariadb:11.8
+    command: ["--general-log=1", "--log-output=TABLE"]
+    environment:
+      MARIADB_DATABASE: atlas_test
+      MARIADB_USER: atlas_test
+      MARIADB_PASSWORD: ${ATLAS_TEST_DB_PASSWORD:?Set ATLAS_TEST_DB_PASSWORD for the disposable stack}
+      MARIADB_ROOT_PASSWORD: ${ATLAS_TEST_DB_ROOT_PASSWORD:?Set ATLAS_TEST_DB_ROOT_PASSWORD for the disposable stack}
+    volumes: ["db_data:/var/lib/mysql"]
+    networks: [isolated]
+  wordpress:
+    image: wordpress:latest
+    depends_on: [db]
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: atlas_test
+      WORDPRESS_DB_PASSWORD: ${ATLAS_TEST_DB_PASSWORD:?Set ATLAS_TEST_DB_PASSWORD for the disposable stack}
+      WORDPRESS_DB_NAME: atlas_test
+      WORDPRESS_DEBUG: "1"
+      WORDPRESS_CONFIG_EXTRA: |
+        define('WP_DEBUG_LOG', true);
+        define('WP_DEBUG_DISPLAY', false);
+        define('DISALLOW_FILE_EDIT', true);
+    volumes:
+      - wp_data:/var/www/html
+      - ../wordpress/dist/project-atlas-metadata-bridge-0.57.4.zip:/artifacts/project-atlas-metadata-bridge-0.57.4.zip:ro
+      - ./:/tests:ro
+    networks: [isolated]
+  cli:
+    image: wordpress:cli-php8.3
+    depends_on: [db, wordpress]
+    user: "33:33"
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: atlas_test
+      WORDPRESS_DB_PASSWORD: ${ATLAS_TEST_DB_PASSWORD:?Set ATLAS_TEST_DB_PASSWORD for the disposable stack}
+      WORDPRESS_DB_NAME: atlas_test
+    volumes:
+      - wp_data:/var/www/html
+      - ../wordpress/dist/project-atlas-metadata-bridge-0.57.4.zip:/artifacts/project-atlas-metadata-bridge-0.57.4.zip:ro
+      - ./:/tests:ro
+    networks: [isolated]
+volumes: {db_data: {}, wp_data: {}}
+networks:
+  isolated: {internal: true}
