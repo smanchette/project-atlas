@@ -98,12 +98,18 @@ from app.services.wordpress_metadata import (
 )
 from app.services.wordpress_deployment import (
     authorize_manual_install,
+    deployment_readiness,
     install_dry_run,
     report_manual_complete,
     verify_manual_install,
 )
 
 router = APIRouter(prefix="/wordpress", tags=["wordpress sandbox"])
+
+
+@router.get("/deployment/metadata-bridge/install/readiness")
+def metadata_bridge_install_readiness() -> dict[str, object]:
+    return deployment_readiness()
 
 
 @router.post("/deployment/metadata-bridge/install/dry-run/{page_id}", response_model=WordPressDeploymentInstallDryRun)

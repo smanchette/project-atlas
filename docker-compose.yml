@@ -25,11 +25,15 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://atlas:atlas_password@postgres:5432/atlas
       FRONTEND_ORIGIN: http://localhost:5173
+      ATLAS_PROGRAM_ROOT: /atlas-program
+      ATLAS_RELEASE_MANIFEST_PATH: /atlas-runtime/atlas-release.json
+      ATLAS_RELEASE_MANIFEST_SHA256: ${ATLAS_RELEASE_MANIFEST_SHA256:-}
     ports:
       - "8000:8000"
     volumes:
       - ./backend:/app
-      - ./:/atlas-program:ro
+      - ./wordpress:/atlas-program/wordpress:ro
+      - ./.runtime:/atlas-runtime:ro
       - ./frontend/public/media:/frontend/public/media:ro
     depends_on:
       postgres:

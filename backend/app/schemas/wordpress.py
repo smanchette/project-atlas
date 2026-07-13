@@ -733,6 +733,7 @@ class WordPressDeploymentBackupEvidence(SQLModel):
     confirmer_identity: str = Field(min_length=3, max_length=200)
     php_error_log_findings: str = Field(min_length=3, max_length=2000)
     observed_write_summary: str = Field(min_length=3, max_length=2000)
+    manual_browser_evidence: dict[str, Any] | None = None
 
 
 class WordPressDeploymentInstallDryRun(SQLModel):

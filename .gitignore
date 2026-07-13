@@ -2,6 +2,7 @@
 .env
 backend/.env
 frontend/.env
+.runtime/
 
 # Python
 __pycache__/

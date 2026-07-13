@@ -863,6 +863,13 @@ export type WordPressMetadataDryRun = {
 export type WordPressMetadataApplyResult = { page_id: number; wordpress_post_id: number; status: "metadata_applied"; payload_hash: string; wordpress_revision: string; audit_id: number; verification: Record<string, unknown> };
 
 export type WordPressDeploymentGate = { code: string; label: string; passed: boolean; message: string };
+export type WordPressDeploymentReadiness = {
+  release: { atlas_version: string; atlas_commit: string; atlas_tag: string; plugin_version: string; plugin_zip_filename: string; plugin_zip_sha256: string; manifest_sha256: string; verification_source: string } | null;
+  release_status: "verified" | "release_identity_unavailable"; release_error: string | null;
+  source_expectations: { deployment_workflow_version: string; plugin_version: string; plugin_zip_filename: string; plugin_zip_sha256: string };
+  program: { resolved_program_root: string; artifact_relative_path: string; artifact_exists: boolean; source_directory_exists: boolean };
+  read_only: true;
+};
 export type WordPressDeploymentDryRun = {
   page_id: 41; wordpress_post_id: 8; status: "preflight_not_started" | "preflight_ready"; ready: boolean;
   artifact: Record<string, string>; inspected_state: Record<string, unknown>; backup_age_seconds?: number | null;

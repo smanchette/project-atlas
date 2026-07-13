@@ -24,6 +24,10 @@ from app.schemas.wordpress import (
 )
 from app.services import wordpress_deployment as deployment
 
+TEST_ATLAS_VERSION="v0.59.4"
+TEST_ATLAS_COMMIT="c"*40
+TEST_ATLAS_TAG="v0.59.4"
+
 
 def proof(**extra):
     value = dict(
@@ -70,7 +74,7 @@ def db(tmp_path):
 def authorize_request(pre, reference="sg-backup-123"):
     values = proof(wordpress_backup_reference=reference)
     model = WordPressDeploymentAuthorizeRequest(**values, confirmation_token="placeholder", confirmation_phrase=deployment.INSTALL_PHRASE, operator="Shawn Manchette", shawn_approved_at=datetime.now(UTC), evidence_directory="docs/deployment-records/wordpress/orlando-page-8/2026/2026-07-12/v0.59-install")
-    artifact = {"plugin_slug":deployment.PLUGIN_SLUG,"plugin_path":deployment.PLUGIN_FILE,"plugin_version":deployment.PLUGIN_VERSION,"zip_file_name":deployment.ZIP_NAME,"zip_sha256":deployment.ZIP_SHA256}
+    artifact = {"atlas_version":TEST_ATLAS_VERSION,"atlas_commit":TEST_ATLAS_COMMIT,"atlas_tag":TEST_ATLAS_TAG,"release_manifest_sha256":"d"*64,"release_verification_source":"checksum_verified_manifest","plugin_slug":deployment.PLUGIN_SLUG,"plugin_path":deployment.PLUGIN_FILE,"plugin_version":deployment.PLUGIN_VERSION,"zip_file_name":deployment.ZIP_NAME,"zip_sha256":deployment.ZIP_SHA256}
     context = deployment._bound_context(pre, model, artifact)
     model.confirmation_token = deployment._sign_context("authorize_manual_plugin_install", context, datetime.now(UTC)+timedelta(minutes=10))
     dry = WordPressDeploymentInstallDryRun(status="preflight_ready",ready=True,artifact=artifact,inspected_state=pre,gate_results=[])
@@ -79,7 +83,7 @@ def authorize_request(pre, reference="sg-backup-123"):
 
 def audit_model(status="awaiting_manual_installation", deadline=None):
     backup = proof(); completed=backup["wordpress_backup_completed_at"]
-    return WordPressDeploymentAudit(generated_page_id=41,wordpress_post_id=8,action_type="install_metadata_bridge",status=status,operator="Shawn Manchette",shawn_approved_at=datetime.now(UTC),confirmation_phrase_hash="a"*64,atlas_version="v0.57.7",atlas_commit="e"*40,atlas_tag="v0.57.7",plugin_version=deployment.PLUGIN_VERSION,plugin_slug=deployment.PLUGIN_SLUG,plugin_path=deployment.PLUGIN_FILE,zip_file_name=deployment.ZIP_NAME,zip_sha256=deployment.ZIP_SHA256,plugin_source_sha256=deployment.SOURCE_SHA256,backup_reference=backup["wordpress_backup_reference"],backup_completed_at=completed,backup_deadline=deadline or completed+timedelta(hours=4),authorization_jti="1"*32,deployment_key="2"*64,backup_evidence=WordPressDeploymentBackupEvidence(**backup).model_dump(mode="json"),pre_snapshot=snapshot(),evidence_directory="docs/deployment-records/wordpress/orlando-page-8/2026/2026-07-12/v0.59-install")
+    return WordPressDeploymentAudit(generated_page_id=41,wordpress_post_id=8,action_type="install_metadata_bridge",status=status,operator="Shawn Manchette",shawn_approved_at=datetime.now(UTC),confirmation_phrase_hash="a"*64,atlas_version=TEST_ATLAS_VERSION,atlas_commit=TEST_ATLAS_COMMIT,atlas_tag=TEST_ATLAS_TAG,plugin_version=deployment.PLUGIN_VERSION,plugin_slug=deployment.PLUGIN_SLUG,plugin_path=deployment.PLUGIN_FILE,zip_file_name=deployment.ZIP_NAME,zip_sha256=deployment.ZIP_SHA256,plugin_source_sha256=deployment.SOURCE_SHA256,backup_reference=backup["wordpress_backup_reference"],backup_completed_at=completed,backup_deadline=deadline or completed+timedelta(hours=4),authorization_jti="1"*32,deployment_key="2"*64,backup_evidence=WordPressDeploymentBackupEvidence(**backup).model_dump(mode="json"),pre_snapshot=snapshot(),evidence_directory="docs/deployment-records/wordpress/orlando-page-8/2026/2026-07-12/v0.59-install")
 
 
 def test_install_routes_are_fixed_and_no_activation_or_upload_route():
@@ -97,7 +101,15 @@ def test_authorization_consumes_nonce_and_preserves_exact_initial_sequence(monke
         audit=session.get(WordPressDeploymentAudit,result.audit_id);nonce=session.exec(select(WordPressDeploymentNonce)).one()
         assert result.state_history==["installation_authorized","awaiting_manual_installation"]
         assert audit.status=="awaiting_manual_installation" and nonce.audit_id==audit.id
+        assert (audit.atlas_version,audit.atlas_commit,audit.atlas_tag)==(TEST_ATLAS_VERSION,TEST_ATLAS_COMMIT,TEST_ATLAS_TAG)
+        assert audit.evidence_summary["release_manifest_sha256"]=="d"*64 and audit.evidence_summary["release_verification_source"]=="checksum_verified_manifest"
         assert audit.confirmation_phrase_hash != deployment.INSTALL_PHRASE and request.confirmation_token not in str(audit.model_dump())
+
+
+def test_authorization_token_binds_the_same_runtime_release_identity():
+    pre=snapshot();request,_=authorize_request(pre)
+    token=deployment._verify(request.confirmation_token,"authorize_manual_plugin_install",41)
+    assert token["context"]["atlas_release"]=={"version":TEST_ATLAS_VERSION,"commit":TEST_ATLAS_COMMIT,"tag":TEST_ATLAS_TAG,"manifest_sha256":"d"*64,"verification_source":"checksum_verified_manifest"}
 
 
 def test_nonce_replay_and_duplicate_deployment_are_blocked(monkeypatch,db):
@@ -212,12 +224,12 @@ def test_evidence_path_resolved_symlink_escape_rejected(monkeypatch,tmp_path):
             if str(path).startswith(str(year)): return outside/"2026-07-12/v0.59-install"
             return original_resolve(path,strict=strict)
         monkeypatch.setattr(Path,"resolve",simulated_resolve)
-    monkeypatch.setattr(deployment,"PROJECT_ROOT",project);monkeypatch.setattr(deployment,"EVIDENCE_ROOT",root)
+    monkeypatch.setattr(deployment,"resolve_program_root",lambda:project)
     with pytest.raises(HTTPException): deployment._safe_evidence_path("docs/deployment-records/wordpress/orlando-page-8/2026/2026-07-12/v0.59-install")
 
 
 def test_dry_run_does_not_create_evidence_directory(monkeypatch,tmp_path):
-    monkeypatch.setattr(deployment,"PROJECT_ROOT",tmp_path);monkeypatch.setattr(deployment,"EVIDENCE_ROOT",tmp_path/"docs/deployment-records/wordpress/orlando-page-8")
+    monkeypatch.setattr(deployment,"resolve_program_root",lambda:tmp_path)
     path="docs/deployment-records/wordpress/orlando-page-8/2026/2026-07-12/v0.59-install";deployment._safe_evidence_path(path)
     assert not (tmp_path/path).exists()
 

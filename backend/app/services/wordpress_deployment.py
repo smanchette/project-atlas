@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import secrets
@@ -37,22 +38,25 @@ from app.schemas.wordpress import (
 )
 from app.services.wordpress_metadata import _hash, _parse_html, _sign_context, _verify
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
+from app.services.wordpress_deployment_release import (
+    SOURCE_EXPECTATIONS,
+    DeploymentReleaseError,
+    artifact_sha256,
+    readiness_diagnostics,
+    release_paths,
+    resolve_program_root,
+    verify_runtime_release_identity,
+)
+from app.services.wordpress_rendered_state import acquire_rendered_state
 
-ATLAS_VERSION = "v0.57.7"
-ATLAS_COMMIT = "eb834904d59eb4f266e3e77393994c2d72a332ce"
-ATLAS_TAG = "v0.57.7"
-PLUGIN_VERSION = "0.57.4"
-PLUGIN_SLUG = "project-atlas-metadata-bridge"
-PLUGIN_FILE = f"{PLUGIN_SLUG}/project-atlas-metadata-bridge.php"
-ZIP_NAME = "project-atlas-metadata-bridge-0.57.4.zip"
-ZIP_SHA256 = "939412e6e80e8344d95274444fda65b6122fe0c8249a2ced0a8582a418c4e232"
-SOURCE_SHA256 = "5b33659b9fab81ff5aa6d6c8e0d5b89037b5d62fa454e0939f9b3ca91d32cab2"
+PLUGIN_VERSION = SOURCE_EXPECTATIONS.plugin_version
+PLUGIN_SLUG = SOURCE_EXPECTATIONS.plugin_slug
+PLUGIN_FILE = SOURCE_EXPECTATIONS.plugin_entry_path
+ZIP_NAME = SOURCE_EXPECTATIONS.plugin_zip_filename
+ZIP_SHA256 = SOURCE_EXPECTATIONS.plugin_zip_sha256
+SOURCE_SHA256 = SOURCE_EXPECTATIONS.plugin_source_sha256
 INSTALL_PHRASE = "INSTALL PROJECT ATLAS METADATA BRIDGE"
 BACKUP_WINDOW = timedelta(hours=4)
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-EVIDENCE_ROOT = PROJECT_ROOT / "docs" / "deployment-records" / "wordpress" / "orlando-page-8"
-ZIP_PATH = PROJECT_ROOT / "wordpress" / "dist" / ZIP_NAME
-SOURCE_DIR = PROJECT_ROOT / "wordpress" / PLUGIN_SLUG
 ALLOWED_TRANSITIONS = {
     "installation_authorized": {"awaiting_manual_installation", "failed"},
     "awaiting_manual_installation": {"manual_installation_reported", "failed"},
@@ -62,10 +66,34 @@ ALLOWED_TRANSITIONS = {
 }
 
 
+def deployment_readiness() -> dict[str, Any]:
+    try:
+        program = readiness_diagnostics()
+        root = resolve_program_root()
+    except DeploymentReleaseError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    try:
+        release = verify_runtime_release_identity(root).identity()
+        release_status = "verified"
+        release_error = None
+    except DeploymentReleaseError as exc:
+        release = None
+        release_status = "release_identity_unavailable"
+        release_error = str(exc)
+    return {"release": release, "release_status": release_status, "release_error": release_error, "source_expectations": SOURCE_EXPECTATIONS.identity(), "program": program, "read_only": True}
+
+
 def install_dry_run(session: Session, page_id: int, proof: WordPressDeploymentBackupEvidence) -> WordPressDeploymentInstallDryRun:
     _target(page_id)
     artifact, artifact_gates = _verify_artifact()
-    observed = _observe(session)
+    release_verified = any(gate.code == "release_identity" and gate.passed for gate in artifact_gates)
+    observed = _observe(session, proof) if release_verified else {
+        "_error": "release_identity_unavailable",
+        "plugins": [],
+        "rendered": {"source": "none", "outcome": "unavailable", "verified": False},
+        "read_only": True,
+        "wordpress_request_performed": False,
+    }
     gates = [*artifact_gates, *_backup_gates(proof), *_state_gates(session, observed)]
     context = _bound_context(observed, proof, artifact)
     ready = all(gate.passed for gate in gates)
@@ -105,7 +133,7 @@ def authorize_manual_install(session: Session, page_id: int, request: WordPressD
     jti = str(token.get("nonce", ""))
     if not re.fullmatch(r"[0-9a-f]{32}", jti):
         raise HTTPException(422, "The authorization token has no valid nonce.")
-    deployment_key = _deployment_key(request)
+    deployment_key = _deployment_key(request, dry.artifact)
     nonce = WordPressDeploymentNonce(
         jti=jti,
         token_fingerprint=hashlib.sha256(request.confirmation_token.encode()).hexdigest(),
@@ -119,9 +147,9 @@ def authorize_manual_install(session: Session, page_id: int, request: WordPressD
         operator=request.operator,
         shawn_approved_at=request.shawn_approved_at.astimezone(UTC),
         confirmation_phrase_hash=hashlib.sha256(INSTALL_PHRASE.encode()).hexdigest(),
-        atlas_version=ATLAS_VERSION,
-        atlas_commit=ATLAS_COMMIT,
-        atlas_tag=ATLAS_TAG,
+        atlas_version=str(dry.artifact["atlas_version"]),
+        atlas_commit=str(dry.artifact["atlas_commit"]),
+        atlas_tag=str(dry.artifact["atlas_tag"]),
         plugin_version=PLUGIN_VERSION,
         plugin_slug=PLUGIN_SLUG,
         plugin_path=PLUGIN_FILE,
@@ -139,6 +167,8 @@ def authorize_manual_install(session: Session, page_id: int, request: WordPressD
             "authorization_wordpress_request_performed": False,
             "upload_performed_by_atlas": False,
             "token_stored": False,
+            "release_manifest_sha256": dry.artifact.get("release_manifest_sha256"),
+            "release_verification_source": dry.artifact.get("release_verification_source"),
         },
         evidence_directory=evidence_path,
     )
@@ -180,7 +210,7 @@ def report_manual_complete(session: Session, page_id: int, request: WordPressDep
         raise HTTPException(422, "Manual upload completion must be attested.")
     if audit.status != "awaiting_manual_installation":
         raise HTTPException(409, "Audit is not awaiting manual installation.")
-    observed = _observe(session)
+    observed = _observe(session, WordPressDeploymentBackupEvidence.model_validate(audit.backup_evidence))
     gates = [*_stored_backup_gates(audit), *_expected_install_delta_gates(audit.pre_snapshot, observed)]
     if not all(gate.passed for gate in gates):
         _fail_audit(session, audit, request.operator, "manual_acknowledgment_invalid", gates)
@@ -208,7 +238,7 @@ def verify_manual_install(session: Session, page_id: int, request: WordPressDepl
     audit = _audit(session, request.audit_id)
     if audit.status != "verification_pending":
         raise HTTPException(409, "Audit is not pending verification.")
-    observed = _observe(session)
+    observed = _observe(session, WordPressDeploymentBackupEvidence.model_validate(audit.backup_evidence))
     gates = [
         *_stored_backup_gates(audit),
         *_expected_install_delta_gates(audit.pre_snapshot, observed),
@@ -270,7 +300,7 @@ def reconcile_install_audit(session: Session, page_id: int, request: WordPressDe
     raise HTTPException(409, f"Audit {audit.id} requires a separately approved reconciliation workflow; no WordPress request was performed.")
 
 
-def _observe(session: Session) -> dict[str, Any]:
+def _observe(session: Session, proof: WordPressDeploymentBackupEvidence | None = None) -> dict[str, Any]:
     settings = read_wordpress_settings(session)
     password = get_wordpress_application_password()
     if not (settings.site_url and settings.username and password):
@@ -280,21 +310,27 @@ def _observe(session: Session) -> dict[str, Any]:
     page = _request(settings.site_url, settings.username, password, "GET", "/wp-json/wp/v2/pages/8?context=edit")
     media31 = _request(settings.site_url, settings.username, password, "GET", "/wp-json/wp/v2/media/31?context=edit")
     media32 = _request(settings.site_url, settings.username, password, "GET", "/wp-json/wp/v2/media/32?context=edit")
-    rendered = _request(settings.site_url, settings.username, password, "GET", "/drywood-termite-tenting-orlando-fl/?atlas_install_verify=1", text=True)
-    parsed = rendered.get("parsed", {}) if isinstance(rendered, dict) else {}
+    rendered = acquire_rendered_state(
+        settings.username,
+        password,
+        manual_evidence=proof.manual_browser_evidence if proof else None,
+        evidence_signing_key=os.getenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", ""),
+        verified_bypass_url=os.getenv("WORDPRESS_VERIFIED_CACHE_BYPASS_URL", ""),
+        bypass_independently_verified=os.getenv("WORDPRESS_CACHE_BYPASS_VERIFIED", "").lower() == "true",
+    )
     plugin_list = plugins if isinstance(plugins, list) else []
     active_plugins = sorted(item.get("plugin") for item in plugin_list if item.get("status") in {"active", "network-active"})
     media32_url = media32.get("source_url", "") if isinstance(media32, dict) else ""
     page_encoded = json.dumps(page, sort_keys=True) if isinstance(page, dict) else ""
-    rendered_encoded = json.dumps(parsed, sort_keys=True)
+    rendered_encoded = json.dumps(rendered, sort_keys=True)
     locked = {
         "site_title": root.get("name") if isinstance(root, dict) else None,
         "tagline": root.get("description") if isinstance(root, dict) else None,
         "page_snapshot_hash": _hash(page),
         "media31_snapshot_hash": _hash(media31),
         "media32_snapshot_hash": _hash(media32),
-        "rendered_head_hash": parsed.get("head_hash"),
-        "visible_content_hash": parsed.get("visible_hash"),
+        "rendered_head_hash": rendered.get("head_hash"),
+        "visible_content_hash": rendered.get("visible_hash"),
     }
     return {
         "plugins": plugin_list,
@@ -308,16 +344,10 @@ def _observe(session: Session) -> dict[str, Any]:
         "media32": _resource_snapshot(media32),
         "media32_snapshot_hash": _hash(media32),
         "site": {"name": root.get("name"), "description": root.get("description")} if isinstance(root, dict) else {},
-        "rendered": {
-            "head_hash": parsed.get("head_hash"),
-            "visible_hash": parsed.get("visible_hash"),
-            "raw_hash": parsed.get("raw_hash"),
-            "atlas_metadata_marker_present": rendered.get("atlas_metadata_marker_present", False) if isinstance(rendered, dict) else False,
-            "media32_reference_present": bool(media32_url and media32_url in rendered_encoded) or "hero-1.png" in rendered_encoded,
-        },
+        "rendered": {**rendered, "media32_reference_present": bool(media32_url and media32_url in rendered_encoded) or bool(rendered.get("media32_reference_present"))},
         "page_references_media32": bool(media32_url and media32_url in page_encoded) or "hero-1.png" in page_encoded,
         "locked_state_hash": _hash(locked),
-        "cache_headers": rendered.get("cache_headers", {}) if isinstance(rendered, dict) else {},
+        "cache_headers": rendered.get("cache_headers", {}),
         "read_only": True,
     }
 
@@ -336,7 +366,7 @@ def _state_gates(session: Session, observed: dict[str, Any]) -> list[WordPressDr
         _gate("media31", "Media 31 remains exact", media31.get("id") == 31 and bool(image and image.wordpress_media_id == 31), "Media 31 changed."),
         _gate("media32", "Existing media 32 remains unattached, unfeatured, and unreferenced", media32.get("id") == 32 and not media32.get("post") and not observed.get("page_references_media32") and not observed.get("rendered", {}).get("media32_reference_present"), "Media 32 changed or is referenced."),
         _gate("plugin_absent", "Metadata bridge is absent", not any(str(item.get("plugin", "")).startswith(f"{PLUGIN_SLUG}/") for item in observed.get("plugins", [])), "Plugin slug/path conflict exists."),
-        _gate("rendered", "Rendered head and body hashes captured", bool(observed.get("rendered", {}).get("head_hash") and observed.get("rendered", {}).get("visible_hash")), "Rendered state unavailable."),
+        _gate("rendered", "Rendered state is explicitly verified with bound head and body hashes", bool(observed.get("rendered", {}).get("verified") and observed.get("rendered", {}).get("head_hash") and observed.get("rendered", {}).get("visible_hash")), f"Rendered state blocked: {observed.get('rendered', {}).get('outcome', 'unavailable')}."),
     ]
 
 
@@ -363,29 +393,52 @@ def _expected_install_delta_gates(before: dict[str, Any], after: dict[str, Any])
 
 
 def _verify_artifact() -> tuple[dict[str, Any], list[WordPressDraftGateResult]]:
-    sha = hashlib.sha256(ZIP_PATH.read_bytes()).hexdigest() if ZIP_PATH.is_file() else ""
     try:
-        with zipfile.ZipFile(ZIP_PATH) as archive:
+        root = resolve_program_root()
+        zip_path, source_dir = release_paths(root)
+        diagnostics = readiness_diagnostics()
+        sha = artifact_sha256(zip_path)
+        resolution_error = None
+    except DeploymentReleaseError as exc:
+        diagnostics = {"artifact_relative_path": SOURCE_EXPECTATIONS.artifact_relative_path, "artifact_exists": False, "source_directory_exists": False}
+        sha = None
+        resolution_error = str(exc)
+        zip_path = source_dir = Path("__invalid_atlas_release_path__")
+        root = None
+    try:
+        runtime_release = verify_runtime_release_identity(root) if root else None
+        release_error = None if runtime_release else "release_identity_unavailable"
+    except DeploymentReleaseError as exc:
+        runtime_release = None
+        release_error = str(exc)
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
             names = archive.namelist()
-            expected = {f"{PLUGIN_SLUG}/{path.relative_to(SOURCE_DIR).as_posix()}": path.read_bytes() for path in SOURCE_DIR.rglob("*") if path.is_file()}
+            expected = {f"{PLUGIN_SLUG}/{path.relative_to(source_dir).as_posix()}": path.read_bytes() for path in source_dir.rglob("*") if path.is_file()}
             actual = {name: archive.read(name) for name in names if not name.endswith("/")}
             valid = len(names) == len(set(names)) and all("\\" not in name and not name.startswith("/") and not re.match(r"^[A-Za-z]:", name) and ".." not in PurePosixPath(name).parts for name in names) and {PurePosixPath(name).parts[0] for name in names} == {PLUGIN_SLUG} and actual == expected and PLUGIN_FILE in names
     except (OSError, zipfile.BadZipFile):
         valid = False
     artifact = {
-        "atlas_version": ATLAS_VERSION,
-        "atlas_commit": ATLAS_COMMIT,
-        "atlas_tag": ATLAS_TAG,
+        "atlas_version": runtime_release.atlas_version if runtime_release else None,
+        "atlas_commit": runtime_release.atlas_commit if runtime_release else None,
+        "atlas_tag": runtime_release.atlas_tag if runtime_release else None,
+        "release_identity_status": "verified" if runtime_release else "release_identity_unavailable",
+        "release_verification_source": runtime_release.verification_source if runtime_release else None,
+        "release_manifest_sha256": runtime_release.manifest_sha256 if runtime_release else None,
         "plugin_slug": PLUGIN_SLUG,
         "plugin_path": PLUGIN_FILE,
         "plugin_version": PLUGIN_VERSION,
         "zip_file_name": ZIP_NAME,
         "zip_sha256": sha,
         "plugin_source_sha256": SOURCE_SHA256,
+        "readiness": diagnostics,
     }
     return artifact, [
-        _gate("artifact_hash", "ZIP SHA-256 is locked", sha == ZIP_SHA256, "ZIP checksum mismatch."),
+        _gate("program_root", "Atlas program root is explicitly resolved and validated", resolution_error is None, resolution_error or "Invalid program root."),
+        _gate("artifact_hash", "ZIP SHA-256 is locked", sha == ZIP_SHA256, resolution_error or "ZIP checksum mismatch."),
         _gate("artifact_portable", "ZIP is portable and byte-equal to source", valid, "ZIP structure/source mismatch."),
+        _gate("release_identity", "External runtime release identity is verified", runtime_release is not None, release_error or "release_identity_unavailable"),
     ]
 
 
@@ -422,6 +475,19 @@ def _stored_backup_gates(audit: WordPressDeploymentAudit) -> list[WordPressDraft
     deadline = _as_utc(audit.backup_deadline)
     gates.append(_gate("workflow_deadline", "Manual upload and verification remain inside the original four-hour window", datetime.now(UTC) <= deadline, "The original four-hour backup deadline expired; a new backup, preflight, token, and audit are required."))
     gates.append(_gate("backup_reference_bound", "Stored backup reference remains bound", audit.backup_reference == audit.backup_evidence.get("wordpress_backup_reference"), "Backup reference changed."))
+    try:
+        runtime = verify_runtime_release_identity(resolve_program_root())
+    except DeploymentReleaseError:
+        runtime = None
+    gates.append(_gate(
+        "release_identity_bound",
+        "Audit remains bound to the verified runtime deployment release",
+        runtime is not None and audit.atlas_version == runtime.atlas_version and audit.atlas_commit == runtime.atlas_commit and audit.atlas_tag == runtime.atlas_tag
+        and audit.plugin_version == PLUGIN_VERSION and audit.zip_sha256 == ZIP_SHA256
+        and audit.evidence_summary.get("release_manifest_sha256") == runtime.manifest_sha256
+        and audit.evidence_summary.get("release_verification_source") == runtime.verification_source,
+        "Stored deployment release identity differs from the locked manifest.",
+    ))
     return gates
 
 
@@ -433,7 +499,7 @@ def _bound_context(observed: dict[str, Any], proof: WordPressDeploymentBackupEvi
         "plugin_slug": PLUGIN_SLUG,
         "plugin_path": PLUGIN_FILE,
         "artifact": artifact,
-        "atlas_release": {"version": ATLAS_VERSION, "commit": ATLAS_COMMIT, "tag": ATLAS_TAG},
+        "atlas_release": {"version": artifact.get("atlas_version"), "commit": artifact.get("atlas_commit"), "tag": artifact.get("atlas_tag"), "manifest_sha256": artifact.get("release_manifest_sha256"), "verification_source": artifact.get("release_verification_source")},
         "backup": _backup_dict(proof),
         "backup_deadline": _backup_deadline(proof.wordpress_backup_completed_at).isoformat(),
         "plugin_inventory_hash": observed.get("plugin_inventory_hash"),
@@ -449,8 +515,8 @@ def _bound_context(observed: dict[str, Any], proof: WordPressDeploymentBackupEvi
     }
 
 
-def _deployment_key(proof: WordPressDeploymentBackupEvidence) -> str:
-    return _hash({"page": 41, "wordpress_page": 8, "plugin_slug": PLUGIN_SLUG, "plugin_version": PLUGIN_VERSION, "zip_sha256": ZIP_SHA256, "backup_reference": proof.wordpress_backup_reference})
+def _deployment_key(proof: WordPressDeploymentBackupEvidence, artifact: dict[str, Any]) -> str:
+    return _hash({"page": 41, "wordpress_page": 8, "plugin_slug": PLUGIN_SLUG, "plugin_version": PLUGIN_VERSION, "zip_sha256": ZIP_SHA256, "atlas_version": artifact.get("atlas_version"), "atlas_commit": artifact.get("atlas_commit"), "atlas_tag": artifact.get("atlas_tag"), "manifest_sha256": artifact.get("release_manifest_sha256"), "backup_reference": proof.wordpress_backup_reference})
 
 
 def _safe_evidence_path(value: str) -> str:
@@ -463,8 +529,12 @@ def _safe_evidence_path(value: str) -> str:
         raise HTTPException(422, "Empty, current, and parent path segments are forbidden.")
     if not re.fullmatch(r"docs/deployment-records/wordpress/orlando-page-8/\d{4}/\d{4}-\d{2}-\d{2}/v0\.59-install", value):
         raise HTTPException(422, "Evidence directory is outside the approved structure.")
-    candidate = (PROJECT_ROOT / value).resolve(strict=False)
-    approved = EVIDENCE_ROOT.resolve(strict=False)
+    try:
+        project_root = resolve_program_root()
+    except DeploymentReleaseError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    candidate = (project_root / value).resolve(strict=False)
+    approved = (project_root / "docs" / "deployment-records" / "wordpress" / "orlando-page-8").resolve(strict=False)
     if candidate != approved and approved not in candidate.parents:
         raise HTTPException(422, "Resolved evidence directory escapes the approved root.")
     return value
