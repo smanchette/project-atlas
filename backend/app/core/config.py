@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     media_public_url: str = "http://localhost:8000/media"
     media_max_upload_bytes: int = 10 * 1024 * 1024
     media_max_pixels: int = 40_000_000
+    atlas_release_manifest_sha256: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

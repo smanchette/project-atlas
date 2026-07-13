@@ -350,7 +350,7 @@ def test_program_backup_endpoint_contains_rebuild_files(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project_root = _program_backup_project(tmp_path)
-    monkeypatch.setattr(program_backup, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(program_backup, "resolve_program_root", lambda: project_root)
 
     with TestClient(app) as client:
         response = client.post("/api/backups/program")
@@ -386,7 +386,7 @@ def test_program_backup_excludes_generated_private_and_protected_files(
 ) -> None:
     project_root = _program_backup_project(tmp_path)
     before = _file_tree_snapshot(project_root)
-    monkeypatch.setattr(program_backup, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(program_backup, "resolve_program_root", lambda: project_root)
 
     with TestClient(app) as client:
         response = client.post("/api/backups/program")
@@ -4848,11 +4848,16 @@ def _program_backup_project(root: Path) -> Path:
     }
     excluded_files = {
         ".git/config": "private git metadata\n",
+        ".runtime/atlas-release.json": "runtime identity\n",
+        ".local-wp-integration/compose.yaml": "temporary wordpress\n",
         "backend/.env": "DATABASE_URL=secret\n",
         "backend/app/.env.local": "SECRET=hidden\n",
         "backend/app/private_key.pem": "private\n",
         "backend/app/secrets.json": "{}\n",
         "backend/app/cache.db": "database\n",
+        "backend/app/cache.db-wal": "database sidecar\n",
+        "backend/app/cache.sqlite-shm": "database sidecar\n",
+        "backend/app/cache.sqlite3-journal": "database sidecar\n",
         "backend/app/__pycache__/main.pyc": "cache\n",
         "backend/alembic/.pytest_cache/state": "cache\n",
         "backend/backups/atlas-backup-old.json": "backup\n",

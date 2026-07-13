@@ -33,6 +33,23 @@ services:
     volumes:
       - ./backend:/app
       - ./wordpress:/atlas-program/wordpress:ro
+      - ./backend/app:/atlas-program/backend/app:ro
+      - ./backend/alembic:/atlas-program/backend/alembic:ro
+      - ./backend/tests:/atlas-program/backend/tests:ro
+      - ./backend/scripts:/atlas-program/backend/scripts:ro
+      - ./frontend/src:/atlas-program/frontend/src:ro
+      - ./backend/Dockerfile:/atlas-program/backend/Dockerfile:ro
+      - ./backend/.dockerignore:/atlas-program/backend/.dockerignore:ro
+      - ./backend/alembic.ini:/atlas-program/backend/alembic.ini:ro
+      - ./backend/requirements.txt:/atlas-program/backend/requirements.txt:ro
+      - ./frontend/Dockerfile:/atlas-program/frontend/Dockerfile:ro
+      - ./frontend/package.json:/atlas-program/frontend/package.json:ro
+      - ./frontend/package-lock.json:/atlas-program/frontend/package-lock.json:ro
+      - ./frontend/index.html:/atlas-program/frontend/index.html:ro
+      - ./frontend/tsconfig.json:/atlas-program/frontend/tsconfig.json:ro
+      - ./frontend/vite.config.ts:/atlas-program/frontend/vite.config.ts:ro
+      - ./docker-compose.yml:/atlas-program/docker-compose.yml:ro
+      - ./README.md:/atlas-program/README.md:ro
       - ./.runtime:/atlas-runtime:ro
       - ./frontend/public/media:/frontend/public/media:ro
     depends_on:
