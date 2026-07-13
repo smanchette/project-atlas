@@ -861,6 +861,21 @@ export type WordPressMetadataDryRun = {
 };
 
 export type WordPressMetadataApplyResult = { page_id: number; wordpress_post_id: number; status: "metadata_applied"; payload_hash: string; wordpress_revision: string; audit_id: number; verification: Record<string, unknown> };
+
+export type WordPressDeploymentGate = { code: string; label: string; passed: boolean; message: string };
+export type WordPressDeploymentDryRun = {
+  page_id: 41; wordpress_post_id: 8; status: "preflight_not_started" | "preflight_ready"; ready: boolean;
+  artifact: Record<string, string>; inspected_state: Record<string, unknown>; backup_age_seconds?: number | null;
+  gate_results: WordPressDeploymentGate[]; confirmation_token?: string | null; confirmation_phrase?: string | null; expires_at?: string | null; read_only: true;
+};
+export type WordPressDeploymentAuthorization = {
+  audit_id: number; status: "awaiting_manual_installation"; installation_transport: "manual_wordpress_admin_upload";
+  zip_file_name: string; zip_sha256: string; instructions: string[]; warning: "DO NOT CLICK ACTIVATE PLUGIN"; wordpress_request_performed: false; state_history: string[];
+};
+export type WordPressDeploymentVerification = {
+  audit_id: number; status: "verified" | "verification_failed" | "reconciliation_required"; verified: boolean;
+  gate_results: WordPressDeploymentGate[]; inspected_state: Record<string, unknown>; read_only_wordpress: true; state_history: string[]; inspection_limitations: string[];
+};
 export type WordPressMetadataVerification = { status: "verified" | "failed" | "not_applied"; metadata_correct: boolean; apply_needed: boolean; payload_hash: string; live_payload_hash?: string | null; gate_results: WordPressMetadataGate[]; read_only: true };
 export type WordPressMetadataRollbackDryRun = { status: "blocked" | "rollback_ready"; ready: boolean; current_payload_hash?: string | null; gate_results: WordPressMetadataGate[]; confirmation_token?: string | null; confirmation_phrase?: string | null; expires_at?: string | null };
 

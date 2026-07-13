@@ -718,3 +718,84 @@ class WordPressMetadataReconciliationResult(SQLModel):
     status: Literal["metadata_reconciled"]
     original_audit_id: int
     wordpress_write_performed: Literal[False] = False
+
+
+class WordPressDeploymentBackupEvidence(SQLModel):
+    atlas_data_backup_file: str = Field(min_length=6, max_length=255)
+    atlas_media_backup_file: str = Field(min_length=6, max_length=255)
+    atlas_program_backup_file: str = Field(min_length=6, max_length=255)
+    wordpress_backup_method: str = Field(min_length=6, max_length=255)
+    wordpress_backup_reference: str = Field(min_length=6, max_length=255)
+    wordpress_backup_completed_at: datetime
+    wordpress_database_included_attestation: bool
+    wordpress_plugins_included_attestation: bool
+    wordpress_restore_capability_attestation: bool
+    confirmer_identity: str = Field(min_length=3, max_length=200)
+    php_error_log_findings: str = Field(min_length=3, max_length=2000)
+    observed_write_summary: str = Field(min_length=3, max_length=2000)
+
+
+class WordPressDeploymentInstallDryRun(SQLModel):
+    page_id: int = 41
+    wordpress_post_id: int = 8
+    status: Literal["preflight_not_started", "preflight_ready"]
+    ready: bool
+    artifact: dict[str, Any]
+    inspected_state: dict[str, Any]
+    backup_age_seconds: int | None = None
+    gate_results: list[WordPressDraftGateResult]
+    confirmation_token: str | None = None
+    confirmation_phrase: str | None = None
+    expires_at: str | None = None
+    read_only: Literal[True] = True
+
+
+class WordPressDeploymentAuthorizeRequest(WordPressDeploymentBackupEvidence):
+    confirmation_token: str = Field(min_length=1)
+    confirmation_phrase: str = Field(min_length=1, max_length=100)
+    operator: str = Field(min_length=3, max_length=200)
+    shawn_approved_at: datetime
+    evidence_directory: str = Field(min_length=10, max_length=500)
+
+
+class WordPressDeploymentAuthorization(SQLModel):
+    audit_id: int
+    status: Literal["awaiting_manual_installation"]
+    installation_transport: Literal["manual_wordpress_admin_upload"] = "manual_wordpress_admin_upload"
+    zip_file_name: str
+    zip_sha256: str
+    instructions: list[str]
+    warning: Literal["DO NOT CLICK ACTIVATE PLUGIN"] = "DO NOT CLICK ACTIVATE PLUGIN"
+    wordpress_request_performed: Literal[False] = False
+    state_history: list[str]
+
+
+class WordPressDeploymentManualCompleteRequest(SQLModel):
+    audit_id: int
+    operator: str = Field(min_length=3, max_length=200)
+    manual_upload_completed_attestation: bool
+
+
+class WordPressDeploymentManualComplete(SQLModel):
+    audit_id: int
+    status: Literal["verification_pending"]
+    success_assumed: Literal[False] = False
+    wordpress_request_performed: Literal[False] = False
+    state_history: list[str]
+
+
+class WordPressDeploymentVerification(SQLModel):
+    audit_id: int
+    status: Literal["verified", "verification_failed", "reconciliation_required"]
+    verified: bool
+    gate_results: list[WordPressDraftGateResult]
+    inspected_state: dict[str, Any]
+    read_only_wordpress: Literal[True] = True
+    state_history: list[str]
+    inspection_limitations: list[str] = Field(default_factory=list)
+
+
+class WordPressDeploymentVerifyRequest(SQLModel):
+    audit_id: int
+    operator: str = Field(min_length=3, max_length=200)
+    php_error_log_findings: str = Field(min_length=3, max_length=2000)

@@ -45,6 +45,14 @@ from app.schemas.wordpress import (
     WordPressMetadataReconciliationDryRun,
     WordPressMetadataReconciliationRequest,
     WordPressMetadataReconciliationResult,
+    WordPressDeploymentBackupEvidence,
+    WordPressDeploymentInstallDryRun,
+    WordPressDeploymentAuthorizeRequest,
+    WordPressDeploymentAuthorization,
+    WordPressDeploymentManualCompleteRequest,
+    WordPressDeploymentManualComplete,
+    WordPressDeploymentVerifyRequest,
+    WordPressDeploymentVerification,
 )
 from app.services.wordpress_draft_review import (
     check_live_wordpress_draft_status,
@@ -88,8 +96,34 @@ from app.services.wordpress_metadata import (
     dry_run_wordpress_metadata_reconciliation,
     reconcile_wordpress_metadata,
 )
+from app.services.wordpress_deployment import (
+    authorize_manual_install,
+    install_dry_run,
+    report_manual_complete,
+    verify_manual_install,
+)
 
 router = APIRouter(prefix="/wordpress", tags=["wordpress sandbox"])
+
+
+@router.post("/deployment/metadata-bridge/install/dry-run/{page_id}", response_model=WordPressDeploymentInstallDryRun)
+def metadata_bridge_install_dry_run(page_id: int, payload: WordPressDeploymentBackupEvidence, session: Session = Depends(get_session)) -> WordPressDeploymentInstallDryRun:
+    return install_dry_run(session, page_id, payload)
+
+
+@router.post("/deployment/metadata-bridge/install/authorize/{page_id}", response_model=WordPressDeploymentAuthorization)
+def metadata_bridge_install_authorize(page_id: int, payload: WordPressDeploymentAuthorizeRequest, session: Session = Depends(get_session)) -> WordPressDeploymentAuthorization:
+    return authorize_manual_install(session, page_id, payload)
+
+
+@router.post("/deployment/metadata-bridge/install/report-manual-complete/{page_id}", response_model=WordPressDeploymentManualComplete)
+def metadata_bridge_install_report(page_id: int, payload: WordPressDeploymentManualCompleteRequest, session: Session = Depends(get_session)) -> WordPressDeploymentManualComplete:
+    return report_manual_complete(session, page_id, payload)
+
+
+@router.post("/deployment/metadata-bridge/install/verify/{page_id}", response_model=WordPressDeploymentVerification)
+def metadata_bridge_install_verify(page_id: int, payload: WordPressDeploymentVerifyRequest, session: Session = Depends(get_session)) -> WordPressDeploymentVerification:
+    return verify_manual_install(session, page_id, payload)
 
 
 @router.get("/settings", response_model=WordPressSettingsRead)

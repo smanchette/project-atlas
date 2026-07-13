@@ -310,6 +310,86 @@ class WordPressMetadataSyncAudit(SQLModel, table=True):
     error_message: str | None = None
 
 
+class WordPressDeploymentAudit(SQLModel, table=True):
+    __table_args__ = (
+        CheckConstraint("action_type = 'install_metadata_bridge'", name="ck_wordpressdeploymentaudit_action"),
+        CheckConstraint(
+            "status IN ('installation_authorized','awaiting_manual_installation','manual_installation_reported','verification_pending','verified','verification_failed','reconciliation_required','failed')",
+            name="ck_wordpressdeploymentaudit_status",
+        ),
+        UniqueConstraint("deployment_key", name="uq_wordpressdeploymentaudit_deployment_key"),
+        UniqueConstraint("authorization_jti", name="uq_wordpressdeploymentaudit_authorization_jti"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
+    wordpress_post_id: int = Field(index=True)
+    action_type: str = Field(max_length=64, index=True)
+    status: str = Field(max_length=40, index=True)
+    operator: str = Field(max_length=200)
+    shawn_approved_at: datetime
+    confirmation_phrase_hash: str = Field(max_length=64)
+    atlas_version: str = Field(max_length=32)
+    atlas_commit: str = Field(max_length=40)
+    atlas_tag: str = Field(max_length=32)
+    plugin_version: str = Field(max_length=32)
+    plugin_slug: str = Field(max_length=100)
+    plugin_path: str = Field(max_length=255)
+    zip_file_name: str = Field(max_length=255)
+    zip_sha256: str = Field(max_length=64)
+    plugin_source_sha256: str = Field(max_length=64)
+    installation_transport: str = Field(default="manual_wordpress_admin_upload", max_length=64)
+    backup_reference: str = Field(max_length=255, index=True)
+    backup_completed_at: datetime
+    backup_deadline: datetime = Field(index=True)
+    authorization_jti: str = Field(max_length=64, index=True)
+    deployment_key: str = Field(max_length=64, index=True)
+    backup_evidence: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    pre_snapshot: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    post_snapshot: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    evidence_summary: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    evidence_directory: str = Field(max_length=500)
+    attempted_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    completed_at: datetime | None = None
+    error_code: str | None = Field(default=None, max_length=64)
+    error_message: str | None = Field(default=None, max_length=2000)
+    partial_failure_details: str | None = None
+
+
+class WordPressDeploymentNonce(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("jti", name="uq_wordpressdeploymentnonce_jti"),
+        UniqueConstraint("token_fingerprint", name="uq_wordpressdeploymentnonce_token_fingerprint"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    jti: str = Field(max_length=64, index=True)
+    token_fingerprint: str = Field(max_length=64)
+    action_type: str = Field(max_length=64, index=True)
+    consumed_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    audit_id: int | None = Field(default=None, foreign_key="wordpressdeploymentaudit.id", index=True)
+
+
+class WordPressDeploymentTransition(SQLModel, table=True):
+    __table_args__ = (
+        CheckConstraint(
+            "previous_state IS NULL OR previous_state IN ('installation_authorized','awaiting_manual_installation','manual_installation_reported','verification_pending','verified','verification_failed','reconciliation_required','failed')",
+            name="ck_wordpressdeploymenttransition_previous_state",
+        ),
+        CheckConstraint(
+            "new_state IN ('installation_authorized','awaiting_manual_installation','manual_installation_reported','verification_pending','verified','verification_failed','reconciliation_required','failed')",
+            name="ck_wordpressdeploymenttransition_new_state",
+        ),
+        UniqueConstraint("request_identifier", name="uq_wordpressdeploymenttransition_request_identifier"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    audit_id: int = Field(foreign_key="wordpressdeploymentaudit.id", index=True)
+    previous_state: str | None = Field(default=None, max_length=40)
+    new_state: str = Field(max_length=40, index=True)
+    transitioned_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    actor: str = Field(max_length=200)
+    reason: str = Field(max_length=500)
+    request_identifier: str = Field(max_length=64, index=True)
+
+
 class PageImageAssignment(TimestampMixin, table=True):
     __table_args__ = (
         UniqueConstraint(

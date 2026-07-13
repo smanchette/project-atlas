@@ -42,10 +42,12 @@ def isolate_wordpress_audit_state() -> None:
     from app.db.session import engine
     from app.models import (
         WordPressDraftAudit, WordPressMediaSyncAudit, WordPressMetadataState,
-        WordPressMetadataSyncAudit, WordPressPublishAudit,
+        WordPressMetadataSyncAudit, WordPressPublishAudit, WordPressDeploymentAudit,
+        WordPressDeploymentNonce, WordPressDeploymentTransition,
     )
 
     models = (
+        WordPressDeploymentTransition, WordPressDeploymentNonce, WordPressDeploymentAudit,
         WordPressPublishAudit, WordPressMetadataSyncAudit, WordPressMetadataState,
         WordPressMediaSyncAudit, WordPressDraftAudit,
     )

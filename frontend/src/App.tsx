@@ -4,7 +4,6 @@ import {
   ClipboardCheck,
   DatabaseBackup,
   FileSearch,
-  FileCode2,
   Images,
   FileText,
   Home,
@@ -36,7 +35,7 @@ import WordPressSandboxPage from "./pages/WordPressSandboxPage";
 import WordPressDraftUpdateSandboxPage from "./pages/WordPressDraftUpdateSandboxPage";
 import WordPressPublishSafetySandboxPage from "./pages/WordPressPublishSafetySandboxPage";
 import WordPressMediaSafetyPage from "./pages/WordPressMediaSafetyPage";
-import WordPressMetadataSafetyPage from "./pages/WordPressMetadataSafetyPage";
+import WordPressMetadataBridgeInstallPage from "./pages/WordPressMetadataBridgeInstallPage";
 import type { Business, City, County, FieldConfig, GeneratedPage, Service } from "./types";
 
 const navItems = [
@@ -56,7 +55,7 @@ const navItems = [
   { to: "/wordpress-draft-update", label: "WP Draft Update", icon: ClipboardCheck },
   { to: "/wordpress-publish-safety", label: "WP Publish Safety", icon: ShieldCheck },
   { to: "/wordpress-media-safety", label: "WP Media Safety", icon: Images },
-  { to: "/wordpress-metadata-safety", label: "WP Metadata Safety", icon: FileCode2 },
+  { to: "/wordpress-metadata-bridge-install", label: "WP Bridge Install", icon: ShieldCheck },
   { to: "/wordpress-quality-review", label: "WP Quality Review", icon: ListTodo },
   { to: "/settings", label: "Settings", icon: Settings }
 ];
@@ -197,7 +196,7 @@ function DashboardShell() {
           <Route path="/wordpress-draft-update" element={<WordPressDraftUpdateSandboxPage />} />
           <Route path="/wordpress-publish-safety" element={<WordPressPublishSafetySandboxPage />} />
           <Route path="/wordpress-media-safety" element={<WordPressMediaSafetyPage />} />
-          <Route path="/wordpress-metadata-safety" element={<WordPressMetadataSafetyPage />} />
+          <Route path="/wordpress-metadata-bridge-install" element={<WordPressMetadataBridgeInstallPage />} />
           <Route path="/wordpress-quality-review" element={<WordPressDraftQualityReviewPage />} />
           <Route
             path="/settings"
