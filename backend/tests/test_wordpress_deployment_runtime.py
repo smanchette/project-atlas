@@ -23,7 +23,7 @@ from app.services.wordpress_rendered_state import (
 from app.services.wordpress_rendered_state import _html_result
 
 
-HTML = f"""<!doctype html><html><head><title>Drywood Termite Tenting in Orlando, FL</title><link rel="canonical" href="{EXPECTED_URL}"></head><body><h1>Drywood Termite Tenting in Orlando, FL</h1><img src="{EXPECTED_MEDIA_URL}"><p>Orlando service content.</p></body></html>"""
+HTML = f"""<!doctype html><html><head><title>Drywood Termite Tenting in Orlando, FL \u2013 My WordPress</title><link rel="canonical" href="{EXPECTED_URL}"></head><body><h1>Drywood Termite Tenting in Orlando, FL</h1><img src="{EXPECTED_MEDIA_URL}" alt="Two-story Orlando Florida home professionally covered for drywood termite tenting"><p>Orlando service content.</p></body></html>"""
 
 
 def atlas_layout(root: Path, *, artifact: bool = True, source: bool = True) -> Path:
@@ -392,7 +392,7 @@ def test_wrong_final_url_and_network_failure_are_explicit():
 @pytest.mark.parametrize(
     "broken",
     [
-        HTML.replace("<title>Drywood Termite Tenting in Orlando, FL</title>", ""),
+        HTML.replace("<title>Drywood Termite Tenting in Orlando, FL \u2013 My WordPress</title>", ""),
         HTML.replace(f'<link rel="canonical" href="{EXPECTED_URL}">', ""),
         HTML.replace("<h1>Drywood Termite Tenting in Orlando, FL</h1>", ""),
         HTML.replace(EXPECTED_MEDIA_URL, "https://example.com/wrong.jpg"),
@@ -416,7 +416,7 @@ def test_manual_browser_evidence_valid_tampered_expired_wrong_url_and_secret_rej
         assert not validate_manual_browser_evidence(changed, key)[0]
     expired = build_manual_browser_evidence(HTML, final_url=EXPECTED_URL, evidence_identifier="old.json", signing_key=key, captured_at=datetime.now(UTC) - timedelta(minutes=16))
     assert not validate_manual_browser_evidence(expired, key)[0]
-    wrong = {**evidence, "expected_final_url": "https://example.com/"}
+    wrong = {**evidence, "final_url": "https://example.com/"}
     assert not validate_manual_browser_evidence(wrong, key)[0]
     with pytest.raises(ValueError, match="secret-bearing"):
         build_manual_browser_evidence(HTML + "Authorization: Basic secret", final_url=EXPECTED_URL, evidence_identifier="bad.json", signing_key=key)
@@ -436,7 +436,11 @@ def test_ui_separates_token_free_preflight_from_authorization_phase():
     source = (root / "frontend/src/pages/WordPressMetadataBridgeInstallPage.tsx").read_text(encoding="utf-8")
     assert "/install/preflight/${PAGE_ID}" in source
     assert ">Run token-free preflight<" in source
+    assert ">Capture signed browser evidence<" in source
     assert ">Enter Authorization Phase<" in source
+    assert source.index(">Capture signed browser evidence<") < source.index(">Run token-free preflight<") < source.index(">Enter Authorization Phase<")
+    capture_function = source.split("async function captureSignedBrowserEvidence", 1)[1].split("const evidenceValidated", 1)[0]
+    assert "/install/dry-run/" not in capture_function and "/install/authorize/" not in capture_function
     assert "function preflight()" in source and "setPreflightResult" in source
     assert "function beginAuthorization()" in source and "/install/dry-run/${PAGE_ID}" in source
     preflight_function = source.split("function preflight()", 1)[1].split("function beginAuthorization()", 1)[0]

@@ -720,6 +720,32 @@ class WordPressMetadataReconciliationResult(SQLModel):
     wordpress_write_performed: Literal[False] = False
 
 
+class WordPressManualBrowserEvidence(SQLModel):
+    """Strict signed envelope; nested values are independently validated by the evidence service."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_schema: Literal["project-atlas-manual-browser-evidence"]
+    evidence_schema_version: Literal[1]
+    capture_helper_version: Literal["0.59.15"]
+    evidence_id: str = Field(min_length=8, max_length=200)
+    captured_at: datetime
+    expires_at: datetime
+    final_url: str
+    acquisition_source: Literal["credential_free_public_browser"]
+    navigation_outcome: dict[str, Any]
+    page_identity: dict[str, Any]
+    metadata_inventory: dict[str, Any]
+    metadata_inventory_hash: str = Field(min_length=64, max_length=64)
+    absence_findings: dict[str, bool]
+    normalized_head: str = Field(min_length=1, max_length=500_000)
+    normalized_visible_content: str = Field(min_length=1, max_length=2_000_000)
+    rendered_head_hash: str = Field(min_length=64, max_length=64)
+    visible_content_hash: str = Field(min_length=64, max_length=64)
+    privacy_attestations: dict[str, bool]
+    helper_signature: str = Field(min_length=64, max_length=64)
+
+
 class WordPressDeploymentBackupEvidence(SQLModel):
     atlas_data_backup_file: str = Field(min_length=6, max_length=255)
     atlas_media_backup_file: str = Field(min_length=6, max_length=255)
@@ -733,7 +759,7 @@ class WordPressDeploymentBackupEvidence(SQLModel):
     confirmer_identity: str = Field(min_length=3, max_length=200)
     php_error_log_findings: str = Field(min_length=3, max_length=2000)
     observed_write_summary: str = Field(min_length=3, max_length=2000)
-    manual_browser_evidence: dict[str, Any] | None = None
+    manual_browser_evidence: WordPressManualBrowserEvidence | None = None
 
 
 class WordPressDeploymentPreflightRequest(WordPressDeploymentBackupEvidence):

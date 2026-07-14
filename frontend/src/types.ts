@@ -863,6 +863,25 @@ export type WordPressMetadataDryRun = {
 export type WordPressMetadataApplyResult = { page_id: number; wordpress_post_id: number; status: "metadata_applied"; payload_hash: string; wordpress_revision: string; audit_id: number; verification: Record<string, unknown> };
 
 export type WordPressDeploymentGate = { code: string; label: string; passed: boolean; message: string };
+export type WordPressManualBrowserEvidence = {
+  evidence_schema: "project-atlas-manual-browser-evidence";
+  evidence_schema_version: 1;
+  capture_helper_version: "0.59.15";
+  evidence_id: string; captured_at: string; expires_at: string; final_url: string;
+  acquisition_source: "credential_free_public_browser";
+  navigation_outcome: { status_code: 200; content_type: "text/html"; redirect_count: 0; outcome: "success" };
+  page_identity: { document_title: string; h1: string; canonical_url: string; featured_image_url: string; featured_image_alt: string };
+  metadata_inventory: {
+    meta_descriptions: Record<string,string>[]; canonicals: string[]; open_graph: Record<string,string>[];
+    twitter: Record<string,string>[]; json_ld: unknown[]; title_count: number; canonical_count: number;
+    atlas_ownership_markers: string[]; featured_image_references: Record<string,string>[];
+    media32_references: string[]; unexpected_metadata_owners: string[]; duplicates: string[];
+  };
+  metadata_inventory_hash: string; absence_findings: Record<string,boolean>;
+  normalized_head: string; normalized_visible_content: string;
+  rendered_head_hash: string; visible_content_hash: string;
+  privacy_attestations: Record<string,boolean>; helper_signature: string;
+};
 export type WordPressDeploymentReadiness = {
   release: { manifest_schema_version: number; source_compatibility_id: string; atlas_version: string; atlas_commit: string; atlas_tag: string; plugin_version: string; plugin_zip_filename: string; plugin_zip_sha256: string; manifest_sha256: string; verification_source: string; git_metadata_available: boolean; manifest_integrity_verified: boolean; expected_release_matched: boolean; runtime_identity_verified: boolean } | null;
   release_status: "verified" | "release_identity_unavailable"; release_error: string | null;
