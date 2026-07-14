@@ -875,6 +875,12 @@ export type WordPressDeploymentDryRun = {
   artifact: Record<string, string>; inspected_state: Record<string, unknown>; backup_age_seconds?: number | null;
   gate_results: WordPressDeploymentGate[]; confirmation_token?: string | null; confirmation_phrase?: string | null; expires_at?: string | null; read_only: true;
 };
+export type WordPressDeploymentPreflight = {
+  page_id: 41; wordpress_post_id: 8; status: "preflight_blocked" | "preflight_ready"; preflight_ready: boolean;
+  backup_age_seconds?: number | null; backup_deadline?: string | null; artifact: Record<string, unknown>; inspected_state: Record<string, unknown>;
+  gate_results: WordPressDeploymentGate[]; php_error_findings: Record<string, unknown>; inspection_only: true; token_issued: false;
+  nonce_consumed: false; audit_created: false; wordpress_write_count: 0; atlas_write_count: 0; read_only: true;
+};
 export type WordPressDeploymentAuthorization = {
   audit_id: number; status: "awaiting_manual_installation"; installation_transport: "manual_wordpress_admin_upload";
   zip_file_name: string; zip_sha256: string; instructions: string[]; warning: "DO NOT CLICK ACTIVATE PLUGIN"; wordpress_request_performed: false; state_history: string[];

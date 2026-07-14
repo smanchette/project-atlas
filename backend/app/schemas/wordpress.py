@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import field_validator
+from pydantic import ConfigDict, field_validator
 from sqlmodel import Field, SQLModel
 
 PublishingMode = Literal["disabled", "sandbox", "draft_only_future"]
@@ -734,6 +734,30 @@ class WordPressDeploymentBackupEvidence(SQLModel):
     php_error_log_findings: str = Field(min_length=3, max_length=2000)
     observed_write_summary: str = Field(min_length=3, max_length=2000)
     manual_browser_evidence: dict[str, Any] | None = None
+
+
+class WordPressDeploymentPreflightRequest(WordPressDeploymentBackupEvidence):
+    model_config = ConfigDict(extra="forbid")
+
+
+class WordPressDeploymentPreflight(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    status: Literal["preflight_blocked", "preflight_ready"]
+    preflight_ready: bool
+    backup_age_seconds: int | None = None
+    backup_deadline: datetime | None = None
+    artifact: dict[str, Any]
+    inspected_state: dict[str, Any]
+    gate_results: list[WordPressDraftGateResult]
+    php_error_findings: dict[str, Any]
+    inspection_only: Literal[True] = True
+    token_issued: Literal[False] = False
+    nonce_consumed: Literal[False] = False
+    audit_created: Literal[False] = False
+    wordpress_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+    read_only: Literal[True] = True
 
 
 class WordPressDeploymentInstallDryRun(SQLModel):

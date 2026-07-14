@@ -51,6 +51,8 @@ from app.schemas.wordpress import (
     WordPressDeploymentAuthorization,
     WordPressDeploymentManualCompleteRequest,
     WordPressDeploymentManualComplete,
+    WordPressDeploymentPreflight,
+    WordPressDeploymentPreflightRequest,
     WordPressDeploymentVerifyRequest,
     WordPressDeploymentVerification,
 )
@@ -99,6 +101,7 @@ from app.services.wordpress_metadata import (
 from app.services.wordpress_deployment import (
     authorize_manual_install,
     deployment_readiness,
+    inspect_installation_preflight,
     install_dry_run,
     report_manual_complete,
     verify_manual_install,
@@ -115,6 +118,11 @@ def metadata_bridge_install_readiness() -> dict[str, object]:
 @router.post("/deployment/metadata-bridge/install/dry-run/{page_id}", response_model=WordPressDeploymentInstallDryRun)
 def metadata_bridge_install_dry_run(page_id: int, payload: WordPressDeploymentBackupEvidence, session: Session = Depends(get_session)) -> WordPressDeploymentInstallDryRun:
     return install_dry_run(session, page_id, payload)
+
+
+@router.post("/deployment/metadata-bridge/install/preflight/{page_id}", response_model=WordPressDeploymentPreflight)
+def metadata_bridge_install_preflight(page_id: int, payload: WordPressDeploymentPreflightRequest, session: Session = Depends(get_session)) -> WordPressDeploymentPreflight:
+    return inspect_installation_preflight(session, page_id, payload)
 
 
 @router.post("/deployment/metadata-bridge/install/authorize/{page_id}", response_model=WordPressDeploymentAuthorization)

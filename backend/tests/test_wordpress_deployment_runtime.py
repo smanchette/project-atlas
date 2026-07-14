@@ -429,3 +429,16 @@ def test_ui_has_no_independent_stale_release_constant():
     assert "readiness?.release?.atlas_version" in source
     assert not __import__("re").search(r'atlas_commit\s*=\s*"[0-9a-f]{40}"', release_source)
     assert 'deployment_workflow_version="v0.59.4"' not in release_source
+
+
+def test_ui_separates_token_free_preflight_from_authorization_phase():
+    root = release.resolve_program_root()
+    source = (root / "frontend/src/pages/WordPressMetadataBridgeInstallPage.tsx").read_text(encoding="utf-8")
+    assert "/install/preflight/${PAGE_ID}" in source
+    assert ">Run token-free preflight<" in source
+    assert ">Enter Authorization Phase<" in source
+    assert "function preflight()" in source and "setPreflightResult" in source
+    assert "function beginAuthorization()" in source and "/install/dry-run/${PAGE_ID}" in source
+    preflight_function = source.split("function preflight()", 1)[1].split("function beginAuthorization()", 1)[0]
+    assert "/install/preflight/${PAGE_ID}" in preflight_function
+    assert "/install/dry-run/" not in preflight_function and "/install/authorize/" not in preflight_function

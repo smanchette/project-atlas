@@ -3,6 +3,7 @@ import inspect
 import json
 from pathlib import Path
 import threading
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -12,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.main import app
+from app.api import wordpress_routes
 from app.db.backup import BackupValidationError, export_backup, load_backup, restore_backup
 from app.db.session import engine as app_engine
 from app.models import WordPressDeploymentAudit, WordPressDeploymentNonce, WordPressDeploymentTransition
@@ -20,6 +22,8 @@ from app.schemas.wordpress import (
     WordPressDeploymentBackupEvidence,
     WordPressDeploymentInstallDryRun,
     WordPressDeploymentManualCompleteRequest,
+    WordPressDeploymentPreflightRequest,
+    WordPressDeploymentPreflight,
     WordPressDeploymentVerifyRequest,
 )
 from app.services import wordpress_deployment as deployment
@@ -88,10 +92,125 @@ def audit_model(status="awaiting_manual_installation", deadline=None):
 
 def test_install_routes_are_fixed_and_no_activation_or_upload_route():
     routes={(route.path,method) for route in app.routes for method in (getattr(route,"methods",None) or set())}; prefix="/api/wordpress/deployment/metadata-bridge/install/"
-    assert {(prefix+f"{action}/{{page_id}}","POST") for action in ("dry-run","authorize","report-manual-complete","verify")} <= routes
+    assert {(prefix+f"{action}/{{page_id}}","POST") for action in ("preflight","dry-run","authorize","report-manual-complete","verify")} <= routes
     assert not any(term in path for path,_ in routes if prefix in path for term in ("activate","upload","remove","delete"))
     request=proof();request["wordpress_backup_completed_at"]=request["wordpress_backup_completed_at"].isoformat()
     with TestClient(app) as client: assert client.post(prefix+"dry-run/42",json=request).status_code==404
+
+
+def _preflight_artifact():
+    return {
+        "atlas_version":TEST_ATLAS_VERSION,"atlas_commit":TEST_ATLAS_COMMIT,"atlas_tag":TEST_ATLAS_TAG,
+        "release_manifest_sha256":"d"*64,"release_source_compatibility_id":"project-atlas-release-identity-v0.59.8",
+        "release_verification_source":"expected_identity_and_checksum_verified_manifest","release_manifest_integrity_verified":True,
+        "release_expected_identity_matched":True,"release_git_metadata_available":False,"release_runtime_identity_verified":True,
+        "plugin_slug":deployment.PLUGIN_SLUG,"plugin_path":deployment.PLUGIN_FILE,"plugin_version":deployment.PLUGIN_VERSION,
+        "zip_file_name":deployment.ZIP_NAME,"zip_sha256":deployment.ZIP_SHA256,
+    }
+
+
+def _mock_complete_inspection(monkeypatch, observed=None, backup_gates=None, state_gates=None):
+    monkeypatch.setattr(deployment,"_verify_artifact",lambda:(_preflight_artifact(),[deployment._gate("artifact","Artifact",True,"")]))
+    monkeypatch.setattr(deployment,"_observe",lambda *_:observed or snapshot())
+    monkeypatch.setattr(deployment,"_backup_gates",lambda *_:backup_gates or [deployment._gate("backup","Backup",True,"")])
+    monkeypatch.setattr(deployment,"_state_gates",lambda *_:state_gates or [deployment._gate("state","State",True,"")])
+
+
+def test_token_free_preflight_is_inspection_only_and_never_signs(monkeypatch,db):
+    _mock_complete_inspection(monkeypatch)
+    monkeypatch.setattr(deployment,"_sign_context",lambda *_: (_ for _ in ()).throw(AssertionError("preflight must not sign")))
+    values=proof();request=WordPressDeploymentPreflightRequest(**values)
+    with Session(db) as session:
+        before=(len(session.exec(select(WordPressDeploymentAudit)).all()),len(session.exec(select(WordPressDeploymentNonce)).all()),len(session.exec(select(WordPressDeploymentTransition)).all()))
+        result=deployment.inspect_installation_preflight(session,41,request)
+        after=(len(session.exec(select(WordPressDeploymentAudit)).all()),len(session.exec(select(WordPressDeploymentNonce)).all()),len(session.exec(select(WordPressDeploymentTransition)).all()))
+    assert result.status=="preflight_ready" and result.preflight_ready and result.inspection_only
+    assert not hasattr(result,"confirmation_token") and not hasattr(result,"confirmation_phrase")
+    assert not result.token_issued and not result.nonce_consumed and not result.audit_created
+    assert result.wordpress_write_count==0 and result.atlas_write_count==0 and result.read_only
+    assert result.backup_deadline==values["wordpress_backup_completed_at"]+timedelta(hours=4)
+    assert before==after==(0,0,0)
+    source=inspect.getsource(deployment.inspect_installation_preflight)
+    assert "_sign_context" not in source and ".commit(" not in source and ".add(" not in source
+
+
+def test_shared_inspection_exactly_feeds_authorization_dry_run(monkeypatch):
+    _mock_complete_inspection(monkeypatch)
+    request=WordPressDeploymentBackupEvidence(**proof())
+    inspection=deployment.inspect_installation_preflight(object(),41,request)
+    monkeypatch.setattr(deployment,"_sign_context",lambda *_:"short-lived-token")
+    dry=deployment.install_dry_run(object(),41,request)
+    assert dry.gate_results==inspection.gate_results
+    assert dry.artifact==inspection.artifact and dry.inspected_state==inspection.inspected_state
+    assert dry.backup_age_seconds==inspection.backup_age_seconds
+    assert dry.confirmation_token=="short-lived-token"
+
+
+def test_token_free_preflight_fails_closed_for_missing_credentials(monkeypatch):
+    observed=snapshot();observed["_error"]="credentials_unavailable";observed["wordpress_request_performed"]=False
+    class TargetSession:
+        def get(self,model,identifier):
+            return SimpleNamespace(wordpress_post_id=8) if model.__name__=="GeneratedPage" else SimpleNamespace(wordpress_media_id=31)
+    monkeypatch.setattr(deployment,"_verify_artifact",lambda:(_preflight_artifact(),[deployment._gate("artifact","Artifact",True,"")]))
+    monkeypatch.setattr(deployment,"_observe",lambda *_:observed)
+    monkeypatch.setattr(deployment,"_backup_gates",lambda *_:[deployment._gate("backup","Backup",True,"")])
+    result=deployment.inspect_installation_preflight(TargetSession(),41,WordPressDeploymentPreflightRequest(**proof()))
+    gates={gate.code:gate for gate in result.gate_results}
+    assert not result.preflight_ready and not gates["credentials"].passed
+    assert result.inspected_state["wordpress_request_performed"] is False
+
+
+def test_token_free_preflight_fails_closed_for_expired_backup(monkeypatch):
+    _mock_complete_inspection(monkeypatch,backup_gates=[deployment._gate("backup_window","Backup window",False,"Expired")])
+    result=deployment.inspect_installation_preflight(object(),41,WordPressDeploymentPreflightRequest(**proof(wordpress_backup_completed_at=datetime.now(UTC)-timedelta(hours=4,seconds=1))))
+    assert not result.preflight_ready
+    assert not {gate.code:gate for gate in result.gate_results}["backup_window"].passed
+
+
+def test_shared_observation_performs_only_wordpress_get_requests(monkeypatch):
+    calls=[]
+    monkeypatch.setattr(deployment,"read_wordpress_settings",lambda *_:SimpleNamespace(site_url="https://example.test",username="operator"))
+    monkeypatch.setattr(deployment,"get_wordpress_application_password",lambda:"test-only-sentinel")
+    def request(site,user,password,method,path,text=False):
+        calls.append((method,path))
+        if path=="/wp-json/": return {"name":"My WordPress","description":""}
+        if "plugins" in path: return []
+        if "/pages/8" in path: return {"id":8,"status":"publish","slug":"drywood-termite-tenting-orlando-fl","featured_media":31}
+        if "/media/31" in path: return {"id":31,"source_url":"media31.jpg"}
+        return {"id":32,"post":0,"source_url":"media32.jpg"}
+    monkeypatch.setattr(deployment,"_request",request)
+    monkeypatch.setattr(deployment,"acquire_rendered_state",lambda *_args,**_kwargs:{"verified":True,"head_hash":"head","visible_hash":"visible","cache_headers":{}})
+    observed=deployment._observe(object(),WordPressDeploymentPreflightRequest(**proof()))
+    assert calls and {method for method,_ in calls}=={"GET"}
+    assert observed["wordpress_request_methods"]==["GET"] and observed["wordpress_request_performed"] is True
+    assert "test-only-sentinel" not in json.dumps(observed)
+
+
+def test_preflight_request_rejects_authorization_fields_and_route_never_accepts_phrase():
+    request=proof();request["wordpress_backup_completed_at"]=request["wordpress_backup_completed_at"].isoformat()
+    request.update(confirmation_phrase=deployment.INSTALL_PHRASE,confirmation_token="forbidden")
+    with pytest.raises(Exception): WordPressDeploymentPreflightRequest(**request)
+    with TestClient(app) as client:
+        response=client.post("/api/wordpress/deployment/metadata-bridge/install/preflight/41",json=request)
+    assert response.status_code==422
+
+
+def test_token_free_preflight_http_response_has_no_authorization_material(monkeypatch):
+    result=WordPressDeploymentPreflight(
+        status="preflight_ready",preflight_ready=True,backup_deadline=datetime.now(UTC)+timedelta(hours=3),
+        artifact=_preflight_artifact(),inspected_state=snapshot(),gate_results=[deployment._gate("all","All gates",True,"")],
+        php_error_findings={"source":"operator_supplied_read_only_evidence","status":"no_errors_reported","details_returned":False},
+    )
+    monkeypatch.setattr(wordpress_routes,"inspect_installation_preflight",lambda *_:result)
+    request=proof();request["wordpress_backup_completed_at"]=request["wordpress_backup_completed_at"].isoformat()
+    with TestClient(app) as client:
+        response=client.post("/api/wordpress/deployment/metadata-bridge/install/preflight/41",json=request)
+    assert response.status_code==200
+    payload=response.json()
+    assert payload["preflight_ready"] and payload["inspection_only"] and payload["token_issued"] is False
+    assert payload["nonce_consumed"] is False and payload["audit_created"] is False
+    assert payload["wordpress_write_count"]==0 and payload["atlas_write_count"]==0
+    assert "confirmation_token" not in payload and "confirmation_phrase" not in payload and "nonce" not in payload
 
 
 def test_authorization_consumes_nonce_and_preserves_exact_initial_sequence(monkeypatch,db):

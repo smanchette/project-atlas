@@ -30,6 +30,7 @@ from app.schemas.wordpress import (
     WordPressDeploymentAuthorization,
     WordPressDeploymentBackupEvidence,
     WordPressDeploymentInstallDryRun,
+    WordPressDeploymentPreflight,
     WordPressDeploymentManualComplete,
     WordPressDeploymentManualCompleteRequest,
     WordPressDeploymentVerification,
@@ -83,7 +84,7 @@ def deployment_readiness() -> dict[str, Any]:
     return {"release": release, "release_status": release_status, "release_error": release_error, "source_expectations": SOURCE_EXPECTATIONS.identity(), "program": program, "read_only": True}
 
 
-def install_dry_run(session: Session, page_id: int, proof: WordPressDeploymentBackupEvidence) -> WordPressDeploymentInstallDryRun:
+def inspect_installation_preflight(session: Session, page_id: int, proof: WordPressDeploymentBackupEvidence) -> WordPressDeploymentPreflight:
     _target(page_id)
     artifact, artifact_gates = _verify_artifact()
     release_verified = any(gate.code == "release_identity" and gate.passed for gate in artifact_gates)
@@ -95,23 +96,45 @@ def install_dry_run(session: Session, page_id: int, proof: WordPressDeploymentBa
         "wordpress_request_performed": False,
     }
     gates = [*artifact_gates, *_backup_gates(proof), *_state_gates(session, observed)]
-    context = _bound_context(observed, proof, artifact)
     ready = all(gate.passed for gate in gates)
+    age = _backup_age(proof.wordpress_backup_completed_at)
+    deadline = _backup_deadline(proof.wordpress_backup_completed_at) if proof.wordpress_backup_completed_at.tzinfo else None
+    return WordPressDeploymentPreflight(
+        status="preflight_ready" if ready else "preflight_blocked",
+        preflight_ready=ready,
+        artifact=artifact,
+        inspected_state=observed,
+        backup_age_seconds=int(age.total_seconds()) if age is not None else None,
+        backup_deadline=deadline,
+        gate_results=gates,
+        php_error_findings={
+            "source": "operator_supplied_read_only_evidence",
+            "status": "no_errors_reported" if _clean_findings(proof.php_error_log_findings) else "findings_reported",
+            "details_returned": False,
+        },
+    )
+
+
+def install_dry_run(session: Session, page_id: int, proof: WordPressDeploymentBackupEvidence) -> WordPressDeploymentInstallDryRun:
+    inspection = inspect_installation_preflight(session, page_id, proof)
+    context = _bound_context(inspection.inspected_state, proof, inspection.artifact)
+    ready = inspection.preflight_ready
     token = phrase = expires_at = None
     if ready:
-        deadline = _backup_deadline(proof.wordpress_backup_completed_at)
+        deadline = inspection.backup_deadline
+        if deadline is None:
+            raise HTTPException(422, "Backup timestamp must be timezone-aware.")
         expires = min(datetime.now(UTC) + timedelta(minutes=15), deadline)
         token = _sign_context("authorize_manual_plugin_install", context, expires)
         phrase = INSTALL_PHRASE
         expires_at = expires.isoformat()
-    age = _backup_age(proof.wordpress_backup_completed_at)
     return WordPressDeploymentInstallDryRun(
         status="preflight_ready" if ready else "preflight_not_started",
         ready=ready,
-        artifact=artifact,
-        inspected_state=observed,
-        backup_age_seconds=int(age.total_seconds()) if age is not None else None,
-        gate_results=gates,
+        artifact=inspection.artifact,
+        inspected_state=inspection.inspected_state,
+        backup_age_seconds=inspection.backup_age_seconds,
+        gate_results=inspection.gate_results,
         confirmation_token=token,
         confirmation_phrase=phrase,
         expires_at=expires_at,
@@ -309,7 +332,7 @@ def _observe(session: Session, proof: WordPressDeploymentBackupEvidence | None =
     settings = read_wordpress_settings(session)
     password = get_wordpress_application_password()
     if not (settings.site_url and settings.username and password):
-        return {"_error": "credentials_unavailable", "plugins": []}
+        return {"_error": "credentials_unavailable", "plugins": [], "read_only": True, "wordpress_request_performed": False, "wordpress_request_methods": []}
     root = _request(settings.site_url, settings.username, password, "GET", "/wp-json/")
     plugins = _request(settings.site_url, settings.username, password, "GET", "/wp-json/wp/v2/plugins?context=edit")
     page = _request(settings.site_url, settings.username, password, "GET", "/wp-json/wp/v2/pages/8?context=edit")
@@ -353,6 +376,8 @@ def _observe(session: Session, proof: WordPressDeploymentBackupEvidence | None =
         "page_references_media32": bool(media32_url and media32_url in page_encoded) or "hero-1.png" in page_encoded,
         "locked_state_hash": _hash(locked),
         "cache_headers": rendered.get("cache_headers", {}),
+        "wordpress_request_performed": True,
+        "wordpress_request_methods": ["GET"],
         "read_only": True,
     }
 
