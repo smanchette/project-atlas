@@ -24,6 +24,7 @@ from app.services.wordpress_rendered_state import (
     _canonical_json,
     _evidence_payload,
     build_manual_browser_evidence,
+    classify_public_page_context,
     validate_manual_browser_evidence,
 )
 
@@ -43,6 +44,11 @@ DUPLICATE_HTML = f"""<!doctype html><html><head>
 <div class="entry-content wp-block-post-content"><h1>{EXPECTED_BODY_H1}</h1>
 <img class="wp-image-31 hero" src="{EXPECTED_MEDIA_URL}" alt="{EXPECTED_MEDIA_ALT}">
 <p>Orlando service content.</p></div></main></body></html>"""
+PUBLIC_ADMIN_THEME_CSS = """<style>
+:root { --wp-admin-theme-color:#007cba; --wp-admin-theme-color-darker-10:#006ba1;
+--wp-admin-theme-color-darker-20:#005a87; }
+.public-wp-admin-block-reference { color:var(--wp-admin-theme-color); }
+</style>"""
 
 
 def evidence(html: str = HTML, **kwargs):
@@ -101,6 +107,37 @@ def test_schema_v2_signs_locked_ordered_duplicate_h1_inventory():
     assert [item["ordinal"] for item in value["h1_inventory"]] == [1, 2]
     assert [item["source_classification"] for item in value["h1_inventory"]] == ["theme_owned_post_title", "atlas_body_content"]
     assert all(item["visible"] and item["dom_path"] for item in value["h1_inventory"])
+
+
+def test_public_wordpress_admin_theme_css_is_accepted_with_safe_signed_diagnostics():
+    public_html = HTML.replace("</head>", f"{PUBLIC_ADMIN_THEME_CSS}</head>")
+    value = evidence(public_html)
+    assert validate_manual_browser_evidence(value, KEY) == (True, "Verified.")
+    assert value["navigation_outcome"] == {
+        "status_code": 200,
+        "content_type": "text/html",
+        "redirect_count": 0,
+        "outcome": "success",
+        "admin_page_detected": False,
+        "login_page_detected": False,
+        "authenticated_context_detected": False,
+        "challenge_page_detected": False,
+        "error_page_detected": False,
+        "admin_detection_signals": [],
+    }
+
+
+def test_orlando_duplicate_h1_fixture_with_public_admin_theme_css_is_accepted():
+    public_html = DUPLICATE_HTML.replace("</head>", f"{PUBLIC_ADMIN_THEME_CSS}</head>")
+    value = evidence(public_html, schema_version=2)
+    assert validate_manual_browser_evidence(value, KEY) == (True, "Verified.")
+    assert value["h1_count"] == 2
+
+
+def test_legacy_schema_v1_navigation_outcome_retains_its_original_meaning():
+    value = evidence()
+    value["navigation_outcome"] = {"status_code": 200, "content_type": "text/html", "redirect_count": 0, "outcome": "success"}
+    assert validate_manual_browser_evidence(resign(value), KEY) == (True, "Verified.")
 
 
 def test_schema_v1_remains_one_h1_and_cannot_prove_duplicate_state():
@@ -188,9 +225,54 @@ def test_credential_cookie_authorization_and_authenticated_capture_rejected(kwar
         evidence(**kwargs)
 
 
-@pytest.mark.parametrize("marker", ["wp-login.php", "/wp-admin/", "checking your browser", "captcha", "critical error", "template fallback"])
-def test_login_admin_challenge_error_and_fallback_pages_rejected(marker):
+@pytest.mark.parametrize("marker", ["checking your browser", "captcha", "critical error", "template fallback"])
+def test_challenge_error_and_fallback_pages_rejected(marker):
     with pytest.raises(ValueError):
+        evidence(HTML + marker)
+
+
+@pytest.mark.parametrize(
+    ("final_url", "html", "expected_field", "expected_signal"),
+    [
+        ("https://www.drywoodtenting.com/wp-admin/", HTML, "admin_page_detected", "admin_url_path"),
+        ("https://www.drywoodtenting.com/wp-login.php", HTML, "login_page_detected", None),
+        (EXPECTED_URL, HTML.replace("</body>", '<form id="loginform" action="/wp-login.php"></form></body>'), "login_page_detected", None),
+        (EXPECTED_URL, HTML.replace('<body class="page-id-8 stable">', '<body class="login wp-core-ui"><div id="login"><form id="loginform">'), "login_page_detected", None),
+        (EXPECTED_URL, HTML.replace('<body class="page-id-8 stable">', '<body class="wp-admin wp-core-ui"><div id="wpwrap"><nav id="adminmenu"><a href="/wp-admin/">Dashboard</a></nav>'), "admin_page_detected", "admin_body_class"),
+        (EXPECTED_URL, HTML.replace('class="page-id-8 stable"', 'class="wp-admin wp-core-ui"'), "admin_page_detected", "admin_body_class"),
+        (EXPECTED_URL, HTML.replace(f'<title>{EXPECTED_TITLE}</title>', '<title>Dashboard ‹ My WordPress — WordPress</title>').replace('<body class="page-id-8 stable">', '<body><div id="wpwrap">'), "admin_page_detected", "dashboard_title_and_shell"),
+        (EXPECTED_URL, HTML.replace('<body class="page-id-8 stable">', '<body class="logged-in admin-bar"><div id="wpadminbar">'), "admin_page_detected", "admin_toolbar_and_authenticated_context"),
+    ],
+)
+def test_structural_admin_and_login_context_is_detected(final_url, html, expected_field, expected_signal):
+    result = classify_public_page_context(html, final_url=final_url)
+    assert result[expected_field] is True
+    if expected_signal:
+        assert expected_signal in result["admin_detection_signals"]
+    with pytest.raises(ValueError):
+        build_manual_browser_evidence(html, final_url=final_url, evidence_identifier="blocked-context", signing_key=KEY)
+
+
+def test_authenticated_admin_toolbar_and_explicit_session_evidence_are_rejected():
+    html = HTML.replace('<body class="page-id-8 stable">', '<body class="admin-bar"><div id="wpadminbar">')
+    diagnostics = classify_public_page_context(html, final_url=EXPECTED_URL, admin_session_used=True)
+    assert diagnostics["authenticated_context_detected"] is True
+    assert diagnostics["admin_page_detected"] is True
+    assert diagnostics["admin_detection_signals"] == ["admin_toolbar_and_authenticated_context"]
+    with pytest.raises(ValueError, match="forbidden"):
+        evidence(html, admin_session_used=True)
+
+
+def test_resigned_false_safe_diagnostics_cannot_claim_admin_context_is_clear():
+    value = evidence()
+    value["navigation_outcome"]["admin_page_detected"] = True
+    value["navigation_outcome"]["admin_detection_signals"] = ["admin_url_path"]
+    assert not validate_manual_browser_evidence(resign(value), KEY)[0]
+
+
+@pytest.mark.parametrize("marker", ["authorization: Bearer secret-material", "cookie: wordpress_logged_in=value", "wp_nonce=secret-value"])
+def test_secret_bearing_source_content_remains_rejected(marker):
+    with pytest.raises(ValueError, match="secret-bearing"):
         evidence(HTML + marker)
 
 

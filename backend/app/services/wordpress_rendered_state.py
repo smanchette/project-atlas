@@ -37,7 +37,7 @@ SECRET_PATTERN = re.compile(
 )
 BOT_PATTERN = re.compile(r"cloudflare|siteground|captcha|access denied|bot protection|checking your browser|cf-chl", re.I)
 CHALLENGE_PATTERN = re.compile(r"cloudflare|captcha|access denied|bot protection|checking your browser|cf-chl", re.I)
-ERROR_PATTERN = re.compile(r"wp-login\.php|wp-admin|critical error|error 404|page not found|template fallback|checking your browser", re.I)
+ERROR_PATTERN = re.compile(r"critical error|error 404|page not found|template fallback|checking your browser", re.I)
 CACHE_HEADERS = {"age", "cache-control", "cf-cache-status", "x-cache", "x-proxy-cache", "x-sg-cache"}
 CACHE_BUSTING_QUERY_KEYS = {"_", "cb", "cache", "cachebust", "timestamp", "ver", "v"}
 VOLATILE_ATTRIBUTES = {"nonce", "integrity", "crossorigin"}
@@ -205,6 +205,116 @@ class _EvidenceHTML(HTMLParser):
             self.media32_references.append(f"comment:{value}")
 
 
+class _PublicPageContextHTML(HTMLParser):
+    """Collect structural login/admin signals without inspecting stylesheet text."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.body_classes: set[str] = set()
+        self.element_classes: set[str] = set()
+        self.element_ids: set[str] = set()
+        self.form_actions: list[str] = []
+        self.hrefs: list[str] = []
+        self.in_title = False
+        self.title_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        values = {key.lower(): _text(value or "") for key, value in attrs}
+        classes = {item.lower() for item in values.get("class", "").split()}
+        self.element_classes.update(classes)
+        if tag == "body":
+            self.body_classes.update(classes)
+        if values.get("id"):
+            self.element_ids.add(values["id"].lower())
+        if tag == "form" and values.get("action"):
+            self.form_actions.append(values["action"])
+        if values.get("href"):
+            self.hrefs.append(values["href"])
+        if tag == "title":
+            self.in_title = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "title":
+            self.in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self.in_title:
+            self.title_parts.append(data)
+
+
+def classify_public_page_context(
+    html: str,
+    *,
+    final_url: str,
+    status_code: int = 200,
+    credentials: str | None = None,
+    cookies: str | None = None,
+    authorization_header: str | None = None,
+    authenticated_html: bool = False,
+    admin_session_used: bool = False,
+) -> dict[str, Any]:
+    """Return safe structural page-context diagnostics without retaining raw HTML."""
+
+    parsed = _PublicPageContextHTML()
+    parsed.feed(html)
+    parsed.close()
+    def safe_path(value: str) -> str:
+        try:
+            return urlsplit(value).path.lower()
+        except ValueError:
+            return ""
+
+    path = safe_path(final_url)
+    normalized_path = path.rstrip("/") or "/"
+    login_url = normalized_path == "/wp-login.php"
+    admin_url = normalized_path == "/wp-admin" or path.startswith("/wp-admin/")
+    login_form = any((safe_path(action).rstrip("/") or "/") == "/wp-login.php" for action in parsed.form_actions)
+    login_shell = "loginform" in parsed.element_ids or "login" in parsed.element_ids
+    login_body = "login" in parsed.body_classes and login_shell
+    title = _text(" ".join(parsed.title_parts)).lower()
+    login_title = ("log in" in title or "login" in title) and "wordpress" in title and (login_form or login_shell)
+
+    admin_shell_ids = {"wpwrap", "wpcontent", "wpbody", "wpbody-content", "adminmenu", "adminmenuwrap"}
+    admin_shell = bool(parsed.element_ids & admin_shell_ids)
+    admin_body = "wp-admin" in parsed.body_classes and ("wp-core-ui" in parsed.body_classes or admin_shell)
+    dashboard_title = ("dashboard" in title and "wordpress" in title) and admin_shell
+    admin_links = any(
+        (safe_path(href).rstrip("/") or "/") == "/wp-admin"
+        or safe_path(href).startswith("/wp-admin/")
+        for href in parsed.hrefs
+    )
+    toolbar = "wpadminbar" in parsed.element_ids or "admin-bar" in parsed.body_classes
+    authenticated_context = bool(
+        credentials
+        or cookies
+        or authorization_header
+        or authenticated_html
+        or admin_session_used
+        or "logged-in" in parsed.body_classes
+    )
+    admin_signals: list[str] = []
+    if admin_url:
+        admin_signals.append("admin_url_path")
+    if admin_body:
+        admin_signals.append("admin_body_class")
+    if dashboard_title:
+        admin_signals.append("dashboard_title_and_shell")
+    if admin_links and admin_shell:
+        admin_signals.append("admin_navigation_and_shell")
+    if toolbar and authenticated_context:
+        admin_signals.append("admin_toolbar_and_authenticated_context")
+    admin_detected = bool(admin_signals)
+    return {
+        "admin_page_detected": admin_detected,
+        "login_page_detected": bool(login_url or login_form or login_body or login_title),
+        "authenticated_context_detected": authenticated_context,
+        "challenge_page_detected": bool(CHALLENGE_PATTERN.search(html)),
+        "error_page_detected": bool(status_code in {404, 500, 502, 503, 504} or ERROR_PATTERN.search(html)),
+        "admin_detection_signals": admin_signals,
+    }
+
+
 class _H1InventoryHTML(HTMLParser):
     """Collect a deterministic, ordered H1 inventory without changing schema-v1 parsing."""
 
@@ -366,6 +476,16 @@ def build_manual_browser_evidence(
     schema_version: int = EVIDENCE_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     """Build evidence only from a credential-free public browser DOM capture."""
+    context = classify_public_page_context(
+        html,
+        final_url=final_url,
+        status_code=status_code,
+        credentials=credentials,
+        cookies=cookies,
+        authorization_header=authorization_header,
+        authenticated_html=authenticated_html,
+        admin_session_used=admin_session_used,
+    )
     if final_url != EXPECTED_URL or redirect_count != 0:
         raise ValueError("Browser evidence must use the locked Orlando URL without redirects.")
     if status_code != 200 or "text/html" not in content_type.lower():
@@ -376,7 +496,7 @@ def build_manual_browser_evidence(
         raise ValueError("A local browser-evidence signing key is required.")
     if SECRET_PATTERN.search(html) or SECRET_PATTERN.search(_canonical_json({"credentials": credentials, "cookies": cookies, "authorization": authorization_header})):
         raise ValueError("Browser evidence source contains secret-bearing content.")
-    if CHALLENGE_PATTERN.search(html) or ERROR_PATTERN.search(html):
+    if any(context[field] for field in ("admin_page_detected", "login_page_detected", "authenticated_context_detected", "challenge_page_detected", "error_page_detected")):
         raise ValueError("Challenge, login, admin, error, or fallback content cannot be evidence.")
     parsed = _EvidenceHTML()
     parsed.feed(html)
@@ -405,7 +525,13 @@ def build_manual_browser_evidence(
         "expires_at": expires.isoformat(),
         "final_url": final_url,
         "acquisition_source": ACQUISITION_SOURCE,
-        "navigation_outcome": {"status_code": status_code, "content_type": content_type.split(";", 1)[0].lower(), "redirect_count": redirect_count, "outcome": "success"},
+        "navigation_outcome": {
+            "status_code": status_code,
+            "content_type": content_type.split(";", 1)[0].lower(),
+            "redirect_count": redirect_count,
+            "outcome": "success",
+            **context,
+        },
         "page_identity": {"document_title": parsed.titles[0], "h1": parsed.h1[0], "canonical_url": parsed.canonicals[0], "featured_image_url": featured[0]["src"], "featured_image_alt": featured[0]["alt"]},
         "metadata_inventory": inventory,
         "metadata_inventory_hash": _hash(_canonical_json(inventory)),
@@ -473,7 +599,16 @@ def validate_manual_browser_evidence(evidence: dict[str, Any] | Any | None, sign
     if not captured.astimezone(UTC) <= current <= expires.astimezone(UTC):
         return False, "Browser evidence is expired or future-dated."
     navigation = evidence.get("navigation_outcome")
-    if navigation != {"status_code": 200, "content_type": "text/html", "redirect_count": 0, "outcome": "success"}:
+    legacy_navigation = {"status_code": 200, "content_type": "text/html", "redirect_count": 0, "outcome": "success"}
+    diagnostics = {
+        "admin_page_detected": False,
+        "login_page_detected": False,
+        "authenticated_context_detected": False,
+        "challenge_page_detected": False,
+        "error_page_detected": False,
+        "admin_detection_signals": [],
+    }
+    if navigation != legacy_navigation and navigation != {**legacy_navigation, **diagnostics}:
         return False, "Browser evidence navigation outcome is not an exact successful non-redirected HTML capture."
     identity = evidence.get("page_identity")
     if identity != {"document_title": EXPECTED_TITLE, "h1": EXPECTED_H1, "canonical_url": EXPECTED_URL, "featured_image_url": EXPECTED_MEDIA_URL, "featured_image_alt": EXPECTED_MEDIA_ALT} or evidence.get("final_url") != EXPECTED_URL:
@@ -550,8 +685,9 @@ def _valid_duplicate_h1_inventory(value: Any) -> bool:
 def _html_result(response: httpx.Response, outcome: str, source: str) -> dict[str, Any]:
     final_url = str(response.url)
     headers = {key.lower(): value for key, value in response.headers.items()}
-    base: dict[str, Any] = {"source": source, "outcome": outcome, "final_url": final_url, "status_code": response.status_code, "content_type": headers.get("content-type", ""), "cache_headers": {key: value for key, value in headers.items() if key in CACHE_HEADERS}, "verified": False}
     body = response.text
+    context = classify_public_page_context(body, final_url=final_url, status_code=response.status_code)
+    base: dict[str, Any] = {"source": source, "outcome": outcome, "final_url": final_url, "status_code": response.status_code, "content_type": headers.get("content-type", ""), "cache_headers": {key: value for key, value in headers.items() if key in CACHE_HEADERS}, "verified": False, **context}
     if 300 <= response.status_code < 400 or final_url != EXPECTED_URL:
         return {**base, "outcome": "unexpected_redirect"}
     if response.status_code == 403 and BOT_PATTERN.search(body + " " + " ".join(headers.values())):
@@ -560,7 +696,10 @@ def _html_result(response: httpx.Response, outcome: str, source: str) -> dict[st
         return {**base, "outcome": "error_page_detected"}
     if response.status_code >= 400:
         return {**base, "outcome": "unavailable"}
-    if "text/html" not in headers.get("content-type", "").lower() or ERROR_PATTERN.search(body):
+    if "text/html" not in headers.get("content-type", "").lower() or any(
+        context[field]
+        for field in ("admin_page_detected", "login_page_detected", "authenticated_context_detected", "challenge_page_detected", "error_page_detected")
+    ):
         return {**base, "outcome": "error_page_detected"}
     parsed = _EvidenceHTML()
     parsed.feed(body)
