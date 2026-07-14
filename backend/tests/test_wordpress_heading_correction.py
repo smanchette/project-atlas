@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import copy
 import inspect
+import json
 
 import pytest
+import httpx
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -30,6 +33,12 @@ from app.services.wordpress_heading_contract import (
     wordpress_body_hash,
 )
 from app.services.wordpress_sandbox import build_wordpress_payload_preview
+from app.services.wordpress_rendered_state import (
+    EXPECTED_MEDIA_ALT,
+    EXPECTED_MEDIA_URL,
+    EXPECTED_TITLE as EXPECTED_DOCUMENT_TITLE,
+    build_manual_browser_evidence,
+)
 
 
 def _backups(offset_seconds: int = 0) -> WordPressHeadingCorrectionBackupIdentities:
@@ -66,18 +75,38 @@ def _observation(body: str, *, corrected: bool) -> dict:
         '<html><head><title>Drywood Termite Tenting in Orlando, FL – My WordPress</title>'
         f'<link rel="canonical" href="{EXPECTED_URL}"></head><body>'
         f'{theme_h1}<div class="entry-content wp-block-post-content">{body}'
-        '<img class="wp-image-31" src="https://www.drywoodtenting.com/wp-content/uploads/2026/07/orlando-drywood-termite-tenting-hero.png">'
+        '<img class="wp-image-31" src="https://www.drywoodtenting.com/wp-content/uploads/2026/07/orlando-drywood-termite-tenting-hero.png" alt="Two-story Orlando Florida home professionally covered for drywood termite tenting">'
         "</div></body></html>"
     )
     snapshot = {
         "page": correction._page_snapshot(page),
-        "media_31": {"id": 31, "status": "inherit", "slug": "orlando-hero", "source_url": "hero.png", "alt_text": "Hero", "modified_gmt": "2026-07-12T00:00:00"},
-        "media_32": {"status_code": 404},
+        "media_31": {"id": 31, "status": "inherit", "slug": "orlando-hero", "source_url": "https://www.drywoodtenting.com/wp-content/uploads/2026/07/orlando-drywood-termite-tenting-hero.png", "alt_text": "Two-story Orlando Florida home professionally covered for drywood termite tenting", "modified_gmt": "2026-07-12T00:00:00"},
+        "media_32": {"id": 32, "status": "inherit", "slug": "unused-hero", "source_url": "https://www.drywoodtenting.com/wp-content/uploads/2026/07/unused-hero.png", "alt_text": "Unused", "modified_gmt": "2026-07-12T00:00:00", "post": None},
         "rendered": correction._rendered_snapshot(html, {"cache-control": "max-age=0"}),
     }
     expected_h1_count = 1 if corrected else 2
     assert len(snapshot["rendered"]["h1_texts"]) == expected_h1_count
-    return {"page": page, "rendered_html": html, "snapshot": snapshot}
+    return {
+        "page": page,
+        "media_31": snapshot["media_31"],
+        "media_32": snapshot["media_32"],
+        "rendered_html": html,
+        "rendered_snapshot": snapshot["rendered"],
+        "snapshot": snapshot,
+    }
+
+
+def _duplicate_evidence_html(body: str) -> str:
+    return (
+        f'<html><head><title>{EXPECTED_DOCUMENT_TITLE}</title><link rel="canonical" href="{EXPECTED_URL}"></head>'
+        f'<body><h1 class="wp-block-post-title">{EXPECTED_TITLE}</h1><div class="entry-content wp-block-post-content">{body}'
+        f'<img class="wp-image-31" src="{EXPECTED_MEDIA_URL}" alt="{EXPECTED_MEDIA_ALT}"></div></body></html>'
+    )
+
+
+def _http_response(url: str, status: int, *, payload: dict | None = None, text: str = "", content_type: str = "application/json") -> httpx.Response:
+    body = json.dumps(payload) if payload is not None else text
+    return httpx.Response(status, request=httpx.Request("GET", url), content=body.encode(), headers={"content-type": content_type})
 
 
 @pytest.fixture
@@ -125,7 +154,7 @@ def test_dry_run_requires_exact_hashes_and_signs_locked_context(
 ) -> None:
     with Session(engine) as session:
         current, proposed = _bodies(session)
-        monkeypatch.setattr(correction, "_observe", lambda *_: _observation(current, corrected=False))
+        monkeypatch.setattr(correction, "_observe", lambda *_, **__: _observation(current, corrected=False))
         result = correction.dry_run_heading_correction(
             session, 41, WordPressHeadingCorrectionDryRunRequest(backups=_backups())
         )
@@ -145,7 +174,7 @@ def test_dry_run_blocks_wrong_page_post_and_body_hash(
     with Session(engine) as session:
         current, _ = _bodies(session)
         drifted = _observation(current + "<p>drift</p>", corrected=False)
-        monkeypatch.setattr(correction, "_observe", lambda *_: drifted)
+        monkeypatch.setattr(correction, "_observe", lambda *_, **__: drifted)
         result = correction.dry_run_heading_correction(
             session, 41, WordPressHeadingCorrectionDryRunRequest(backups=_backups())
         )
@@ -160,11 +189,21 @@ def test_dry_run_requires_the_exact_proposed_hash(
 ) -> None:
     with Session(engine) as session:
         current, _ = _bodies(session)
-        monkeypatch.setattr(correction, "_observe", lambda *_: _observation(current, corrected=False))
+        monkeypatch.setattr(correction, "_observe", lambda *_, **__: _observation(current, corrected=False))
         monkeypatch.setattr(correction, "EXPECTED_PROPOSED_BODY_HASH", "0" * 64)
         result = correction.dry_run_heading_correction(session, 41, WordPressHeadingCorrectionDryRunRequest(backups=_backups()))
     assert {gate.code: gate.passed for gate in result.gate_results}["proposed_body_hash"] is False
     assert result.confirmation_token is None
+
+
+def test_unavailable_page_content_returns_null_hash_and_dependency_reason() -> None:
+    result = heading_contract_service.build_orlando_heading_correction_dry_run(
+        {"id": 8, "status": "publish", "title": {"raw": EXPECTED_TITLE}, "slug": "drywood-termite-tenting-orlando-fl", "link": EXPECTED_URL, "featured_media": 31},
+        '<h1 class="wp-block-post-title">Drywood Termite Tenting in Orlando, FL</h1>',
+    )
+    gates = {gate.code: gate for gate in result.gate_results}
+    assert result.current_body_hash is None
+    assert gates["body_hash"].message == "blocked_due_to_missing_page_observation"
 
 
 def test_apply_sends_exactly_one_content_only_request_and_preserves_protected_fields(
@@ -174,7 +213,7 @@ def test_apply_sends_exactly_one_content_only_request_and_preserves_protected_fi
     with Session(engine) as session:
         current, proposed = _bodies(session)
         observations = iter((_observation(current, corrected=False), _observation(current, corrected=False), _observation(proposed, corrected=True)))
-        monkeypatch.setattr(correction, "_observe", lambda *_: next(observations))
+        monkeypatch.setattr(correction, "_observe", lambda *_, **__: next(observations))
         dry = correction.dry_run_heading_correction(session, 41, WordPressHeadingCorrectionDryRunRequest(backups=_backups()))
 
         class Response:
@@ -210,7 +249,7 @@ def test_backup_change_and_stale_token_block_before_write(
 ) -> None:
     with Session(engine) as session:
         current, _ = _bodies(session)
-        monkeypatch.setattr(correction, "_observe", lambda *_: _observation(current, corrected=False))
+        monkeypatch.setattr(correction, "_observe", lambda *_, **__: _observation(current, corrected=False))
         first = _backups()
         dry = correction.dry_run_heading_correction(session, 41, WordPressHeadingCorrectionDryRunRequest(backups=first))
         with pytest.raises(HTTPException) as changed:
@@ -231,7 +270,7 @@ def test_wordpress_success_atlas_failure_uses_read_only_reconciliation(
     with Session(engine) as session:
         current, proposed = _bodies(session)
         observations = iter((_observation(current, corrected=False), _observation(current, corrected=False), _observation(proposed, corrected=True)))
-        monkeypatch.setattr(correction, "_observe", lambda *_: next(observations))
+        monkeypatch.setattr(correction, "_observe", lambda *_, **__: next(observations))
         dry = correction.dry_run_heading_correction(session, 41, WordPressHeadingCorrectionDryRunRequest(backups=_backups()))
         class Response:
             status_code = 200
@@ -257,7 +296,7 @@ def test_wordpress_success_atlas_failure_uses_read_only_reconciliation(
         audit_id = failed.value.detail["audit_id"]
         audit = session.get(WordPressHeadingCorrectionAudit, audit_id)
         assert audit and audit.status == "reconciliation_required" and audit.wordpress_write_count == 1
-        monkeypatch.setattr(correction, "_observe", lambda *_: _observation(proposed, corrected=True))
+        monkeypatch.setattr(correction, "_observe", lambda *_, **__: _observation(proposed, corrected=True))
         result = correction.reconcile_heading_correction(session, 41, WordPressHeadingCorrectionReconcileRequest(audit_id=audit_id, confirmation_phrase=correction.RECONCILIATION_PHRASE))
         assert result.status == "verified" and result.wordpress_write_count == 0
 
@@ -269,7 +308,7 @@ def test_verify_requires_one_h1_exact_h2_and_unchanged_media(
         current, proposed = _bodies(session)
         pre = _observation(current, corrected=False)["snapshot"]
         post = _observation(proposed, corrected=True)
-        monkeypatch.setattr(correction, "_observe", lambda *_: post)
+        monkeypatch.setattr(correction, "_observe", lambda *_, **__: post)
         audit = WordPressHeadingCorrectionAudit(
             generated_page_id=41, wordpress_post_id=8, status="reconciliation_required",
             wordpress_site_url="https://example.test", current_body_hash=correction.EXPECTED_CURRENT_BODY_HASH,
@@ -305,10 +344,114 @@ def test_seven_other_drafts_remain_byte_for_byte_unchanged(
         before = [(p.id, p.page_title, p.h1, p.draft_content) for p in others]
         other_ids = [p.id for p in others]
         current, _ = _bodies(session)
-        monkeypatch.setattr(correction, "_observe", lambda *_: _observation(current, corrected=False))
+        monkeypatch.setattr(correction, "_observe", lambda *_, **__: _observation(current, corrected=False))
         correction.dry_run_heading_correction(session, 41, WordPressHeadingCorrectionDryRunRequest(backups=_backups()))
         after = [(p.id, p.page_title, p.h1, p.draft_content) for p in session.exec(select(GeneratedPage).where(GeneratedPage.id.in_(other_ids)).order_by(GeneratedPage.id)).all()]
     assert len(before) == 7 and after == before
+
+
+def _mock_observation_client(body: str, *, failed_resource: str | None = None):
+    fixture = _observation(body, corrected=False)
+
+    class Client:
+        def __init__(self, **_kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def get(self, url: str, auth=None):
+            if url == EXPECTED_URL:
+                return _http_response(url, 403, text="SiteGround bot protection access denied", content_type="text/html")
+            if "/pages/8" in url:
+                return _http_response(url, 500 if failed_resource == "page_8" else 200, payload=fixture["page"])
+            if "/media/31" in url:
+                return _http_response(url, 500 if failed_resource == "media_31" else 200, payload=fixture["media_31"])
+            if "/media/32" in url:
+                return _http_response(url, 500 if failed_resource == "media_32" else 200, payload=fixture["media_32"])
+            raise AssertionError(f"Unexpected GET {url}")
+    return Client
+
+
+@pytest.mark.parametrize(
+    ("resource", "field", "failure_code"),
+    [
+        ("page_8", "page_8_observation", "page_8_get_failed"),
+        ("media_31", "media_31_observation", "media_31_get_failed"),
+        ("media_32", "media_32_observation", "media_32_get_failed"),
+    ],
+)
+def test_observation_failures_are_reported_independently(guarded, monkeypatch: pytest.MonkeyPatch, resource: str, field: str, failure_code: str):
+    with Session(engine) as session:
+        current, _ = _bodies(session)
+    monkeypatch.setattr(correction.httpx, "Client", _mock_observation_client(current, failed_resource=resource))
+    result = correction._observe("https://example.test", "operator", "process-only")
+    diagnostic = result[field]
+    assert diagnostic.attempted and not diagnostic.success and diagnostic.failure_code == failure_code
+    for other in {"page_8_observation", "media_31_observation", "media_32_observation"} - {field}:
+        assert result[other].success
+    assert result["rendered_page_observation"].failure_code == "rendered_public_bot_protection"
+
+
+def test_schema_v2_satisfies_only_bot_blocked_rendered_observation(guarded, monkeypatch: pytest.MonkeyPatch):
+    key = "v0.59.25-local-test-signing-key"
+    monkeypatch.setenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", key)
+    with Session(engine) as session:
+        current, _ = _bodies(session)
+        evidence = build_manual_browser_evidence(
+            _duplicate_evidence_html(current),
+            final_url=EXPECTED_URL,
+            evidence_identifier="duplicate-h1-evidence-001",
+            signing_key=key,
+            schema_version=2,
+        )
+        monkeypatch.setattr(correction.httpx, "Client", _mock_observation_client(current))
+        observed = correction._observe("https://example.test", "operator", "process-only", manual_evidence=evidence)
+        assert observed["rendered_page_observation"].success
+        assert observed["rendered_page_observation"].acquisition_source == "signed_browser_evidence_v2"
+        assert all(observed[name].success for name in ("page_8_observation", "media_31_observation", "media_32_observation"))
+        before = len(session.exec(select(WordPressHeadingCorrectionAudit)).all())
+        monkeypatch.setattr(correction, "_observe", lambda *_, **__: observed)
+        dry = correction.dry_run_heading_correction(
+            session,
+            41,
+            WordPressHeadingCorrectionDryRunRequest(backups=_backups(), manual_browser_evidence=evidence),
+        )
+        after = len(session.exec(select(WordPressHeadingCorrectionAudit)).all())
+    assert dry.ready and dry.token_issued, [(gate.code, gate.message) for gate in dry.gate_results if not gate.passed]
+    assert dry.current_body_hash == correction.EXPECTED_CURRENT_BODY_HASH
+    assert dry.proposed_body_hash == correction.EXPECTED_PROPOSED_BODY_HASH
+    assert before == after and not dry.audit_created and dry.wordpress_write_count == 0 and dry.atlas_write_count == 0
+
+
+@pytest.mark.parametrize("missing", ["page_8", "media_31", "media_32"])
+def test_schema_v2_cannot_replace_authenticated_page_or_media(missing: str, guarded, monkeypatch: pytest.MonkeyPatch):
+    key = "v0.59.25-local-test-signing-key"
+    monkeypatch.setenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", key)
+    with Session(engine) as session:
+        current, _ = _bodies(session)
+        evidence = build_manual_browser_evidence(_duplicate_evidence_html(current), final_url=EXPECTED_URL, evidence_identifier="duplicate-h1-evidence-002", signing_key=key, schema_version=2)
+        monkeypatch.setattr(correction.httpx, "Client", _mock_observation_client(current, failed_resource=missing))
+        observed = correction._observe("https://example.test", "operator", "process-only", manual_evidence=evidence)
+        monkeypatch.setattr(correction, "_observe", lambda *_, **__: observed)
+        dry = correction.dry_run_heading_correction(session, 41, WordPressHeadingCorrectionDryRunRequest(backups=_backups(), manual_browser_evidence=evidence))
+    assert not dry.ready and not dry.token_issued and dry.confirmation_token is None
+    if missing == "page_8":
+        assert dry.current_body_hash is None
+        assert {gate.code: gate.message for gate in dry.gate_results}["body_hash"] == "blocked_due_to_missing_page_observation"
+
+
+def test_invalid_or_v1_evidence_cannot_satisfy_duplicate_h1_bot_fallback(guarded, monkeypatch: pytest.MonkeyPatch):
+    key = "v0.59.25-local-test-signing-key"
+    monkeypatch.setenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", key)
+    with Session(engine) as session:
+        current, proposed = _bodies(session)
+    v1 = build_manual_browser_evidence(_duplicate_evidence_html(proposed), final_url=EXPECTED_URL, evidence_identifier="post-correction-v1", signing_key=key)
+    monkeypatch.setattr(correction.httpx, "Client", _mock_observation_client(current))
+    result = correction._observe("https://example.test", "operator", "process-only", manual_evidence=v1)
+    assert not result["rendered_page_observation"].success
+    assert result["rendered_page_observation"].failure_code == "rendered_evidence_invalid"
+    altered = copy.deepcopy(v1)
+    altered["visible_content_hash"] = "0" * 64
+    result = correction._observe("https://example.test", "operator", "process-only", manual_evidence=altered)
+    assert result["rendered_page_observation"].failure_code == "rendered_evidence_invalid"
 
 
 def test_apply_source_has_one_post_no_retry_and_forbids_protected_payload_fields() -> None:

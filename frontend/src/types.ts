@@ -872,7 +872,7 @@ export type WordPressMetadataApplyResult = { page_id: number; wordpress_post_id:
 export type WordPressDeploymentGate = { code: string; label: string; passed: boolean; message: string };
 export type WordPressManualBrowserEvidence = {
   evidence_schema: "project-atlas-manual-browser-evidence";
-  evidence_schema_version: 1;
+  evidence_schema_version: 1 | 2;
   capture_helper_version: "0.59.15";
   evidence_id: string; captured_at: string; expires_at: string; final_url: string;
   acquisition_source: "credential_free_public_browser";
@@ -887,7 +887,23 @@ export type WordPressManualBrowserEvidence = {
   metadata_inventory_hash: string; absence_findings: Record<string,boolean>;
   normalized_head: string; normalized_visible_content: string;
   rendered_head_hash: string; visible_content_hash: string;
-  privacy_attestations: Record<string,boolean>; helper_signature: string;
+  privacy_attestations: Record<string,boolean>;
+  h1_inventory?: { text:string; ordinal:number; dom_path:string; classes:string[]; ancestor_classes:string[]; visible:boolean; source_classification:string }[] | null;
+  h1_count?: number | null; primary_h1?: string | null; body_h1?: string | null;
+  helper_signature: string;
+};
+export type WordPressHeadingCorrectionObservation = {
+  attempted:boolean; acquisition_source:string; http_status?:number|null; final_url?:string|null;
+  success:boolean; failure_code?:string|null; message:string;
+};
+export type WordPressHeadingCorrectionDryRun = {
+  atlas_page_id:41; wordpress_post_id:8; status:"blocked"|"dry_run_ready"; ready:boolean;
+  current_body_hash?:string|null; proposed_body_hash?:string|null; current_heading_fragment:string; proposed_heading_fragment:string;
+  request_payload:Record<string,string>; gate_results:WordPressDeploymentGate[]; read_only:true; token_issued:boolean;
+  nonce_consumed:false; audit_created:false; wordpress_write_count:0; atlas_write_count:0;
+  page_8_observation?:WordPressHeadingCorrectionObservation|null; media_31_observation?:WordPressHeadingCorrectionObservation|null;
+  media_32_observation?:WordPressHeadingCorrectionObservation|null; rendered_page_observation?:WordPressHeadingCorrectionObservation|null;
+  confirmation_phrase?:string|null; expires_at?:string|null;
 };
 export type WordPressDeploymentReadiness = {
   release: { manifest_schema_version: number; source_compatibility_id: string; atlas_version: string; atlas_commit: string; atlas_tag: string; plugin_version: string; plugin_zip_filename: string; plugin_zip_sha256: string; manifest_sha256: string; verification_source: string; git_metadata_available: boolean; manifest_integrity_verified: boolean; expected_release_matched: boolean; runtime_identity_verified: boolean } | null;

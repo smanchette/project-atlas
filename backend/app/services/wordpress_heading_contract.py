@@ -52,11 +52,15 @@ def propose_orlando_body_correction(current_body: str) -> str:
 
 
 def build_orlando_heading_correction_dry_run(
-    page_rest: dict[str, Any],
-    rendered_html: str,
+    page_rest: dict[str, Any] | None,
+    rendered_html: str = "",
+    rendered_h1_inventory: list[dict[str, Any]] | None = None,
 ) -> WordPressHeadingCorrectionDryRun:
-    current_body = _resource_text(page_rest.get("content"))
-    current_hash = wordpress_body_hash(current_body)
+    page_available = page_rest is not None
+    page_rest = page_rest or {}
+    content_available = page_available and "content" in page_rest
+    current_body = _resource_text(page_rest.get("content")) if content_available else ""
+    current_hash = wordpress_body_hash(current_body) if content_available else None
     proposed_body = ""
     try:
         proposed_body = propose_orlando_body_correction(current_body)
@@ -64,13 +68,13 @@ def build_orlando_heading_correction_dry_run(
         pass
 
     request_payload = {"content": proposed_body} if proposed_body else {}
-    current_headings = _headings(rendered_html)
-    simulated_html = (
-        rendered_html.replace(CURRENT_HEADING_FRAGMENT, PROPOSED_HEADING_FRAGMENT, 1)
-        if proposed_body
-        else rendered_html
-    )
-    proposed_headings = _headings(simulated_html)
+    rendered_available = rendered_h1_inventory is not None or bool(rendered_html)
+    current_headings = rendered_h1_inventory if rendered_h1_inventory is not None else _headings(rendered_html)
+    if rendered_h1_inventory is not None:
+        proposed_headings = [item for item in current_headings if item.get("source_classification") != "atlas_body_content"] if proposed_body else current_headings
+    else:
+        simulated_html = rendered_html.replace(CURRENT_HEADING_FRAGMENT, PROPOSED_HEADING_FRAGMENT, 1) if proposed_body else rendered_html
+        proposed_headings = _headings(simulated_html)
     title = _resource_text(page_rest.get("title"))
     first = current_headings[0] if len(current_headings) > 0 else {}
     second = current_headings[1] if len(current_headings) > 1 else {}
@@ -84,25 +88,25 @@ def build_orlando_heading_correction_dry_run(
     )
 
     gates = [
-        _gate("target_id", "WordPress page 8 is the only target", page_rest.get("id") == WORDPRESS_POST_ID),
-        _gate("status", "Page 8 remains published", page_rest.get("status") == "publish"),
-        _gate("title", "Page title remains exact", title == EXPECTED_TITLE),
-        _gate("slug", "Page slug remains exact", page_rest.get("slug") == EXPECTED_SLUG),
-        _gate("url", "Page URL remains exact", page_rest.get("link") == EXPECTED_URL),
-        _gate("featured_media", "Featured media remains 31", page_rest.get("featured_media") == EXPECTED_FEATURED_MEDIA),
-        _gate("body_hash", "Current canonical body hash remains locked", current_hash == EXPECTED_CURRENT_BODY_HASH),
-        _gate("body_prefix", "Current body starts with the exact Atlas H1", current_body.startswith(CURRENT_HEADING_FRAGMENT)),
-        _gate("two_h1", "Exactly two H1 elements currently render", len(current_headings) == 2),
+        _gate("target_id", "WordPress page 8 is the only target", page_rest.get("id") == WORDPRESS_POST_ID, page_available),
+        _gate("status", "Page 8 remains published", page_rest.get("status") == "publish", page_available),
+        _gate("title", "Page title remains exact", title == EXPECTED_TITLE, page_available),
+        _gate("slug", "Page slug remains exact", page_rest.get("slug") == EXPECTED_SLUG, page_available),
+        _gate("url", "Page URL remains exact", page_rest.get("link") == EXPECTED_URL, page_available),
+        _gate("featured_media", "Featured media remains 31", page_rest.get("featured_media") == EXPECTED_FEATURED_MEDIA, page_available),
+        _gate("body_hash", "Current canonical body hash remains locked", current_hash == EXPECTED_CURRENT_BODY_HASH, content_available),
+        _gate("body_prefix", "Current body starts with the exact Atlas H1", current_body.startswith(CURRENT_HEADING_FRAGMENT), content_available),
+        _gate("two_h1", "Exactly two H1 elements currently render", len(current_headings) == 2, rendered_available),
         _gate(
             "theme_h1_first",
             "The theme Post Title is the first H1",
-            first.get("text") == EXPECTED_TITLE and "wp-block-post-title" in first.get("classes", []),
+            first.get("text") == EXPECTED_TITLE and "wp-block-post-title" in first.get("classes", []), rendered_available,
         ),
         _gate(
             "atlas_h1_second",
             "The Atlas body heading is the second H1",
             second.get("text") == EXPECTED_BODY_HEADING
-            and bool({"entry-content", "wp-block-post-content"} & set(second.get("ancestor_classes", []))),
+            and bool({"entry-content", "wp-block-post-content"} & set(second.get("ancestor_classes", []))), rendered_available,
         ),
         _gate("tag_only_delta", "Only the first body heading tag changes", tail_unchanged),
         _gate(
@@ -110,7 +114,7 @@ def build_orlando_heading_correction_dry_run(
             "The proposed rendered result contains exactly one H1",
             len(proposed_headings) == 1
             and proposed_headings[0].get("text") == EXPECTED_TITLE
-            and "wp-block-post-title" in proposed_headings[0].get("classes", []),
+            and "wp-block-post-title" in proposed_headings[0].get("classes", []), rendered_available,
         ),
         _gate(
             "wording_sections_unchanged",
@@ -146,7 +150,15 @@ def _resource_text(value: Any) -> str:
     return ""
 
 
-def _gate(code: str, label: str, passed: bool) -> WordPressDraftGateResult:
+def _gate(code: str, label: str, passed: bool, observation_available: bool = True) -> WordPressDraftGateResult:
+    if not observation_available:
+        dependency = "page" if code in {"target_id", "status", "title", "slug", "url", "featured_media", "body_hash", "body_prefix"} else "rendered"
+        return WordPressDraftGateResult(
+            code=code,
+            label=label,
+            passed=False,
+            message=f"blocked_due_to_missing_{dependency}_observation",
+        )
     return WordPressDraftGateResult(
         code=code,
         label=label,

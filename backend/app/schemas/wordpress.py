@@ -82,7 +82,7 @@ class WordPressHeadingCorrectionDryRun(SQLModel):
     status: Literal["blocked", "dry_run_ready"]
     ready: bool
     heading_contract: WordPressHeadingContract
-    current_body_hash: str
+    current_body_hash: str | None = None
     proposed_body_hash: str | None = None
     current_heading_fragment: str
     proposed_heading_fragment: str
@@ -97,6 +97,10 @@ class WordPressHeadingCorrectionDryRun(SQLModel):
     backup_identities: "WordPressHeadingCorrectionBackupIdentities | None" = None
     release_identity: dict[str, Any] | None = None
     pre_snapshot: dict[str, Any] | None = None
+    page_8_observation: "WordPressHeadingCorrectionObservationResult | None" = None
+    media_31_observation: "WordPressHeadingCorrectionObservationResult | None" = None
+    media_32_observation: "WordPressHeadingCorrectionObservationResult | None" = None
+    rendered_page_observation: "WordPressHeadingCorrectionObservationResult | None" = None
     confirmation_token: str | None = None
     confirmation_phrase: str | None = None
     expires_at: str | None = None
@@ -137,10 +141,23 @@ class WordPressHeadingCorrectionBackupIdentities(SQLModel):
         return value
 
 
+class WordPressHeadingCorrectionObservationResult(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attempted: bool
+    acquisition_source: str = Field(min_length=1, max_length=100)
+    http_status: int | None = None
+    final_url: str | None = None
+    success: bool
+    failure_code: str | None = None
+    message: str = Field(min_length=1, max_length=500)
+
+
 class WordPressHeadingCorrectionDryRunRequest(SQLModel):
     model_config = ConfigDict(extra="forbid")
 
     backups: WordPressHeadingCorrectionBackupIdentities
+    manual_browser_evidence: "WordPressManualBrowserEvidence | None" = None
 
 
 class WordPressHeadingContentPayload(SQLModel):
@@ -877,7 +894,7 @@ class WordPressManualBrowserEvidence(SQLModel):
     model_config = ConfigDict(extra="forbid")
 
     evidence_schema: Literal["project-atlas-manual-browser-evidence"]
-    evidence_schema_version: Literal[1]
+    evidence_schema_version: Literal[1, 2]
     capture_helper_version: Literal["0.59.15"]
     evidence_id: str = Field(min_length=8, max_length=200)
     captured_at: datetime
@@ -894,6 +911,10 @@ class WordPressManualBrowserEvidence(SQLModel):
     rendered_head_hash: str = Field(min_length=64, max_length=64)
     visible_content_hash: str = Field(min_length=64, max_length=64)
     privacy_attestations: dict[str, bool]
+    h1_inventory: list[dict[str, Any]] | None = None
+    h1_count: int | None = None
+    primary_h1: str | None = None
+    body_h1: str | None = None
     helper_signature: str = Field(min_length=64, max_length=64)
 
 

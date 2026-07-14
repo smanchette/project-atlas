@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 import re
 import secrets
@@ -23,6 +24,7 @@ from app.schemas.wordpress import (
     WordPressHeadingCorrectionBackupIdentities,
     WordPressHeadingCorrectionDryRun,
     WordPressHeadingCorrectionDryRunRequest,
+    WordPressHeadingCorrectionObservationResult,
     WordPressHeadingCorrectionReconcileRequest,
     WordPressHeadingCorrectionReconcileResult,
     WordPressHeadingCorrectionVerification,
@@ -51,6 +53,13 @@ from app.services.wordpress_sandbox import (
     get_wordpress_application_password,
     read_wordpress_settings,
 )
+from app.services.wordpress_rendered_state import (
+    BOT_PATTERN,
+    EXPECTED_MEDIA_ALT,
+    EXPECTED_MEDIA_URL,
+    EXPECTED_TITLE as EXPECTED_RENDERED_DOCUMENT_TITLE,
+    validate_manual_browser_evidence,
+)
 
 EXPECTED_PROPOSED_BODY_HASH = "c031a7aa841b8e9a0316956dd3bf25178f390e64d01ceb9d9cd4273cc4aed195"
 EXPECTED_RENDERED_H1 = "Drywood Termite Tenting in Orlando, FL"
@@ -69,11 +78,36 @@ def dry_run_heading_correction(
     page = session.get(GeneratedPage, page_id)
     settings = read_wordpress_settings(session)
     password = get_wordpress_application_password()
-    observation = _observe(settings.site_url, settings.username, password)
-    plan = build_orlando_heading_correction_dry_run(
-        observation.get("page", {}), observation.get("rendered_html", "")
+    observation = _observe(
+        settings.site_url,
+        settings.username,
+        password,
+        manual_evidence=request.manual_browser_evidence,
     )
+    page_observation = _observation_diagnostic(observation, "page_8_observation", bool(observation.get("page")))
+    legacy_snapshot = observation.get("snapshot") if isinstance(observation.get("snapshot"), dict) else {}
+    media31_observation = _observation_diagnostic(observation, "media_31_observation", bool(observation.get("media_31") or legacy_snapshot.get("media_31")))
+    media32_observation = _observation_diagnostic(observation, "media_32_observation", bool(observation.get("media_32") or legacy_snapshot.get("media_32")))
+    rendered_observation = _observation_diagnostic(
+        observation,
+        "rendered_page_observation",
+        bool(observation.get("rendered_html") or observation.get("rendered_h1_inventory")),
+    )
+    plan = build_orlando_heading_correction_dry_run(
+        observation.get("page") if page_observation.success else None,
+        observation.get("rendered_html", "") if rendered_observation.success else "",
+        observation.get("rendered_h1_inventory") if rendered_observation.success else None,
+    )
+    plan.page_8_observation = page_observation
+    plan.media_31_observation = media31_observation
+    plan.media_32_observation = media32_observation
+    plan.rendered_page_observation = rendered_observation
     release, release_error = _release_identity()
+    page_data = observation.get("page") if isinstance(observation.get("page"), dict) else {}
+    media31 = observation.get("media_31") if isinstance(observation.get("media_31"), dict) else legacy_snapshot.get("media_31", {})
+    media32 = observation.get("media_32") if isinstance(observation.get("media_32"), dict) else legacy_snapshot.get("media_32", {})
+    rendered_snapshot = observation.get("rendered_snapshot") if isinstance(observation.get("rendered_snapshot"), dict) else legacy_snapshot.get("rendered", {})
+    body = _text(page_data.get("content"))
     extra_gates = [
         _gate(
             "atlas_target",
@@ -87,11 +121,53 @@ def dry_run_heading_correction(
             bool(settings.site_url and settings.username and password),
             "WordPress credentials are missing from backend process memory.",
         ),
+        _observation_gate("page_8_observation", "Authenticated WordPress page 8 GET succeeded", page_observation),
+        _observation_gate("media_31_observation", "Authenticated WordPress media 31 GET succeeded", media31_observation),
+        _observation_gate("media_32_observation", "Authenticated WordPress media 32 GET succeeded", media32_observation),
+        _observation_gate("rendered_page_observation", "Rendered Orlando page observation succeeded", rendered_observation),
         _gate(
-            "wordpress_read_only_observation",
-            "Authenticated page/media and public rendered observations succeeded",
-            "_error" not in observation,
-            str(observation.get("_error", "WordPress read-only observation failed.")),
+            "rendered_identity",
+            "Rendered title, canonical, featured image, and alt remain exact",
+            bool(
+                rendered_observation.success
+                and rendered_snapshot.get("document_title") == EXPECTED_RENDERED_DOCUMENT_TITLE
+                and rendered_snapshot.get("canonical") == EXPECTED_URL
+                and rendered_snapshot.get("featured_image_url") == EXPECTED_MEDIA_URL
+                and rendered_snapshot.get("featured_image_alt") == EXPECTED_MEDIA_ALT
+            ),
+            "blocked_due_to_missing_rendered_observation" if not rendered_observation.success else "Rendered title, canonical, image, or alt drifted.",
+        ),
+        _gate(
+            "rendered_metadata_absence",
+            "Rendered metadata and media 32 remain absent",
+            bool(rendered_observation.success and rendered_snapshot.get("metadata_count") == 0 and rendered_snapshot.get("media_32_visible") is False),
+            "blocked_due_to_missing_rendered_observation" if not rendered_observation.success else "Unexpected metadata or media 32 appeared.",
+        ),
+        _gate(
+            "media_31_identity",
+            "Media 31 remains the locked visible featured image",
+            bool(
+                media31_observation.success
+                and media31.get("id") == 31
+                and media31.get("source_url") == EXPECTED_MEDIA_URL
+                and media31.get("alt_text") == EXPECTED_MEDIA_ALT
+                and page_data.get("featured_media") == 31
+                and rendered_snapshot.get("media_31_visible") is True
+            ),
+            "blocked_due_to_missing_media_31_observation" if not media31_observation.success else "Media 31 identity or visibility drifted.",
+        ),
+        _gate(
+            "media_32_identity",
+            "Media 32 remains unattached, unfeatured, and absent",
+            bool(
+                media32_observation.success
+                and media32.get("id") == 32
+                and media32.get("post") in {None, 0}
+                and page_data.get("featured_media") != 32
+                and str(media32.get("source_url", "")) not in body
+                and rendered_snapshot.get("media_32_visible") is False
+            ),
+            "blocked_due_to_missing_media_32_observation" if not media32_observation.success else "Media 32 attachment, feature, body, or rendered absence drifted.",
         ),
         _gate(
             "proposed_body_hash",
@@ -293,36 +369,126 @@ def reconcile_heading_correction(
     return WordPressHeadingCorrectionReconcileResult(audit_id=audit.id or 0, gate_results=verification.gate_results)
 
 
-def _observe(site_url: str, username: str, password: str | None) -> dict[str, Any]:
-    if not site_url or not username or not password:
-        return {"_error": "WordPress credentials are unavailable.", "page": {}, "rendered_html": ""}
-    page_url = f"{site_url.rstrip('/')}/wp-json/wp/v2/pages/{WORDPRESS_POST_ID}?context=edit"
-    try:
-        with httpx.Client(timeout=15.0, follow_redirects=False) as client:
-            page_response = client.get(page_url, auth=httpx.BasicAuth(username, password))
-            media31_response = client.get(f"{site_url.rstrip('/')}/wp-json/wp/v2/media/31?context=edit", auth=httpx.BasicAuth(username, password))
-            media32_response = client.get(f"{site_url.rstrip('/')}/wp-json/wp/v2/media/32?context=edit", auth=httpx.BasicAuth(username, password))
-            rendered_response = client.get(EXPECTED_URL)
-    except httpx.HTTPError as exc:
-        return {"_error": f"Read-only WordPress observation failed: {exc.__class__.__name__}.", "page": {}, "rendered_html": ""}
-    if page_response.status_code != 200 or media31_response.status_code != 200 or rendered_response.status_code != 200:
-        return {"_error": "Required page, media 31, or public rendered GET did not return HTTP 200.", "page": {}, "rendered_html": ""}
-    if rendered_response.url != httpx.URL(EXPECTED_URL):
-        return {"_error": "The public rendered page redirected or changed URL.", "page": {}, "rendered_html": ""}
-    try:
-        page = page_response.json()
-        media31 = media31_response.json()
-        media32 = media32_response.json() if media32_response.status_code == 200 else {"status_code": media32_response.status_code}
-    except ValueError:
-        return {"_error": "A read-only WordPress response contained invalid JSON.", "page": {}, "rendered_html": ""}
-    html = rendered_response.text
-    snapshot = {
-        "page": _page_snapshot(page),
-        "media_31": _media_snapshot(media31),
-        "media_32": _media_snapshot(media32),
-        "rendered": _rendered_snapshot(html, dict(rendered_response.headers)),
+def _observe(
+    site_url: str,
+    username: str,
+    password: str | None,
+    *,
+    manual_evidence: Any | None = None,
+) -> dict[str, Any]:
+    base = site_url.rstrip("/")
+    urls = {
+        "page_8_observation": f"{base}/wp-json/wp/v2/pages/{WORDPRESS_POST_ID}?context=edit",
+        "media_31_observation": f"{base}/wp-json/wp/v2/media/31?context=edit",
+        "media_32_observation": f"{base}/wp-json/wp/v2/media/32?context=edit",
     }
-    return {"page": page, "rendered_html": html, "snapshot": snapshot}
+    if not (site_url and username and password):
+        unavailable = {
+            key: _diagnostic(False, "not_attempted", False, "credentials_unavailable", "WordPress credentials are unavailable in backend process memory.")
+            for key in (*urls, "rendered_page_observation")
+        }
+        return {**unavailable, "page": None, "media_31": None, "media_32": None, "rendered_html": ""}
+
+    auth = httpx.BasicAuth(username, password)
+    result: dict[str, Any] = {"page": None, "media_31": None, "media_32": None, "rendered_html": ""}
+    with httpx.Client(timeout=15.0, follow_redirects=False) as client:
+        for key, url in urls.items():
+            resource_name = key.removesuffix("_observation")
+            storage_name = "page" if resource_name == "page_8" else resource_name
+            failure_code = f"{resource_name}_get_failed"
+            try:
+                response = client.get(url, auth=auth)
+            except httpx.HTTPError as exc:
+                result[key] = _diagnostic(True, "authenticated_wordpress_rest", False, failure_code, f"Read-only GET failed: {exc.__class__.__name__}.", final_url=url)
+                continue
+            final_url = str(response.url)
+            if response.status_code != 200:
+                result[key] = _diagnostic(True, "authenticated_wordpress_rest", False, failure_code, f"Read-only GET returned HTTP {response.status_code}.", http_status=response.status_code, final_url=final_url)
+                continue
+            try:
+                data = response.json()
+            except ValueError:
+                result[key] = _diagnostic(True, "authenticated_wordpress_rest", False, f"{resource_name}_invalid_json", "Read-only GET returned invalid JSON.", http_status=200, final_url=final_url)
+                continue
+            result[storage_name] = data
+            result[key] = _diagnostic(True, "authenticated_wordpress_rest", True, None, "Read-only GET succeeded.", http_status=200, final_url=final_url)
+
+        try:
+            rendered_response = client.get(EXPECTED_URL)
+        except httpx.HTTPError as exc:
+            result["rendered_page_observation"] = _diagnostic(True, "credential_free_public_get", False, "rendered_public_network_failed", f"Public rendered GET failed: {exc.__class__.__name__}.", final_url=EXPECTED_URL)
+        else:
+            result.update(_rendered_observation(rendered_response, manual_evidence))
+
+    page = result.get("page")
+    media31 = result.get("media_31")
+    media32 = result.get("media_32")
+    rendered = result.get("rendered_snapshot")
+    diagnostics = [result.get(key) for key in (*urls, "rendered_page_observation")]
+    if all(isinstance(item, WordPressHeadingCorrectionObservationResult) and item.success for item in diagnostics) and all(isinstance(item, dict) for item in (page, media31, media32, rendered)):
+        result["snapshot"] = {
+            "page": _page_snapshot(page),
+            "media_31": _media_snapshot(media31),
+            "media_32": _media_snapshot(media32),
+            "rendered": rendered,
+        }
+    return result
+
+
+def _rendered_observation(response: httpx.Response, manual_evidence: Any | None) -> dict[str, Any]:
+    final_url = str(response.url)
+    status = response.status_code
+    if final_url != EXPECTED_URL:
+        return {"rendered_page_observation": _diagnostic(True, "credential_free_public_get", False, "rendered_wrong_final_url", "Public rendered GET changed URL or redirected.", http_status=status, final_url=final_url)}
+    body_and_headers = response.text + " " + " ".join(response.headers.values())
+    siteground_bot_protection = bool(BOT_PATTERN.search(body_and_headers) and re.search(r"(?:siteground|x-sg-|sg-security|sg captcha)", body_and_headers, re.I))
+    if status == 403 and siteground_bot_protection:
+        evidence = manual_evidence.model_dump(mode="json", exclude_none=True) if hasattr(manual_evidence, "model_dump") else manual_evidence
+        if evidence is None:
+            return {"rendered_page_observation": _diagnostic(True, "credential_free_public_get", False, "rendered_public_bot_protection", "Recognized public bot protection returned HTTP 403; signed schema-v2 evidence is required.", http_status=403, final_url=final_url)}
+        valid, reason = validate_manual_browser_evidence(evidence, os.getenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", ""))
+        if not valid or evidence.get("evidence_schema_version") != 2:
+            return {"rendered_page_observation": _diagnostic(True, "signed_browser_evidence_v2", False, "rendered_evidence_invalid", reason if not valid else "Signed schema-v2 duplicate-H1 evidence is required.", http_status=403, final_url=final_url)}
+        snapshot = _rendered_snapshot_from_evidence(evidence)
+        return {
+            "rendered_page_observation": _diagnostic(True, "signed_browser_evidence_v2", True, None, "Public GET was blocked by recognized bot protection; signed schema-v2 evidence verified.", http_status=403, final_url=final_url),
+            "rendered_h1_inventory": snapshot["h1_inventory"],
+            "rendered_snapshot": snapshot,
+        }
+    if status != 200:
+        return {"rendered_page_observation": _diagnostic(True, "credential_free_public_get", False, "rendered_public_get_failed", f"Public rendered GET returned HTTP {status} without recognized SiteGround bot protection.", http_status=status, final_url=final_url)}
+    if BOT_PATTERN.search(body_and_headers):
+        return {"rendered_page_observation": _diagnostic(True, "credential_free_public_get", False, "rendered_challenge_page", "Public rendered GET returned a challenge-like document.", http_status=200, final_url=final_url)}
+    snapshot = _rendered_snapshot(response.text, dict(response.headers))
+    return {
+        "rendered_page_observation": _diagnostic(True, "credential_free_public_get", True, None, "Public rendered GET succeeded.", http_status=200, final_url=final_url),
+        "rendered_html": response.text,
+        "rendered_snapshot": snapshot,
+    }
+
+
+def _rendered_snapshot_from_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    identity = evidence["page_identity"]
+    absence = evidence["absence_findings"]
+    inventory = evidence["h1_inventory"]
+    return {
+        "h1_texts": [item["text"] for item in inventory],
+        "h1_inventory": inventory,
+        "canonical": identity["canonical_url"],
+        "document_title": identity["document_title"],
+        "featured_image_url": identity["featured_image_url"],
+        "featured_image_alt": identity["featured_image_alt"],
+        "visible_text": evidence["normalized_visible_content"],
+        "media_31_visible": True,
+        "media_32_visible": not absence["media32_absent"],
+        "metadata_count": 0,
+        "head_hash": evidence["rendered_head_hash"],
+        "visible_hash": evidence["visible_content_hash"],
+        "signature_validated": True,
+        "evidence_schema_version": 2,
+        "evidence_id": evidence["evidence_id"],
+        "cache_headers": {},
+    }
 
 
 def _verify_corrected_observation(
@@ -380,18 +546,45 @@ def _page_snapshot(page: dict[str, Any]) -> dict[str, Any]:
 def _media_snapshot(media: dict[str, Any]) -> dict[str, Any]:
     if "status_code" in media:
         return {"status_code": media["status_code"]}
-    return {key: media.get(key) for key in ("id", "status", "slug", "source_url", "alt_text", "modified_gmt")}
+    return {key: media.get(key) for key in ("id", "status", "slug", "source_url", "alt_text", "modified_gmt", "post")}
 
 
 def _rendered_snapshot(html: str, headers: dict[str, str]) -> dict[str, Any]:
     lower = html.lower()
+    headings = _headings(html)
+    h1_inventory = [
+        {
+            **item,
+            "ordinal": index + 1,
+            "visible": True,
+            "source_classification": (
+                "theme_owned_post_title"
+                if item.get("text") == EXPECTED_RENDERED_H1 and "wp-block-post-title" in item.get("classes", [])
+                else "atlas_body_content"
+                if item.get("text") == "Drywood Termite Tenting in Orlando, Florida" and {"entry-content", "wp-block-post-content"} & set(item.get("ancestor_classes", []))
+                else "unclassified"
+            ),
+        }
+        for index, item in enumerate(headings)
+    ]
     canonical_match = re.search(r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)', html, re.I)
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+    image_match = re.search(
+        rf'<img[^>]+src=["\']{re.escape(EXPECTED_MEDIA_URL)}["\'][^>]*>',
+        html,
+        re.I,
+    )
+    image_alt_match = re.search(r'alt=["\']([^"\']*)', image_match.group(0), re.I) if image_match else None
     metadata_count = len(re.findall(r'<meta[^>]+(?:name|property)=["\'](?:description|og:|twitter:|atlas:)', html, re.I))
     metadata_count += len(re.findall(r'<script[^>]+type=["\']application/ld\+json["\']', html, re.I))
     visible = re.sub(r"<[^>]+>", " ", html)
     return {
-        "h1_texts": [item.get("text") for item in _headings(html)],
+        "h1_texts": [item.get("text") for item in headings],
+        "h1_inventory": h1_inventory,
         "canonical": canonical_match.group(1) if canonical_match else None,
+        "document_title": re.sub(r"<[^>]+>", "", title_match.group(1)).strip() if title_match else None,
+        "featured_image_url": EXPECTED_MEDIA_URL if image_match else None,
+        "featured_image_alt": image_alt_match.group(1) if image_alt_match else None,
         "visible_text": " ".join(visible.split()),
         "media_31_visible": "orlando-drywood-termite-tenting-hero.png" in lower,
         "media_32_visible": "/wp-content/uploads/" in lower and bool(re.search(r'(?:attachment-|wp-image-)32\b|media.?32', lower)),
@@ -489,6 +682,55 @@ def _digest(value: Any) -> str:
 
 def _encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _diagnostic(
+    attempted: bool,
+    acquisition_source: str,
+    success: bool,
+    failure_code: str | None,
+    message: str,
+    *,
+    http_status: int | None = None,
+    final_url: str | None = None,
+) -> WordPressHeadingCorrectionObservationResult:
+    return WordPressHeadingCorrectionObservationResult(
+        attempted=attempted,
+        acquisition_source=acquisition_source,
+        http_status=http_status,
+        final_url=final_url,
+        success=success,
+        failure_code=failure_code,
+        message=message,
+    )
+
+
+def _observation_diagnostic(
+    observation: dict[str, Any],
+    key: str,
+    legacy_success: bool,
+) -> WordPressHeadingCorrectionObservationResult:
+    value = observation.get(key)
+    if isinstance(value, WordPressHeadingCorrectionObservationResult):
+        return value
+    if isinstance(value, dict):
+        return WordPressHeadingCorrectionObservationResult.model_validate(value)
+    return _diagnostic(
+        attempted=legacy_success,
+        acquisition_source="mocked_read_only_observation" if legacy_success else "unavailable",
+        success=legacy_success,
+        failure_code=None if legacy_success else key.replace("_observation", "_missing"),
+        message="Read-only observation succeeded." if legacy_success else "Read-only observation is unavailable.",
+    )
+
+
+def _observation_gate(
+    code: str,
+    label: str,
+    diagnostic: WordPressHeadingCorrectionObservationResult,
+) -> WordPressDraftGateResult:
+    failure = diagnostic.failure_code or diagnostic.message
+    return _gate(code, label, diagnostic.success, failure)
 
 
 def _gate(code: str, label: str, passed: bool, failure: str) -> WordPressDraftGateResult:

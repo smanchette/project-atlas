@@ -23,6 +23,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True, help="Signed evidence JSON output path")
     parser.add_argument("--final-url", default=EXPECTED_URL)
     parser.add_argument("--evidence-id", default=f"orlando-{uuid.uuid4()}")
+    parser.add_argument("--schema-version", type=int, choices=(1, 2), default=1)
     parser.add_argument("--dry-run-fixture", type=Path, help="Local/static HTML fixture; forbidden for live evidence")
     args = parser.parse_args()
     signing_key = os.getenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", "")
@@ -39,6 +40,7 @@ def main() -> int:
         final_url=args.final_url,
         evidence_identifier=args.evidence_id,
         signing_key=signing_key,
+        schema_version=args.schema_version,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(evidence, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

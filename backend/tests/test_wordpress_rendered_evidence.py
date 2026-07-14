@@ -14,6 +14,8 @@ from app.services.wordpress_rendered_state import (
     CAPTURE_HELPER_VERSION,
     EVIDENCE_SCHEMA,
     EVIDENCE_SCHEMA_VERSION,
+    EVIDENCE_SCHEMA_VERSION_DUPLICATE_H1,
+    EXPECTED_BODY_H1,
     EXPECTED_H1,
     EXPECTED_MEDIA_ALT,
     EXPECTED_MEDIA_URL,
@@ -34,6 +36,13 @@ HTML = f"""<!doctype html><html><head>
 </head><body class="page-id-8 stable"><h1>{EXPECTED_H1}</h1>
 <img class="wp-image-31 hero" src="{EXPECTED_MEDIA_URL}?ver=1" alt="{EXPECTED_MEDIA_ALT}">
 <p>Orlando service content.</p></body></html>"""
+DUPLICATE_HTML = f"""<!doctype html><html><head>
+<meta charset="utf-8"><title>{EXPECTED_TITLE}</title>
+<link rel="canonical" href="{EXPECTED_URL}">
+</head><body><main><h1 class="wp-block-post-title">{EXPECTED_H1}</h1>
+<div class="entry-content wp-block-post-content"><h1>{EXPECTED_BODY_H1}</h1>
+<img class="wp-image-31 hero" src="{EXPECTED_MEDIA_URL}" alt="{EXPECTED_MEDIA_ALT}">
+<p>Orlando service content.</p></div></main></body></html>"""
 
 
 def evidence(html: str = HTML, **kwargs):
@@ -80,6 +89,68 @@ def test_versioned_contract_exact_identity_inventory_hashes_and_privacy():
         "admin_session_used": False,
         "secrets_detected": False,
     }
+
+
+def test_schema_v2_signs_locked_ordered_duplicate_h1_inventory():
+    value = evidence(DUPLICATE_HTML, schema_version=2)
+    assert validate_manual_browser_evidence(value, KEY) == (True, "Verified.")
+    assert value["evidence_schema_version"] == EVIDENCE_SCHEMA_VERSION_DUPLICATE_H1
+    assert value["h1_count"] == 2
+    assert value["primary_h1"] == EXPECTED_H1 and value["body_h1"] == EXPECTED_BODY_H1
+    assert [item["text"] for item in value["h1_inventory"]] == [EXPECTED_H1, EXPECTED_BODY_H1]
+    assert [item["ordinal"] for item in value["h1_inventory"]] == [1, 2]
+    assert [item["source_classification"] for item in value["h1_inventory"]] == ["theme_owned_post_title", "atlas_body_content"]
+    assert all(item["visible"] and item["dom_path"] for item in value["h1_inventory"])
+
+
+def test_schema_v1_remains_one_h1_and_cannot_prove_duplicate_state():
+    assert evidence()["evidence_schema_version"] == 1
+    with pytest.raises(ValueError):
+        evidence(DUPLICATE_HTML)
+    captured = datetime(2026, 7, 14, tzinfo=UTC)
+    assert evidence(HTML, schema_version=1, captured_at=captured) == evidence(HTML, captured_at=captured)
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        DUPLICATE_HTML.replace(f'<h1>{EXPECTED_BODY_H1}</h1>', ""),
+        DUPLICATE_HTML.replace(EXPECTED_H1, "Wrong primary H1"),
+        DUPLICATE_HTML.replace(EXPECTED_BODY_H1, "Wrong body H1"),
+        DUPLICATE_HTML.replace(f'<h1>{EXPECTED_BODY_H1}</h1>', f'<h1 hidden>{EXPECTED_BODY_H1}</h1>'),
+        DUPLICATE_HTML.replace(f'<h1>{EXPECTED_BODY_H1}</h1>', f'<h1>{EXPECTED_BODY_H1}</h1><h1>Third H1</h1>'),
+        DUPLICATE_HTML.replace(
+            f'<h1 class="wp-block-post-title">{EXPECTED_H1}</h1>\n<div class="entry-content wp-block-post-content"><h1>{EXPECTED_BODY_H1}</h1>',
+            f'<div class="entry-content wp-block-post-content"><h1>{EXPECTED_BODY_H1}</h1></div><h1 class="wp-block-post-title">{EXPECTED_H1}</h1>\n<div class="entry-content wp-block-post-content">',
+        ),
+    ],
+)
+def test_schema_v2_rejects_wrong_count_text_visibility_or_order(broken: str):
+    with pytest.raises(ValueError):
+        evidence(broken, schema_version=2)
+
+
+@pytest.mark.parametrize("field", ["dom_path", "source_classification"])
+def test_schema_v2_inventory_tampering_invalidates_signature(field: str):
+    value = evidence(DUPLICATE_HTML, schema_version=2)
+    value["h1_inventory"][0][field] = "altered"
+    assert not validate_manual_browser_evidence(value, KEY)[0]
+
+
+def test_schema_v2_reordered_inventory_invalidates_signature_and_unknown_version_rejected():
+    value = evidence(DUPLICATE_HTML, schema_version=2)
+    value["h1_inventory"].reverse()
+    assert not validate_manual_browser_evidence(value, KEY)[0]
+    unknown = resign({**evidence(), "evidence_schema_version": 3})
+    assert validate_manual_browser_evidence(unknown, KEY) == (False, "Browser evidence schema is unsupported.")
+
+
+def test_schema_v2_expired_or_resigned_identity_mismatch_is_rejected():
+    expired = evidence(DUPLICATE_HTML, schema_version=2, captured_at=datetime.now(UTC) - timedelta(minutes=16))
+    assert not validate_manual_browser_evidence(expired, KEY)[0]
+    mismatched = evidence(DUPLICATE_HTML, schema_version=2)
+    mismatched["h1_inventory"][1]["text"] = "Mismatched body H1"
+    assert not validate_manual_browser_evidence(resign(mismatched), KEY)[0]
 
 
 @pytest.mark.parametrize(

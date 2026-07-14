@@ -18,8 +18,10 @@ EXPECTED_MEDIA_URL = "https://www.drywoodtenting.com/wp-content/uploads/2026/07/
 EXPECTED_MEDIA_ALT = "Two-story Orlando Florida home professionally covered for drywood termite tenting"
 EXPECTED_TITLE = "Drywood Termite Tenting in Orlando, FL \u2013 My WordPress"
 EXPECTED_H1 = "Drywood Termite Tenting in Orlando, FL"
+EXPECTED_BODY_H1 = "Drywood Termite Tenting in Orlando, Florida"
 EVIDENCE_SCHEMA = "project-atlas-manual-browser-evidence"
 EVIDENCE_SCHEMA_VERSION = 1
+EVIDENCE_SCHEMA_VERSION_DUPLICATE_H1 = 2
 CAPTURE_HELPER_VERSION = "0.59.15"
 EVIDENCE_LIFETIME = timedelta(minutes=15)
 ACQUISITION_SOURCE = "credential_free_public_browser"
@@ -203,6 +205,83 @@ class _EvidenceHTML(HTMLParser):
             self.media32_references.append(f"comment:{value}")
 
 
+class _H1InventoryHTML(HTMLParser):
+    """Collect a deterministic, ordered H1 inventory without changing schema-v1 parsing."""
+
+    _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.stack: list[dict[str, Any]] = []
+        self.root_counts: dict[str, int] = {}
+        self.inventory: list[dict[str, Any]] = []
+        self.active_h1: dict[str, Any] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        values = {key.lower(): _text(value or "") for key, value in attrs}
+        counts = self.stack[-1]["child_counts"] if self.stack else self.root_counts
+        counts[tag] = counts.get(tag, 0) + 1
+        segment = f"{tag}:nth-of-type({counts[tag]})"
+        parent_path = self.stack[-1]["path"] if self.stack else ""
+        path = f"{parent_path}>{segment}" if parent_path else segment
+        classes = sorted(set(values.get("class", "").split()))
+        ancestor_classes = sorted({item for frame in self.stack for item in frame["classes"]})
+        hidden_here = (
+            "hidden" in values
+            or values.get("aria-hidden", "").lower() == "true"
+            or bool({"hidden", "is-hidden", "screen-reader-text", "sr-only", "visually-hidden"} & {item.lower() for item in classes})
+            or bool(re.search(r"(?:display\s*:\s*none|visibility\s*:\s*hidden)", values.get("style", ""), re.I))
+        )
+        visible = not hidden_here and all(frame["visible"] for frame in self.stack)
+        frame = {"tag": tag, "path": path, "classes": classes, "visible": visible, "child_counts": {}}
+        if tag == "h1":
+            self.active_h1 = {
+                "text_parts": [],
+                "ordinal": len(self.inventory) + 1,
+                "dom_path": path,
+                "classes": classes,
+                "ancestor_classes": ancestor_classes,
+                "visible": visible,
+            }
+        if tag not in self._VOID:
+            self.stack.append(frame)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "h1" and self.active_h1 is not None:
+            text_parts = self.active_h1.pop("text_parts")
+            entry = {**self.active_h1, "text": _text(" ".join(text_parts))}
+            entry["source_classification"] = _classify_h1(entry)
+            self.inventory.append(entry)
+            self.active_h1 = None
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index]["tag"] == tag:
+                del self.stack[index:]
+                break
+
+    def handle_data(self, data: str) -> None:
+        if self.active_h1 is not None:
+            self.active_h1["text_parts"].append(data)
+
+
+def _classify_h1(entry: dict[str, Any]) -> str:
+    classes = set(entry.get("classes", []))
+    ancestors = set(entry.get("ancestor_classes", []))
+    if entry.get("text") == EXPECTED_H1 and "wp-block-post-title" in classes:
+        return "theme_owned_post_title"
+    if entry.get("text") == EXPECTED_BODY_H1 and {"entry-content", "wp-block-post-content"} & ancestors:
+        return "atlas_body_content"
+    return "unclassified"
+
+
+def _ordered_h1_inventory(html: str) -> list[dict[str, Any]]:
+    parser = _H1InventoryHTML()
+    parser.feed(html)
+    parser.close()
+    return parser.inventory
+
+
 def _metadata_inventory(parsed: _EvidenceHTML) -> dict[str, Any]:
     featured = [image for image in parsed.images if image["src"] == EXPECTED_MEDIA_URL]
     duplicates: list[str] = []
@@ -284,6 +363,7 @@ def build_manual_browser_evidence(
     authorization_header: str | None = None,
     authenticated_html: bool = False,
     admin_session_used: bool = False,
+    schema_version: int = EVIDENCE_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     """Build evidence only from a credential-free public browser DOM capture."""
     if final_url != EXPECTED_URL or redirect_count != 0:
@@ -302,7 +382,10 @@ def build_manual_browser_evidence(
     parsed.feed(html)
     inventory = _metadata_inventory(parsed)
     featured = inventory["featured_image_references"]
-    if parsed.titles != [EXPECTED_TITLE] or parsed.h1 != [EXPECTED_H1] or parsed.canonicals != [EXPECTED_URL]:
+    if schema_version not in {EVIDENCE_SCHEMA_VERSION, EVIDENCE_SCHEMA_VERSION_DUPLICATE_H1}:
+        raise ValueError("Browser evidence schema is unsupported.")
+    expected_h1 = [EXPECTED_H1] if schema_version == 1 else [EXPECTED_H1, EXPECTED_BODY_H1]
+    if parsed.titles != [EXPECTED_TITLE] or parsed.h1 != expected_h1 or parsed.canonicals != [EXPECTED_URL]:
         raise ValueError("Browser evidence does not match the locked title, H1, or canonical identity.")
     if featured != [{"src": EXPECTED_MEDIA_URL, "alt": EXPECTED_MEDIA_ALT}]:
         raise ValueError("Browser evidence featured-image URL or alt text is incorrect.")
@@ -315,7 +398,7 @@ def build_manual_browser_evidence(
     normalized_visible = _text(" ".join(parsed.visible))
     evidence: dict[str, Any] = {
         "evidence_schema": EVIDENCE_SCHEMA,
-        "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+        "evidence_schema_version": schema_version,
         "capture_helper_version": CAPTURE_HELPER_VERSION,
         "evidence_id": evidence_identifier,
         "captured_at": captured.isoformat(),
@@ -333,6 +416,18 @@ def build_manual_browser_evidence(
         "visible_content_hash": _hash(normalized_visible),
         "privacy_attestations": _privacy_attestations(),
     }
+    if schema_version == EVIDENCE_SCHEMA_VERSION_DUPLICATE_H1:
+        h1_inventory = _ordered_h1_inventory(html)
+        if not _valid_duplicate_h1_inventory(h1_inventory):
+            raise ValueError("Browser evidence does not contain the locked visible duplicate-H1 inventory.")
+        evidence.update(
+            {
+                "h1_inventory": h1_inventory,
+                "h1_count": len(h1_inventory),
+                "primary_h1": EXPECTED_H1,
+                "body_h1": EXPECTED_BODY_H1,
+            }
+        )
     encoded = _canonical_json(_evidence_payload(evidence))
     evidence["helper_signature"] = hmac.new(signing_key.encode(), encoded.encode(), hashlib.sha256).hexdigest()
     return evidence
@@ -340,20 +435,24 @@ def build_manual_browser_evidence(
 
 def validate_manual_browser_evidence(evidence: dict[str, Any] | Any | None, signing_key: str, *, now: datetime | None = None) -> tuple[bool, str]:
     if hasattr(evidence, "model_dump"):
-        evidence = evidence.model_dump(mode="json")
+        evidence = evidence.model_dump(mode="json", exclude_none=True)
     if not isinstance(evidence, dict) or not signing_key:
         return False, "Approved signed browser evidence is required."
-    required = {
+    required_v1 = {
         "evidence_schema", "evidence_schema_version", "capture_helper_version", "evidence_id", "captured_at", "expires_at",
         "final_url", "acquisition_source", "navigation_outcome", "page_identity", "metadata_inventory", "metadata_inventory_hash",
         "absence_findings", "normalized_head", "normalized_visible_content", "rendered_head_hash", "visible_content_hash",
         "privacy_attestations", "helper_signature",
     }
+    version = evidence.get("evidence_schema_version")
+    if version not in {EVIDENCE_SCHEMA_VERSION, EVIDENCE_SCHEMA_VERSION_DUPLICATE_H1}:
+        return False, "Browser evidence schema is unsupported."
+    required = required_v1 if version == 1 else required_v1 | {"h1_inventory", "h1_count", "primary_h1", "body_h1"}
     if set(evidence) != required:
         return False, "Browser evidence fields do not match the approved versioned helper format."
     if SECRET_PATTERN.search(_canonical_json(evidence)):
         return False, "Browser evidence contains secret-bearing content."
-    if evidence.get("evidence_schema") != EVIDENCE_SCHEMA or evidence.get("evidence_schema_version") != EVIDENCE_SCHEMA_VERSION:
+    if evidence.get("evidence_schema") != EVIDENCE_SCHEMA:
         return False, "Browser evidence schema is unsupported."
     if evidence.get("capture_helper_version") != CAPTURE_HELPER_VERSION or evidence.get("acquisition_source") != ACQUISITION_SOURCE:
         return False, "Browser evidence helper or acquisition source is unsupported."
@@ -404,7 +503,48 @@ def validate_manual_browser_evidence(evidence: dict[str, Any] | Any | None, sign
         return False, "Browser evidence normalized head is not bound to the signed identity and inventory."
     if not normalized_head or not normalized_visible:
         return False, "Browser evidence normalized rendered payload is empty."
+    if version == EVIDENCE_SCHEMA_VERSION_DUPLICATE_H1:
+        inventory_h1 = evidence.get("h1_inventory")
+        if (
+            evidence.get("h1_count") != 2
+            or evidence.get("primary_h1") != EXPECTED_H1
+            or evidence.get("body_h1") != EXPECTED_BODY_H1
+            or not _valid_duplicate_h1_inventory(inventory_h1)
+        ):
+            return False, "Browser evidence duplicate-H1 inventory is invalid."
+        primary_index = normalized_visible.find(EXPECTED_H1)
+        body_index = normalized_visible.find(EXPECTED_BODY_H1)
+        if primary_index < 0 or body_index <= primary_index:
+            return False, "Browser evidence visible content does not preserve the locked H1 order."
     return True, "Verified."
+
+
+def _valid_duplicate_h1_inventory(value: Any) -> bool:
+    if not isinstance(value, list) or len(value) != 2:
+        return False
+    required = {"text", "ordinal", "dom_path", "classes", "ancestor_classes", "visible", "source_classification"}
+    if any(not isinstance(item, dict) or set(item) != required for item in value):
+        return False
+    first, second = value
+    if [first.get("ordinal"), second.get("ordinal")] != [1, 2]:
+        return False
+    if [first.get("text"), second.get("text")] != [EXPECTED_H1, EXPECTED_BODY_H1]:
+        return False
+    if [first.get("source_classification"), second.get("source_classification")] != ["theme_owned_post_title", "atlas_body_content"]:
+        return False
+    if not all(item.get("visible") is True and isinstance(item.get("dom_path"), str) and item["dom_path"] for item in value):
+        return False
+    if first["dom_path"] == second["dom_path"] or "wp-block-post-title" not in first.get("classes", []):
+        return False
+    if not ({"entry-content", "wp-block-post-content"} & set(second.get("ancestor_classes", []))):
+        return False
+    return all(
+        isinstance(item.get("classes"), list)
+        and isinstance(item.get("ancestor_classes"), list)
+        and item["classes"] == sorted(set(item["classes"]))
+        and item["ancestor_classes"] == sorted(set(item["ancestor_classes"]))
+        for item in value
+    )
 
 
 def _html_result(response: httpx.Response, outcome: str, source: str) -> dict[str, Any]:
