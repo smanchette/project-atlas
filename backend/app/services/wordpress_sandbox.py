@@ -12,6 +12,7 @@ from app.models import Setting
 from app.schemas.wordpress import (
     PublishingMode,
     WordPressConnectionResult,
+    WordPressHeadingContract,
     WordPressPayload,
     WordPressPayloadPreview,
     WordPressSettingsRead,
@@ -23,6 +24,19 @@ SITE_URL_KEY = "wordpress_site_url"
 USERNAME_KEY = "wordpress_username"
 MODE_KEY = "wordpress_publishing_mode"
 VALID_MODES = {"disabled", "sandbox", "draft_only_future"}
+
+DEFAULT_WORDPRESS_HEADING_CONTRACT = WordPressHeadingContract(
+    policy_id="body_owns_primary_h1",
+    template_renders_primary_h1=False,
+    body_heading_level=1,
+)
+WORDPRESS_PAGE_HEADING_CONTRACTS = {
+    41: WordPressHeadingContract(
+        policy_id="template_post_title_owns_primary_h1",
+        template_renders_primary_h1=True,
+        body_heading_level=2,
+    ),
+}
 
 _secret_lock = Lock()
 _application_password: str | None = None
@@ -149,6 +163,7 @@ def build_wordpress_payload_preview(
     page_id: int,
 ) -> WordPressPayloadPreview:
     package = build_page_export_package(session, page_id)
+    heading_contract = wordpress_heading_contract(package.page_id)
     hero = next(
         (item.model_dump(mode="json") for item in package.assigned_media if item.image_role == "hero"),
         None,
@@ -157,7 +172,10 @@ def build_wordpress_payload_preview(
         title=package.page_title,
         slug=package.url_slug,
         status="draft",
-        content=_content_html(package.model_dump(mode="json")),
+        content=_content_html(
+            package.model_dump(mode="json"),
+            heading_contract=heading_contract,
+        ),
         excerpt=package.seo.meta_description,
         featured_media_reference=hero,
         meta={
@@ -171,12 +189,25 @@ def build_wordpress_payload_preview(
         page_id=package.page_id,
         export_package=package.model_dump(mode="json"),
         payload=payload,
+        heading_contract=heading_contract,
         warnings=[warning.model_dump(mode="json") for warning in package.warnings],
     )
 
 
-def _content_html(package: dict[str, Any]) -> str:
-    parts = [f"<h1>{escape(str(package['h1']))}</h1>"]
+def wordpress_heading_contract(page_id: int) -> WordPressHeadingContract:
+    return WORDPRESS_PAGE_HEADING_CONTRACTS.get(
+        page_id,
+        DEFAULT_WORDPRESS_HEADING_CONTRACT,
+    ).model_copy(deep=True)
+
+
+def _content_html(
+    package: dict[str, Any],
+    *,
+    heading_contract: WordPressHeadingContract = DEFAULT_WORDPRESS_HEADING_CONTRACT,
+) -> str:
+    level = heading_contract.body_heading_level
+    parts = [f"<h{level}>{escape(str(package['h1']))}</h{level}>"]
     for key, value in package["content_sections"].items():
         parts.append(
             f'<section data-atlas-section="{escape(key)}">'

@@ -286,10 +286,17 @@ export type WordPressPayload = {
   schema_block_preview: Record<string, unknown>;
 };
 
+export type WordPressHeadingContract = {
+  policy_id: string;
+  template_renders_primary_h1: boolean;
+  body_heading_level: 1 | 2;
+};
+
 export type WordPressPayloadPreview = {
   page_id: number;
   export_package: PageExportPackage;
   payload: WordPressPayload;
+  heading_contract: WordPressHeadingContract;
   warnings: ExportWarning[];
   sandbox_only: boolean;
 };

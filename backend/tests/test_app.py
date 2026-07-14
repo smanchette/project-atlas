@@ -2582,7 +2582,14 @@ def test_wordpress_payload_preview_is_draft_and_read_only() -> None:
     assert payload["payload"]["status"] == "draft"
     assert payload["payload"]["title"] == payload["export_package"]["page_title"]
     assert payload["payload"]["slug"] == payload["export_package"]["url_slug"]
-    assert "<h1>" in payload["payload"]["content"]
+    assert payload["heading_contract"] == {
+        "policy_id": "template_post_title_owns_primary_h1",
+        "template_renders_primary_h1": True,
+        "body_heading_level": 2,
+    }
+    assert payload["payload"]["content"].startswith(
+        "<h2>Drywood Termite Tenting in Orlando, Florida</h2>"
+    )
     assert payload["payload"]["schema_block_preview"]["@context"] == "https://schema.org"
     assert after == before
 

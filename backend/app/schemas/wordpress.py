@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import ConfigDict, field_validator
+from pydantic import ConfigDict, field_validator, model_validator
 from sqlmodel import Field, SQLModel
 
 PublishingMode = Literal["disabled", "sandbox", "draft_only_future"]
@@ -51,12 +51,49 @@ class WordPressPayload(SQLModel):
     schema_block_preview: dict[str, Any]
 
 
+class WordPressHeadingContract(SQLModel):
+    policy_id: str = Field(min_length=3, max_length=100)
+    template_renders_primary_h1: bool
+    body_heading_level: Literal[1, 2]
+
+    @model_validator(mode="after")
+    def validate_heading_ownership(self) -> "WordPressHeadingContract":
+        expected_level = 2 if self.template_renders_primary_h1 else 1
+        if self.body_heading_level != expected_level:
+            raise ValueError(
+                "The body heading must be H2 when the template owns the primary H1, "
+                "and H1 otherwise."
+            )
+        return self
+
+
 class WordPressPayloadPreview(SQLModel):
     page_id: int
     export_package: dict[str, Any]
     payload: WordPressPayload
+    heading_contract: WordPressHeadingContract
     warnings: list[dict[str, str]]
     sandbox_only: bool = True
+
+
+class WordPressHeadingCorrectionDryRun(SQLModel):
+    atlas_page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    status: Literal["blocked", "dry_run_ready"]
+    ready: bool
+    heading_contract: WordPressHeadingContract
+    current_body_hash: str
+    proposed_body_hash: str | None = None
+    current_heading_fragment: str
+    proposed_heading_fragment: str
+    request_payload: dict[str, str]
+    gate_results: list["WordPressDraftGateResult"]
+    read_only: Literal[True] = True
+    token_issued: Literal[False] = False
+    nonce_consumed: Literal[False] = False
+    audit_created: Literal[False] = False
+    wordpress_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
 
 
 class WordPressDraftGateResult(SQLModel):
