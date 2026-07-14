@@ -864,9 +864,9 @@ export type WordPressMetadataApplyResult = { page_id: number; wordpress_post_id:
 
 export type WordPressDeploymentGate = { code: string; label: string; passed: boolean; message: string };
 export type WordPressDeploymentReadiness = {
-  release: { atlas_version: string; atlas_commit: string; atlas_tag: string; plugin_version: string; plugin_zip_filename: string; plugin_zip_sha256: string; manifest_sha256: string; verification_source: string } | null;
+  release: { manifest_schema_version: number; source_compatibility_id: string; atlas_version: string; atlas_commit: string; atlas_tag: string; plugin_version: string; plugin_zip_filename: string; plugin_zip_sha256: string; manifest_sha256: string; verification_source: string; git_metadata_available: boolean; manifest_integrity_verified: boolean; expected_release_matched: boolean; runtime_identity_verified: boolean } | null;
   release_status: "verified" | "release_identity_unavailable"; release_error: string | null;
-  source_expectations: { deployment_workflow_version: string; plugin_version: string; plugin_zip_filename: string; plugin_zip_sha256: string };
+  source_expectations: { manifest_schema_version: number; source_compatibility_id: string; plugin_version: string; plugin_zip_filename: string; plugin_zip_sha256: string };
   program: { resolved_program_root: string; artifact_relative_path: string; artifact_exists: boolean; source_directory_exists: boolean };
   read_only: true;
 };

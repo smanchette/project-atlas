@@ -1,5 +1,7 @@
 # Project Atlas v0.59.4 deployment release identity
 
+> Historical record only. The v0.59.4 checksum-only Git-less identity design was superseded by v0.59.8 and must not be used for deployment readiness. The published v0.59.6 tag remains valid history but is also unsuitable for live deployment identity.
+
 The source tree contains only immutable deployment workflow expectations and Metadata Bridge v0.57.4 artifact facts. It does not contain a Git commit SHA that claims to identify its own commit.
 
 Live installation authorization fails closed until Atlas validates a post-publication runtime manifest. Missing, stale, malformed, mismatched, or checksum-invalid identity is reported as `release_identity_unavailable`; no confirmation token is issued.

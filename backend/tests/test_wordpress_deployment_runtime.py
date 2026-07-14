@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+import os
 from pathlib import Path
 import zipfile
 
@@ -46,6 +47,12 @@ def test_program_root_explicit_container_windows_and_host_fallback(tmp_path):
     assert release.resolve_program_root({}, module_file=fake_module, container_root=tmp_path / "none") == container.resolve()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows path semantics require a Windows host")
+def test_windows_repository_root_override_resolves_with_native_path_semantics(tmp_path):
+    root = atlas_layout(tmp_path / "Atlas Repository")
+    assert release.resolve_program_root({"ATLAS_PROGRAM_ROOT": str(root)}) == root.resolve()
+
+
 @pytest.mark.parametrize("configured", ["/", ".", "../outside"])
 def test_program_root_rejects_root_relative_and_traversal(configured):
     with pytest.raises(release.DeploymentReleaseError):
@@ -79,10 +86,11 @@ def test_locked_artifact_hash_and_source_zip_are_exact():
 
 def manifest_values(**overrides):
     values = {
-        "manifest_schema_version": 1,
-        "atlas_version": "v0.59.4",
+        "manifest_schema_version": 2,
+        "source_compatibility_id": release.SOURCE_EXPECTATIONS.source_compatibility_id,
+        "atlas_version": "v0.59.8",
         "atlas_commit": "c" * 40,
-        "atlas_tag": "v0.59.4",
+        "atlas_tag": "v0.59.8",
         "plugin_version": "0.57.4",
         "plugin_zip_filename": "project-atlas-metadata-bridge-0.57.4.zip",
         "plugin_zip_sha256": release.SOURCE_EXPECTATIONS.plugin_zip_sha256,
@@ -92,12 +100,18 @@ def manifest_values(**overrides):
     return values
 
 
-def write_manifest(root: Path, **overrides):
+def write_manifest(root: Path, *, expected_overrides=None, **overrides):
     path = root / ".runtime/atlas-release.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = release.canonical_manifest_bytes(manifest_values(**overrides))
     path.write_bytes(payload)
-    return {"ATLAS_RELEASE_MANIFEST_PATH": str(path.resolve()), "ATLAS_RELEASE_MANIFEST_SHA256": hashlib.sha256(payload).hexdigest()}
+    expected = {
+        "ATLAS_EXPECTED_RELEASE_VERSION": "v0.59.8",
+        "ATLAS_EXPECTED_RELEASE_COMMIT": "c" * 40,
+        "ATLAS_EXPECTED_RELEASE_TAG": "v0.59.8",
+    }
+    expected.update(expected_overrides or {})
+    return {"ATLAS_RELEASE_MANIFEST_PATH": str(path.resolve()), "ATLAS_RELEASE_MANIFEST_SHA256": hashlib.sha256(payload).hexdigest(), **expected}
 
 
 def add_fake_git(root: Path, *, head="c" * 40, tag="c" * 40):
@@ -106,15 +120,15 @@ def add_fake_git(root: Path, *, head="c" * 40, tag="c" * 40):
     (git / "refs/tags").mkdir(parents=True)
     (git / "HEAD").write_text("ref: refs/heads/main\n", encoding="ascii")
     (git / "refs/heads/main").write_text(head + "\n", encoding="ascii")
-    (git / "refs/tags/v0.59.4").write_text(tag + "\n", encoding="ascii")
+    (git / "refs/tags/v0.59.8").write_text(tag + "\n", encoding="ascii")
 
 
 def test_missing_and_unverified_environment_identity_block(monkeypatch):
     monkeypatch.delenv("ATLAS_RELEASE_MANIFEST_PATH", raising=False)
     monkeypatch.delenv("ATLAS_RELEASE_MANIFEST_SHA256", raising=False)
-    monkeypatch.setenv("ATLAS_RELEASE_VERSION", "v0.59.4")
-    monkeypatch.setenv("ATLAS_RELEASE_COMMIT", "c" * 40)
-    monkeypatch.setenv("ATLAS_RELEASE_TAG", "v0.59.4")
+    monkeypatch.delenv("ATLAS_EXPECTED_RELEASE_VERSION", raising=False)
+    monkeypatch.delenv("ATLAS_EXPECTED_RELEASE_COMMIT", raising=False)
+    monkeypatch.delenv("ATLAS_EXPECTED_RELEASE_TAG", raising=False)
     artifact, gates = deployment._verify_artifact()
     assert artifact["release_identity_status"] == "release_identity_unavailable"
     assert artifact["atlas_commit"] is None
@@ -150,8 +164,9 @@ def test_missing_release_identity_performs_no_wordpress_observation_and_issues_n
 def test_git_unavailable_checksum_verified_manifest_path(tmp_path):
     root = atlas_layout(tmp_path / "project")
     identity = release.verify_runtime_release_identity(root, write_manifest(root))
-    assert identity.atlas_version == "v0.59.4" and identity.atlas_commit == "c" * 40
-    assert identity.verification_source == "checksum_verified_manifest" and not identity.git_metadata_available
+    assert identity.atlas_version == "v0.59.8" and identity.atlas_commit == "c" * 40
+    assert identity.verification_source == "expected_identity_and_checksum_verified_manifest" and not identity.git_metadata_available
+    assert identity.manifest_integrity_verified and identity.expected_release_matched and identity.runtime_identity_verified
     assert identity.plugin_version == "0.57.4"
 
 
@@ -159,12 +174,12 @@ def test_git_available_manifest_head_and_tag_verification(tmp_path):
     root = atlas_layout(tmp_path / "project")
     add_fake_git(root)
     identity = release.verify_runtime_release_identity(root, write_manifest(root))
-    assert identity.verification_source == "git_and_checksum_verified_manifest" and identity.git_metadata_available
+    assert identity.verification_source == "git_expected_identity_and_checksum_verified_manifest" and identity.git_metadata_available
 
 
 @pytest.mark.parametrize("overrides", [
-    {"atlas_version": "v0.59.1", "atlas_tag": "v0.59.1"},
-    {"atlas_version": "v0.59.5", "atlas_tag": "v0.59.5"},
+    {"atlas_version": "v0.59.4", "atlas_tag": "v0.59.4"},
+    {"atlas_version": "v0.59.6", "atlas_tag": "v0.59.6"},
     {"atlas_commit": "bad"},
     {"atlas_tag": "v0.59.3"},
     {"plugin_version": "0.59.4"},
@@ -175,13 +190,107 @@ def test_stale_malformed_or_mismatched_manifest_values_block(tmp_path, overrides
         release.verify_runtime_release_identity(root, write_manifest(root, **overrides))
 
 
+@pytest.mark.parametrize(
+    ("missing", "message"),
+    [
+        ("ATLAS_EXPECTED_RELEASE_VERSION", "VERSION is required"),
+        ("ATLAS_EXPECTED_RELEASE_COMMIT", "COMMIT is required"),
+        ("ATLAS_EXPECTED_RELEASE_TAG", "TAG is required"),
+    ],
+)
+def test_missing_independent_expected_release_values_block(tmp_path, missing, message):
+    root = atlas_layout(tmp_path / "project")
+    env = write_manifest(root)
+    env.pop(missing)
+    with pytest.raises(release.DeploymentReleaseError, match=message):
+        release.verify_runtime_release_identity(root, env)
+
+
+@pytest.mark.parametrize(
+    "expected_overrides",
+    [
+        {"ATLAS_EXPECTED_RELEASE_VERSION": "v0.59.6", "ATLAS_EXPECTED_RELEASE_TAG": "v0.59.6"},
+        {"ATLAS_EXPECTED_RELEASE_COMMIT": "d" * 40},
+        {"ATLAS_EXPECTED_RELEASE_TAG": "v0.59.7"},
+        {"ATLAS_EXPECTED_RELEASE_COMMIT": "bad"},
+    ],
+)
+def test_manifest_cannot_authenticate_itself_or_override_expected_release(tmp_path, expected_overrides):
+    root = atlas_layout(tmp_path / "project")
+    with pytest.raises(release.DeploymentReleaseError, match="release_identity_unavailable"):
+        release.verify_runtime_release_identity(root, write_manifest(root, expected_overrides=expected_overrides))
+
+
+def test_current_checksum_valid_v0594_schema_one_manifest_is_rejected(tmp_path):
+    root = atlas_layout(tmp_path / "project")
+    path = root / ".runtime/atlas-release.json"
+    path.parent.mkdir(parents=True)
+    values = {
+        "manifest_schema_version": 1,
+        "atlas_version": "v0.59.4",
+        "atlas_commit": "a" * 40,
+        "atlas_tag": "v0.59.4",
+        "plugin_version": "0.57.4",
+        "plugin_zip_filename": "project-atlas-metadata-bridge-0.57.4.zip",
+        "plugin_zip_sha256": release.SOURCE_EXPECTATIONS.plugin_zip_sha256,
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
+    payload = (json.dumps(values, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    path.write_bytes(payload)
+    env = {
+        "ATLAS_RELEASE_MANIFEST_PATH": str(path.resolve()),
+        "ATLAS_RELEASE_MANIFEST_SHA256": hashlib.sha256(payload).hexdigest(),
+        "ATLAS_EXPECTED_RELEASE_VERSION": "v0.59.8",
+        "ATLAS_EXPECTED_RELEASE_COMMIT": "c" * 40,
+        "ATLAS_EXPECTED_RELEASE_TAG": "v0.59.8",
+    }
+    with pytest.raises(release.DeploymentReleaseError, match="schema is invalid"):
+        release.verify_runtime_release_identity(root, env)
+
+
+def test_manifest_path_rejects_outside_traversal_missing_and_symlink_escape(tmp_path):
+    root = atlas_layout(tmp_path / "project")
+    env = write_manifest(root)
+    outside = tmp_path / "outside.json"
+    outside.write_bytes((root / ".runtime/atlas-release.json").read_bytes())
+
+    for path, message in (
+        (outside.resolve(), "outside an approved runtime directory"),
+        ((root / ".runtime/../outside.json").resolve(strict=False), "outside an approved runtime directory"),
+        ((root / ".runtime/missing.json").resolve(strict=False), "missing or unsafe"),
+    ):
+        candidate = {**env, "ATLAS_RELEASE_MANIFEST_PATH": str(path)}
+        with pytest.raises(release.DeploymentReleaseError, match=message):
+            release.verify_runtime_release_identity(root, candidate)
+
+    link = root / ".runtime/escape.json"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation is unavailable on this platform; Docker exercises resolved path containment.")
+    candidate = {**env, "ATLAS_RELEASE_MANIFEST_PATH": str(link)}
+    with pytest.raises(release.DeploymentReleaseError, match="outside an approved runtime directory"):
+        release.verify_runtime_release_identity(root, candidate)
+
+
+def test_schema_and_plugin_identity_mismatches_block(tmp_path):
+    root = atlas_layout(tmp_path / "project")
+    for overrides in (
+        {"manifest_schema_version": 3},
+        {"source_compatibility_id": "stale-source"},
+        {"plugin_zip_sha256": "0" * 64},
+    ):
+        with pytest.raises(release.DeploymentReleaseError, match="release_identity_unavailable"):
+            release.verify_runtime_release_identity(root, write_manifest(root, **overrides))
+
+
 def test_git_head_or_tag_mismatch_blocks(tmp_path):
     root = atlas_layout(tmp_path / "project")
     add_fake_git(root, head="d" * 40)
     with pytest.raises(release.DeploymentReleaseError, match="commit or tag"):
         release.verify_runtime_release_identity(root, write_manifest(root))
     (root / ".git/refs/heads/main").write_text("c" * 40 + "\n", encoding="ascii")
-    (root / ".git/refs/tags/v0.59.4").write_text("e" * 40 + "\n", encoding="ascii")
+    (root / ".git/refs/tags/v0.59.8").write_text("e" * 40 + "\n", encoding="ascii")
     with pytest.raises(release.DeploymentReleaseError, match="commit or tag"):
         release.verify_runtime_release_identity(root, write_manifest(root))
 
@@ -195,16 +304,18 @@ def test_runtime_manifest_checksum_mismatch_blocks(tmp_path):
 
 
 def test_verified_runtime_identity_flows_to_artifact(monkeypatch):
-    identity = release.RuntimeReleaseIdentity(**manifest_values(), manifest_sha256="d" * 64, verification_source="checksum_verified_manifest", git_metadata_available=False)
+    identity = release.RuntimeReleaseIdentity(**manifest_values(), manifest_sha256="d" * 64, verification_source="expected_identity_and_checksum_verified_manifest", git_metadata_available=False, manifest_integrity_verified=True, expected_release_matched=True, runtime_identity_verified=True)
     monkeypatch.setattr(deployment, "verify_runtime_release_identity", lambda _: identity)
     artifact, gates = deployment._verify_artifact()
     assert all(gate.passed for gate in gates)
-    assert artifact["atlas_version"] == "v0.59.4" and artifact["atlas_commit"] == "c" * 40 and artifact["atlas_tag"] == "v0.59.4"
+    assert artifact["atlas_version"] == "v0.59.8" and artifact["atlas_commit"] == "c" * 40 and artifact["atlas_tag"] == "v0.59.8"
+    assert artifact["release_manifest_integrity_verified"] and artifact["release_expected_identity_matched"] and artifact["release_runtime_identity_verified"]
+    assert artifact["release_git_metadata_available"] is False
     assert artifact["plugin_version"] == "0.57.4"
 
 
 def test_readiness_api_source_uses_the_same_verified_runtime_identity(monkeypatch):
-    identity = release.RuntimeReleaseIdentity(**manifest_values(), manifest_sha256="d" * 64, verification_source="checksum_verified_manifest", git_metadata_available=False)
+    identity = release.RuntimeReleaseIdentity(**manifest_values(), manifest_sha256="d" * 64, verification_source="expected_identity_and_checksum_verified_manifest", git_metadata_available=False, manifest_integrity_verified=True, expected_release_matched=True, runtime_identity_verified=True)
     monkeypatch.setattr(deployment, "verify_runtime_release_identity", lambda _: identity)
     readiness = deployment.deployment_readiness()
     assert readiness["release_status"] == "verified"
@@ -216,7 +327,7 @@ def test_wrong_checksum_and_missing_source_block_without_empty_checksum(monkeypa
     root = atlas_layout(tmp_path / "project")
     monkeypatch.setattr(deployment, "resolve_program_root", lambda: root)
     monkeypatch.setattr(deployment, "readiness_diagnostics", lambda: {"resolved_program_root": str(root), "artifact_relative_path": release.SOURCE_EXPECTATIONS.artifact_relative_path, "artifact_exists": True, "source_directory_exists": True})
-    identity = release.RuntimeReleaseIdentity(**manifest_values(), manifest_sha256="d" * 64, verification_source="checksum_verified_manifest", git_metadata_available=False)
+    identity = release.RuntimeReleaseIdentity(**manifest_values(), manifest_sha256="d" * 64, verification_source="expected_identity_and_checksum_verified_manifest", git_metadata_available=False, manifest_integrity_verified=True, expected_release_matched=True, runtime_identity_verified=True)
     monkeypatch.setattr(deployment, "verify_runtime_release_identity", lambda _: identity)
     artifact, gates = deployment._verify_artifact()
     assert artifact["zip_sha256"] == hashlib.sha256(b"zip").hexdigest()
@@ -312,7 +423,9 @@ def test_manual_browser_evidence_valid_tampered_expired_wrong_url_and_secret_rej
 
 
 def test_ui_has_no_independent_stale_release_constant():
-    source = (Path(__file__).parents[2] / "frontend/src/pages/WordPressMetadataBridgeInstallPage.tsx").read_text(encoding="utf-8")
-    release_source = (Path(__file__).parents[1] / "app/services/wordpress_deployment_release.py").read_text(encoding="utf-8")
+    root = release.resolve_program_root()
+    source = (root / "frontend/src/pages/WordPressMetadataBridgeInstallPage.tsx").read_text(encoding="utf-8")
+    release_source = (root / "backend/app/services/wordpress_deployment_release.py").read_text(encoding="utf-8")
     assert "readiness?.release?.atlas_version" in source
     assert not __import__("re").search(r'atlas_commit\s*=\s*"[0-9a-f]{40}"', release_source)
+    assert 'deployment_workflow_version="v0.59.4"' not in release_source

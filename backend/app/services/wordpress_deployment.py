@@ -169,6 +169,11 @@ def authorize_manual_install(session: Session, page_id: int, request: WordPressD
             "token_stored": False,
             "release_manifest_sha256": dry.artifact.get("release_manifest_sha256"),
             "release_verification_source": dry.artifact.get("release_verification_source"),
+            "release_source_compatibility_id": dry.artifact.get("release_source_compatibility_id"),
+            "release_manifest_integrity_verified": dry.artifact.get("release_manifest_integrity_verified"),
+            "release_expected_identity_matched": dry.artifact.get("release_expected_identity_matched"),
+            "release_git_metadata_available": dry.artifact.get("release_git_metadata_available"),
+            "release_runtime_identity_verified": dry.artifact.get("release_runtime_identity_verified"),
         },
         evidence_directory=evidence_path,
     )
@@ -426,6 +431,11 @@ def _verify_artifact() -> tuple[dict[str, Any], list[WordPressDraftGateResult]]:
         "release_identity_status": "verified" if runtime_release else "release_identity_unavailable",
         "release_verification_source": runtime_release.verification_source if runtime_release else None,
         "release_manifest_sha256": runtime_release.manifest_sha256 if runtime_release else None,
+        "release_source_compatibility_id": runtime_release.source_compatibility_id if runtime_release else None,
+        "release_manifest_integrity_verified": runtime_release.manifest_integrity_verified if runtime_release else False,
+        "release_expected_identity_matched": runtime_release.expected_release_matched if runtime_release else False,
+        "release_git_metadata_available": runtime_release.git_metadata_available if runtime_release else False,
+        "release_runtime_identity_verified": runtime_release.runtime_identity_verified if runtime_release else False,
         "plugin_slug": PLUGIN_SLUG,
         "plugin_path": PLUGIN_FILE,
         "plugin_version": PLUGIN_VERSION,
@@ -485,7 +495,11 @@ def _stored_backup_gates(audit: WordPressDeploymentAudit) -> list[WordPressDraft
         runtime is not None and audit.atlas_version == runtime.atlas_version and audit.atlas_commit == runtime.atlas_commit and audit.atlas_tag == runtime.atlas_tag
         and audit.plugin_version == PLUGIN_VERSION and audit.zip_sha256 == ZIP_SHA256
         and audit.evidence_summary.get("release_manifest_sha256") == runtime.manifest_sha256
-        and audit.evidence_summary.get("release_verification_source") == runtime.verification_source,
+        and audit.evidence_summary.get("release_verification_source") == runtime.verification_source
+        and audit.evidence_summary.get("release_source_compatibility_id") == runtime.source_compatibility_id
+        and audit.evidence_summary.get("release_manifest_integrity_verified") is True
+        and audit.evidence_summary.get("release_expected_identity_matched") is True
+        and audit.evidence_summary.get("release_runtime_identity_verified") is True,
         "Stored deployment release identity differs from the locked manifest.",
     ))
     return gates
@@ -499,7 +513,7 @@ def _bound_context(observed: dict[str, Any], proof: WordPressDeploymentBackupEvi
         "plugin_slug": PLUGIN_SLUG,
         "plugin_path": PLUGIN_FILE,
         "artifact": artifact,
-        "atlas_release": {"version": artifact.get("atlas_version"), "commit": artifact.get("atlas_commit"), "tag": artifact.get("atlas_tag"), "manifest_sha256": artifact.get("release_manifest_sha256"), "verification_source": artifact.get("release_verification_source")},
+        "atlas_release": {"version": artifact.get("atlas_version"), "commit": artifact.get("atlas_commit"), "tag": artifact.get("atlas_tag"), "manifest_sha256": artifact.get("release_manifest_sha256"), "source_compatibility_id": artifact.get("release_source_compatibility_id"), "verification_source": artifact.get("release_verification_source"), "manifest_integrity_verified": artifact.get("release_manifest_integrity_verified"), "expected_release_matched": artifact.get("release_expected_identity_matched"), "git_metadata_available": artifact.get("release_git_metadata_available"), "runtime_identity_verified": artifact.get("release_runtime_identity_verified")},
         "backup": _backup_dict(proof),
         "backup_deadline": _backup_deadline(proof.wordpress_backup_completed_at).isoformat(),
         "plugin_inventory_hash": observed.get("plugin_inventory_hash"),

@@ -19,7 +19,8 @@ class DeploymentReleaseError(RuntimeError):
 
 @dataclass(frozen=True)
 class DeploymentSourceExpectations:
-    deployment_workflow_version: str
+    manifest_schema_version: int
+    source_compatibility_id: str
     plugin_version: str
     plugin_zip_filename: str
     plugin_zip_sha256: str
@@ -36,6 +37,7 @@ class DeploymentSourceExpectations:
 @dataclass(frozen=True)
 class RuntimeReleaseIdentity:
     manifest_schema_version: int
+    source_compatibility_id: str
     atlas_version: str
     atlas_commit: str
     atlas_tag: str
@@ -46,13 +48,17 @@ class RuntimeReleaseIdentity:
     manifest_sha256: str
     verification_source: str
     git_metadata_available: bool
+    manifest_integrity_verified: bool
+    expected_release_matched: bool
+    runtime_identity_verified: bool
 
     def identity(self) -> dict[str, Any]:
         return asdict(self)
 
 
 SOURCE_EXPECTATIONS = DeploymentSourceExpectations(
-    deployment_workflow_version="v0.59.4",
+    manifest_schema_version=2,
+    source_compatibility_id="project-atlas-release-identity-v0.59.8",
     plugin_version="0.57.4",
     plugin_zip_filename="project-atlas-metadata-bridge-0.57.4.zip",
     plugin_zip_sha256="939412e6e80e8344d95274444fda65b6122fe0c8249a2ced0a8582a418c4e232",
@@ -64,6 +70,7 @@ SOURCE_EXPECTATIONS = DeploymentSourceExpectations(
 )
 MANIFEST_FIELDS = {
     "manifest_schema_version",
+    "source_compatibility_id",
     "atlas_version",
     "atlas_commit",
     "atlas_tag",
@@ -74,6 +81,7 @@ MANIFEST_FIELDS = {
 }
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+RELEASE_PATTERN = re.compile(r"v\d+\.\d+(?:\.\d+)?")
 
 
 def _is_filesystem_root(path: Path) -> bool:
@@ -178,14 +186,34 @@ def _load_manifest(root: Path, environ: Mapping[str, str]) -> tuple[dict[str, An
     return manifest, actual_sha
 
 
+def _expected_release_identity(environ: Mapping[str, str]) -> tuple[str, str, str]:
+    version = environ.get("ATLAS_EXPECTED_RELEASE_VERSION", "").strip()
+    commit = environ.get("ATLAS_EXPECTED_RELEASE_COMMIT", "").strip().lower()
+    tag = environ.get("ATLAS_EXPECTED_RELEASE_TAG", "").strip()
+    if not version:
+        raise DeploymentReleaseError("release_identity_unavailable: ATLAS_EXPECTED_RELEASE_VERSION is required.")
+    if not commit:
+        raise DeploymentReleaseError("release_identity_unavailable: ATLAS_EXPECTED_RELEASE_COMMIT is required.")
+    if not tag:
+        raise DeploymentReleaseError("release_identity_unavailable: ATLAS_EXPECTED_RELEASE_TAG is required.")
+    if RELEASE_PATTERN.fullmatch(version) is None:
+        raise DeploymentReleaseError("release_identity_unavailable: expected release version is malformed.")
+    if COMMIT_PATTERN.fullmatch(commit) is None:
+        raise DeploymentReleaseError("release_identity_unavailable: expected release commit is malformed.")
+    if RELEASE_PATTERN.fullmatch(tag) is None or tag != version:
+        raise DeploymentReleaseError("release_identity_unavailable: expected release tag is malformed or differs from the expected version.")
+    return version, commit, tag
+
+
 def _validate_manifest_values(manifest: dict[str, Any]) -> None:
     try:
         generated = datetime.fromisoformat(str(manifest["generated_at"]))
     except ValueError as exc:
         raise DeploymentReleaseError("release_identity_unavailable: generated timestamp is invalid.") from exc
     valid = (
-        manifest["manifest_schema_version"] == 1
-        and manifest["atlas_version"] == SOURCE_EXPECTATIONS.deployment_workflow_version
+        manifest["manifest_schema_version"] == SOURCE_EXPECTATIONS.manifest_schema_version
+        and manifest["source_compatibility_id"] == SOURCE_EXPECTATIONS.source_compatibility_id
+        and RELEASE_PATTERN.fullmatch(str(manifest["atlas_version"])) is not None
         and manifest["atlas_tag"] == manifest["atlas_version"]
         and COMMIT_PATTERN.fullmatch(str(manifest["atlas_commit"])) is not None
         and manifest["plugin_version"] == SOURCE_EXPECTATIONS.plugin_version
@@ -195,6 +223,16 @@ def _validate_manifest_values(manifest: dict[str, Any]) -> None:
     )
     if not valid:
         raise DeploymentReleaseError("release_identity_unavailable: release manifest values do not match source expectations.")
+
+
+def _validate_expected_match(manifest: Mapping[str, Any], expected: tuple[str, str, str]) -> None:
+    version, commit, tag = expected
+    if manifest["atlas_version"] != version:
+        raise DeploymentReleaseError("release_identity_unavailable: manifest version does not match the independently expected release version.")
+    if manifest["atlas_commit"] != commit:
+        raise DeploymentReleaseError("release_identity_unavailable: manifest commit does not match the independently expected release commit.")
+    if manifest["atlas_tag"] != tag:
+        raise DeploymentReleaseError("release_identity_unavailable: manifest tag does not match the independently expected release tag.")
 
 
 def _packed_ref(git_dir: Path, name: str) -> tuple[str | None, str | None]:
@@ -255,21 +293,26 @@ def verify_runtime_release_identity(
     environ: Mapping[str, str] | None = None,
 ) -> RuntimeReleaseIdentity:
     env = os.environ if environ is None else environ
+    expected = _expected_release_identity(env)
     manifest, manifest_sha = _load_manifest(root, env)
     _validate_manifest_values(manifest)
+    _validate_expected_match(manifest, expected)
     git_available = (root / ".git").exists()
     if git_available:
         head, tag_commit = _git_identity(root, str(manifest["atlas_tag"]))
         if head != manifest["atlas_commit"] or tag_commit != manifest["atlas_commit"]:
             raise DeploymentReleaseError("release_identity_unavailable: runtime commit or tag does not match Git HEAD.")
-        source = "git_and_checksum_verified_manifest"
+        source = "git_expected_identity_and_checksum_verified_manifest"
     else:
-        source = "checksum_verified_manifest"
+        source = "expected_identity_and_checksum_verified_manifest"
     return RuntimeReleaseIdentity(
         **manifest,
         manifest_sha256=manifest_sha,
         verification_source=source,
         git_metadata_available=git_available,
+        manifest_integrity_verified=True,
+        expected_release_matched=True,
+        runtime_identity_verified=True,
     )
 
 

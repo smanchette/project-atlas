@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     media_max_upload_bytes: int = 10 * 1024 * 1024
     media_max_pixels: int = 40_000_000
     atlas_release_manifest_sha256: str | None = None
+    atlas_expected_release_version: str | None = None
+    atlas_expected_release_commit: str | None = None
+    atlas_expected_release_tag: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

@@ -1,15 +1,23 @@
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 import re
 import zipfile
 
-ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / "wordpress" / "project-atlas-metadata-bridge"
-ZIP = ROOT / "wordpress" / "dist" / "project-atlas-metadata-bridge-0.57.4.zip"
+from app.services.wordpress_deployment_release import SOURCE_EXPECTATIONS, release_paths, resolve_program_root
+
 ENTRY = "project-atlas-metadata-bridge/project-atlas-metadata-bridge.php"
 
 
+def plugin_paths():
+    root = resolve_program_root()
+    archive, source = release_paths(root)
+    assert source == root / SOURCE_EXPECTATIONS.source_relative_path
+    assert archive == root / SOURCE_EXPECTATIONS.artifact_relative_path
+    return root, source, archive
+
+
 def test_plugin_zip_is_posix_portable_and_fixed_shape() -> None:
-    with zipfile.ZipFile(ZIP) as archive:
+    _, _, zip_path = plugin_paths()
+    with zipfile.ZipFile(zip_path) as archive:
         names = archive.namelist()
         assert names and len(names) == len(set(names))
         assert names.count(ENTRY) == 1
@@ -24,7 +32,9 @@ def test_plugin_zip_is_posix_portable_and_fixed_shape() -> None:
 
 
 def test_plugin_zip_matches_source_byte_for_byte() -> None:
-    expected = {f"{SOURCE.name}/{path.relative_to(SOURCE).as_posix()}": path.read_bytes() for path in SOURCE.rglob("*") if path.is_file()}
-    with zipfile.ZipFile(ZIP) as archive:
+    root, source, zip_path = plugin_paths()
+    assert source.parent == root / "wordpress" and zip_path.parent == root / "wordpress" / "dist"
+    expected = {f"{source.name}/{path.relative_to(source).as_posix()}": path.read_bytes() for path in source.rglob("*") if path.is_file()}
+    with zipfile.ZipFile(zip_path) as archive:
         actual = {name: archive.read(name) for name in archive.namelist() if not name.endswith("/")}
     assert actual == expected

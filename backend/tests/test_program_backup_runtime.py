@@ -116,7 +116,7 @@ def test_program_backup_rejects_secret_material(monkeypatch, tmp_path):
 
 
 def test_compose_program_source_mounts_are_granular_and_read_only():
-    compose = (Path(__file__).parents[2] / "docker-compose.yml").read_text(encoding="utf-8")
+    compose = (resolve_program_root() / "docker-compose.yml").read_text(encoding="utf-8")
     assert "./:/atlas-program" not in compose and ".git:/atlas-program" not in compose
     required = (
         "./wordpress:/atlas-program/wordpress:ro",

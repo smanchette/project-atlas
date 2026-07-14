@@ -1,5 +1,4 @@
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 import inspect
 import json
 
@@ -10,12 +9,10 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services import wordpress_metadata as metadata
+from app.services.wordpress_deployment_release import SOURCE_EXPECTATIONS, resolve_program_root
 
 
-PLUGIN = next(path for path in (
-    Path("/atlas-program/wordpress/project-atlas-metadata-bridge/project-atlas-metadata-bridge.php"),
-    Path("../wordpress/project-atlas-metadata-bridge/project-atlas-metadata-bridge.php"),
-) if path.exists())
+PLUGIN = resolve_program_root() / "wordpress" / SOURCE_EXPECTATIONS.plugin_entry_path
 
 
 def test_metadata_routes_are_fixed_one_page_actions_without_bulk_routes() -> None:
