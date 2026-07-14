@@ -55,6 +55,14 @@ from app.schemas.wordpress import (
     WordPressDeploymentPreflightRequest,
     WordPressDeploymentVerifyRequest,
     WordPressDeploymentVerification,
+    WordPressHeadingCorrectionApplyRequest,
+    WordPressHeadingCorrectionApplyResult,
+    WordPressHeadingCorrectionDryRun,
+    WordPressHeadingCorrectionDryRunRequest,
+    WordPressHeadingCorrectionReconcileRequest,
+    WordPressHeadingCorrectionReconcileResult,
+    WordPressHeadingCorrectionVerification,
+    WordPressHeadingCorrectionVerifyRequest,
 )
 from app.services.wordpress_draft_review import (
     check_live_wordpress_draft_status,
@@ -106,8 +114,50 @@ from app.services.wordpress_deployment import (
     report_manual_complete,
     verify_manual_install,
 )
+from app.services.wordpress_heading_correction import (
+    apply_heading_correction,
+    dry_run_heading_correction,
+    reconcile_heading_correction,
+    verify_heading_correction,
+)
 
 router = APIRouter(prefix="/wordpress", tags=["wordpress sandbox"])
+
+
+@router.post("/heading-correction/dry-run/{page_id}", response_model=WordPressHeadingCorrectionDryRun)
+def heading_correction_dry_run(
+    page_id: int,
+    payload: WordPressHeadingCorrectionDryRunRequest,
+    session: Session = Depends(get_session),
+) -> WordPressHeadingCorrectionDryRun:
+    return dry_run_heading_correction(session, page_id, payload)
+
+
+@router.post("/heading-correction/apply/{page_id}", response_model=WordPressHeadingCorrectionApplyResult)
+def heading_correction_apply(
+    page_id: int,
+    payload: WordPressHeadingCorrectionApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressHeadingCorrectionApplyResult:
+    return apply_heading_correction(session, page_id, payload)
+
+
+@router.post("/heading-correction/verify/{page_id}", response_model=WordPressHeadingCorrectionVerification)
+def heading_correction_verify(
+    page_id: int,
+    payload: WordPressHeadingCorrectionVerifyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressHeadingCorrectionVerification:
+    return verify_heading_correction(session, page_id, payload)
+
+
+@router.post("/heading-correction/reconcile/{page_id}", response_model=WordPressHeadingCorrectionReconcileResult)
+def heading_correction_reconcile(
+    page_id: int,
+    payload: WordPressHeadingCorrectionReconcileRequest,
+    session: Session = Depends(get_session),
+) -> WordPressHeadingCorrectionReconcileResult:
+    return reconcile_heading_correction(session, page_id, payload)
 
 
 @router.get("/deployment/metadata-bridge/install/readiness")

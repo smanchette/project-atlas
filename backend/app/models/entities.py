@@ -355,6 +355,41 @@ class WordPressDeploymentAudit(SQLModel, table=True):
     partial_failure_details: str | None = None
 
 
+class WordPressHeadingCorrectionAudit(SQLModel, table=True):
+    __table_args__ = (
+        CheckConstraint(
+            "action_type = 'correct_orlando_duplicate_h1'",
+            name="ck_wordpressheadingcorrectionaudit_action",
+        ),
+        CheckConstraint(
+            "status IN ('pending','corrected','verified','reconciliation_required','failed')",
+            name="ck_wordpressheadingcorrectionaudit_status",
+        ),
+        UniqueConstraint(
+            "token_fingerprint",
+            name="uq_wordpressheadingcorrectionaudit_token_fingerprint",
+        ),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
+    wordpress_post_id: int = Field(index=True)
+    action_type: str = Field(default="correct_orlando_duplicate_h1", max_length=64, index=True)
+    status: str = Field(default="pending", max_length=40, index=True)
+    wordpress_site_url: str = Field(max_length=500)
+    current_body_hash: str = Field(max_length=64, index=True)
+    proposed_body_hash: str = Field(max_length=64, index=True)
+    token_fingerprint: str = Field(max_length=64, index=True)
+    backup_identities: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    release_identity: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    pre_snapshot: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    post_snapshot: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    gate_results: list[dict[str, Any]] = Field(sa_column=Column(JSON, nullable=False))
+    wordpress_write_count: int = Field(default=0)
+    attempted_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    completed_at: datetime | None = None
+    error_message: str | None = Field(default=None, max_length=2000)
+
+
 class WordPressDeploymentNonce(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("jti", name="uq_wordpressdeploymentnonce_jti"),

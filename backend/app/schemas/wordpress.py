@@ -89,11 +89,125 @@ class WordPressHeadingCorrectionDryRun(SQLModel):
     request_payload: dict[str, str]
     gate_results: list["WordPressDraftGateResult"]
     read_only: Literal[True] = True
-    token_issued: Literal[False] = False
+    token_issued: bool = False
     nonce_consumed: Literal[False] = False
     audit_created: Literal[False] = False
     wordpress_write_count: Literal[0] = 0
     atlas_write_count: Literal[0] = 0
+    backup_identities: "WordPressHeadingCorrectionBackupIdentities | None" = None
+    release_identity: dict[str, Any] | None = None
+    pre_snapshot: dict[str, Any] | None = None
+    confirmation_token: str | None = None
+    confirmation_phrase: str | None = None
+    expires_at: str | None = None
+
+
+class WordPressHeadingCorrectionBackupIdentities(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    data_backup_file_name: str = Field(
+        min_length=10,
+        max_length=255,
+    )
+    media_backup_file_name: str = Field(
+        min_length=10,
+        max_length=255,
+    )
+    program_backup_file_name: str = Field(
+        min_length=10,
+        max_length=255,
+    )
+
+    @field_validator(
+        "data_backup_file_name",
+        "media_backup_file_name",
+        "program_backup_file_name",
+    )
+    @classmethod
+    def validate_backup_name(cls, value: str, info: Any) -> str:
+        patterns = {
+            "data_backup_file_name": r"^atlas-backup-\d{4}-\d{2}-\d{2}-\d{6}\.json$",
+            "media_backup_file_name": r"^atlas-media-backup-\d{4}-\d{2}-\d{2}-\d{6}\.zip$",
+            "program_backup_file_name": r"^atlas-program-backup-\d{4}-\d{2}-\d{2}-\d{6}\.zip$",
+        }
+        import re
+
+        if re.fullmatch(patterns[info.field_name], value) is None:
+            raise ValueError("Atlas backup identity has an invalid filename.")
+        return value
+
+
+class WordPressHeadingCorrectionDryRunRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    backups: WordPressHeadingCorrectionBackupIdentities
+
+
+class WordPressHeadingContentPayload(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str
+
+
+class WordPressHeadingCorrectionApplyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    backups: WordPressHeadingCorrectionBackupIdentities
+    confirmation_token: str = Field(min_length=20, max_length=4096)
+    confirmation_phrase: str = Field(min_length=1, max_length=100)
+
+
+class WordPressHeadingCorrectionApplyResult(SQLModel):
+    atlas_page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    status: Literal["corrected", "reconciliation_required"]
+    audit_id: int
+    current_body_hash: str
+    proposed_body_hash: str
+    request_payload: WordPressHeadingContentPayload
+    gate_results: list["WordPressDraftGateResult"]
+    wordpress_write_count: Literal[1] = 1
+    atlas_write_count: int = 2
+    automatic_retry_count: Literal[0] = 0
+
+
+class WordPressHeadingCorrectionVerifyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audit_id: int | None = Field(default=None, ge=1)
+
+
+class WordPressHeadingCorrectionVerification(SQLModel):
+    atlas_page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    status: Literal["verified", "blocked", "reconciliation_ready"]
+    verified: bool
+    audit_id: int | None = None
+    body_hash: str
+    rendered_h1_count: int
+    rendered_h1_text: str | None = None
+    gate_results: list["WordPressDraftGateResult"]
+    snapshot: dict[str, Any]
+    wordpress_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+    cache_purge_count: Literal[0] = 0
+
+
+class WordPressHeadingCorrectionReconcileRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audit_id: int = Field(ge=1)
+    confirmation_phrase: str = Field(min_length=1, max_length=100)
+
+
+class WordPressHeadingCorrectionReconcileResult(SQLModel):
+    atlas_page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    status: Literal["verified"] = "verified"
+    audit_id: int
+    wordpress_write_count: Literal[0] = 0
+    atlas_write_count: Literal[1] = 1
+    gate_results: list["WordPressDraftGateResult"]
 
 
 class WordPressDraftGateResult(SQLModel):

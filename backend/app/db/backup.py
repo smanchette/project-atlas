@@ -20,6 +20,7 @@ from app.models import (
     Service,
     Setting,
     WordPressDraftAudit,
+    WordPressHeadingCorrectionAudit,
     WordPressDeploymentAudit,
     WordPressDeploymentNonce,
     WordPressDeploymentTransition,
@@ -31,7 +32,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.31"
+BACKUP_VERSION = "0.32"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -48,6 +49,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.29",
     "0.30",
     "0.31",
+    "0.32",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -69,6 +71,7 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "approval_audits": ApprovalAudit,
     "page_revisions": GeneratedPageRevision,
     "wordpress_draft_audits": WordPressDraftAudit,
+    "wordpress_heading_correction_audits": WordPressHeadingCorrectionAudit,
     "wordpress_deployment_audits": WordPressDeploymentAudit,
     "wordpress_deployment_nonces": WordPressDeploymentNonce,
     "wordpress_deployment_transitions": WordPressDeploymentTransition,
@@ -495,6 +498,23 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     WordPressDeploymentAudit.action_type == record["action_type"],
                 ), restored_record)
 
+        for record in data["wordpress_heading_correction_audits"]:
+            attempted_at = _datetime_value(record["attempted_at"], "wordpress_heading_correction_audits.attempted_at")
+            restored_record = {
+                **record,
+                "generated_page_id": _mapped_id(generated_page_ids, record["generated_page_id"], "wordpress_heading_correction_audits.generated_page_id"),
+                "attempted_at": attempted_at,
+                "completed_at": _datetime_value(record["completed_at"], "wordpress_heading_correction_audits.completed_at") if record.get("completed_at") else None,
+            }
+            _upsert(
+                session,
+                WordPressHeadingCorrectionAudit,
+                select(WordPressHeadingCorrectionAudit).where(
+                    WordPressHeadingCorrectionAudit.token_fingerprint == record["token_fingerprint"]
+                ),
+                restored_record,
+            )
+
         deployment_audit_ids = {
             record["id"]: session.exec(
                 select(WordPressDeploymentAudit).where(
@@ -630,6 +650,9 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
         if group not in data:
             data[group] = []
             counts[group] = 0
+    if "wordpress_heading_correction_audits" not in data:
+        data["wordpress_heading_correction_audits"] = []
+        counts["wordpress_heading_correction_audits"] = 0
 
     for group in BACKUP_MODELS:
         records = data.get(group)
@@ -747,6 +770,7 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         "approval_audits": ("generated_page_id", "approved_at", "draft_hash_at_approval"),
         "page_revisions": ("generated_page_id", "created_at", "draft_hash_after"),
         "wordpress_draft_audits": ("generated_page_id", "attempted_at", "payload_hash"),
+        "wordpress_heading_correction_audits": ("token_fingerprint",),
         "wordpress_deployment_audits": ("generated_page_id", "attempted_at", "action_type"),
         "wordpress_deployment_nonces": ("jti",),
         "wordpress_deployment_transitions": ("request_identifier",),
@@ -808,6 +832,7 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
         "wordpress_draft_audits": (
             ("generated_page_id", "generated_pages", False),
         ),
+        "wordpress_heading_correction_audits": (("generated_page_id", "generated_pages", False),),
         "wordpress_publish_audits": (
             ("generated_page_id", "generated_pages", False),
             ("latest_update_audit_id", "wordpress_draft_audits", True),
