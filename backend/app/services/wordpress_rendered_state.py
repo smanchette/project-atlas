@@ -24,6 +24,9 @@ EVIDENCE_SCHEMA_VERSION = 1
 EVIDENCE_SCHEMA_VERSION_DUPLICATE_H1 = 2
 CAPTURE_HELPER_VERSION = "0.59.15"
 EVIDENCE_LIFETIME = timedelta(minutes=15)
+CANONICAL_EVIDENCE_TIMESTAMP_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$"
+)
 ACQUISITION_SOURCE = "credential_free_public_browser"
 VERIFIED_OUTCOMES = {
     "public_html_verified",
@@ -74,6 +77,34 @@ def _hash(value: str) -> str:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _parse_evidence_timestamp(value: datetime | str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError as exc:
+            raise ValueError("Browser evidence timestamp is invalid.") from exc
+    else:
+        raise ValueError("Browser evidence timestamp is invalid.")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("Browser evidence timestamp must be timezone-aware.")
+    return parsed.astimezone(UTC)
+
+
+def canonical_evidence_timestamp(value: datetime | str) -> str:
+    """Return the sole timestamp representation permitted in signed evidence."""
+    return _parse_evidence_timestamp(value).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _canonicalized_evidence_payload(evidence: dict[str, Any]) -> dict[str, Any]:
+    payload = _evidence_payload(evidence)
+    payload["captured_at"] = canonical_evidence_timestamp(payload["captured_at"])
+    payload["expires_at"] = canonical_evidence_timestamp(payload["expires_at"])
+    return payload
 
 
 def _normalize_attrs(attrs: list[tuple[str, str | None]]) -> list[tuple[str, str]]:
@@ -464,7 +495,7 @@ def build_manual_browser_evidence(
     final_url: str,
     evidence_identifier: str,
     signing_key: str,
-    captured_at: datetime | None = None,
+    captured_at: datetime | str | None = None,
     status_code: int = 200,
     content_type: str = "text/html; charset=UTF-8",
     redirect_count: int = 0,
@@ -512,7 +543,7 @@ def build_manual_browser_evidence(
     absence = _absence_findings(inventory)
     if not all(absence.values()) or inventory["unexpected_metadata_owners"] or inventory["duplicates"]:
         raise ValueError("Browser evidence contains metadata, duplicates, Atlas markers, or media 32.")
-    captured = (captured_at or datetime.now(UTC)).astimezone(UTC)
+    captured = _parse_evidence_timestamp(captured_at or datetime.now(UTC))
     expires = captured + EVIDENCE_LIFETIME
     normalized_head = _canonical_json({"page": {"titles": parsed.titles, "canonicals": parsed.canonicals}, "head_elements": parsed.head_elements, "inventory": inventory})
     normalized_visible = _text(" ".join(parsed.visible))
@@ -521,8 +552,8 @@ def build_manual_browser_evidence(
         "evidence_schema_version": schema_version,
         "capture_helper_version": CAPTURE_HELPER_VERSION,
         "evidence_id": evidence_identifier,
-        "captured_at": captured.isoformat(),
-        "expires_at": expires.isoformat(),
+        "captured_at": canonical_evidence_timestamp(captured),
+        "expires_at": canonical_evidence_timestamp(expires),
         "final_url": final_url,
         "acquisition_source": ACQUISITION_SOURCE,
         "navigation_outcome": {
@@ -554,7 +585,7 @@ def build_manual_browser_evidence(
                 "body_h1": EXPECTED_BODY_H1,
             }
         )
-    encoded = _canonical_json(_evidence_payload(evidence))
+    encoded = _canonical_json(_canonicalized_evidence_payload(evidence))
     evidence["helper_signature"] = hmac.new(signing_key.encode(), encoded.encode(), hashlib.sha256).hexdigest()
     return evidence
 
@@ -584,15 +615,26 @@ def validate_manual_browser_evidence(evidence: dict[str, Any] | Any | None, sign
         return False, "Browser evidence helper or acquisition source is unsupported."
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{7,199}", str(evidence.get("evidence_id", ""))):
         return False, "Browser evidence identifier is invalid."
-    encoded = _canonical_json(_evidence_payload(evidence))
+    try:
+        captured_text = canonical_evidence_timestamp(evidence["captured_at"])
+        expires_text = canonical_evidence_timestamp(evidence["expires_at"])
+    except (KeyError, ValueError):
+        return False, "Browser evidence timestamp is invalid."
+    if (
+        not isinstance(evidence.get("captured_at"), str)
+        or not isinstance(evidence.get("expires_at"), str)
+        or not CANONICAL_EVIDENCE_TIMESTAMP_PATTERN.fullmatch(evidence["captured_at"])
+        or not CANONICAL_EVIDENCE_TIMESTAMP_PATTERN.fullmatch(evidence["expires_at"])
+        or evidence["captured_at"] != captured_text
+        or evidence["expires_at"] != expires_text
+    ):
+        return False, "Browser evidence timestamps are not canonical UTC strings."
+    encoded = _canonical_json(_canonicalized_evidence_payload(evidence))
     expected_signature = hmac.new(signing_key.encode(), encoded.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(str(evidence.get("helper_signature", "")), expected_signature):
         return False, "Browser evidence signature is invalid."
-    try:
-        captured = datetime.fromisoformat(str(evidence["captured_at"]))
-        expires = datetime.fromisoformat(str(evidence["expires_at"]))
-    except ValueError:
-        return False, "Browser evidence timestamp is invalid."
+    captured = _parse_evidence_timestamp(captured_text)
+    expires = _parse_evidence_timestamp(expires_text)
     current = (now or datetime.now(UTC)).astimezone(UTC)
     if captured.tzinfo is None or expires.tzinfo is None or expires.astimezone(UTC) - captured.astimezone(UTC) != EVIDENCE_LIFETIME:
         return False, "Browser evidence lifetime is invalid."

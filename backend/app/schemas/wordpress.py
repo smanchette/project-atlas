@@ -897,8 +897,8 @@ class WordPressManualBrowserEvidence(SQLModel):
     evidence_schema_version: Literal[1, 2]
     capture_helper_version: Literal["0.59.15"]
     evidence_id: str = Field(min_length=8, max_length=200)
-    captured_at: datetime
-    expires_at: datetime
+    captured_at: str = Field(min_length=27, max_length=27)
+    expires_at: str = Field(min_length=27, max_length=27)
     final_url: str
     acquisition_source: Literal["credential_free_public_browser"]
     navigation_outcome: dict[str, Any]

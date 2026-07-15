@@ -20,7 +20,7 @@ The top-level object is strict; unknown or missing fields fail validation.
 - `evidence_schema_version`: `1`
 - `capture_helper_version`: `0.59.15`
 - `evidence_id`
-- timezone-aware `captured_at` and `expires_at`
+- canonical UTC `captured_at` and `expires_at` strings in `YYYY-MM-DDTHH:MM:SS.ffffffZ` form
 - `final_url` and `acquisition_source` (`credential_free_public_browser`)
 - `navigation_outcome`: HTTP 200, `text/html`, zero redirects, `success`
 - `page_identity`: exact title, H1, canonical, featured-image URL, and alt text
@@ -44,6 +44,8 @@ The rendered-head hash is SHA-256 over canonical JSON containing normalized page
 ## Signature and lifetime
 
 HMAC-SHA-256 covers every top-level field except `helper_signature`, using UTF-8 canonical JSON with sorted object keys. This includes all nested inventory data, derived findings, normalized rendered payloads, hashes, privacy values, identifiers, versions, and timestamps. Any altered field invalidates the signature.
+
+Signed timestamps use UTC only, an uppercase `Z`, and exactly six fractional-second digits. Capture and validation normalize timezone-aware inputs to that representation before calculating signature bytes; neither relies on incidental JSON or Pydantic datetime serialization. Evidence generated before the v0.59.34 canonicalization correction used a different signed timestamp meaning and must be recaptured rather than reused.
 
 Evidence is valid for exactly 15 minutes. A missing/invalid signature, unsupported schema/helper, malformed or naive timestamp, altered lifetime, future capture, or expired evidence fails closed.
 

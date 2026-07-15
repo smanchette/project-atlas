@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
@@ -10,7 +10,9 @@ import sys
 
 import pytest
 
+from app.schemas.wordpress import WordPressManualBrowserEvidence
 from app.services.wordpress_rendered_state import (
+    CANONICAL_EVIDENCE_TIMESTAMP_PATTERN,
     CAPTURE_HELPER_VERSION,
     EVIDENCE_SCHEMA,
     EVIDENCE_SCHEMA_VERSION,
@@ -24,6 +26,7 @@ from app.services.wordpress_rendered_state import (
     _canonical_json,
     _evidence_payload,
     build_manual_browser_evidence,
+    canonical_evidence_timestamp,
     classify_public_page_context,
     validate_manual_browser_evidence,
 )
@@ -66,6 +69,81 @@ def resign(value: dict) -> dict:
     encoded = _canonical_json(_evidence_payload(changed))
     changed["helper_signature"] = hmac.new(KEY.encode(), encoded.encode(), hashlib.sha256).hexdigest()
     return changed
+
+
+def test_signed_timestamps_are_canonical_utc_with_fixed_microseconds():
+    captured = datetime(2026, 7, 15, 3, 54, 43, 909827, tzinfo=UTC)
+    value = evidence(captured_at=captured)
+    assert value["captured_at"] == "2026-07-15T03:54:43.909827Z"
+    assert value["expires_at"] == "2026-07-15T04:09:43.909827Z"
+    assert CANONICAL_EVIDENCE_TIMESTAMP_PATTERN.fullmatch(value["captured_at"])
+    assert CANONICAL_EVIDENCE_TIMESTAMP_PATTERN.fullmatch(value["expires_at"])
+
+
+def test_timestamp_inputs_normalize_to_utc_before_signing():
+    failed_shape = evidence(captured_at="2026-07-15T03:54:43.909827+00:00")
+    canonical_shape = evidence(captured_at="2026-07-15T03:54:43.909827Z")
+    local_shape = evidence(
+        captured_at=datetime(
+            2026,
+            7,
+            14,
+            23,
+            54,
+            43,
+            909827,
+            tzinfo=timezone(timedelta(hours=-4)),
+        )
+    )
+    assert failed_shape == canonical_shape == local_shape
+    assert failed_shape["captured_at"] == "2026-07-15T03:54:43.909827Z"
+
+
+def test_helper_evidence_survives_api_schema_round_trip():
+    captured = datetime.now(UTC).replace(microsecond=0)
+    value = evidence(DUPLICATE_HTML, schema_version=2, captured_at=captured)
+    parsed = WordPressManualBrowserEvidence.model_validate(value)
+    dumped = parsed.model_dump(mode="json", exclude_none=True)
+    assert dumped == value
+    assert dumped["captured_at"].endswith(".000000Z")
+    assert validate_manual_browser_evidence(parsed, KEY) == (True, "Verified.")
+
+
+def test_noncanonical_pre_fix_evidence_and_equivalent_raw_timestamp_are_rejected():
+    captured = datetime.now(UTC).replace(microsecond=909827)
+    canonical = evidence(captured_at=captured)
+    equivalent_raw = json.loads(json.dumps(canonical))
+    equivalent_raw["captured_at"] = equivalent_raw["captured_at"].replace("Z", "+00:00")
+    equivalent_raw["expires_at"] = equivalent_raw["expires_at"].replace("Z", "+00:00")
+    assert not validate_manual_browser_evidence(equivalent_raw, KEY)[0]
+
+    pre_fix = json.loads(json.dumps(equivalent_raw))
+    encoded = _canonical_json(_evidence_payload(pre_fix))
+    pre_fix["helper_signature"] = hmac.new(KEY.encode(), encoded.encode(), hashlib.sha256).hexdigest()
+    assert validate_manual_browser_evidence(pre_fix, KEY) == (
+        False,
+        "Browser evidence timestamps are not canonical UTC strings.",
+    )
+
+
+def test_naive_malformed_tampered_and_invalid_lifetime_timestamps_are_rejected():
+    with pytest.raises(ValueError, match="timezone-aware"):
+        evidence(captured_at=datetime(2026, 7, 15, 3, 54, 43, 909827))
+    with pytest.raises(ValueError, match="timestamp is invalid"):
+        canonical_evidence_timestamp("not-a-timestamp")
+
+    captured = datetime.now(UTC).replace(microsecond=909827)
+    value = evidence(captured_at=captured)
+    tampered = json.loads(json.dumps(value))
+    tampered["captured_at"] = canonical_evidence_timestamp(captured + timedelta(seconds=1))
+    assert not validate_manual_browser_evidence(tampered, KEY)[0]
+
+    invalid_lifetime = json.loads(json.dumps(value))
+    invalid_lifetime["expires_at"] = canonical_evidence_timestamp(captured + timedelta(minutes=14))
+    assert validate_manual_browser_evidence(resign(invalid_lifetime), KEY) == (
+        False,
+        "Browser evidence lifetime is invalid.",
+    )
 
 
 def test_versioned_contract_exact_identity_inventory_hashes_and_privacy():
