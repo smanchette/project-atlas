@@ -101,7 +101,7 @@ class WordPressHeadingCorrectionDryRun(SQLModel):
     media_31_observation: "WordPressHeadingCorrectionObservationResult | None" = None
     media_32_observation: "WordPressHeadingCorrectionObservationResult | None" = None
     rendered_page_observation: "WordPressHeadingCorrectionObservationResult | None" = None
-    confirmation_token: str | None = None
+    token_handle: str | None = None
     confirmation_phrase: str | None = None
     expires_at: str | None = None
 
@@ -170,8 +170,8 @@ class WordPressHeadingCorrectionApplyRequest(SQLModel):
     model_config = ConfigDict(extra="forbid")
 
     backups: WordPressHeadingCorrectionBackupIdentities
-    confirmation_token: str = Field(min_length=20, max_length=4096)
-    confirmation_phrase: str = Field(min_length=1, max_length=100)
+    token_handle: str = Field(default="", max_length=200)
+    confirmation_phrase: str = Field(default="", max_length=100)
 
 
 class WordPressHeadingCorrectionApplyResult(SQLModel):

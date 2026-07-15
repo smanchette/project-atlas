@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import base64
 import hashlib
@@ -9,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+from threading import Lock, Timer
 from typing import Any
 
 import httpx
@@ -67,13 +69,46 @@ CONFIRMATION_PHRASE = "CORRECT ORLANDO DUPLICATE H1"
 RECONCILIATION_PHRASE = "FINALIZE ORLANDO H1 CORRECTION AUDIT"
 TOKEN_TTL_MINUTES = 10
 BACKUP_MAX_AGE = timedelta(hours=24)
+TOKEN_ACTION = "correct_orlando_duplicate_h1"
 _token_secret = secrets.token_bytes(32)
+
+
+@dataclass(frozen=True)
+class _TokenHandleEntry:
+    raw_token: str
+    action: str
+    atlas_page_id: int
+    wordpress_post_id: int
+    issued_at: datetime
+    expires_at: datetime
+    proposed_body_hash: str
+    backup_digest: str
+    release_digest: str
+    manual_browser_evidence: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class _ConsumedTokenContext:
+    action: str
+    atlas_page_id: int
+    wordpress_post_id: int
+    proposed_body_hash: str
+    backup_digest: str
+    release_digest: str
+    manual_browser_evidence: dict[str, Any] | None
+
+
+_token_handle_lock = Lock()
+_token_handles: dict[str, _TokenHandleEntry] = {}
+_token_handle_timers: dict[str, Timer] = {}
 
 
 def dry_run_heading_correction(
     session: Session,
     page_id: int,
     request: WordPressHeadingCorrectionDryRunRequest,
+    *,
+    issue_token_handle: bool = True,
 ) -> WordPressHeadingCorrectionDryRun:
     page = session.get(GeneratedPage, page_id)
     settings = read_wordpress_settings(session)
@@ -194,10 +229,11 @@ def dry_run_heading_correction(
     plan.backup_identities = request.backups
     plan.release_identity = release
     plan.pre_snapshot = observation.get("snapshot")
-    if plan.ready and release and plan.pre_snapshot:
-        expires = datetime.now(UTC) + timedelta(minutes=TOKEN_TTL_MINUTES)
+    if plan.ready and release and plan.pre_snapshot and issue_token_handle:
+        issued = datetime.now(UTC)
+        expires = issued + timedelta(minutes=TOKEN_TTL_MINUTES)
         token_body = {
-            "action": "correct_orlando_duplicate_h1",
+            "action": TOKEN_ACTION,
             "atlas_page_id": ATLAS_PAGE_ID,
             "wordpress_post_id": WORDPRESS_POST_ID,
             "current_body_hash": EXPECTED_CURRENT_BODY_HASH,
@@ -208,7 +244,18 @@ def dry_run_heading_correction(
             "expires_at": int(expires.timestamp()),
             "jti": secrets.token_hex(16),
         }
-        plan.confirmation_token = _sign(token_body)
+        raw_token = _sign(token_body)
+        plan.token_handle = _store_token_handle(
+            raw_token,
+            token_body,
+            issued_at=issued,
+            expires_at=expires,
+            manual_browser_evidence=(
+                request.manual_browser_evidence.model_dump(mode="json", exclude_none=True)
+                if request.manual_browser_evidence is not None
+                else None
+            ),
+        )
         plan.confirmation_phrase = CONFIRMATION_PHRASE
         plan.expires_at = expires.isoformat()
         plan.token_issued = True  # type: ignore[assignment]
@@ -220,11 +267,26 @@ def apply_heading_correction(
     page_id: int,
     request: WordPressHeadingCorrectionApplyRequest,
 ) -> WordPressHeadingCorrectionApplyResult:
-    token = _verify_token(request.confirmation_token, page_id)
+    raw_token, handle_context = _consume_token_handle(
+        request.token_handle,
+        page_id,
+        request.backups,
+    )
+    try:
+        token = _verify_token(raw_token, page_id)
+        fingerprint = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    finally:
+        raw_token = ""
     if not hmac.compare_digest(request.confirmation_phrase.strip(), CONFIRMATION_PHRASE):
         raise HTTPException(422, "The heading-correction confirmation phrase is incorrect.")
     dry = dry_run_heading_correction(
-        session, page_id, WordPressHeadingCorrectionDryRunRequest(backups=request.backups)
+        session,
+        page_id,
+        WordPressHeadingCorrectionDryRunRequest(
+            backups=request.backups,
+            manual_browser_evidence=handle_context.manual_browser_evidence,
+        ),
+        issue_token_handle=False,
     )
     if not dry.ready or not dry.pre_snapshot or not dry.release_identity:
         raise HTTPException(409, {"message": "Heading correction is blocked.", "gate_results": _dump_gates(dry.gate_results)})
@@ -237,8 +299,16 @@ def apply_heading_correction(
     }
     if any(token.get(key) != value for key, value in expected.items()):
         raise HTTPException(409, "The target, backups, release identity, or live snapshot changed after dry run.")
+    if (
+        handle_context.action != TOKEN_ACTION
+        or handle_context.atlas_page_id != ATLAS_PAGE_ID
+        or handle_context.wordpress_post_id != WORDPRESS_POST_ID
+        or handle_context.proposed_body_hash != EXPECTED_PROPOSED_BODY_HASH
+        or handle_context.backup_digest != expected["backup_digest"]
+        or handle_context.release_digest != expected["release_digest"]
+    ):
+        raise HTTPException(409, "The token handle binding does not match the guarded correction context.")
 
-    fingerprint = hashlib.sha256(request.confirmation_token.encode("utf-8")).hexdigest()
     if session.exec(
         select(WordPressHeadingCorrectionAudit).where(
             WordPressHeadingCorrectionAudit.token_fingerprint == fingerprint
@@ -646,6 +716,100 @@ def _sign(body: dict[str, Any]) -> str:
     return f"{encoded}.{signature}"
 
 
+def _store_token_handle(
+    raw_token: str,
+    token_body: dict[str, Any],
+    *,
+    issued_at: datetime,
+    expires_at: datetime,
+    manual_browser_evidence: dict[str, Any] | None,
+) -> str:
+    entry = _TokenHandleEntry(
+        raw_token=raw_token,
+        action=str(token_body.get("action", "")),
+        atlas_page_id=int(token_body.get("atlas_page_id", 0)),
+        wordpress_post_id=int(token_body.get("wordpress_post_id", 0)),
+        issued_at=issued_at,
+        expires_at=expires_at,
+        proposed_body_hash=str(token_body.get("proposed_body_hash", "")),
+        backup_digest=str(token_body.get("backup_digest", "")),
+        release_digest=str(token_body.get("release_digest", "")),
+        manual_browser_evidence=manual_browser_evidence,
+    )
+    with _token_handle_lock:
+        _purge_expired_token_handles(issued_at)
+        handle = secrets.token_urlsafe(32)
+        while handle in _token_handles:
+            handle = secrets.token_urlsafe(32)
+        _token_handles[handle] = entry
+        timer = Timer(max(0.0, (expires_at - issued_at).total_seconds()), _expire_token_handle, args=(handle,))
+        timer.daemon = True
+        _token_handle_timers[handle] = timer
+    timer.start()
+    return handle
+
+
+def _consume_token_handle(
+    handle: str,
+    page_id: int,
+    backups: WordPressHeadingCorrectionBackupIdentities,
+) -> tuple[str, _ConsumedTokenContext]:
+    now = datetime.now(UTC)
+    with _token_handle_lock:
+        entry = _token_handles.pop(handle, None)
+        timer = _token_handle_timers.pop(handle, None)
+        if timer is not None:
+            timer.cancel()
+        _purge_expired_token_handles(now)
+    if entry is None:
+        raise HTTPException(422, "The heading-correction token handle is unknown, expired, already consumed, or cleared by a backend restart.")
+    if entry.expires_at <= now:
+        raise HTTPException(422, "The heading-correction token handle expired.")
+    if (
+        entry.action != TOKEN_ACTION
+        or entry.atlas_page_id != page_id
+        or entry.wordpress_post_id != WORDPRESS_POST_ID
+        or entry.proposed_body_hash != EXPECTED_PROPOSED_BODY_HASH
+    ):
+        raise HTTPException(422, "The heading-correction token handle does not match the locked target or action.")
+    if entry.backup_digest != _digest(backups.model_dump(mode="json")):
+        raise HTTPException(409, "The Atlas backup identities changed after dry run.")
+    return entry.raw_token, _ConsumedTokenContext(
+        action=entry.action,
+        atlas_page_id=entry.atlas_page_id,
+        wordpress_post_id=entry.wordpress_post_id,
+        proposed_body_hash=entry.proposed_body_hash,
+        backup_digest=entry.backup_digest,
+        release_digest=entry.release_digest,
+        manual_browser_evidence=entry.manual_browser_evidence,
+    )
+
+
+def _purge_expired_token_handles(now: datetime | None = None) -> None:
+    current = now or datetime.now(UTC)
+    expired = [handle for handle, entry in _token_handles.items() if entry.expires_at <= current]
+    for handle in expired:
+        _token_handles.pop(handle, None)
+        timer = _token_handle_timers.pop(handle, None)
+        if timer is not None:
+            timer.cancel()
+
+
+def _expire_token_handle(handle: str) -> None:
+    with _token_handle_lock:
+        _token_handles.pop(handle, None)
+        _token_handle_timers.pop(handle, None)
+
+
+def _clear_token_handles() -> None:
+    """Model a backend restart in tests; production restarts clear module memory."""
+    with _token_handle_lock:
+        _token_handles.clear()
+        for timer in _token_handle_timers.values():
+            timer.cancel()
+        _token_handle_timers.clear()
+
+
 def _verify_token(value: str, page_id: int) -> dict[str, Any]:
     try:
         encoded, supplied = value.split(".", 1)
@@ -655,7 +819,7 @@ def _verify_token(value: str, page_id: int) -> dict[str, Any]:
         body = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
     except (ValueError, TypeError, json.JSONDecodeError):
         raise HTTPException(422, "The heading-correction token is invalid.")
-    if body.get("action") != "correct_orlando_duplicate_h1" or body.get("atlas_page_id") != page_id or body.get("wordpress_post_id") != WORDPRESS_POST_ID:
+    if body.get("action") != TOKEN_ACTION or body.get("atlas_page_id") != page_id or body.get("wordpress_post_id") != WORDPRESS_POST_ID:
         raise HTTPException(422, "The heading-correction token does not match the locked target.")
     if int(body.get("expires_at", 0)) < int(datetime.now(UTC).timestamp()):
         raise HTTPException(422, "The heading-correction token expired.")

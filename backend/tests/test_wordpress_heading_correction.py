@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import copy
 import hashlib
 import hmac
 import inspect
 import json
+from pathlib import Path
+import time
 
 import pytest
 import httpx
@@ -127,6 +130,7 @@ def _http_response(
 
 @pytest.fixture
 def guarded(monkeypatch: pytest.MonkeyPatch):
+    correction._clear_token_handles()
     with TestClient(app):
         with Session(engine) as session:
             proposed = build_wordpress_payload_preview(session, 41).payload.content
@@ -146,6 +150,7 @@ def guarded(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(correction, "read_wordpress_settings", lambda _session: type("S", (), {"site_url": "https://example.test", "username": "operator"})())
         monkeypatch.setattr(correction, "get_wordpress_application_password", lambda: "process-memory-only")
         yield
+        correction._clear_token_handles()
         with Session(engine) as session:
             page = session.get(GeneratedPage, 41)
             assert page is not None
@@ -180,7 +185,9 @@ def test_dry_run_requires_exact_hashes_and_signs_locked_context(
     assert result.request_payload == {"content": proposed}
     assert result.confirmation_phrase == correction.CONFIRMATION_PHRASE
     assert result.audit_created is False and result.wordpress_write_count == 0
-    token = correction._verify_token(result.confirmation_token or "", 41)
+    assert result.token_handle and len(result.token_handle) >= 32
+    assert "confirmation_token" not in result.model_dump(mode="json")
+    token = correction._verify_token(correction._token_handles[result.token_handle].raw_token, 41)
     assert token["backup_digest"] == correction._digest(result.backup_identities.model_dump(mode="json"))
 
 
@@ -209,7 +216,7 @@ def test_dry_run_requires_the_exact_proposed_hash(
         monkeypatch.setattr(correction, "EXPECTED_PROPOSED_BODY_HASH", "0" * 64)
         result = correction.dry_run_heading_correction(session, 41, WordPressHeadingCorrectionDryRunRequest(backups=_backups()))
     assert {gate.code: gate.passed for gate in result.gate_results}["proposed_body_hash"] is False
-    assert result.confirmation_token is None
+    assert result.token_handle is None
 
 
 def test_unavailable_page_content_returns_null_hash_and_dependency_reason() -> None:
@@ -226,11 +233,15 @@ def test_apply_sends_exactly_one_content_only_request_and_preserves_protected_fi
     guarded, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sent: list[dict] = []
+    pending_seen: list[bool] = []
     with Session(engine) as session:
         current, proposed = _bodies(session)
         observations = iter((_observation(current, corrected=False), _observation(current, corrected=False), _observation(proposed, corrected=True)))
         monkeypatch.setattr(correction, "_observe", lambda *_, **__: next(observations))
         dry = correction.dry_run_heading_correction(session, 41, WordPressHeadingCorrectionDryRunRequest(backups=_backups()))
+        assert dry.token_handle
+        token_handle = dry.token_handle
+        raw_token = correction._token_handles[token_handle].raw_token
 
         class Response:
             status_code = 200
@@ -240,6 +251,7 @@ def test_apply_sends_exactly_one_content_only_request_and_preserves_protected_fi
             def __enter__(self): return self
             def __exit__(self, *_args): return False
             def post(self, url, *, json, auth):
+                pending_seen.append(bool(session.exec(select(WordPressHeadingCorrectionAudit).where(WordPressHeadingCorrectionAudit.status == "pending")).first()))
                 sent.append({"url": url, "json": json, "auth_type": type(auth).__name__})
                 return Response()
         monkeypatch.setattr(correction.httpx, "Client", Client)
@@ -248,16 +260,178 @@ def test_apply_sends_exactly_one_content_only_request_and_preserves_protected_fi
             41,
             WordPressHeadingCorrectionApplyRequest(
                 backups=dry.backup_identities,
-                confirmation_token=dry.confirmation_token,
+                token_handle=token_handle,
                 confirmation_phrase=correction.CONFIRMATION_PHRASE,
             ),
         )
         audit = session.get(WordPressHeadingCorrectionAudit, result.audit_id)
+        with pytest.raises(HTTPException) as replay:
+            correction.apply_heading_correction(
+                session,
+                41,
+                WordPressHeadingCorrectionApplyRequest(
+                    backups=dry.backup_identities,
+                    token_handle=token_handle,
+                    confirmation_phrase=correction.CONFIRMATION_PHRASE,
+                ),
+            )
     assert len(sent) == 1
+    assert pending_seen == [True]
     assert sent[0]["json"] == {"content": proposed}
     assert set(sent[0]["json"]) == {"content"}
     assert audit and audit.status == "corrected" and audit.wordpress_write_count == 1
+    assert raw_token not in json.dumps(audit.model_dump(mode="json"), sort_keys=True)
+    assert token_handle not in json.dumps(audit.model_dump(mode="json"), sort_keys=True)
+    assert not correction._token_handles
+    assert replay.value.status_code == 422
     assert result.automatic_retry_count == 0
+
+
+def test_handle_is_consumed_on_wrong_phrase_and_backend_restart(
+    guarded, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with Session(engine) as session:
+        current, _ = _bodies(session)
+        monkeypatch.setattr(correction, "_observe", lambda *_, **__: _observation(current, corrected=False))
+        backups = _backups()
+        wrong_phrase = correction.dry_run_heading_correction(
+            session, 41, WordPressHeadingCorrectionDryRunRequest(backups=backups)
+        )
+        assert wrong_phrase.token_handle
+        with pytest.raises(HTTPException) as phrase_error:
+            correction.apply_heading_correction(
+                session,
+                41,
+                WordPressHeadingCorrectionApplyRequest(
+                    backups=backups,
+                    token_handle=wrong_phrase.token_handle,
+                    confirmation_phrase="wrong phrase",
+                ),
+            )
+        assert phrase_error.value.status_code == 422
+        with pytest.raises(HTTPException):
+            correction.apply_heading_correction(
+                session,
+                41,
+                WordPressHeadingCorrectionApplyRequest(
+                    backups=backups,
+                    token_handle=wrong_phrase.token_handle,
+                    confirmation_phrase=correction.CONFIRMATION_PHRASE,
+                ),
+            )
+
+        restart = correction.dry_run_heading_correction(
+            session, 41, WordPressHeadingCorrectionDryRunRequest(backups=backups)
+        )
+        assert restart.token_handle
+        correction._clear_token_handles()
+        with pytest.raises(HTTPException) as restart_error:
+            correction.apply_heading_correction(
+                session,
+                41,
+                WordPressHeadingCorrectionApplyRequest(
+                    backups=backups,
+                    token_handle=restart.token_handle,
+                    confirmation_phrase=correction.CONFIRMATION_PHRASE,
+                ),
+            )
+        assert restart_error.value.status_code == 422
+
+
+def test_handle_is_actively_removed_at_expiry(guarded) -> None:
+    issued = datetime.now(UTC)
+    expires = issued + timedelta(milliseconds=50)
+    token_body = {
+        "action": correction.TOKEN_ACTION,
+        "atlas_page_id": 41,
+        "wordpress_post_id": 8,
+        "proposed_body_hash": correction.EXPECTED_PROPOSED_BODY_HASH,
+        "backup_digest": "b" * 64,
+        "release_digest": "r" * 64,
+        "expires_at": int(expires.timestamp()),
+    }
+    handle = correction._store_token_handle(
+        correction._sign(token_body),
+        token_body,
+        issued_at=issued,
+        expires_at=expires,
+        manual_browser_evidence=None,
+    )
+    deadline = time.monotonic() + 1.0
+    while handle in correction._token_handles and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert handle not in correction._token_handles
+    assert handle not in correction._token_handle_timers
+
+
+@pytest.mark.parametrize("binding", ["page", "action", "hash"])
+def test_handle_binding_mismatch_fails_closed(
+    binding: str, guarded, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with Session(engine) as session:
+        current, _ = _bodies(session)
+        monkeypatch.setattr(correction, "_observe", lambda *_, **__: _observation(current, corrected=False))
+        backups = _backups()
+        dry = correction.dry_run_heading_correction(
+            session, 41, WordPressHeadingCorrectionDryRunRequest(backups=backups)
+        )
+        assert dry.token_handle
+        page_id = 42 if binding == "page" else 41
+        if binding == "action":
+            correction._token_handles[dry.token_handle] = replace(
+                correction._token_handles[dry.token_handle], action="different_action"
+            )
+        elif binding == "hash":
+            correction._token_handles[dry.token_handle] = replace(
+                correction._token_handles[dry.token_handle], proposed_body_hash="0" * 64
+            )
+        with pytest.raises(HTTPException) as blocked:
+            correction.apply_heading_correction(
+                session,
+                page_id,
+                WordPressHeadingCorrectionApplyRequest(
+                    backups=backups,
+                    token_handle=dry.token_handle,
+                    confirmation_phrase=correction.CONFIRMATION_PHRASE,
+                ),
+            )
+        assert blocked.value.status_code == 422
+        assert dry.token_handle not in correction._token_handles
+
+
+def test_apply_rejects_missing_handle_and_consumes_handle_without_phrase(
+    guarded, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with Session(engine) as session:
+        with pytest.raises(HTTPException) as missing_handle:
+            correction.apply_heading_correction(
+                session,
+                41,
+                WordPressHeadingCorrectionApplyRequest(
+                    backups=_backups(),
+                    confirmation_phrase=correction.CONFIRMATION_PHRASE,
+                ),
+            )
+        assert missing_handle.value.status_code == 422
+
+        current, _ = _bodies(session)
+        monkeypatch.setattr(correction, "_observe", lambda *_, **__: _observation(current, corrected=False))
+        backups = _backups()
+        dry = correction.dry_run_heading_correction(
+            session, 41, WordPressHeadingCorrectionDryRunRequest(backups=backups)
+        )
+        assert dry.token_handle
+        with pytest.raises(HTTPException) as missing_phrase:
+            correction.apply_heading_correction(
+                session,
+                41,
+                WordPressHeadingCorrectionApplyRequest(
+                    backups=backups,
+                    token_handle=dry.token_handle,
+                ),
+            )
+        assert missing_phrase.value.status_code == 422
+        assert dry.token_handle not in correction._token_handles
 
 
 def test_backup_change_and_stale_token_block_before_write(
@@ -269,14 +443,16 @@ def test_backup_change_and_stale_token_block_before_write(
         first = _backups()
         dry = correction.dry_run_heading_correction(session, 41, WordPressHeadingCorrectionDryRunRequest(backups=first))
         with pytest.raises(HTTPException) as changed:
-            correction.apply_heading_correction(session, 41, WordPressHeadingCorrectionApplyRequest(backups=_backups(1), confirmation_token=dry.confirmation_token, confirmation_phrase=correction.CONFIRMATION_PHRASE))
+            correction.apply_heading_correction(session, 41, WordPressHeadingCorrectionApplyRequest(backups=_backups(1), token_handle=dry.token_handle, confirmation_phrase=correction.CONFIRMATION_PHRASE))
         assert changed.value.status_code == 409
-        expired = correction._sign({
-            "action": "correct_orlando_duplicate_h1", "atlas_page_id": 41,
-            "wordpress_post_id": 8, "expires_at": int((datetime.now(UTC) - timedelta(seconds=1)).timestamp()),
-        })
+        dry = correction.dry_run_heading_correction(session, 41, WordPressHeadingCorrectionDryRunRequest(backups=first))
+        assert dry.token_handle
+        correction._token_handles[dry.token_handle] = replace(
+            correction._token_handles[dry.token_handle],
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
         with pytest.raises(HTTPException) as stale:
-            correction.apply_heading_correction(session, 41, WordPressHeadingCorrectionApplyRequest(backups=first, confirmation_token=expired, confirmation_phrase=correction.CONFIRMATION_PHRASE))
+            correction.apply_heading_correction(session, 41, WordPressHeadingCorrectionApplyRequest(backups=first, token_handle=dry.token_handle, confirmation_phrase=correction.CONFIRMATION_PHRASE))
         assert stale.value.status_code == 422
 
 
@@ -307,7 +483,7 @@ def test_wordpress_success_atlas_failure_uses_read_only_reconciliation(
             real_commit()
         monkeypatch.setattr(session, "commit", flaky_commit)
         with pytest.raises(HTTPException) as failed:
-            correction.apply_heading_correction(session, 41, WordPressHeadingCorrectionApplyRequest(backups=dry.backup_identities, confirmation_token=dry.confirmation_token, confirmation_phrase=correction.CONFIRMATION_PHRASE))
+            correction.apply_heading_correction(session, 41, WordPressHeadingCorrectionApplyRequest(backups=dry.backup_identities, token_handle=dry.token_handle, confirmation_phrase=correction.CONFIRMATION_PHRASE))
         assert failed.value.status_code == 500
         audit_id = failed.value.detail["audit_id"]
         audit = session.get(WordPressHeadingCorrectionAudit, audit_id)
@@ -603,7 +779,7 @@ def test_failed_403_fallback_dry_run_has_no_token_nonce_audit_or_write(
             WordPressHeadingCorrectionDryRunRequest(backups=_backups(), manual_browser_evidence=evidence),
         )
         after = len(session.exec(select(WordPressHeadingCorrectionAudit)).all())
-    assert not dry.ready and not dry.token_issued and dry.confirmation_token is None
+    assert not dry.ready and not dry.token_issued and dry.token_handle is None
     assert dry.nonce_consumed is False and dry.audit_created is False
     assert dry.wordpress_write_count == 0 and dry.atlas_write_count == 0
     assert before == after
@@ -620,7 +796,7 @@ def test_schema_v2_cannot_replace_authenticated_page_or_media(missing: str, guar
         observed = correction._observe("https://example.test", "operator", "process-only", manual_evidence=evidence)
         monkeypatch.setattr(correction, "_observe", lambda *_, **__: observed)
         dry = correction.dry_run_heading_correction(session, 41, WordPressHeadingCorrectionDryRunRequest(backups=_backups(), manual_browser_evidence=evidence))
-    assert not dry.ready and not dry.token_issued and dry.confirmation_token is None
+    assert not dry.ready and not dry.token_issued and dry.token_handle is None
     if missing == "page_8":
         assert dry.current_body_hash is None
         assert {gate.code: gate.message for gate in dry.gate_results}["body_hash"] == "blocked_due_to_missing_page_observation"
@@ -657,7 +833,31 @@ def test_apply_request_and_wordpress_payload_reject_protected_fields() -> None:
     with pytest.raises(ValidationError):
         WordPressHeadingCorrectionApplyRequest(
             backups=_backups(),
-            confirmation_token="x" * 40,
+            token_handle="x" * 40,
             confirmation_phrase=correction.CONFIRMATION_PHRASE,
             featured_media=31,
         )
+    with pytest.raises(ValidationError):
+        WordPressHeadingCorrectionApplyRequest(
+            backups=_backups(),
+            token_handle="x" * 40,
+            confirmation_phrase=correction.CONFIRMATION_PHRASE,
+            confirmation_token="operator-supplied-raw-token-is-forbidden",
+        )
+
+
+def test_frontend_keeps_only_the_opaque_handle_in_component_memory() -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "frontend"
+        / "src"
+        / "pages"
+        / "WordPressMetadataBridgeInstallPage.tsx"
+    ).read_text(encoding="utf-8")
+    assert "token_handle:tokenHandle" in source
+    assert "localStorage" not in source and "sessionStorage" not in source
+    assert "confirmation_token:tokenHandle" not in source
+    assert "raw signed token is never returned" in source
+    service_source = inspect.getsource(correction)
+    assert "print(raw_token" not in service_source
+    assert "logger" not in inspect.getsource(correction._store_token_handle)

@@ -903,7 +903,12 @@ export type WordPressHeadingCorrectionDryRun = {
   nonce_consumed:false; audit_created:false; wordpress_write_count:0; atlas_write_count:0;
   page_8_observation?:WordPressHeadingCorrectionObservation|null; media_31_observation?:WordPressHeadingCorrectionObservation|null;
   media_32_observation?:WordPressHeadingCorrectionObservation|null; rendered_page_observation?:WordPressHeadingCorrectionObservation|null;
-  confirmation_phrase?:string|null; expires_at?:string|null;
+  token_handle?:string|null; confirmation_phrase?:string|null; expires_at?:string|null;
+};
+export type WordPressHeadingCorrectionApplyResult = {
+  atlas_page_id:41; wordpress_post_id:8; status:"corrected"|"reconciliation_required"; audit_id:number;
+  current_body_hash:string; proposed_body_hash:string; request_payload:{content:string}; gate_results:WordPressDeploymentGate[];
+  wordpress_write_count:1; atlas_write_count:number; automatic_retry_count:0;
 };
 export type WordPressDeploymentReadiness = {
   release: { manifest_schema_version: number; source_compatibility_id: string; atlas_version: string; atlas_commit: string; atlas_tag: string; plugin_version: string; plugin_zip_filename: string; plugin_zip_sha256: string; manifest_sha256: string; verification_source: string; git_metadata_available: boolean; manifest_integrity_verified: boolean; expected_release_matched: boolean; runtime_identity_verified: boolean } | null;

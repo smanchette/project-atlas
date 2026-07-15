@@ -20,12 +20,14 @@ The current canonical body SHA-256 is `1144c89c046bfd74d3381560afdc5b7ec81f9a01e
 
 ## Endpoints and stopping points
 
-1. `POST /api/wordpress/heading-correction/dry-run/41` performs authenticated page/media GETs and a credential-free public-page GET. It requires fresh Atlas Data, Media, and Program backup identities and verified runtime release identity. Only a fully passing inspection returns the short-lived signed token and `CORRECT ORLANDO DUPLICATE H1`.
-2. `POST /api/wordpress/heading-correction/apply/41` requires that token, the same backups, and the exact phrase. It reruns every gate, commits a dedicated pending audit, and sends one request whose JSON object has exactly one key: `content`. A token fingerprint prevents replay.
+1. `POST /api/wordpress/heading-correction/dry-run/41` performs authenticated page/media GETs and a credential-free public-page GET. It requires fresh Atlas Data, Media, and Program backup identities and verified runtime release identity. Only a fully passing inspection creates a short-lived signed token and returns an opaque one-time handle plus `CORRECT ORLANDO DUPLICATE H1`. The raw token exists only in backend process memory: it is never returned, logged, serialized, audited, backed up, or persisted.
+2. `POST /api/wordpress/heading-correction/apply/41` accepts only that opaque handle, the same backups, and the exact phrase. It atomically consumes the handle, retrieves and clears the raw token in backend memory, reruns every gate, commits a dedicated pending audit, and sends one request whose JSON object has exactly one key: `content`. The token fingerprint prevents replay without exposing the token. An unknown, expired, already-consumed, mismatched, or restart-cleared handle fails closed; there is no operator-supplied raw-token fallback.
 3. `POST /api/wordpress/heading-correction/verify/41` is read-only. It verifies the locked H2 body, the single theme-owned H1, protected page fields, both media snapshots, canonical URL, metadata absence, and the absence of any cache-purge operation in this workflow.
 4. `POST /api/wordpress/heading-correction/reconcile/41` is Atlas-only. It is available only for a `reconciliation_required` audit, reruns the complete read-only verification, requires `FINALIZE ORLANDO H1 CORRECTION AUDIT`, and never resends the WordPress write.
 
 Any network uncertainty or failure after WordPress may have accepted the request produces a hard reconciliation stop. No automatic retry exists.
+
+The frontend retains only the opaque handle in component memory. It never uses `localStorage` or other persistent browser storage for the handle, and it never receives the raw token. A page reload or backend restart therefore requires a new dry run.
 
 ## Explicit exclusions
 
