@@ -57,6 +57,8 @@ from app.services.wordpress_sandbox import (
 )
 from app.services.wordpress_rendered_state import (
     BOT_PATTERN,
+    EVIDENCE_SCHEMA_VERSION,
+    EVIDENCE_SCHEMA_VERSION_DUPLICATE_H1,
     EXPECTED_MEDIA_ALT,
     EXPECTED_MEDIA_URL,
     EXPECTED_TITLE as EXPECTED_RENDERED_DOCUMENT_TITLE,
@@ -403,7 +405,13 @@ def verify_heading_correction(
 ) -> WordPressHeadingCorrectionVerification:
     _target(page_id)
     settings = read_wordpress_settings(session)
-    observation = _observe(settings.site_url, settings.username, get_wordpress_application_password())
+    observation = _observe(
+        settings.site_url,
+        settings.username,
+        get_wordpress_application_password(),
+        manual_evidence=request.manual_browser_evidence,
+        rendered_evidence_schema_version=EVIDENCE_SCHEMA_VERSION,
+    )
     audit = session.get(WordPressHeadingCorrectionAudit, request.audit_id) if request.audit_id else None
     pre_snapshot = audit.pre_snapshot if audit else None
     result = _verify_corrected_observation(observation, pre_snapshot, audit.id if audit else None)
@@ -426,7 +434,12 @@ def reconcile_heading_correction(
     if audit.status != "reconciliation_required":
         raise HTTPException(409, "Only a reconciliation-required correction audit can be finalized.")
     verification = verify_heading_correction(
-        session, page_id, WordPressHeadingCorrectionVerifyRequest(audit_id=audit.id)
+        session,
+        page_id,
+        WordPressHeadingCorrectionVerifyRequest(
+            audit_id=audit.id,
+            manual_browser_evidence=request.manual_browser_evidence,
+        ),
     )
     if not verification.verified:
         raise HTTPException(409, {"message": "Live read-only evidence does not prove the correction.", "gate_results": _dump_gates(verification.gate_results)})
@@ -445,6 +458,7 @@ def _observe(
     password: str | None,
     *,
     manual_evidence: Any | None = None,
+    rendered_evidence_schema_version: int = EVIDENCE_SCHEMA_VERSION_DUPLICATE_H1,
 ) -> dict[str, Any]:
     base = site_url.rstrip("/")
     urls = {
@@ -498,6 +512,7 @@ def _observe(
                     rendered_response,
                     manual_evidence,
                     authenticated_observations_passed=authenticated_observations_passed,
+                    evidence_schema_version=rendered_evidence_schema_version,
                 )
             )
 
@@ -521,6 +536,7 @@ def _rendered_observation(
     manual_evidence: Any | None,
     *,
     authenticated_observations_passed: bool,
+    evidence_schema_version: int,
 ) -> dict[str, Any]:
     final_url = str(response.url)
     status = response.status_code
@@ -542,13 +558,43 @@ def _rendered_observation(
             }
         evidence = manual_evidence.model_dump(mode="json", exclude_none=True) if hasattr(manual_evidence, "model_dump") else manual_evidence
         if evidence is None:
-            return {"rendered_page_observation": _diagnostic(True, "credential_free_public_get", False, "rendered_public_forbidden", "Public rendered GET returned HTTP 403; valid signed schema-v2 evidence is required.", http_status=403, final_url=final_url)}
+            return {
+                "rendered_page_observation": _diagnostic(
+                    True,
+                    "credential_free_public_get",
+                    False,
+                    "rendered_public_forbidden",
+                    f"Public rendered GET returned HTTP 403; valid signed schema-v{evidence_schema_version} evidence is required.",
+                    http_status=403,
+                    final_url=final_url,
+                )
+            }
         valid, reason = validate_manual_browser_evidence(evidence, os.getenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", ""))
-        if not valid or evidence.get("evidence_schema_version") != 2:
-            return {"rendered_page_observation": _diagnostic(True, "signed_browser_evidence_after_public_403", False, "rendered_evidence_invalid", reason if not valid else "Signed schema-v2 duplicate-H1 evidence is required.", http_status=403, final_url=final_url)}
+        if not valid or evidence.get("evidence_schema_version") != evidence_schema_version:
+            return {
+                "rendered_page_observation": _diagnostic(
+                    True,
+                    "signed_browser_evidence_after_public_403",
+                    False,
+                    "rendered_evidence_invalid",
+                    reason
+                    if not valid
+                    else f"Signed schema-v{evidence_schema_version} browser evidence is required for this page state.",
+                    http_status=403,
+                    final_url=final_url,
+                )
+            }
         snapshot = _rendered_snapshot_from_evidence(evidence)
         return {
-            "rendered_page_observation": _diagnostic(True, "signed_browser_evidence_after_public_403", True, None, "Public rendered GET returned HTTP 403; independently signed schema-v2 browser evidence verified.", http_status=403, final_url=final_url),
+            "rendered_page_observation": _diagnostic(
+                True,
+                "signed_browser_evidence_after_public_403",
+                True,
+                None,
+                f"Public rendered GET returned HTTP 403; independently signed schema-v{evidence_schema_version} browser evidence verified.",
+                http_status=403,
+                final_url=final_url,
+            ),
             "rendered_h1_inventory": snapshot["h1_inventory"],
             "rendered_snapshot": snapshot,
         }
@@ -567,7 +613,18 @@ def _rendered_observation(
 def _rendered_snapshot_from_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
     identity = evidence["page_identity"]
     absence = evidence["absence_findings"]
-    inventory = evidence["h1_inventory"]
+    version = evidence["evidence_schema_version"]
+    inventory = evidence.get("h1_inventory") or [
+        {
+            "ordinal": 1,
+            "dom_path": None,
+            "classes": ["wp-block-post-title"],
+            "ancestor_classes": [],
+            "visible": True,
+            "text": identity["h1"],
+            "source_classification": "theme_owned_post_title",
+        }
+    ]
     return {
         "h1_texts": [item["text"] for item in inventory],
         "h1_inventory": inventory,
@@ -583,7 +640,7 @@ def _rendered_snapshot_from_evidence(evidence: dict[str, Any]) -> dict[str, Any]
         "visible_hash": evidence["visible_content_hash"],
         "signature_validated": True,
         "evidence_schema": evidence["evidence_schema"],
-        "evidence_schema_version": 2,
+        "evidence_schema_version": version,
         "evidence_id": evidence["evidence_id"],
         "cache_headers": {},
     }
@@ -594,23 +651,56 @@ def _verify_corrected_observation(
     pre_snapshot: dict[str, Any] | None,
     audit_id: int | None,
 ) -> WordPressHeadingCorrectionVerification:
-    snapshot = observation.get("snapshot") or {"page": {}, "media_31": {}, "media_32": {}, "rendered": {}}
-    page = snapshot["page"]
-    rendered = snapshot["rendered"]
-    h1 = rendered.get("h1_texts", [])
+    snapshot = observation.get("snapshot") if isinstance(observation.get("snapshot"), dict) else None
+    page = snapshot.get("page", {}) if snapshot else {}
+    rendered = snapshot.get("rendered", {}) if snapshot else {}
+    h1 = rendered.get("h1_texts") if isinstance(rendered.get("h1_texts"), list) else None
+    page_observation = _observation_diagnostic(observation, "page_8_observation", bool(snapshot and page))
+    media31_observation = _observation_diagnostic(
+        observation,
+        "media_31_observation",
+        bool(snapshot and isinstance(snapshot.get("media_31"), dict)),
+    )
+    media32_observation = _observation_diagnostic(
+        observation,
+        "media_32_observation",
+        bool(snapshot and isinstance(snapshot.get("media_32"), dict)),
+    )
+    rendered_observation = _observation_diagnostic(
+        observation,
+        "rendered_page_observation",
+        bool(snapshot and rendered),
+    )
+    observations_ready = bool(
+        snapshot
+        and all(
+            diagnostic.success
+            for diagnostic in (
+                page_observation,
+                media31_observation,
+                media32_observation,
+                rendered_observation,
+            )
+        )
+    )
     pre_page = (pre_snapshot or {}).get("page", {})
     invariant_fields = ("title", "slug", "link", "status", "excerpt", "featured_media")
     gates = [
-        _gate("read_only_observation", "Read-only post-correction observation succeeded", "_error" not in observation, str(observation.get("_error", "Observation failed."))),
-        _gate("body_hash", "Body hash matches the locked proposed hash", page.get("body_hash") == EXPECTED_PROPOSED_BODY_HASH, "Corrected body hash mismatch."),
-        _gate("body_h2_prefix", "Body begins with the exact locked H2", page.get("body", "").startswith(PROPOSED_HEADING_FRAGMENT), "Body does not begin with the locked H2."),
-        _gate("one_h1", "Rendered page contains exactly one H1", h1 == [EXPECTED_RENDERED_H1], "Rendered page must contain exactly the theme-owned H1."),
-        _gate("wording_preserved", "Visible body heading wording is unchanged", "Drywood Termite Tenting in Orlando, Florida" in rendered.get("visible_text", ""), "Body heading wording changed."),
-        _gate("page_invariants", "Title, canonical target, slug, URL, status, excerpt, and featured media are unchanged", bool(pre_page) and all(page.get(field) == pre_page.get(field) for field in invariant_fields), "A protected page field changed."),
-        _gate("canonical", "Canonical URL remains exact", rendered.get("canonical") == EXPECTED_URL, "Canonical URL changed."),
-        _gate("media_31", "Media 31 remains unchanged and visible", bool(pre_snapshot) and snapshot.get("media_31") == pre_snapshot.get("media_31") and rendered.get("media_31_visible") is True, "Media 31 changed or is not visible."),
-        _gate("media_32", "Media 32 remains unchanged and absent from rendered HTML", bool(pre_snapshot) and snapshot.get("media_32") == pre_snapshot.get("media_32") and rendered.get("media_32_visible") is False, "Media 32 changed or appeared."),
-        _gate("metadata_absent", "No meta description, Open Graph, Twitter, JSON-LD, or Atlas marker was added", rendered.get("metadata_count") == 0, "Unexpected metadata was rendered."),
+        _observation_gate("page_8_observation", "Authenticated WordPress page 8 GET succeeded", page_observation),
+        _observation_gate("media_31_observation", "Authenticated WordPress media 31 GET succeeded", media31_observation),
+        _observation_gate("media_32_observation", "Authenticated WordPress media 32 GET succeeded", media32_observation),
+        _observation_gate("rendered_page_observation", "Rendered Orlando page observation succeeded", rendered_observation),
+        _gate("read_only_observation", "Complete read-only post-correction snapshot is available", observations_ready, "One or more required read-only observations are unavailable."),
+        _gate("page_target", "Authenticated page is exactly WordPress page 8", observations_ready and page.get("id") == WORDPRESS_POST_ID, "WordPress page 8 was not proven."),
+        _gate("body_hash", "Body hash matches the locked proposed hash", observations_ready and page.get("body_hash") == EXPECTED_PROPOSED_BODY_HASH, "Corrected body hash is unavailable or mismatched."),
+        _gate("body_h2_prefix", "Body begins with the exact locked H2", observations_ready and page.get("body", "").startswith(PROPOSED_HEADING_FRAGMENT), "Corrected body is unavailable or does not begin with the locked H2."),
+        _gate("one_h1", "Rendered page contains exactly one H1", observations_ready and h1 == [EXPECTED_RENDERED_H1], "Rendered H1 evidence is unavailable or does not contain exactly the theme-owned H1."),
+        _gate("wording_preserved", "Visible body heading wording is unchanged", observations_ready and "Drywood Termite Tenting in Orlando, Florida" in rendered.get("visible_text", ""), "Rendered wording evidence is unavailable or changed."),
+        _gate("page_invariants", "Title, canonical target, slug, URL, status, excerpt, and featured media are unchanged", observations_ready and bool(pre_page) and all(page.get(field) == pre_page.get(field) for field in invariant_fields), "Protected page-field evidence is unavailable or changed."),
+        _gate("canonical", "Canonical URL remains exact", observations_ready and rendered.get("canonical") == EXPECTED_URL, "Canonical evidence is unavailable or changed."),
+        _gate("media_31", "Media 31 remains unchanged and visible", observations_ready and bool(pre_snapshot) and snapshot is not None and snapshot.get("media_31") == pre_snapshot.get("media_31") and rendered.get("media_31_visible") is True, "Media 31 evidence is unavailable, changed, or not visible."),
+        _gate("media_32", "Media 32 remains unchanged and absent from rendered HTML", observations_ready and bool(pre_snapshot) and snapshot is not None and snapshot.get("media_32") == pre_snapshot.get("media_32") and rendered.get("media_32_visible") is False, "Media 32 evidence is unavailable, changed, or visible."),
+        _gate("metadata_absent", "No meta description, Open Graph, Twitter, JSON-LD, or Atlas marker was added", observations_ready and rendered.get("metadata_count") == 0, "Rendered metadata evidence is unavailable or unexpected metadata appeared."),
         _gate("no_cache_purge", "No cache purge request exists in this workflow", True, "Cache purge is prohibited."),
     ]
     verified = all(gate.passed for gate in gates)
@@ -618,11 +708,15 @@ def _verify_corrected_observation(
         status="verified" if verified else "blocked",
         verified=verified,
         audit_id=audit_id,
-        body_hash=str(page.get("body_hash", "")),
-        rendered_h1_count=len(h1),
-        rendered_h1_text=h1[0] if len(h1) == 1 else None,
+        body_hash=page.get("body_hash") if observations_ready else None,
+        rendered_h1_count=len(h1) if observations_ready and h1 is not None else None,
+        rendered_h1_text=h1[0] if observations_ready and h1 is not None and len(h1) == 1 else None,
         gate_results=gates,
         snapshot=snapshot,
+        page_8_observation=page_observation,
+        media_31_observation=media31_observation,
+        media_32_observation=media32_observation,
+        rendered_page_observation=rendered_observation,
     )
 
 

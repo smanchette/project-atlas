@@ -85,7 +85,7 @@ def _observation(body: str, *, corrected: bool) -> dict:
     )
     snapshot = {
         "page": correction._page_snapshot(page),
-        "media_31": {"id": 31, "status": "inherit", "slug": "orlando-hero", "source_url": "https://www.drywoodtenting.com/wp-content/uploads/2026/07/orlando-drywood-termite-tenting-hero.png", "alt_text": "Two-story Orlando Florida home professionally covered for drywood termite tenting", "modified_gmt": "2026-07-12T00:00:00"},
+        "media_31": {"id": 31, "status": "inherit", "slug": "orlando-hero", "source_url": "https://www.drywoodtenting.com/wp-content/uploads/2026/07/orlando-drywood-termite-tenting-hero.png", "alt_text": "Two-story Orlando Florida home professionally covered for drywood termite tenting", "modified_gmt": "2026-07-12T00:00:00", "post": 8},
         "media_32": {"id": 32, "status": "inherit", "slug": "unused-hero", "source_url": "https://www.drywoodtenting.com/wp-content/uploads/2026/07/unused-hero.png", "alt_text": "Unused", "modified_gmt": "2026-07-12T00:00:00", "post": None},
         "rendered": correction._rendered_snapshot(html, {"cache-control": "max-age=0"}),
     }
@@ -102,6 +102,14 @@ def _observation(body: str, *, corrected: bool) -> dict:
 
 
 def _duplicate_evidence_html(body: str) -> str:
+    return (
+        f'<html><head><title>{EXPECTED_DOCUMENT_TITLE}</title><link rel="canonical" href="{EXPECTED_URL}"></head>'
+        f'<body><h1 class="wp-block-post-title">{EXPECTED_TITLE}</h1><div class="entry-content wp-block-post-content">{body}'
+        f'<img class="wp-image-31" src="{EXPECTED_MEDIA_URL}" alt="{EXPECTED_MEDIA_ALT}"></div></body></html>'
+    )
+
+
+def _corrected_evidence_html(body: str) -> str:
     return (
         f'<html><head><title>{EXPECTED_DOCUMENT_TITLE}</title><link rel="canonical" href="{EXPECTED_URL}"></head>'
         f'<body><h1 class="wp-block-post-title">{EXPECTED_TITLE}</h1><div class="entry-content wp-block-post-content">{body}'
@@ -545,13 +553,14 @@ def test_seven_other_drafts_remain_byte_for_byte_unchanged(
 def _mock_observation_client(
     body: str,
     *,
+    corrected: bool = False,
     failed_resource: str | None = None,
     public_status: int = 403,
     public_text: str = "Generic forbidden response",
     public_url: str = EXPECTED_URL,
     public_history: list[httpx.Response] | None = None,
 ):
-    fixture = _observation(body, corrected=False)
+    fixture = _observation(body, corrected=corrected)
 
     class Client:
         def __init__(self, **_kwargs): pass
@@ -634,6 +643,262 @@ def test_schema_v2_satisfies_generic_public_403_rendered_observation(guarded, mo
     assert dry.current_body_hash == correction.EXPECTED_CURRENT_BODY_HASH
     assert dry.proposed_body_hash == correction.EXPECTED_PROPOSED_BODY_HASH
     assert before == after and not dry.audit_created and dry.wordpress_write_count == 0 and dry.atlas_write_count == 0
+
+
+def test_reconciliation_schema_v1_satisfies_public_403_without_replacing_authenticated_gets(
+    guarded,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = "v0.59.41-local-test-signing-key"
+    monkeypatch.setenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", key)
+    with Session(engine) as session:
+        current, proposed = _bodies(session)
+    evidence = build_manual_browser_evidence(
+        _corrected_evidence_html(proposed),
+        final_url=EXPECTED_URL,
+        evidence_identifier="reconciliation-schema-v1-valid",
+        signing_key=key,
+        schema_version=1,
+    )
+    monkeypatch.setattr(
+        correction.httpx,
+        "Client",
+        _mock_observation_client(proposed, corrected=True),
+    )
+    observed = correction._observe(
+        "https://example.test",
+        "operator",
+        "process-only",
+        manual_evidence=evidence,
+        rendered_evidence_schema_version=1,
+    )
+    result = correction._verify_corrected_observation(
+        observed,
+        _observation(current, corrected=False)["snapshot"],
+        1,
+    )
+    assert result.verified and result.body_hash == correction.EXPECTED_PROPOSED_BODY_HASH
+    assert result.rendered_h1_count == 1 and result.rendered_h1_text == correction.EXPECTED_RENDERED_H1
+    assert result.rendered_page_observation.acquisition_source == "signed_browser_evidence_after_public_403"
+    assert result.rendered_page_observation.http_status == 403
+    assert all(
+        diagnostic.success
+        for diagnostic in (
+            result.page_8_observation,
+            result.media_31_observation,
+            result.media_32_observation,
+            result.rendered_page_observation,
+        )
+    )
+
+
+def test_reconciliation_rejects_schema_v2_for_corrected_page(
+    guarded,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = "v0.59.41-local-test-signing-key"
+    monkeypatch.setenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", key)
+    with Session(engine) as session:
+        current, proposed = _bodies(session)
+    evidence = build_manual_browser_evidence(
+        _duplicate_evidence_html(current),
+        final_url=EXPECTED_URL,
+        evidence_identifier="reconciliation-schema-v2-rejected",
+        signing_key=key,
+        schema_version=2,
+    )
+    monkeypatch.setattr(correction.httpx, "Client", _mock_observation_client(proposed, corrected=True))
+    observed = correction._observe(
+        "https://example.test",
+        "operator",
+        "process-only",
+        manual_evidence=evidence,
+        rendered_evidence_schema_version=1,
+    )
+    diagnostic = observed["rendered_page_observation"]
+    assert not diagnostic.success and diagnostic.failure_code == "rendered_evidence_invalid"
+    assert "schema-v1" in diagnostic.message
+    assert observed.get("snapshot") is None
+
+
+@pytest.mark.parametrize("case", ["invalid_signature", "expired", "wrong_url", "tampered"])
+def test_reconciliation_blocks_invalid_schema_v1_evidence(
+    case: str,
+    guarded,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = "v0.59.41-local-test-signing-key"
+    monkeypatch.setenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", key)
+    with Session(engine) as session:
+        _, proposed = _bodies(session)
+    evidence = build_manual_browser_evidence(
+        _corrected_evidence_html(proposed),
+        final_url=EXPECTED_URL,
+        evidence_identifier=f"reconciliation-v1-{case}",
+        signing_key=key,
+        captured_at=datetime.now(UTC) - timedelta(hours=1) if case == "expired" else None,
+        schema_version=1,
+    )
+    if case == "invalid_signature":
+        evidence["helper_signature"] = "0" * 64
+    elif case == "wrong_url":
+        evidence["final_url"] = "https://example.test/not-orlando/"
+        evidence = _resign_evidence(evidence, key)
+    elif case == "tampered":
+        evidence["visible_content_hash"] = "0" * 64
+    monkeypatch.setattr(correction.httpx, "Client", _mock_observation_client(proposed, corrected=True))
+    observed = correction._observe(
+        "https://example.test",
+        "operator",
+        "process-only",
+        manual_evidence=evidence,
+        rendered_evidence_schema_version=1,
+    )
+    diagnostic = observed["rendered_page_observation"]
+    assert not diagnostic.success and diagnostic.failure_code == "rendered_evidence_invalid"
+    assert observed.get("snapshot") is None
+
+
+@pytest.mark.parametrize(
+    ("resource", "field"),
+    [
+        ("page_8", "page_8_observation"),
+        ("media_31", "media_31_observation"),
+        ("media_32", "media_32_observation"),
+    ],
+)
+def test_reconciliation_authenticated_get_failure_is_explicit_and_returns_null_values(
+    resource: str,
+    field: str,
+    guarded,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = "v0.59.41-local-test-signing-key"
+    monkeypatch.setenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", key)
+    with Session(engine) as session:
+        current, proposed = _bodies(session)
+    evidence = build_manual_browser_evidence(
+        _corrected_evidence_html(proposed),
+        final_url=EXPECTED_URL,
+        evidence_identifier=f"reconciliation-missing-{resource}",
+        signing_key=key,
+        schema_version=1,
+    )
+    monkeypatch.setattr(
+        correction.httpx,
+        "Client",
+        _mock_observation_client(proposed, corrected=True, failed_resource=resource),
+    )
+    observed = correction._observe(
+        "https://example.test",
+        "operator",
+        "process-only",
+        manual_evidence=evidence,
+        rendered_evidence_schema_version=1,
+    )
+    result = correction._verify_corrected_observation(
+        observed,
+        _observation(current, corrected=False)["snapshot"],
+        1,
+    )
+    assert not result.verified and result.snapshot is None
+    assert result.body_hash is None and result.rendered_h1_count is None and result.rendered_h1_text is None
+    assert not getattr(result, field).success
+    assert {gate.code: gate.passed for gate in result.gate_results}[field] is False
+
+
+def test_reconciliation_missing_credentials_returns_explicit_unavailable_observations(
+    guarded,
+) -> None:
+    observed = correction._observe(
+        "https://example.test",
+        "operator",
+        None,
+        rendered_evidence_schema_version=1,
+    )
+    result = correction._verify_corrected_observation(observed, None, 1)
+    assert not result.verified and result.snapshot is None
+    assert result.body_hash is None and result.rendered_h1_count is None
+    assert all(
+        not diagnostic.success and diagnostic.failure_code == "credentials_unavailable"
+        for diagnostic in (
+            result.page_8_observation,
+            result.media_31_observation,
+            result.media_32_observation,
+            result.rendered_page_observation,
+        )
+    )
+
+
+def test_schema_v1_reconciliation_finalizes_only_selected_audit_with_zero_wordpress_writes(
+    guarded,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = "v0.59.41-local-test-signing-key"
+    monkeypatch.setenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", key)
+    with Session(engine) as session:
+        current, proposed = _bodies(session)
+        pre = _observation(current, corrected=False)["snapshot"]
+        selected = WordPressHeadingCorrectionAudit(
+            generated_page_id=41,
+            wordpress_post_id=8,
+            status="reconciliation_required",
+            wordpress_site_url="https://example.test",
+            current_body_hash=correction.EXPECTED_CURRENT_BODY_HASH,
+            proposed_body_hash=correction.EXPECTED_PROPOSED_BODY_HASH,
+            token_fingerprint="4" * 64,
+            backup_identities=_backups().model_dump(mode="json"),
+            release_identity={"verified": True},
+            pre_snapshot=pre,
+            gate_results=[],
+            wordpress_write_count=1,
+        )
+        untouched = WordPressHeadingCorrectionAudit(
+            generated_page_id=41,
+            wordpress_post_id=8,
+            status="reconciliation_required",
+            wordpress_site_url="https://example.test",
+            current_body_hash=correction.EXPECTED_CURRENT_BODY_HASH,
+            proposed_body_hash=correction.EXPECTED_PROPOSED_BODY_HASH,
+            token_fingerprint="5" * 64,
+            backup_identities=_backups(1).model_dump(mode="json"),
+            release_identity={"verified": True},
+            pre_snapshot=pre,
+            gate_results=[],
+            wordpress_write_count=1,
+        )
+        session.add(selected)
+        session.add(untouched)
+        session.commit()
+        session.refresh(selected)
+        session.refresh(untouched)
+        evidence = build_manual_browser_evidence(
+            _corrected_evidence_html(proposed),
+            final_url=EXPECTED_URL,
+            evidence_identifier="reconciliation-finalize-selected",
+            signing_key=key,
+            schema_version=1,
+        )
+        monkeypatch.setattr(
+            correction.httpx,
+            "Client",
+            _mock_observation_client(proposed, corrected=True),
+        )
+        result = correction.reconcile_heading_correction(
+            session,
+            41,
+            WordPressHeadingCorrectionReconcileRequest(
+                audit_id=selected.id,
+                confirmation_phrase=correction.RECONCILIATION_PHRASE,
+                manual_browser_evidence=evidence,
+            ),
+        )
+        session.refresh(selected)
+        session.refresh(untouched)
+        assert result.status == "verified"
+        assert result.wordpress_write_count == 0 and result.atlas_write_count == 1
+        assert selected.status == "verified" and selected.wordpress_write_count == 1
+        assert untouched.status == "reconciliation_required" and untouched.wordpress_write_count == 1
 
 
 def _resign_evidence(evidence: dict, key: str) -> dict:

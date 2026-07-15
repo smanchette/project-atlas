@@ -192,6 +192,7 @@ class WordPressHeadingCorrectionVerifyRequest(SQLModel):
     model_config = ConfigDict(extra="forbid")
 
     audit_id: int | None = Field(default=None, ge=1)
+    manual_browser_evidence: "WordPressManualBrowserEvidence | None" = None
 
 
 class WordPressHeadingCorrectionVerification(SQLModel):
@@ -200,11 +201,15 @@ class WordPressHeadingCorrectionVerification(SQLModel):
     status: Literal["verified", "blocked", "reconciliation_ready"]
     verified: bool
     audit_id: int | None = None
-    body_hash: str
-    rendered_h1_count: int
+    body_hash: str | None = None
+    rendered_h1_count: int | None = None
     rendered_h1_text: str | None = None
     gate_results: list["WordPressDraftGateResult"]
-    snapshot: dict[str, Any]
+    snapshot: dict[str, Any] | None = None
+    page_8_observation: WordPressHeadingCorrectionObservationResult
+    media_31_observation: WordPressHeadingCorrectionObservationResult
+    media_32_observation: WordPressHeadingCorrectionObservationResult
+    rendered_page_observation: WordPressHeadingCorrectionObservationResult
     wordpress_write_count: Literal[0] = 0
     atlas_write_count: Literal[0] = 0
     cache_purge_count: Literal[0] = 0
@@ -215,6 +220,7 @@ class WordPressHeadingCorrectionReconcileRequest(SQLModel):
 
     audit_id: int = Field(ge=1)
     confirmation_phrase: str = Field(min_length=1, max_length=100)
+    manual_browser_evidence: "WordPressManualBrowserEvidence | None" = None
 
 
 class WordPressHeadingCorrectionReconcileResult(SQLModel):
