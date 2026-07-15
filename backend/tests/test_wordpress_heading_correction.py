@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import copy
+import hashlib
+import hmac
 import inspect
 import json
 
@@ -104,9 +106,23 @@ def _duplicate_evidence_html(body: str) -> str:
     )
 
 
-def _http_response(url: str, status: int, *, payload: dict | None = None, text: str = "", content_type: str = "application/json") -> httpx.Response:
+def _http_response(
+    url: str,
+    status: int,
+    *,
+    payload: dict | None = None,
+    text: str = "",
+    content_type: str = "application/json",
+    history: list[httpx.Response] | None = None,
+) -> httpx.Response:
     body = json.dumps(payload) if payload is not None else text
-    return httpx.Response(status, request=httpx.Request("GET", url), content=body.encode(), headers={"content-type": content_type})
+    return httpx.Response(
+        status,
+        request=httpx.Request("GET", url),
+        content=body.encode(),
+        headers={"content-type": content_type},
+        history=history,
+    )
 
 
 @pytest.fixture
@@ -350,7 +366,15 @@ def test_seven_other_drafts_remain_byte_for_byte_unchanged(
     assert len(before) == 7 and after == before
 
 
-def _mock_observation_client(body: str, *, failed_resource: str | None = None):
+def _mock_observation_client(
+    body: str,
+    *,
+    failed_resource: str | None = None,
+    public_status: int = 403,
+    public_text: str = "Generic forbidden response",
+    public_url: str = EXPECTED_URL,
+    public_history: list[httpx.Response] | None = None,
+):
     fixture = _observation(body, corrected=False)
 
     class Client:
@@ -359,7 +383,13 @@ def _mock_observation_client(body: str, *, failed_resource: str | None = None):
         def __exit__(self, *_args): return False
         def get(self, url: str, auth=None):
             if url == EXPECTED_URL:
-                return _http_response(url, 403, text="SiteGround bot protection access denied", content_type="text/html")
+                return _http_response(
+                    public_url,
+                    public_status,
+                    text=public_text,
+                    content_type="text/html",
+                    history=public_history,
+                )
             if "/pages/8" in url:
                 return _http_response(url, 500 if failed_resource == "page_8" else 200, payload=fixture["page"])
             if "/media/31" in url:
@@ -387,10 +417,10 @@ def test_observation_failures_are_reported_independently(guarded, monkeypatch: p
     assert diagnostic.attempted and not diagnostic.success and diagnostic.failure_code == failure_code
     for other in {"page_8_observation", "media_31_observation", "media_32_observation"} - {field}:
         assert result[other].success
-    assert result["rendered_page_observation"].failure_code == "rendered_public_bot_protection"
+    assert result["rendered_page_observation"].failure_code == "rendered_evidence_dependencies_failed"
 
 
-def test_schema_v2_satisfies_only_bot_blocked_rendered_observation(guarded, monkeypatch: pytest.MonkeyPatch):
+def test_schema_v2_satisfies_generic_public_403_rendered_observation(guarded, monkeypatch: pytest.MonkeyPatch):
     key = "v0.59.25-local-test-signing-key"
     monkeypatch.setenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", key)
     with Session(engine) as session:
@@ -405,7 +435,16 @@ def test_schema_v2_satisfies_only_bot_blocked_rendered_observation(guarded, monk
         monkeypatch.setattr(correction.httpx, "Client", _mock_observation_client(current))
         observed = correction._observe("https://example.test", "operator", "process-only", manual_evidence=evidence)
         assert observed["rendered_page_observation"].success
-        assert observed["rendered_page_observation"].acquisition_source == "signed_browser_evidence_v2"
+        diagnostic = observed["rendered_page_observation"]
+        assert diagnostic.acquisition_source == "signed_browser_evidence_after_public_403"
+        assert diagnostic.http_status == 403 and diagnostic.final_url == EXPECTED_URL
+        assert "SiteGround" not in diagnostic.message and "bot protection" not in diagnostic.message
+        assert observed["rendered_snapshot"]["evidence_id"] == evidence["evidence_id"]
+        assert observed["rendered_snapshot"]["evidence_schema"] == evidence["evidence_schema"]
+        assert observed["rendered_snapshot"]["evidence_schema_version"] == 2
+        assert observed["rendered_snapshot"]["signature_validated"] is True
+        assert observed["rendered_snapshot"]["head_hash"] == evidence["rendered_head_hash"]
+        assert observed["rendered_snapshot"]["visible_hash"] == evidence["visible_content_hash"]
         assert all(observed[name].success for name in ("page_8_observation", "media_31_observation", "media_32_observation"))
         before = len(session.exec(select(WordPressHeadingCorrectionAudit)).all())
         monkeypatch.setattr(correction, "_observe", lambda *_, **__: observed)
@@ -419,6 +458,155 @@ def test_schema_v2_satisfies_only_bot_blocked_rendered_observation(guarded, monk
     assert dry.current_body_hash == correction.EXPECTED_CURRENT_BODY_HASH
     assert dry.proposed_body_hash == correction.EXPECTED_PROPOSED_BODY_HASH
     assert before == after and not dry.audit_created and dry.wordpress_write_count == 0 and dry.atlas_write_count == 0
+
+
+def _resign_evidence(evidence: dict, key: str) -> dict:
+    altered = copy.deepcopy(evidence)
+    payload = {name: altered[name] for name in sorted(altered) if name != "helper_signature"}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    altered["helper_signature"] = hmac.new(key.encode(), encoded.encode(), hashlib.sha256).hexdigest()
+    return altered
+
+
+@pytest.mark.parametrize("case", ["invalid_signature", "expired", "wrong_url"])
+def test_generic_403_blocks_invalid_expired_or_wrong_url_evidence(
+    case: str,
+    guarded,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = "v0.59.31-local-test-signing-key"
+    monkeypatch.setenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", key)
+    with Session(engine) as session:
+        current, _ = _bodies(session)
+    captured_at = datetime.now(UTC) - timedelta(hours=1) if case == "expired" else None
+    evidence = build_manual_browser_evidence(
+        _duplicate_evidence_html(current),
+        final_url=EXPECTED_URL,
+        evidence_identifier=f"generic-403-{case}",
+        signing_key=key,
+        captured_at=captured_at,
+        schema_version=2,
+    )
+    if case == "invalid_signature":
+        evidence["visible_content_hash"] = "0" * 64
+    elif case == "wrong_url":
+        evidence["final_url"] = "https://example.test/not-orlando/"
+        evidence = _resign_evidence(evidence, key)
+    monkeypatch.setattr(correction.httpx, "Client", _mock_observation_client(current))
+    result = correction._observe("https://example.test", "operator", "process-only", manual_evidence=evidence)
+    diagnostic = result["rendered_page_observation"]
+    assert not diagnostic.success and diagnostic.failure_code == "rendered_evidence_invalid"
+    assert diagnostic.acquisition_source == "signed_browser_evidence_after_public_403"
+
+
+@pytest.mark.parametrize("status", [404, 500, 503])
+def test_non_403_public_failures_never_use_signed_evidence(
+    status: int,
+    guarded,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = "v0.59.31-local-test-signing-key"
+    monkeypatch.setenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", key)
+    with Session(engine) as session:
+        current, _ = _bodies(session)
+    evidence = build_manual_browser_evidence(
+        _duplicate_evidence_html(current),
+        final_url=EXPECTED_URL,
+        evidence_identifier=f"public-status-{status}",
+        signing_key=key,
+        schema_version=2,
+    )
+    monkeypatch.setattr(
+        correction.httpx,
+        "Client",
+        _mock_observation_client(current, public_status=status),
+    )
+    result = correction._observe("https://example.test", "operator", "process-only", manual_evidence=evidence)
+    diagnostic = result["rendered_page_observation"]
+    assert not diagnostic.success and diagnostic.failure_code == "rendered_public_get_failed"
+    assert diagnostic.acquisition_source == "credential_free_public_get"
+
+
+def test_public_redirect_blocks_before_signed_evidence(
+    guarded,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = "v0.59.31-local-test-signing-key"
+    monkeypatch.setenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", key)
+    with Session(engine) as session:
+        current, _ = _bodies(session)
+    evidence = build_manual_browser_evidence(
+        _duplicate_evidence_html(current),
+        final_url=EXPECTED_URL,
+        evidence_identifier="public-redirect",
+        signing_key=key,
+        schema_version=2,
+    )
+    redirect = _http_response(EXPECTED_URL, 302, text="redirect", content_type="text/html")
+    monkeypatch.setattr(
+        correction.httpx,
+        "Client",
+        _mock_observation_client(current, public_history=[redirect]),
+    )
+    result = correction._observe("https://example.test", "operator", "process-only", manual_evidence=evidence)
+    diagnostic = result["rendered_page_observation"]
+    assert not diagnostic.success and diagnostic.failure_code == "rendered_wrong_final_url"
+
+
+@pytest.mark.parametrize(
+    "unsafe_fragment",
+    [
+        '<form id="loginform" action="/wp-login.php"><input name="log"></form>',
+        '<body class="wp-admin wp-core-ui"><main>Dashboard</main></body>',
+        '<main>Cloudflare security challenge verify you are human</main>',
+        '<main>A critical error occurred on this website</main>',
+    ],
+)
+def test_unsafe_browser_documents_cannot_be_signed_for_403_fallback(
+    unsafe_fragment: str,
+    guarded,
+) -> None:
+    with Session(engine) as session:
+        current, _ = _bodies(session)
+    unsafe_html = _duplicate_evidence_html(current).replace("<body>", f"<body>{unsafe_fragment}", 1)
+    with pytest.raises(ValueError):
+        build_manual_browser_evidence(
+            unsafe_html,
+            final_url=EXPECTED_URL,
+            evidence_identifier="unsafe-browser-document",
+            signing_key="v0.59.31-local-test-signing-key",
+            schema_version=2,
+        )
+
+
+def test_failed_403_fallback_dry_run_has_no_token_nonce_audit_or_write(
+    guarded,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = "v0.59.31-local-test-signing-key"
+    monkeypatch.setenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", key)
+    with Session(engine) as session:
+        current, _ = _bodies(session)
+        evidence = build_manual_browser_evidence(
+            _duplicate_evidence_html(current),
+            final_url=EXPECTED_URL,
+            evidence_identifier="invalid-fallback-no-write",
+            signing_key=key,
+            schema_version=2,
+        )
+        evidence["rendered_head_hash"] = "0" * 64
+        monkeypatch.setattr(correction.httpx, "Client", _mock_observation_client(current))
+        before = len(session.exec(select(WordPressHeadingCorrectionAudit)).all())
+        dry = correction.dry_run_heading_correction(
+            session,
+            41,
+            WordPressHeadingCorrectionDryRunRequest(backups=_backups(), manual_browser_evidence=evidence),
+        )
+        after = len(session.exec(select(WordPressHeadingCorrectionAudit)).all())
+    assert not dry.ready and not dry.token_issued and dry.confirmation_token is None
+    assert dry.nonce_consumed is False and dry.audit_created is False
+    assert dry.wordpress_write_count == 0 and dry.atlas_write_count == 0
+    assert before == after
 
 
 @pytest.mark.parametrize("missing", ["page_8", "media_31", "media_32"])

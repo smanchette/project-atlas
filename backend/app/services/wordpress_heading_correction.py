@@ -418,7 +418,18 @@ def _observe(
         except httpx.HTTPError as exc:
             result["rendered_page_observation"] = _diagnostic(True, "credential_free_public_get", False, "rendered_public_network_failed", f"Public rendered GET failed: {exc.__class__.__name__}.", final_url=EXPECTED_URL)
         else:
-            result.update(_rendered_observation(rendered_response, manual_evidence))
+            authenticated_observations_passed = all(
+                isinstance(result.get(key), WordPressHeadingCorrectionObservationResult)
+                and result[key].success
+                for key in urls
+            )
+            result.update(
+                _rendered_observation(
+                    rendered_response,
+                    manual_evidence,
+                    authenticated_observations_passed=authenticated_observations_passed,
+                )
+            )
 
     page = result.get("page")
     media31 = result.get("media_31")
@@ -435,28 +446,44 @@ def _observe(
     return result
 
 
-def _rendered_observation(response: httpx.Response, manual_evidence: Any | None) -> dict[str, Any]:
+def _rendered_observation(
+    response: httpx.Response,
+    manual_evidence: Any | None,
+    *,
+    authenticated_observations_passed: bool,
+) -> dict[str, Any]:
     final_url = str(response.url)
     status = response.status_code
-    if final_url != EXPECTED_URL:
+    if final_url != EXPECTED_URL or bool(response.history):
         return {"rendered_page_observation": _diagnostic(True, "credential_free_public_get", False, "rendered_wrong_final_url", "Public rendered GET changed URL or redirected.", http_status=status, final_url=final_url)}
     body_and_headers = response.text + " " + " ".join(response.headers.values())
-    siteground_bot_protection = bool(BOT_PATTERN.search(body_and_headers) and re.search(r"(?:siteground|x-sg-|sg-security|sg captcha)", body_and_headers, re.I))
-    if status == 403 and siteground_bot_protection:
+    if status == 403:
+        if not authenticated_observations_passed:
+            return {
+                "rendered_page_observation": _diagnostic(
+                    True,
+                    "credential_free_public_get",
+                    False,
+                    "rendered_evidence_dependencies_failed",
+                    "Signed browser evidence cannot replace a failed authenticated page or media observation.",
+                    http_status=403,
+                    final_url=final_url,
+                )
+            }
         evidence = manual_evidence.model_dump(mode="json", exclude_none=True) if hasattr(manual_evidence, "model_dump") else manual_evidence
         if evidence is None:
-            return {"rendered_page_observation": _diagnostic(True, "credential_free_public_get", False, "rendered_public_bot_protection", "Recognized public bot protection returned HTTP 403; signed schema-v2 evidence is required.", http_status=403, final_url=final_url)}
+            return {"rendered_page_observation": _diagnostic(True, "credential_free_public_get", False, "rendered_public_forbidden", "Public rendered GET returned HTTP 403; valid signed schema-v2 evidence is required.", http_status=403, final_url=final_url)}
         valid, reason = validate_manual_browser_evidence(evidence, os.getenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", ""))
         if not valid or evidence.get("evidence_schema_version") != 2:
-            return {"rendered_page_observation": _diagnostic(True, "signed_browser_evidence_v2", False, "rendered_evidence_invalid", reason if not valid else "Signed schema-v2 duplicate-H1 evidence is required.", http_status=403, final_url=final_url)}
+            return {"rendered_page_observation": _diagnostic(True, "signed_browser_evidence_after_public_403", False, "rendered_evidence_invalid", reason if not valid else "Signed schema-v2 duplicate-H1 evidence is required.", http_status=403, final_url=final_url)}
         snapshot = _rendered_snapshot_from_evidence(evidence)
         return {
-            "rendered_page_observation": _diagnostic(True, "signed_browser_evidence_v2", True, None, "Public GET was blocked by recognized bot protection; signed schema-v2 evidence verified.", http_status=403, final_url=final_url),
+            "rendered_page_observation": _diagnostic(True, "signed_browser_evidence_after_public_403", True, None, "Public rendered GET returned HTTP 403; independently signed schema-v2 browser evidence verified.", http_status=403, final_url=final_url),
             "rendered_h1_inventory": snapshot["h1_inventory"],
             "rendered_snapshot": snapshot,
         }
     if status != 200:
-        return {"rendered_page_observation": _diagnostic(True, "credential_free_public_get", False, "rendered_public_get_failed", f"Public rendered GET returned HTTP {status} without recognized SiteGround bot protection.", http_status=status, final_url=final_url)}
+        return {"rendered_page_observation": _diagnostic(True, "credential_free_public_get", False, "rendered_public_get_failed", f"Public rendered GET returned HTTP {status}.", http_status=status, final_url=final_url)}
     if BOT_PATTERN.search(body_and_headers):
         return {"rendered_page_observation": _diagnostic(True, "credential_free_public_get", False, "rendered_challenge_page", "Public rendered GET returned a challenge-like document.", http_status=200, final_url=final_url)}
     snapshot = _rendered_snapshot(response.text, dict(response.headers))
@@ -485,6 +512,7 @@ def _rendered_snapshot_from_evidence(evidence: dict[str, Any]) -> dict[str, Any]
         "head_hash": evidence["rendered_head_hash"],
         "visible_hash": evidence["visible_content_hash"],
         "signature_validated": True,
+        "evidence_schema": evidence["evidence_schema"],
         "evidence_schema_version": 2,
         "evidence_id": evidence["evidence_id"],
         "cache_headers": {},
