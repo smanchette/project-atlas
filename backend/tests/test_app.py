@@ -3243,6 +3243,8 @@ def test_wordpress_api_exposes_only_controlled_publish_and_existing_write_routes
         ("/api/wordpress/deployment/metadata-bridge/install/authorize/{page_id}", "POST"),
         ("/api/wordpress/deployment/metadata-bridge/install/report-manual-complete/{page_id}", "POST"),
             ("/api/wordpress/deployment/metadata-bridge/install/verify/{page_id}", "POST"),
+            ("/api/wordpress/deployment/metadata-bridge/install/reconciliation/verify/{page_id}", "POST"),
+            ("/api/wordpress/deployment/metadata-bridge/install/reconciliation/apply/{page_id}", "POST"),
             ("/api/wordpress/heading-correction/dry-run/{page_id}", "POST"),
             ("/api/wordpress/heading-correction/apply/{page_id}", "POST"),
             ("/api/wordpress/heading-correction/verify/{page_id}", "POST"),

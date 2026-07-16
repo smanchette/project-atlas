@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import hashlib
 import hmac
@@ -8,6 +9,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import secrets
+from threading import Lock, Timer
 from typing import Any
 from urllib.parse import unquote
 import zipfile
@@ -24,6 +26,8 @@ from app.models import (
     WordPressDeploymentAudit,
     WordPressDeploymentNonce,
     WordPressDeploymentTransition,
+    WordPressMetadataState,
+    WordPressMetadataSyncAudit,
 )
 from app.schemas.wordpress import (
     WordPressDeploymentAuthorizeRequest,
@@ -31,6 +35,10 @@ from app.schemas.wordpress import (
     WordPressDeploymentBackupEvidence,
     WordPressDeploymentInstallDryRun,
     WordPressDeploymentPreflight,
+    WordPressDeploymentReconciliationApplyRequest,
+    WordPressDeploymentReconciliationResult,
+    WordPressDeploymentReconciliationVerification,
+    WordPressDeploymentReconciliationVerifyRequest,
     WordPressDeploymentManualComplete,
     WordPressDeploymentManualCompleteRequest,
     WordPressDeploymentVerification,
@@ -38,6 +46,13 @@ from app.schemas.wordpress import (
     WordPressDraftGateResult,
 )
 from app.services.wordpress_metadata import _hash, _parse_html, _sign_context, _verify
+from app.services.wordpress_heading_contract import (
+    EXPECTED_FEATURED_MEDIA,
+    EXPECTED_SLUG,
+    EXPECTED_TITLE,
+    EXPECTED_URL,
+    wordpress_body_hash,
+)
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 from app.services.wordpress_deployment_release import (
     SOURCE_EXPECTATIONS,
@@ -48,7 +63,7 @@ from app.services.wordpress_deployment_release import (
     resolve_program_root,
     verify_runtime_release_identity,
 )
-from app.services.wordpress_rendered_state import acquire_rendered_state
+from app.services.wordpress_rendered_state import EXPECTED_H1, EXPECTED_MEDIA_ALT, EXPECTED_MEDIA_URL, acquire_rendered_state, validate_manual_browser_evidence
 
 PLUGIN_VERSION = SOURCE_EXPECTATIONS.plugin_version
 PLUGIN_SLUG = SOURCE_EXPECTATIONS.plugin_slug
@@ -57,6 +72,9 @@ ZIP_NAME = SOURCE_EXPECTATIONS.plugin_zip_filename
 ZIP_SHA256 = SOURCE_EXPECTATIONS.plugin_zip_sha256
 SOURCE_SHA256 = SOURCE_EXPECTATIONS.plugin_source_sha256
 INSTALL_PHRASE = "INSTALL PROJECT ATLAS METADATA BRIDGE"
+RECONCILIATION_PHRASE = "RECONCILE INSTALLED INACTIVE METADATA BRIDGE"
+RECONCILIATION_TTL = timedelta(minutes=10)
+EXPECTED_CORRECTED_BODY_HASH = "c031a7aa841b8e9a0316956dd3bf25178f390e64d01ceb9d9cd4273cc4aed195"
 BACKUP_WINDOW = timedelta(hours=4)
 ALLOWED_TRANSITIONS = {
     "installation_authorized": {"awaiting_manual_installation", "failed"},
@@ -65,6 +83,19 @@ ALLOWED_TRANSITIONS = {
     "verification_pending": {"verified", "verification_failed", "reconciliation_required", "failed"},
     "reconciliation_required": {"failed"},
 }
+
+
+@dataclass(frozen=True)
+class _ReconciliationHandleEntry:
+    request: WordPressDeploymentReconciliationVerifyRequest
+    binding_hash: str
+    issued_at: datetime
+    expires_at: datetime
+
+
+_reconciliation_handle_lock = Lock()
+_reconciliation_handles: dict[str, _ReconciliationHandleEntry] = {}
+_reconciliation_handle_timers: dict[str, Timer] = {}
 
 
 def deployment_readiness() -> dict[str, Any]:
@@ -322,10 +353,160 @@ def verify_manual_install(session: Session, page_id: int, request: WordPressDepl
     )
 
 
-def reconcile_install_audit(session: Session, page_id: int, request: WordPressDeploymentVerifyRequest) -> WordPressDeploymentVerification:
+def verify_install_reconciliation(
+    session: Session,
+    page_id: int,
+    request: WordPressDeploymentReconciliationVerifyRequest,
+    *,
+    issue_handle: bool = True,
+) -> WordPressDeploymentReconciliationVerification:
+    """Inspect an already-installed inactive bridge without mutating WordPress or Atlas."""
     _target(page_id)
     audit = _audit(session, request.audit_id)
-    raise HTTPException(409, f"Audit {audit.id} requires a separately approved reconciliation workflow; no WordPress request was performed.")
+    proof_values = dict(audit.backup_evidence)
+    proof_values["manual_browser_evidence"] = request.manual_browser_evidence.model_dump(mode="json", exclude_none=True)
+    try:
+        proof = WordPressDeploymentBackupEvidence.model_validate(proof_values)
+    except Exception as exc:
+        raise HTTPException(409, "Stored deployment backup evidence is invalid.") from exc
+    evidence_valid, evidence_reason = validate_manual_browser_evidence(
+        request.manual_browser_evidence,
+        os.getenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", ""),
+    )
+    evidence_contract_valid = evidence_valid and request.manual_browser_evidence.evidence_schema_version == 1
+    if evidence_valid and not evidence_contract_valid:
+        evidence_reason = "Installed-inactive reconciliation requires fresh schema-v1 evidence."
+    artifact, artifact_gates = _verify_artifact()
+    observed = _observe(session, proof) if evidence_contract_valid and any(g.code == "release_identity" and g.passed for g in artifact_gates) else {
+        "_error": "manual_browser_evidence_invalid" if not evidence_contract_valid else "release_identity_unavailable",
+        "manual_evidence_reason": evidence_reason if not evidence_contract_valid else None,
+        "plugins": [],
+        "rendered": {"verified": False, "outcome": "release_identity_unavailable"},
+        "wordpress_request_methods": [],
+        "wordpress_request_performed": False,
+        "read_only": True,
+    }
+    nonce = session.exec(select(WordPressDeploymentNonce).where(WordPressDeploymentNonce.audit_id == audit.id)).one_or_none()
+    transitions = _transition_records(session, audit.id or 0)
+    metadata_states = session.exec(select(WordPressMetadataState).where(WordPressMetadataState.generated_page_id == 41)).all()
+    metadata_audits = session.exec(select(WordPressMetadataSyncAudit).where(WordPressMetadataSyncAudit.generated_page_id == 41)).all()
+    gates = [
+        *artifact_gates,
+        *_reconciliation_gates(
+            audit,
+            nonce,
+            transitions,
+            observed,
+            artifact,
+            request,
+            metadata_state_count=len(metadata_states),
+            metadata_audit_count=len(metadata_audits),
+            evidence_valid=evidence_contract_valid,
+            evidence_reason=evidence_reason,
+        ),
+    ]
+    ready = all(gate.passed for gate in gates)
+    binding = _reconciliation_binding(audit, nonce, transitions, observed, artifact, request)
+    binding_hash = _hash(binding)
+    handle = None
+    expires_at = None
+    if ready and issue_handle:
+        evidence_expiry = _evidence_expiry(request.manual_browser_evidence.expires_at)
+        expires_at = min(datetime.now(UTC) + RECONCILIATION_TTL, evidence_expiry)
+        if expires_at <= datetime.now(UTC):
+            ready = False
+            gates.append(_gate("handle_lifetime", "Fresh evidence permits a positive handle lifetime", False, "Evidence expires before a reconciliation handle can be issued."))
+        else:
+            handle = _store_reconciliation_handle(request, binding_hash, expires_at)
+    return WordPressDeploymentReconciliationVerification(
+        audit_id=audit.id or 0,
+        status="reconciliation_ready" if ready else "reconciliation_blocked",
+        reconciliation_ready=ready,
+        reconciliation_handle=handle,
+        confirmation_phrase=RECONCILIATION_PHRASE if ready else None,
+        binding_hash=binding_hash if ready else None,
+        expires_at=expires_at,
+        gate_results=gates,
+        inspected_state=_reconciliation_public_snapshot(observed, audit, nonce, transitions, len(metadata_states), len(metadata_audits)),
+        proposed_atlas_changes=[
+            "Update deployment audit status from awaiting_manual_installation to verified.",
+            "Record installed_inactive_reconciliation evidence on the existing deployment audit.",
+            "Append one reconciliation-specific deployment transition while preserving prior transitions and the original nonce.",
+        ] if ready else [],
+    )
+
+
+def apply_install_reconciliation(
+    session: Session,
+    page_id: int,
+    request: WordPressDeploymentReconciliationApplyRequest,
+) -> WordPressDeploymentReconciliationResult:
+    """Finalize the existing Atlas audit only; this function has no WordPress write transport."""
+    _target(page_id)
+    if not hmac.compare_digest(request.confirmation_phrase, RECONCILIATION_PHRASE):
+        raise HTTPException(422, "The installed-inactive reconciliation phrase is incorrect.")
+    entry = _consume_reconciliation_handle(request.reconciliation_handle)
+    verification = verify_install_reconciliation(session, page_id, entry.request, issue_handle=False)
+    if not verification.reconciliation_ready or verification.binding_hash != entry.binding_hash:
+        raise HTTPException(409, "Installed-inactive reconciliation state changed. Run a new verification.")
+    audit = _audit(session, entry.request.audit_id)
+    nonce = session.exec(select(WordPressDeploymentNonce).where(WordPressDeploymentNonce.audit_id == audit.id)).one_or_none()
+    transitions_before = _transition_records(session, audit.id or 0)
+    evidence = entry.request.manual_browser_evidence
+    request_identifier = f"reconcile:{hashlib.sha256(request.reconciliation_handle.encode()).hexdigest()[:54]}"
+    previous_status = audit.status
+    if audit.status != "awaiting_manual_installation":
+        raise HTTPException(409, "Deployment audit status changed before reconciliation finalization.")
+    audit.status = "verified"
+    session.add(WordPressDeploymentTransition(
+        audit_id=audit.id or 0,
+        previous_state=previous_status,
+        new_state="verified",
+        actor=audit.operator,
+        reason="Installed inactive plugin verified and deployment audit finalized by Atlas-only reconciliation",
+        request_identifier=request_identifier,
+    ))
+    audit.post_snapshot = verification.inspected_state
+    audit.completed_at = datetime.now(UTC)
+    audit.error_code = None
+    audit.error_message = None
+    audit.evidence_summary = {
+        **audit.evidence_summary,
+        "completion_mode": "installed_inactive_reconciliation",
+        "reconciliation": {
+            "previous_status": previous_status,
+            "final_status": "verified",
+            "binding_hash": entry.binding_hash,
+            "handle_fingerprint": hashlib.sha256(request.reconciliation_handle.encode()).hexdigest(),
+            "fresh_evidence_id": evidence.evidence_id,
+            "fresh_evidence_schema": evidence.evidence_schema,
+            "fresh_evidence_schema_version": evidence.evidence_schema_version,
+            "fresh_evidence_rendered_head_hash": evidence.rendered_head_hash,
+            "fresh_evidence_visible_content_hash": evidence.visible_content_hash,
+            "fresh_evidence_expires_at": _json_datetime(evidence.expires_at),
+            "original_authorization_jti": nonce.jti if nonce else None,
+            "original_transition_history_hash": _transition_history_hash(transitions_before),
+            "wordpress_write_count": 0,
+            "atlas_write_scope": ["existing_deployment_audit", "one_deployment_transition"],
+            "accidental_activation_and_guarded_deactivation_not_rewritten": True,
+        },
+    }
+    session.add(audit)
+    session.commit()
+    session.refresh(audit)
+    return WordPressDeploymentReconciliationResult(
+        audit_id=audit.id or 0,
+        status="verified",
+        binding_hash=entry.binding_hash,
+        state_history=_history(session, audit.id or 0),
+    )
+
+
+def reconcile_install_audit(session: Session, page_id: int, request: WordPressDeploymentVerifyRequest) -> WordPressDeploymentVerification:
+    """Legacy normal-flow placeholder retained to prevent bypass of the dedicated workflow."""
+    _target(page_id)
+    audit = _audit(session, request.audit_id)
+    raise HTTPException(409, f"Audit {audit.id} requires the dedicated fresh-evidence reconciliation endpoints; no WordPress request was performed.")
 
 
 def _observe(session: Session, proof: WordPressDeploymentBackupEvidence | None = None) -> dict[str, Any]:
@@ -351,6 +532,9 @@ def _observe(session: Session, proof: WordPressDeploymentBackupEvidence | None =
     media32_url = media32.get("source_url", "") if isinstance(media32, dict) else ""
     page_encoded = json.dumps(page, sort_keys=True) if isinstance(page, dict) else ""
     rendered_encoded = json.dumps(rendered, sort_keys=True)
+    page_body = _nested_text(page, "content")
+    page_title = _nested_text(page, "title")
+    page_excerpt = _nested_text(page, "excerpt")
     locked = {
         "site_title": root.get("name") if isinstance(root, dict) else None,
         "tagline": root.get("description") if isinstance(root, dict) else None,
@@ -367,6 +551,10 @@ def _observe(session: Session, proof: WordPressDeploymentBackupEvidence | None =
         "active_plugin_inventory_hash": _hash(active_plugins),
         "page": _resource_snapshot(page),
         "page_snapshot_hash": _hash(page),
+        "page_body_hash": wordpress_body_hash(page_body) if page_body else None,
+        "page_title": page_title,
+        "page_excerpt": page_excerpt,
+        "page_canonical": page.get("link") if isinstance(page, dict) else None,
         "media31": _resource_snapshot(media31),
         "media31_snapshot_hash": _hash(media31),
         "media32": _resource_snapshot(media32),
@@ -420,6 +608,103 @@ def _expected_install_delta_gates(before: dict[str, Any], after: dict[str, Any])
         _gate("post_meta_inferred", "No Atlas post-meta change is observable", after.get("page_snapshot_hash") == before.get("page_snapshot_hash") and not after.get("rendered", {}).get("atlas_metadata_marker_present", False), "Atlas post metadata may have changed."),
         _gate("writes_bounded", "Observed changes are limited to the exact inactive plugin", _canonical_plugins(without_bridge) == _canonical_plugins(before.get("plugins", [])) and after.get("locked_state_hash") == before.get("locked_state_hash"), "Unexpected observable WordPress writes occurred."),
     ]
+
+
+def _reconciliation_gates(
+    audit: WordPressDeploymentAudit,
+    nonce: WordPressDeploymentNonce | None,
+    transitions: list[WordPressDeploymentTransition],
+    observed: dict[str, Any],
+    artifact: dict[str, Any],
+    request: WordPressDeploymentReconciliationVerifyRequest,
+    *,
+    metadata_state_count: int,
+    metadata_audit_count: int,
+    evidence_valid: bool,
+    evidence_reason: str,
+) -> list[WordPressDraftGateResult]:
+    matches = [item for item in observed.get("plugins", []) if item.get("plugin") == PLUGIN_FILE]
+    rendered = observed.get("rendered", {})
+    page = observed.get("page", {})
+    media31 = observed.get("media31", {})
+    media32 = observed.get("media32", {})
+    expected_runtime = request.expected_runtime_identity.model_dump(mode="json")
+    actual_runtime = {
+        "atlas_version": artifact.get("atlas_version"),
+        "atlas_commit": artifact.get("atlas_commit"),
+        "atlas_tag": artifact.get("atlas_tag"),
+        "manifest_sha256": artifact.get("release_manifest_sha256"),
+        "source_compatibility_id": artifact.get("release_source_compatibility_id"),
+    }
+    expected_history = ["installation_authorized", "awaiting_manual_installation"]
+    observable_safety_state = (
+        len(matches) == 1
+        and matches[0].get("status") == "inactive"
+        and metadata_state_count == 0
+        and metadata_audit_count == 0
+        and not rendered.get("atlas_metadata_marker_present", False)
+        and observed.get("page_snapshot_hash") == request.expected_page_snapshot_hash
+        and observed.get("page_body_hash") == request.expected_body_hash
+    )
+    return [
+        _gate("evidence_contract", "Fresh signed canonical schema-v1 browser evidence is valid", evidence_valid and request.manual_browser_evidence.evidence_schema_version == 1, evidence_reason or "Schema-v1 browser evidence is required."),
+        _gate("audit_target", "Existing deployment audit is bound to Atlas page 41 and WordPress page 8", audit.generated_page_id == 41 and audit.wordpress_post_id == 8, "Deployment audit target changed."),
+        _gate("audit_status", "Audit is awaiting manual installation reconciliation", audit.status == "awaiting_manual_installation", "Audit status is not awaiting_manual_installation."),
+        _gate("original_nonce", "Original installation authorization nonce remains consumed and bound", bool(nonce and nonce.jti == audit.authorization_jti and nonce.audit_id == audit.id and nonce.consumed_at), "Original consumed authorization nonce is missing or changed."),
+        _gate("transition_history", "Original authorization transitions remain intact", [item.new_state for item in transitions] == expected_history, "Original deployment transition history changed."),
+        _gate("authorized_identity", "Authorized plugin identity and artifact remain exact", audit.plugin_slug == request.expected_plugin_slug == PLUGIN_SLUG and audit.plugin_path == request.expected_plugin_path == PLUGIN_FILE and audit.plugin_version == request.expected_plugin_version == PLUGIN_VERSION and audit.zip_sha256 == request.expected_zip_sha256 == ZIP_SHA256, "Authorized plugin identity or ZIP checksum differs."),
+        _gate("artifact_source", "Authorized ZIP remains portable, byte-equal to source, and bound to installed identity", artifact.get("zip_sha256") == request.expected_zip_sha256 and artifact.get("plugin_source_sha256") == audit.plugin_source_sha256 and artifact.get("plugin_path") == request.expected_plugin_path, "Authorized source artifact changed."),
+        _gate("runtime_identity", "Independent expected runtime identity remains verified and exact", actual_runtime == expected_runtime and artifact.get("release_runtime_identity_verified") is True and artifact.get("release_manifest_integrity_verified") is True and artifact.get("release_expected_identity_matched") is True, "Runtime release identity or repository artifact safety changed."),
+        _gate("credentials", "Authenticated WordPress read credentials are available in backend memory", "_error" not in observed and observed.get("wordpress_request_performed") is True, "Authenticated WordPress reads are unavailable."),
+        _gate("read_only_transport", "Every WordPress request is GET-only", observed.get("wordpress_request_methods") == ["GET"] and observed.get("read_only") is True, "A non-read-only WordPress request was observed."),
+        _gate("plugin_singleton", "Metadata Bridge is installed exactly once at the authorized path", len(matches) == 1, "Plugin is absent, duplicated, or installed under another entry path."),
+        _gate("plugin_inactive", "Installed Metadata Bridge remains inactive", len(matches) == 1 and matches[0].get("status") == "inactive", "Plugin is active or its state is unavailable."),
+        _gate("plugin_version", "Installed Metadata Bridge version remains exact", len(matches) == 1 and matches[0].get("version") == request.expected_plugin_version, "Installed plugin version changed."),
+        _gate("plugin_inventory", "Complete inactive plugin inventory hash remains exact", observed.get("plugin_inventory_hash") == request.expected_plugin_inventory_hash, "Complete plugin inventory changed."),
+        _gate("active_inventory", "Active-plugin inventory remains at the pre-install baseline", observed.get("active_plugin_inventory_hash") == request.expected_active_plugin_inventory_hash == audit.pre_snapshot.get("active_plugin_inventory_hash"), "Active-plugin inventory changed."),
+        _gate("inactive_safety_state", "Inactive safety state corroborates rendering disabled, null payload, empty payload hash, and revision zero", observable_safety_state, "Inactive safety state cannot be corroborated from independent inventory, Atlas records, page snapshots, and rendered absence."),
+        _gate("metadata_rows", "Atlas metadata audit and state rows remain absent", metadata_audit_count == 0 and metadata_state_count == 0, "Atlas metadata state or audit rows exist."),
+        _gate("page_identity", "Page 8 title, slug, URL, status, excerpt, canonical, and featured media remain locked", page.get("id") == 8 and page.get("status") == "publish" and page.get("slug") == EXPECTED_SLUG and page.get("link") == EXPECTED_URL and page.get("featured_media") == EXPECTED_FEATURED_MEDIA and observed.get("page_title") == EXPECTED_TITLE and rendered.get("canonical") == [EXPECTED_URL], "Page identity changed."),
+        _gate("page_snapshot", "Complete page snapshot remains exact", observed.get("page_snapshot_hash") == request.expected_page_snapshot_hash, "Page snapshot changed."),
+        _gate("body_hash", "Corrected canonical body hash remains exact", observed.get("page_body_hash") == request.expected_body_hash == EXPECTED_CORRECTED_BODY_HASH, "Page body changed."),
+        _gate("rendered_evidence", "Fresh signed schema-v1 evidence verifies the corrected public page", rendered.get("verified") is True and rendered.get("signature_validated") is True and rendered.get("evidence_schema_version") == 1 and rendered.get("browser_evidence_identifier") == request.manual_browser_evidence.evidence_id, "Fresh signed schema-v1 rendered evidence is required."),
+        _gate("rendered_h1", "Exactly one visible Orlando H1 remains", rendered.get("h1") == [EXPECTED_H1], "Rendered H1 inventory changed."),
+        _gate("rendered_image", "Featured image URL and alt text remain exact", rendered.get("featured_image_url") == EXPECTED_MEDIA_URL and rendered.get("featured_image_alt") == EXPECTED_MEDIA_ALT, "Rendered featured image changed."),
+        _gate("metadata_absent", "No Atlas, description, Open Graph, Twitter, or JSON-LD metadata renders", not rendered.get("atlas_metadata_marker_present", False) and _rendered_metadata_absent(rendered), "Unexpected metadata is rendered."),
+        _gate("media31", "Media 31 remains exact and visible", media31.get("id") == 31 and observed.get("media31_snapshot_hash") == request.expected_media31_snapshot_hash and rendered.get("featured_image_url") == EXPECTED_MEDIA_URL, "Media 31 changed or is not visible."),
+        _gate("media32", "Media 32 remains exact, unattached, unfeatured, and absent", media32.get("id") == 32 and not media32.get("post") and observed.get("media32_snapshot_hash") == request.expected_media32_snapshot_hash and page.get("featured_media") != 32 and not observed.get("page_references_media32") and not rendered.get("media32_reference_present", False), "Media 32 changed or is referenced."),
+        _gate("site_identity", "Site Title and Tagline remain exact", observed.get("site") == {"name": "My WordPress", "description": ""}, "Site Title or Tagline changed."),
+        _gate("cache_boundary", "Reconciliation has no cache-purge transport and the cache observation remains unchanged", observed.get("cache_headers") == rendered.get("cache_headers", {}) == audit.pre_snapshot.get("cache_headers", {}), "Cache observation changed; reconciliation stops without purging."),
+        _gate("zero_wordpress_writes", "Reconciliation verification requires zero WordPress writes", observed.get("wordpress_request_methods") == ["GET"], "WordPress write count is not zero."),
+        _gate("atlas_only_finalization", "Proposed finalization is limited to the existing audit and one transition", True, "Atlas-only finalization scope changed."),
+    ]
+
+
+def _reconciliation_binding(
+    audit: WordPressDeploymentAudit,
+    nonce: WordPressDeploymentNonce | None,
+    transitions: list[WordPressDeploymentTransition],
+    observed: dict[str, Any],
+    artifact: dict[str, Any],
+    request: WordPressDeploymentReconciliationVerifyRequest,
+) -> dict[str, Any]:
+    evidence = request.manual_browser_evidence
+    return {
+        "action": "reconcile_installed_inactive_metadata_bridge",
+        "audit_id": audit.id,
+        "atlas_page_id": audit.generated_page_id,
+        "wordpress_page_id": audit.wordpress_post_id,
+        "runtime_identity": request.expected_runtime_identity.model_dump(mode="json"),
+        "audit_revision": _audit_revision(audit),
+        "audit_status": audit.status,
+        "authorization_nonce": {"id": nonce.id if nonce else None, "jti": nonce.jti if nonce else None, "consumed_at": _json_datetime(nonce.consumed_at) if nonce else None},
+        "transition_history_hash": _transition_history_hash(transitions),
+        "plugin": {"slug": request.expected_plugin_slug, "path": request.expected_plugin_path, "version": request.expected_plugin_version, "zip_sha256": request.expected_zip_sha256, "source_sha256": artifact.get("plugin_source_sha256")},
+        "inventories": {"plugins": observed.get("plugin_inventory_hash"), "active": observed.get("active_plugin_inventory_hash")},
+        "snapshots": {"page": observed.get("page_snapshot_hash"), "body": observed.get("page_body_hash"), "media31": observed.get("media31_snapshot_hash"), "media32": observed.get("media32_snapshot_hash"), "cache": _hash(observed.get("cache_headers", {}))},
+        "evidence": {"id": evidence.evidence_id, "schema": evidence.evidence_schema, "version": evidence.evidence_schema_version, "signature": evidence.helper_signature, "head_hash": evidence.rendered_head_hash, "visible_hash": evidence.visible_content_hash, "expires_at": _json_datetime(evidence.expires_at)},
+        "reconciliation_generation": 1 + sum(1 for item in transitions if "reconciliation" in item.reason.lower()),
+    }
 
 
 def _verify_artifact() -> tuple[dict[str, Any], list[WordPressDraftGateResult]]:
@@ -577,6 +862,163 @@ def _safe_evidence_path(value: str) -> str:
     if candidate != approved and approved not in candidate.parents:
         raise HTTPException(422, "Resolved evidence directory escapes the approved root.")
     return value
+
+
+def _store_reconciliation_handle(
+    request: WordPressDeploymentReconciliationVerifyRequest,
+    binding_hash: str,
+    expires_at: datetime,
+) -> str:
+    now = datetime.now(UTC)
+    entry = _ReconciliationHandleEntry(
+        request=request.model_copy(deep=True),
+        binding_hash=binding_hash,
+        issued_at=now,
+        expires_at=expires_at,
+    )
+    with _reconciliation_handle_lock:
+        _purge_expired_reconciliation_handles(now)
+        handle = secrets.token_urlsafe(32)
+        while handle in _reconciliation_handles:
+            handle = secrets.token_urlsafe(32)
+        _reconciliation_handles[handle] = entry
+        timer = Timer(max(0.0, (expires_at - now).total_seconds()), _expire_reconciliation_handle, args=(handle,))
+        timer.daemon = True
+        _reconciliation_handle_timers[handle] = timer
+    timer.start()
+    return handle
+
+
+def _consume_reconciliation_handle(handle: str) -> _ReconciliationHandleEntry:
+    now = datetime.now(UTC)
+    with _reconciliation_handle_lock:
+        entry = _reconciliation_handles.pop(handle, None)
+        timer = _reconciliation_handle_timers.pop(handle, None)
+        if timer is not None:
+            timer.cancel()
+        _purge_expired_reconciliation_handles(now)
+    if entry is None:
+        raise HTTPException(422, "The reconciliation handle is unknown, expired, already consumed, or cleared by a backend restart.")
+    if entry.expires_at <= now:
+        raise HTTPException(422, "The reconciliation handle expired.")
+    return entry
+
+
+def _purge_expired_reconciliation_handles(now: datetime | None = None) -> None:
+    current = now or datetime.now(UTC)
+    expired = [handle for handle, entry in _reconciliation_handles.items() if entry.expires_at <= current]
+    for handle in expired:
+        _reconciliation_handles.pop(handle, None)
+        timer = _reconciliation_handle_timers.pop(handle, None)
+        if timer is not None:
+            timer.cancel()
+
+
+def _expire_reconciliation_handle(handle: str) -> None:
+    with _reconciliation_handle_lock:
+        _reconciliation_handles.pop(handle, None)
+        _reconciliation_handle_timers.pop(handle, None)
+
+
+def _clear_reconciliation_handles() -> None:
+    """Model a backend restart in tests; production restarts clear module memory."""
+    with _reconciliation_handle_lock:
+        _reconciliation_handles.clear()
+        for timer in _reconciliation_handle_timers.values():
+            timer.cancel()
+        _reconciliation_handle_timers.clear()
+
+
+def _transition_records(session: Session, audit_id: int) -> list[WordPressDeploymentTransition]:
+    return list(session.exec(select(WordPressDeploymentTransition).where(WordPressDeploymentTransition.audit_id == audit_id).order_by(WordPressDeploymentTransition.id)).all())
+
+
+def _transition_history_hash(records: list[WordPressDeploymentTransition]) -> str:
+    return _hash([
+        {
+            "id": record.id,
+            "previous_state": record.previous_state,
+            "new_state": record.new_state,
+            "transitioned_at": _json_datetime(record.transitioned_at),
+            "actor": record.actor,
+            "reason": record.reason,
+            "request_identifier": record.request_identifier,
+        }
+        for record in records
+    ])
+
+
+def _audit_revision(audit: WordPressDeploymentAudit) -> str:
+    return _hash({
+        "id": audit.id,
+        "status": audit.status,
+        "post_snapshot": audit.post_snapshot,
+        "evidence_summary": audit.evidence_summary,
+        "completed_at": _json_datetime(audit.completed_at),
+        "error_code": audit.error_code,
+        "error_message": audit.error_message,
+    })
+
+
+def _reconciliation_public_snapshot(
+    observed: dict[str, Any],
+    audit: WordPressDeploymentAudit,
+    nonce: WordPressDeploymentNonce | None,
+    transitions: list[WordPressDeploymentTransition],
+    metadata_state_count: int,
+    metadata_audit_count: int,
+) -> dict[str, Any]:
+    return {
+        **observed,
+        "audit": {"id": audit.id, "status": audit.status, "revision": _audit_revision(audit)},
+        "authorization_nonce": {"id": nonce.id if nonce else None, "consumed": bool(nonce and nonce.consumed_at), "jti_fingerprint": hashlib.sha256(nonce.jti.encode()).hexdigest() if nonce else None},
+        "transition_history": [record.new_state for record in transitions],
+        "transition_history_hash": _transition_history_hash(transitions),
+        "inactive_metadata_safety": {
+            "verification_source": "corroborated_inactive_inventory_atlas_rows_and_rendered_absence",
+            "rendering_enabled": False,
+            "payload": None,
+            "payload_hash": "",
+            "revision": "0",
+            "metadata_state_rows": metadata_state_count,
+            "metadata_audit_rows": metadata_audit_count,
+        },
+        "reconciliation_cache_purge_count": 0,
+        "wordpress_write_count": 0,
+        "atlas_write_count": 0,
+    }
+
+
+def _rendered_metadata_absent(rendered: dict[str, Any]) -> bool:
+    inventory = rendered.get("metadata_inventory", {})
+    return all(not inventory.get(key, []) for key in ("meta_descriptions", "open_graph", "twitter", "json_ld", "media32_references")) and not inventory.get("unexpected_metadata_owners", []) and not inventory.get("duplicates", [])
+
+
+def _nested_text(value: Any, key: str) -> str:
+    if not isinstance(value, dict):
+        return ""
+    nested = value.get(key)
+    if isinstance(nested, dict):
+        raw = nested.get("raw")
+        if isinstance(raw, str):
+            return raw
+        rendered = nested.get("rendered")
+        if isinstance(rendered, str):
+            return rendered
+    return str(nested) if isinstance(nested, str) else ""
+
+
+def _evidence_expiry(value: datetime | str) -> datetime:
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise HTTPException(422, "Browser evidence expiry must be timezone-aware.")
+    return parsed.astimezone(UTC)
+
+
+def _json_datetime(value: datetime | str | None) -> str | None:
+    if isinstance(value, str):
+        return value
+    return value.astimezone(UTC).isoformat() if value and value.tzinfo else (value.replace(tzinfo=UTC).isoformat() if value else None)
 
 
 def _transition(session: Session, audit: WordPressDeploymentAudit, new_state: str, actor: str, reason: str, request_identifier: str) -> None:

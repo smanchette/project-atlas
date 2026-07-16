@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Any, Literal
 
 from pydantic import ConfigDict, field_validator, model_validator
@@ -1028,3 +1029,96 @@ class WordPressDeploymentVerifyRequest(SQLModel):
     audit_id: int
     operator: str = Field(min_length=3, max_length=200)
     php_error_log_findings: str = Field(min_length=3, max_length=2000)
+
+
+class WordPressDeploymentExpectedRuntimeIdentity(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    atlas_version: str = Field(min_length=2, max_length=32)
+    atlas_commit: str = Field(min_length=40, max_length=40)
+    atlas_tag: str = Field(min_length=2, max_length=32)
+    manifest_sha256: str = Field(min_length=64, max_length=64)
+    source_compatibility_id: str = Field(min_length=3, max_length=200)
+
+    @field_validator("atlas_commit", "manifest_sha256")
+    @classmethod
+    def validate_lower_hex(cls, value: str) -> str:
+        if re.fullmatch(r"[0-9a-f]+", value) is None:
+            raise ValueError("Release hashes must be lowercase hexadecimal.")
+        return value
+
+
+class WordPressDeploymentReconciliationVerifyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audit_id: int = Field(gt=0)
+    manual_browser_evidence: WordPressManualBrowserEvidence
+    expected_plugin_slug: str = Field(min_length=3, max_length=100)
+    expected_plugin_path: str = Field(min_length=3, max_length=255)
+    expected_plugin_version: str = Field(min_length=1, max_length=32)
+    expected_zip_sha256: str = Field(min_length=64, max_length=64)
+    expected_plugin_inventory_hash: str = Field(min_length=64, max_length=64)
+    expected_active_plugin_inventory_hash: str = Field(min_length=64, max_length=64)
+    expected_page_snapshot_hash: str = Field(min_length=64, max_length=64)
+    expected_body_hash: str = Field(min_length=64, max_length=64)
+    expected_media31_snapshot_hash: str = Field(min_length=64, max_length=64)
+    expected_media32_snapshot_hash: str = Field(min_length=64, max_length=64)
+    expected_runtime_identity: WordPressDeploymentExpectedRuntimeIdentity
+
+    @field_validator(
+        "expected_zip_sha256",
+        "expected_plugin_inventory_hash",
+        "expected_active_plugin_inventory_hash",
+        "expected_page_snapshot_hash",
+        "expected_body_hash",
+        "expected_media31_snapshot_hash",
+        "expected_media32_snapshot_hash",
+    )
+    @classmethod
+    def validate_lower_hex(cls, value: str) -> str:
+        if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError("Expected hashes must be 64 lowercase hexadecimal characters.")
+        return value
+
+
+class WordPressDeploymentReconciliationVerification(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    audit_id: int
+    status: Literal["reconciliation_blocked", "reconciliation_ready"]
+    reconciliation_ready: bool
+    reconciliation_handle: str | None = None
+    confirmation_phrase: str | None = None
+    binding_hash: str | None = None
+    expires_at: datetime | None = None
+    gate_results: list[WordPressDraftGateResult]
+    inspected_state: dict[str, Any]
+    proposed_atlas_changes: list[str]
+    inspection_only: Literal[True] = True
+    installation_token_issued: Literal[False] = False
+    installation_nonce_consumed: Literal[False] = False
+    deployment_audit_created: Literal[False] = False
+    wordpress_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+
+
+class WordPressDeploymentReconciliationApplyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reconciliation_handle: str = Field(min_length=32, max_length=200)
+    confirmation_phrase: str = Field(min_length=1, max_length=100)
+
+
+class WordPressDeploymentReconciliationResult(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    audit_id: int
+    status: Literal["verified"]
+    completion_mode: Literal["installed_inactive_reconciliation"] = "installed_inactive_reconciliation"
+    binding_hash: str
+    state_history: list[str]
+    wordpress_write_count: Literal[0] = 0
+    atlas_write_count: Literal[2] = 2
+    original_authorization_nonce_preserved: Literal[True] = True
+    original_transition_history_preserved: Literal[True] = True
+    further_reconciliation_required: Literal[False] = False

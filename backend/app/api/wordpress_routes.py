@@ -53,6 +53,10 @@ from app.schemas.wordpress import (
     WordPressDeploymentManualComplete,
     WordPressDeploymentPreflight,
     WordPressDeploymentPreflightRequest,
+    WordPressDeploymentReconciliationApplyRequest,
+    WordPressDeploymentReconciliationResult,
+    WordPressDeploymentReconciliationVerification,
+    WordPressDeploymentReconciliationVerifyRequest,
     WordPressDeploymentVerifyRequest,
     WordPressDeploymentVerification,
     WordPressHeadingCorrectionApplyRequest,
@@ -107,11 +111,13 @@ from app.services.wordpress_metadata import (
     reconcile_wordpress_metadata,
 )
 from app.services.wordpress_deployment import (
+    apply_install_reconciliation,
     authorize_manual_install,
     deployment_readiness,
     inspect_installation_preflight,
     install_dry_run,
     report_manual_complete,
+    verify_install_reconciliation,
     verify_manual_install,
 )
 from app.services.wordpress_heading_correction import (
@@ -188,6 +194,16 @@ def metadata_bridge_install_report(page_id: int, payload: WordPressDeploymentMan
 @router.post("/deployment/metadata-bridge/install/verify/{page_id}", response_model=WordPressDeploymentVerification)
 def metadata_bridge_install_verify(page_id: int, payload: WordPressDeploymentVerifyRequest, session: Session = Depends(get_session)) -> WordPressDeploymentVerification:
     return verify_manual_install(session, page_id, payload)
+
+
+@router.post("/deployment/metadata-bridge/install/reconciliation/verify/{page_id}", response_model=WordPressDeploymentReconciliationVerification)
+def metadata_bridge_install_reconciliation_verify(page_id: int, payload: WordPressDeploymentReconciliationVerifyRequest, session: Session = Depends(get_session)) -> WordPressDeploymentReconciliationVerification:
+    return verify_install_reconciliation(session, page_id, payload)
+
+
+@router.post("/deployment/metadata-bridge/install/reconciliation/apply/{page_id}", response_model=WordPressDeploymentReconciliationResult)
+def metadata_bridge_install_reconciliation_apply(page_id: int, payload: WordPressDeploymentReconciliationApplyRequest, session: Session = Depends(get_session)) -> WordPressDeploymentReconciliationResult:
+    return apply_install_reconciliation(session, page_id, payload)
 
 
 @router.get("/settings", response_model=WordPressSettingsRead)

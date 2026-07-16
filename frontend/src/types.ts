@@ -936,6 +936,20 @@ export type WordPressDeploymentVerification = {
   audit_id: number; status: "verified" | "verification_failed" | "reconciliation_required"; verified: boolean;
   gate_results: WordPressDeploymentGate[]; inspected_state: Record<string, unknown>; read_only_wordpress: true; state_history: string[]; inspection_limitations: string[];
 };
+export type WordPressDeploymentReconciliationVerification = {
+  page_id: 41; wordpress_post_id: 8; audit_id: number; status: "reconciliation_blocked" | "reconciliation_ready";
+  reconciliation_ready: boolean; reconciliation_handle?: string | null; confirmation_phrase?: string | null;
+  binding_hash?: string | null; expires_at?: string | null; gate_results: WordPressDeploymentGate[];
+  inspected_state: Record<string, unknown>; proposed_atlas_changes: string[]; inspection_only: true;
+  installation_token_issued: false; installation_nonce_consumed: false; deployment_audit_created: false;
+  wordpress_write_count: 0; atlas_write_count: 0;
+};
+export type WordPressDeploymentReconciliationResult = {
+  page_id: 41; wordpress_post_id: 8; audit_id: number; status: "verified";
+  completion_mode: "installed_inactive_reconciliation"; binding_hash: string; state_history: string[];
+  wordpress_write_count: 0; atlas_write_count: 2; original_authorization_nonce_preserved: true;
+  original_transition_history_preserved: true; further_reconciliation_required: false;
+};
 export type WordPressMetadataVerification = { status: "verified" | "failed" | "not_applied"; metadata_correct: boolean; apply_needed: boolean; payload_hash: string; live_payload_hash?: string | null; gate_results: WordPressMetadataGate[]; read_only: true };
 export type WordPressMetadataRollbackDryRun = { status: "blocked" | "rollback_ready"; ready: boolean; current_payload_hash?: string | null; gate_results: WordPressMetadataGate[]; confirmation_token?: string | null; confirmation_phrase?: string | null; expires_at?: string | null };
 
