@@ -25,6 +25,9 @@ backend/test_media/
 # Frontend
 node_modules/
 dist/
+!wordpress/dist/
+wordpress/dist/*
+!wordpress/dist/project-atlas-upgrade-bootstrap-0.1.0.zip
 
 # Local editor and OS files
 .DS_Store

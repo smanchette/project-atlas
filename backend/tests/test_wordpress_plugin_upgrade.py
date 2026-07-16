@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+import hashlib
 import inspect
+import zipfile
 
 import pytest
 from fastapi import HTTPException
@@ -126,6 +128,29 @@ def status(version=upgrade.CURRENT_VERSION):
     }
 
 
+def bootstrap_status(*, available=True, plugin_version=upgrade.CURRENT_VERSION):
+    return {
+        "bootstrap": "project-atlas-upgrade-bootstrap",
+        "bootstrap_version": upgrade.BOOTSTRAP_VERSION,
+        "bootstrap_checksum": upgrade.BOOTSTRAP_ENTRY_SHA256,
+        "operation": "upgrade_metadata_bridge_0.57.4_to_0.57.5",
+        "application_password_compatible": True,
+        "target_plugin": deployment.PLUGIN_FILE,
+        "current_version": upgrade.CURRENT_VERSION,
+        "target_version": upgrade.TARGET_VERSION,
+        "target_zip": deployment.ZIP_NAME,
+        "target_zip_sha256": deployment.ZIP_SHA256,
+        "available": available,
+        "plugin": {
+            "installed": True,
+            "active": True,
+            "version": plugin_version,
+        },
+        "status_code": 200,
+        "request_method": "GET",
+    }
+
+
 def artifact():
     return {
         "atlas_version": VERSION,
@@ -238,6 +263,7 @@ def configure(monkeypatch, before=None):
     before = before or observation()
     monkeypatch.setattr(upgrade, "_observe", lambda session, proof: deepcopy(before))
     monkeypatch.setattr(upgrade, "_read_plugin_status", lambda session: status(before["plugins"][0]["version"]))
+    monkeypatch.setattr(upgrade, "_read_bootstrap_status", lambda session: bootstrap_status())
     monkeypatch.setattr(upgrade, "_verify_artifact", lambda: (artifact(), [upgrade._gate("release_identity", "release", True, "")]))
     monkeypatch.setattr(upgrade, "_backup_gates", lambda proof: [upgrade._gate("backups", "backups", True, "")])
     return before
@@ -271,13 +297,20 @@ def test_apply_uses_one_fixed_upgrade_and_finalizes_audit(monkeypatch, db):
         return deepcopy(before if calls["observe"] <= 2 else after)
     monkeypatch.setattr(upgrade, "_observe", observe)
     monkeypatch.setattr(upgrade, "_read_plugin_status", lambda session: status(upgrade.CURRENT_VERSION) if calls["observe"] <= 2 else status(upgrade.TARGET_VERSION))
-    monkeypatch.setattr(upgrade, "_acquire_upgrade_nonce", lambda session: "nonce-not-returned")
-    def send(session, nonce):
+    def send(session):
         calls["upgrade"] += 1
         pending = session.exec(select(WordPressPluginUpgradeAudit)).one()
         assert pending.status == "pending" and pending.wordpress_write_count == 0
         return {"status_code": 200, "accepted": True}
     monkeypatch.setattr(upgrade, "_send_fixed_upgrade", send)
+    monkeypatch.setattr(
+        upgrade,
+        "_read_bootstrap_status",
+        lambda session: bootstrap_status(
+            available=calls["observe"] <= 2,
+            plugin_version=upgrade.CURRENT_VERSION if calls["observe"] <= 2 else upgrade.TARGET_VERSION,
+        ),
+    )
     monkeypatch.setattr(upgrade, "_read_route_registry", lambda session: {"routes": sorted(upgrade.LIFECYCLE_ROUTES | {upgrade.LEGACY_ROUTE}), "legacy_route_registered": True, "request_method": "GET"})
     with Session(db) as session:
         seed(session)
@@ -295,8 +328,7 @@ def test_apply_uses_one_fixed_upgrade_and_finalizes_audit(monkeypatch, db):
 
 def test_handle_replay_wrong_phrase_expiry_and_restart_block(monkeypatch, db):
     before = configure(monkeypatch)
-    monkeypatch.setattr(upgrade, "_acquire_upgrade_nonce", lambda session: "nonce")
-    monkeypatch.setattr(upgrade, "_send_fixed_upgrade", lambda session, nonce: {"_error": "simulated"})
+    monkeypatch.setattr(upgrade, "_send_fixed_upgrade", lambda session: {"_error": "simulated"})
     with Session(db) as session:
         seed(session)
         preflight = upgrade.plugin_upgrade_preflight(session, 41, request(before))
@@ -404,8 +436,15 @@ def test_post_upgrade_failure_records_recovery_without_automatic_rollback(monkey
     calls = {"observe": 0, "send": 0}
     monkeypatch.setattr(upgrade, "_observe", lambda session, proof: deepcopy(before if (calls.__setitem__("observe", calls["observe"] + 1) or calls["observe"] <= 2) else after))
     monkeypatch.setattr(upgrade, "_read_plugin_status", lambda session: status(upgrade.CURRENT_VERSION) if calls["observe"] <= 2 else status(upgrade.TARGET_VERSION))
-    monkeypatch.setattr(upgrade, "_acquire_upgrade_nonce", lambda session: "nonce")
-    monkeypatch.setattr(upgrade, "_send_fixed_upgrade", lambda session, nonce: calls.__setitem__("send", calls["send"] + 1) or {"status_code": 200, "accepted": True})
+    monkeypatch.setattr(upgrade, "_send_fixed_upgrade", lambda session: calls.__setitem__("send", calls["send"] + 1) or {"status_code": 200, "accepted": True})
+    monkeypatch.setattr(
+        upgrade,
+        "_read_bootstrap_status",
+        lambda session: bootstrap_status(
+            available=calls["observe"] <= 2,
+            plugin_version=upgrade.CURRENT_VERSION if calls["observe"] <= 2 else upgrade.TARGET_VERSION,
+        ),
+    )
     monkeypatch.setattr(upgrade, "_read_route_registry", lambda session: {"routes": sorted(upgrade.LIFECYCLE_ROUTES | {upgrade.LEGACY_ROUTE}), "legacy_route_registered": True, "request_method": "GET"})
     with Session(db) as session:
         seed(session)
@@ -419,14 +458,168 @@ def test_post_upgrade_failure_records_recovery_without_automatic_rollback(monkey
 def test_write_transport_is_fixed_and_has_no_other_mutation_surface():
     source = inspect.getsource(upgrade._send_fixed_upgrade)
     assert "client.post" in source
-    assert "/wp-admin/update.php?action=upload-plugin" in source
-    assert '"overwrite_package": "1"' in source
+    assert "BOOTSTRAP_UPGRADE_ROUTE" in source
+    assert "/wp-admin/" not in source
+    assert "_wpnonce" not in source
+    assert "pluginzip" not in source
+    assert '"artifact"' in source
     assert "ZIP_NAME" in source
-    for forbidden in ("wp/v2/pages", "wp/v2/media", "metadata/stage", "rendering/enable", "purge", "DELETE", "client.put", "client.patch"):
+    for forbidden in ("wp/v2/pages", "wp/v2/media", "metadata/stage", "rendering/enable", "purge", "DELETE", "client.put", "client.patch", "cookie", "administrator_password"):
         assert forbidden not in source
+    assert not hasattr(upgrade, "_acquire_upgrade_nonce")
     preflight = inspect.getsource(upgrade.plugin_upgrade_preflight)
     assert "session.commit" not in preflight
     assert "_send_fixed_upgrade" not in preflight
+
+
+def test_fixed_transport_uses_application_password_rest_and_exact_artifact(monkeypatch):
+    captured = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "operation": "upgrade_metadata_bridge_0.57.4_to_0.57.5",
+                "accepted": True,
+                "plugin": deployment.PLUGIN_FILE,
+                "previous_version": upgrade.CURRENT_VERSION,
+                "target_version": upgrade.TARGET_VERSION,
+                "active": True,
+                "entry_sha256": upgrade._target_entry_sha256(),
+                "bootstrap_reusable": False,
+            }
+
+    class Client:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, **kwargs):
+            captured["url"] = url
+            captured["request"] = kwargs
+            return Response()
+
+    monkeypatch.setattr(upgrade, "read_wordpress_settings", lambda session: type("Settings", (), {"site_url": "https://example.test", "username": "atlas"})())
+    monkeypatch.setattr(upgrade, "get_wordpress_application_password", lambda: "process-memory-only")
+    monkeypatch.setattr(upgrade.httpx, "Client", Client)
+    result = upgrade._send_fixed_upgrade(object())
+    assert result == {"status_code": 200, "accepted": True, "_error": None}
+    assert captured["url"] == f"https://example.test/wp-json{upgrade.BOOTSTRAP_UPGRADE_ROUTE}"
+    assert set(captured["request"]) == {"files", "auth", "headers"}
+    assert set(captured["request"]["files"]) == {"artifact"}
+    name, body, content_type = captured["request"]["files"]["artifact"]
+    assert name == deployment.ZIP_NAME
+    assert hashlib.sha256(body).hexdigest() == deployment.ZIP_SHA256
+    assert content_type == "application/zip"
+
+
+def test_fixed_transport_fails_closed_without_credentials_or_valid_response(monkeypatch):
+    monkeypatch.setattr(upgrade, "read_wordpress_settings", lambda session: type("Settings", (), {"site_url": "https://example.test", "username": "atlas"})())
+    monkeypatch.setattr(upgrade, "get_wordpress_application_password", lambda: None)
+    assert upgrade._send_fixed_upgrade(object()) == {"_error": "credentials_unavailable"}
+
+    class Response:
+        status_code = 404
+
+        @staticmethod
+        def json():
+            return {}
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, **kwargs):
+            return Response()
+
+    monkeypatch.setattr(upgrade, "get_wordpress_application_password", lambda: "wrong-or-unaccepted")
+    monkeypatch.setattr(upgrade.httpx, "Client", Client)
+    result = upgrade._send_fixed_upgrade(object())
+    assert result["accepted"] is False
+    assert result["_error"] == "fixed_bootstrap_http_404_unconfirmed"
+
+
+def test_preflight_contract_rejects_caller_controlled_transport_fields():
+    before = observation()
+    raw = request(before).model_dump(mode="python")
+    for field, value in {
+        "wordpress_endpoint": "https://attacker.invalid/upload",
+        "http_method": "DELETE",
+        "artifact_url": "https://attacker.invalid/plugin.zip",
+        "upload_body": {"path": "../"},
+    }.items():
+        with pytest.raises(Exception):
+            WordPressPluginUpgradePreflightRequest(**{**raw, field: value})
+
+
+def test_bootstrap_is_required_and_unavailable_helper_blocks(monkeypatch, db):
+    before = configure(monkeypatch)
+    monkeypatch.setattr(upgrade, "_read_bootstrap_status", lambda session: {"_error": "upgrade_bootstrap_unavailable"})
+    with Session(db) as session:
+        seed(session)
+        result = upgrade.plugin_upgrade_preflight(session, 41, request(before))
+        assert not result.plugin_upgrade_preflight_ready
+        assert "upgrade_bootstrap" in {gate.code for gate in result.gate_results if not gate.passed}
+        assert session.exec(select(WordPressPluginUpgradeAudit)).first() is None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"available": False},
+        {"bootstrap_version": "9.9.9"},
+        {"application_password_compatible": False},
+        {"target_plugin": "other/plugin.php"},
+        {"current_version": "0.57.3"},
+        {"target_version": "0.57.6"},
+        {"target_zip_sha256": "f" * 64},
+    ],
+)
+def test_bootstrap_identity_drift_blocks(monkeypatch, db, change):
+    before = configure(monkeypatch)
+    changed = bootstrap_status()
+    changed.update(change)
+    monkeypatch.setattr(upgrade, "_read_bootstrap_status", lambda session: deepcopy(changed))
+    with Session(db) as session:
+        seed(session)
+        result = upgrade.plugin_upgrade_preflight(session, 41, request(before))
+        assert not result.plugin_upgrade_preflight_ready
+        assert "upgrade_bootstrap" in {gate.code for gate in result.gate_results if not gate.passed}
+
+
+def test_bootstrap_artifact_and_php_contract_are_locked():
+    root = upgrade.resolve_program_root()
+    bootstrap_zip = root / "wordpress" / "dist" / upgrade.BOOTSTRAP_ZIP_NAME
+    assert hashlib.sha256(bootstrap_zip.read_bytes()).hexdigest() == upgrade.BOOTSTRAP_ZIP_SHA256
+    with zipfile.ZipFile(bootstrap_zip) as archive:
+        names = archive.namelist()
+        assert sorted(names) == sorted([
+            "project-atlas-upgrade-bootstrap/README.md",
+            "project-atlas-upgrade-bootstrap/project-atlas-upgrade-bootstrap.php",
+        ])
+        php = archive.read("project-atlas-upgrade-bootstrap/project-atlas-upgrade-bootstrap.php").decode()
+    assert "current_user_can('update_plugins')" in php
+    assert "is_uploaded_file" in php
+    assert "ATLAS_UPGRADE_BOOTSTRAP_TARGET_ZIP_SHA256" in php
+    assert "Plugin_Upgrader" in php
+    assert "overwrite_package' => true" in php
+    assert "ATLAS_UPGRADE_BOOTSTRAP_CURRENT_VERSION" in php
+    assert "ATLAS_UPGRADE_BOOTSTRAP_TARGET_VERSION" in php
+    for forbidden in ("wp_remote_get", "download_url", "ftp_", "ssh", "WP_CLI", "delete_plugins(", "activate_plugin(", "deactivate_plugins("):
+        assert forbidden not in php
 
 
 def test_target_and_current_zip_contracts_are_locked():

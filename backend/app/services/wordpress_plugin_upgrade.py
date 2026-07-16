@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import hashlib
 import hmac
-import re
 import secrets
 from threading import Lock, Timer
 from typing import Any
@@ -65,10 +64,16 @@ CURRENT_ZIP_SHA256 = "939412e6e80e8344d95274444fda65b6122fe0c8249a2ced0a8582a418
 TARGET_VERSION = "0.57.5"
 UPGRADE_PHRASE = "UPGRADE PROJECT ATLAS METADATA BRIDGE TO 0.57.5"
 UPGRADE_TTL = timedelta(minutes=10)
+BOOTSTRAP_VERSION = "0.1.0"
+BOOTSTRAP_STATUS_ROUTE = "/project-atlas-deployment/v1/metadata-bridge/upgrade-0575/status"
+BOOTSTRAP_UPGRADE_ROUTE = "/project-atlas-deployment/v1/metadata-bridge/upgrade-0575"
+BOOTSTRAP_ZIP_NAME = "project-atlas-upgrade-bootstrap-0.1.0.zip"
+BOOTSTRAP_ZIP_SHA256 = "4c8b4b0c697b2b352a10f405950c7b6a750236be96aec81fcd45176ece1189bd"
+BOOTSTRAP_ENTRY_SHA256 = "e4a67be1a8632c8417325eb253cecdb7efb1b5e2a4b3e93db59d622f26f3a4d0"
 UPGRADE_WORDPRESS_SCOPE = [
-    "POST /wp-admin/update.php?action=upload-plugin",
-    f"multipart pluginzip fixed to {ZIP_NAME}",
-    "overwrite_package=1; existing plugin slug and active status preserved",
+    f"POST /wp-json{BOOTSTRAP_UPGRADE_ROUTE}",
+    f"multipart artifact fixed to {ZIP_NAME} and SHA-256 {ZIP_SHA256}",
+    "single-purpose bootstrap replaces only the existing bridge; active status is preserved",
 ]
 UPGRADE_ATLAS_SCOPE = [
     "create one pending WordPressPluginUpgradeAudit before the WordPress request",
@@ -117,9 +122,11 @@ def plugin_upgrade_preflight(
         evidence_reason = "Plugin upgrade requires fresh schema-v1 evidence."
     artifact, artifact_gates = _verify_artifact()
     current_artifact, current_artifact_gates = _verify_current_artifact()
+    bootstrap_artifact, bootstrap_artifact_gates = _verify_bootstrap_artifact()
     release_ok = any(g.code == "release_identity" and g.passed for g in artifact_gates)
     observed = _observe(session, proof) if evidence_valid and release_ok else _unavailable_observation(evidence_reason)
     plugin_status = _read_plugin_status(session) if observed.get("wordpress_request_performed") else {"_error": "observation_unavailable"}
+    bootstrap_status = _read_bootstrap_status(session) if observed.get("wordpress_request_performed") else {"_error": "observation_unavailable"}
     installation = session.get(WordPressDeploymentAudit, request.installation_audit_id)
     activation = session.get(WordPressActivationAudit, request.activation_audit_id)
     prior_upgrades = list(session.exec(select(WordPressPluginUpgradeAudit)))
@@ -130,11 +137,12 @@ def plugin_upgrade_preflight(
     gates = [
         *artifact_gates,
         *current_artifact_gates,
+        *bootstrap_artifact_gates,
         *_backup_gates(proof),
         *_upgrade_gates(
             request, installation, activation, prior_upgrades, lifecycle,
             metadata_states, metadata_audits, observed, plugin_status,
-            artifact, current_artifact, expected_post, evidence_valid,
+            bootstrap_status, bootstrap_artifact, artifact, current_artifact, expected_post, evidence_valid,
             evidence_reason,
         ),
     ]
@@ -147,7 +155,7 @@ def plugin_upgrade_preflight(
             _backup_deadline(proof.wordpress_backup_completed_at),
         )
     binding = _binding(
-        request, installation, activation, observed, plugin_status,
+        request, installation, activation, observed, plugin_status, bootstrap_status,
         artifact, current_artifact, expected_post, expires_at,
     )
     binding_hash = _hash(binding)
@@ -167,8 +175,15 @@ def plugin_upgrade_preflight(
         binding_hash=binding_hash if ready else None,
         expires_at=expires_at if ready else None,
         backup_deadline=_backup_deadline(proof.wordpress_backup_completed_at) if proof.wordpress_backup_completed_at.tzinfo else None,
-        artifact={**artifact, "current_artifact": current_artifact},
-        inspected_state=_public_snapshot(observed, plugin_status, metadata_states, metadata_audits),
+        artifact={
+            **artifact,
+            "current_artifact": current_artifact,
+            "upgrade_bootstrap_artifact": bootstrap_artifact,
+        },
+        inspected_state={
+            **_public_snapshot(observed, plugin_status, metadata_states, metadata_audits),
+            "upgrade_bootstrap": _safe_bootstrap_status(bootstrap_status),
+        },
         gate_results=gates,
         proposed_wordpress_write_scope=UPGRADE_WORDPRESS_SCOPE if ready else [],
         proposed_atlas_write_scope=UPGRADE_ATLAS_SCOPE if ready else [],
@@ -182,7 +197,7 @@ def apply_plugin_upgrade(
     page_id: int,
     request: WordPressPluginUpgradeApplyRequest,
 ) -> WordPressPluginUpgradeResult:
-    """Consume one handle and invoke the one fixed standard-upgrader request."""
+    """Consume one handle and invoke the one fixed bootstrap REST request."""
     _target(page_id)
     if not hmac.compare_digest(request.confirmation_phrase, UPGRADE_PHRASE):
         raise HTTPException(422, "The Metadata Bridge upgrade phrase is incorrect.")
@@ -192,9 +207,6 @@ def apply_plugin_upgrade(
     )
     if not rerun.plugin_upgrade_preflight_ready or rerun.binding_hash != entry.binding_hash:
         raise HTTPException(409, "Plugin upgrade state changed. Run a new token-free preflight.")
-    nonce = _acquire_upgrade_nonce(session)
-    if not nonce:
-        raise HTTPException(409, "WordPress did not provide the standard plugin-upload nonce. No upgrade was attempted.")
     evidence = entry.request.manual_browser_evidence
     handle_fingerprint = hashlib.sha256(request.upgrade_handle.encode()).hexdigest()
     audit = WordPressPluginUpgradeAudit(
@@ -234,7 +246,7 @@ def apply_plugin_upgrade(
     session.add(audit)
     session.commit()
     session.refresh(audit)
-    response = _send_fixed_upgrade(session, nonce)
+    response = _send_fixed_upgrade(session)
     audit.wordpress_write_count = 1
     if response.get("_error"):
         return _finalize(session, audit, "failed", [
@@ -242,8 +254,9 @@ def apply_plugin_upgrade(
         ], {"upgrade_response": response}, "siteground_restore")
     observed = _observe(session, _proof(entry.request))
     plugin_status = _read_plugin_status(session)
+    bootstrap_status = _read_bootstrap_status(session)
     routes = _read_route_registry(session)
-    post_gates = _post_upgrade_gates(entry.request, rerun.inspected_state, observed, plugin_status, routes)
+    post_gates = _post_upgrade_gates(entry.request, rerun.inspected_state, observed, plugin_status, bootstrap_status, routes)
     status = "verified" if all(g.passed for g in post_gates) else "verification_failed"
     recommendation = "no_action" if status == "verified" else _recovery_recommendation(observed, plugin_status)
     snapshot = {
@@ -253,6 +266,7 @@ def apply_plugin_upgrade(
             list(session.exec(select(WordPressMetadataSyncAudit).where(WordPressMetadataSyncAudit.generated_page_id == 41))),
         ),
         "route_registry": routes,
+        "upgrade_bootstrap": _safe_bootstrap_status(bootstrap_status),
         "upgrade_response": _safe_upgrade_response(response),
     }
     return _finalize(session, audit, status, post_gates, snapshot, recommendation)
@@ -284,7 +298,7 @@ def assess_plugin_upgrade_recovery(
     )
 
 
-def _upgrade_gates(request, installation, activation, prior_upgrades, lifecycle, metadata_states, metadata_audits, observed, plugin_status, artifact, current_artifact, expected_post, evidence_valid, evidence_reason):
+def _upgrade_gates(request, installation, activation, prior_upgrades, lifecycle, metadata_states, metadata_audits, observed, plugin_status, bootstrap_status, bootstrap_artifact, artifact, current_artifact, expected_post, evidence_valid, evidence_reason):
     matches = _matching_reconciliation_plugins(observed.get("plugins", []))
     rendered = observed.get("rendered", {})
     page = observed.get("page", {})
@@ -318,6 +332,22 @@ def _upgrade_gates(request, installation, activation, prior_upgrades, lifecycle,
         _gate("active_inventory", "Current active-plugin inventory hash is exact", observed.get("active_plugin_inventory_hash") == request.expected_active_plugin_inventory_hash, "Active-plugin inventory changed."),
         _gate("target_version", "Upgrade is exactly 0.57.4 to 0.57.5", request.target_plugin_version == TARGET_VERSION == artifact.get("plugin_version"), "Target version differs."),
         _gate("target_artifact", "Target filename and checksum are exact", request.target_zip_filename == ZIP_NAME and request.target_zip_sha256 == ZIP_SHA256 == artifact.get("zip_sha256"), "Target artifact differs."),
+        _gate(
+            "upgrade_bootstrap",
+            "Separately approved single-purpose bootstrap is active and bound to the fixed upgrade",
+            bootstrap_status.get("bootstrap") == "project-atlas-upgrade-bootstrap"
+            and bootstrap_status.get("bootstrap_version") == BOOTSTRAP_VERSION
+            and bootstrap_status.get("bootstrap_checksum") == bootstrap_artifact.get("entry_sha256") == BOOTSTRAP_ENTRY_SHA256
+            and bootstrap_status.get("operation") == "upgrade_metadata_bridge_0.57.4_to_0.57.5"
+            and bootstrap_status.get("application_password_compatible") is True
+            and bootstrap_status.get("target_plugin") == PLUGIN_FILE
+            and bootstrap_status.get("current_version") == CURRENT_VERSION
+            and bootstrap_status.get("target_version") == TARGET_VERSION
+            and bootstrap_status.get("target_zip") == ZIP_NAME
+            and bootstrap_status.get("target_zip_sha256") == ZIP_SHA256
+            and bootstrap_status.get("available") is True,
+            "The separately approved fixed upgrade bootstrap is absent, inactive, mismatched, or unavailable.",
+        ),
         _gate("metadata_rows", "Atlas metadata state and sync-audit rows remain zero", len(metadata_states) == len(metadata_audits) == 0, "Metadata rows already exist."),
         _gate("rendering_disabled", "Rendering remains disabled", status_snapshot.get("rendering_enabled") is False and status_snapshot.get("enabled_metadata_state") is False, "Rendering is enabled."),
         _gate("payload_absent", "Metadata payload and hash remain empty", status_snapshot.get("payload") is None and not status_snapshot.get("payload_hash"), "Metadata payload exists."),
@@ -337,7 +367,7 @@ def _upgrade_gates(request, installation, activation, prior_upgrades, lifecycle,
     ]
 
 
-def _post_upgrade_gates(request, before, after, plugin_status, routes):
+def _post_upgrade_gates(request, before, after, plugin_status, bootstrap_status, routes):
     matches = _matching_reconciliation_plugins(after.get("plugins", []))
     rendered = after.get("rendered", {})
     status_snapshot = plugin_status.get("snapshot", {}) if isinstance(plugin_status.get("snapshot"), dict) else plugin_status
@@ -362,11 +392,20 @@ def _post_upgrade_gates(request, before, after, plugin_status, routes):
         _gate("cache_boundary", "No cache purge occurred", after.get("cache_headers") == before.get("cache_headers"), "Cache observation changed."),
         _gate("lifecycle_routes", "Separated 0.57.5 lifecycle routes are registered", LIFECYCLE_ROUTES <= set(routes.get("routes", [])), "Separated lifecycle routes are missing."),
         _gate("legacy_route_disabled", "Locked 0.57.5 artifact keeps the legacy combined route disabled with HTTP 410", routes.get("legacy_route_registered") is True and _target_artifact_disables_legacy_route(), "Legacy route contract is not disabled."),
+        _gate(
+            "bootstrap_fail_closed",
+            "Upgrade bootstrap is no longer reusable after the fixed version transition",
+            bootstrap_status.get("bootstrap") == "project-atlas-upgrade-bootstrap"
+            and bootstrap_status.get("bootstrap_version") == BOOTSTRAP_VERSION
+            and bootstrap_status.get("available") is False
+            and bootstrap_status.get("plugin", {}).get("version") == TARGET_VERSION,
+            "The single-purpose bootstrap did not become fail-closed after upgrade.",
+        ),
         _gate("read_only_verification", "Post-upgrade verification uses GET requests only", after.get("wordpress_request_methods") == ["GET"] and routes.get("request_method") == "GET", "Post-upgrade verification attempted a mutation."),
     ]
 
 
-def _send_fixed_upgrade(session: Session, nonce: str) -> dict[str, Any]:
+def _send_fixed_upgrade(session: Session) -> dict[str, Any]:
     """The only WordPress mutation reachable from this service."""
     settings = read_wordpress_settings(session)
     password = get_wordpress_application_password()
@@ -376,50 +415,52 @@ def _send_fixed_upgrade(session: Session, nonce: str) -> dict[str, Any]:
     try:
         with httpx.Client(timeout=60, follow_redirects=False) as client:
             response = client.post(
-                f"{settings.site_url.rstrip('/')}/wp-admin/update.php?action=upload-plugin",
-                data={
-                    "_wpnonce": nonce,
-                    "_wp_http_referer": "/wp-admin/plugin-install.php?tab=upload",
-                    "overwrite_package": "1",
-                    "install-plugin-submit": "Install Now",
-                },
-                files={"pluginzip": (ZIP_NAME, zip_path.read_bytes(), "application/zip")},
+                f"{settings.site_url.rstrip('/')}/wp-json{BOOTSTRAP_UPGRADE_ROUTE}",
+                files={"artifact": (ZIP_NAME, zip_path.read_bytes(), "application/zip")},
                 auth=httpx.BasicAuth(settings.username, password),
                 headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
             )
-        body = response.text[:200_000]
-        accepted = response.status_code == 200 and (
-            "Plugin updated successfully" in body
-            or "Plugin installed successfully" in body
+        payload = response.json() if response.status_code == 200 else {}
+        accepted = (
+            response.status_code == 200
+            and isinstance(payload, dict)
+            and payload.get("accepted") is True
+            and payload.get("operation") == "upgrade_metadata_bridge_0.57.4_to_0.57.5"
+            and payload.get("plugin") == PLUGIN_FILE
+            and payload.get("previous_version") == CURRENT_VERSION
+            and payload.get("target_version") == TARGET_VERSION
+            and payload.get("active") is True
+            and payload.get("entry_sha256") == _target_entry_sha256()
+            and payload.get("bootstrap_reusable") is False
         )
         return {
             "status_code": response.status_code,
             "accepted": accepted,
-            "_error": None if accepted else f"standard_upgrader_http_{response.status_code}_unconfirmed",
+            "_error": None if accepted else f"fixed_bootstrap_http_{response.status_code}_unconfirmed",
         }
-    except (OSError, httpx.HTTPError) as exc:
+    except (OSError, ValueError, httpx.HTTPError) as exc:
         return {"_error": exc.__class__.__name__}
 
 
-def _acquire_upgrade_nonce(session: Session) -> str | None:
-    """Read and parse the standard upload nonce transiently; never persist or return it."""
+def _read_bootstrap_status(session: Session) -> dict[str, Any]:
+    """Read the fixed helper identity through application-password REST authentication."""
     settings = read_wordpress_settings(session)
     password = get_wordpress_application_password()
     if not (settings.site_url and settings.username and password):
-        return None
+        return {"_error": "credentials_unavailable"}
     try:
-        with httpx.Client(timeout=20, follow_redirects=False) as client:
+        with httpx.Client(timeout=15, follow_redirects=False) as client:
             response = client.get(
-                f"{settings.site_url.rstrip('/')}/wp-admin/plugin-install.php?tab=upload",
+                f"{settings.site_url.rstrip('/')}/wp-json{BOOTSTRAP_STATUS_ROUTE}",
                 auth=httpx.BasicAuth(settings.username, password),
                 headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
             )
-        if response.status_code != 200:
-            return None
-        match = re.search(r'name=["\']_wpnonce["\'][^>]*value=["\']([^"\']+)["\']', response.text)
-        return match.group(1) if match else None
-    except httpx.HTTPError:
-        return None
+        payload = response.json() if response.status_code == 200 else {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return {**payload, "status_code": response.status_code, "request_method": "GET"}
+    except (httpx.HTTPError, ValueError):
+        return {"_error": "upgrade_bootstrap_unavailable", "request_method": "GET"}
 
 
 def _read_route_registry(session: Session) -> dict[str, Any]:
@@ -478,6 +519,42 @@ def _verify_current_artifact() -> tuple[dict[str, Any], list[WordPressDraftGateR
     ]
 
 
+def _verify_bootstrap_artifact() -> tuple[dict[str, Any], list[WordPressDraftGateResult]]:
+    path = resolve_program_root() / "wordpress" / "dist" / BOOTSTRAP_ZIP_NAME
+    entry = "project-atlas-upgrade-bootstrap/project-atlas-upgrade-bootstrap.php"
+    readme = "project-atlas-upgrade-bootstrap/README.md"
+    try:
+        raw = path.read_bytes()
+        sha = hashlib.sha256(raw).hexdigest()
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+            entry_raw = archive.read(entry)
+            readme_raw = archive.read(readme)
+            valid = (
+                len(names) == len(set(names)) == 2
+                and set(names) == {entry, readme}
+                and all("\\" not in name and ".." not in name.split("/") for name in names)
+                and b"Version: 0.1.0" in entry_raw
+                and b"ATLAS_UPGRADE_BOOTSTRAP_TARGET_ZIP_SHA256" in entry_raw
+                and b"current_user_can('update_plugins')" in entry_raw
+            )
+            entry_sha = hashlib.sha256(entry_raw).hexdigest()
+    except (OSError, KeyError, zipfile.BadZipFile):
+        sha = entry_sha = None
+        valid = False
+    artifact = {
+        "version": BOOTSTRAP_VERSION,
+        "zip_filename": BOOTSTRAP_ZIP_NAME,
+        "zip_sha256": sha,
+        "entry_sha256": entry_sha,
+        "portable": valid,
+    }
+    return artifact, [
+        _gate("bootstrap_artifact_hash", "Upgrade bootstrap ZIP checksum is exact", sha == BOOTSTRAP_ZIP_SHA256, "Upgrade bootstrap checksum differs."),
+        _gate("bootstrap_artifact_portable", "Upgrade bootstrap ZIP structure and contract are exact", valid and entry_sha == BOOTSTRAP_ENTRY_SHA256, "Upgrade bootstrap artifact is malformed."),
+    ]
+
+
 def _target_entry_sha256() -> str:
     path, _ = release_paths(resolve_program_root())
     with zipfile.ZipFile(path) as archive:
@@ -502,7 +579,7 @@ def _expected_post_upgrade(observed):
     }
 
 
-def _binding(request, installation, activation, observed, plugin_status, artifact, current_artifact, expected_post, expires_at):
+def _binding(request, installation, activation, observed, plugin_status, bootstrap_status, artifact, current_artifact, expected_post, expires_at):
     evidence = request.manual_browser_evidence
     return {
         "action": "upgrade_metadata_bridge_0.57.4_to_0.57.5",
@@ -514,6 +591,7 @@ def _binding(request, installation, activation, observed, plugin_status, artifac
         "current_artifact": current_artifact,
         "target_artifact": {"version": artifact.get("plugin_version"), "zip": artifact.get("zip_file_name"), "sha256": artifact.get("zip_sha256"), "source_sha256": artifact.get("plugin_source_sha256")},
         "before": {"plugins": observed.get("plugin_inventory_hash"), "active": observed.get("active_plugin_inventory_hash"), "status_checksum": plugin_status.get("checksum"), "page": observed.get("page_snapshot_hash"), "body": observed.get("page_body_hash"), "media31": observed.get("media31_snapshot_hash"), "media32": observed.get("media32_snapshot_hash"), "cache": _hash(observed.get("cache_headers", {}))},
+        "upgrade_bootstrap": _safe_bootstrap_status(bootstrap_status),
         "expected_after": expected_post,
         "evidence": {"id": evidence.evidence_id if evidence else None, "schema": evidence.evidence_schema if evidence else None, "version": evidence.evidence_schema_version if evidence else None, "signature": evidence.helper_signature if evidence else None, "expires_at": str(evidence.expires_at) if evidence else None},
         "handle_expires_at": expires_at.isoformat() if expires_at else None,
@@ -610,6 +688,27 @@ def _plugins_without_bridge(snapshot):
 
 def _safe_upgrade_response(value):
     return {key: value.get(key) for key in ("status_code", "accepted") if key in value}
+
+
+def _safe_bootstrap_status(value):
+    allowed = (
+        "bootstrap",
+        "bootstrap_version",
+        "bootstrap_checksum",
+        "operation",
+        "application_password_compatible",
+        "target_plugin",
+        "current_version",
+        "target_version",
+        "target_zip",
+        "target_zip_sha256",
+        "available",
+        "plugin",
+        "status_code",
+        "request_method",
+        "_error",
+    )
+    return {key: value.get(key) for key in allowed if key in value}
 
 
 def _store_handle(request, binding_hash, expires_at):

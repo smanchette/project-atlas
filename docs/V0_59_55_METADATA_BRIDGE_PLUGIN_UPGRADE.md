@@ -8,11 +8,11 @@ This release implements the guarded upgrade architecture only. It does not autho
 - `POST /api/wordpress/deployment/metadata-bridge/upgrade/apply/{page_id}` accepts only an opaque process-memory handle and the exact phrase `UPGRADE PROJECT ATLAS METADATA BRIDGE TO 0.57.5`.
 - `POST /api/wordpress/deployment/metadata-bridge/upgrade/recovery/assess/{page_id}` is read-only and recommends `no_action`, `guarded_downgrade`, or `siteground_restore`. It never performs recovery.
 
-The preflight handle lasts at most ten minutes and is further bounded by signed-evidence expiry and the four-hour SiteGround backup deadline. It is consumed atomically, is invalidated by backend restart, and is never stored in the database, a file, a backup, logs, or persistent frontend storage. The WordPress upload nonce is acquired transiently from the standard authenticated upload page and is never returned or persisted.
+The preflight handle lasts at most ten minutes and is further bounded by signed-evidence expiry and the four-hour SiteGround backup deadline. It is consumed atomically, is invalidated by backend restart, and is never stored in the database, a file, a backup, logs, or persistent frontend storage.
 
 ## Fixed mutation boundary
 
-Apply can reach only the standard WordPress upload-overwrite endpoint:
+> Historical correction: the v0.59.55 wp-admin transport below cannot authenticate with WordPress application passwords because those credentials do not establish an admin-cookie session or produce the upload nonce. v0.59.57 removes this transport. It must not be used.
 
 `POST /wp-admin/update.php?action=upload-plugin`
 
