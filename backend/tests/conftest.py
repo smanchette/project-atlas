@@ -45,12 +45,14 @@ def isolate_wordpress_audit_state() -> None:
         WordPressMetadataSyncAudit, WordPressPublishAudit, WordPressDeploymentAudit,
         WordPressDeploymentNonce, WordPressDeploymentTransition,
         WordPressHeadingCorrectionAudit,
+        WordPressActivationAudit,
     )
 
     models = (
         WordPressDeploymentTransition, WordPressDeploymentNonce, WordPressDeploymentAudit,
         WordPressPublishAudit, WordPressMetadataSyncAudit, WordPressMetadataState,
         WordPressMediaSyncAudit, WordPressDraftAudit, WordPressHeadingCorrectionAudit,
+        WordPressActivationAudit,
     )
     available = set(inspect(engine).get_table_names())
     with Session(engine) as session:

@@ -59,6 +59,10 @@ from app.schemas.wordpress import (
     WordPressDeploymentReconciliationVerifyRequest,
     WordPressDeploymentVerifyRequest,
     WordPressDeploymentVerification,
+    WordPressActivationApplyRequest,
+    WordPressActivationPreflight,
+    WordPressActivationPreflightRequest,
+    WordPressActivationResult,
     WordPressHeadingCorrectionApplyRequest,
     WordPressHeadingCorrectionApplyResult,
     WordPressHeadingCorrectionDryRun,
@@ -126,6 +130,7 @@ from app.services.wordpress_heading_correction import (
     reconcile_heading_correction,
     verify_heading_correction,
 )
+from app.services.wordpress_activation import activation_preflight, apply_activation
 
 router = APIRouter(prefix="/wordpress", tags=["wordpress sandbox"])
 
@@ -204,6 +209,30 @@ def metadata_bridge_install_reconciliation_verify(page_id: int, payload: WordPre
 @router.post("/deployment/metadata-bridge/install/reconciliation/apply/{page_id}", response_model=WordPressDeploymentReconciliationResult)
 def metadata_bridge_install_reconciliation_apply(page_id: int, payload: WordPressDeploymentReconciliationApplyRequest, session: Session = Depends(get_session)) -> WordPressDeploymentReconciliationResult:
     return apply_install_reconciliation(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/metadata-bridge/activation/preflight/{page_id}",
+    response_model=WordPressActivationPreflight,
+)
+def metadata_bridge_activation_preflight(
+    page_id: int,
+    payload: WordPressActivationPreflightRequest,
+    session: Session = Depends(get_session),
+) -> WordPressActivationPreflight:
+    return activation_preflight(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/metadata-bridge/activation/apply/{page_id}",
+    response_model=WordPressActivationResult,
+)
+def metadata_bridge_activation_apply(
+    page_id: int,
+    payload: WordPressActivationApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressActivationResult:
+    return apply_activation(session, page_id, payload)
 
 
 @router.get("/settings", response_model=WordPressSettingsRead)

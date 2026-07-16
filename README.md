@@ -19,8 +19,8 @@ WordPress Sandbox, Draft Queue, Draft Review, and Export Package tools are also 
 
 ### Current verified version
 
-- Latest checkpoint: v0.16
-- Backend tests verified: 119 passed
+- Latest checkpoint: v0.59.51
+- Backend tests verified: 541 passed, 1 intentional platform-specific skip
 - Frontend build verified
 - Machine setup hardened
 - Restore drill documented
@@ -77,9 +77,9 @@ cd ..
 
 docker exec atlas_backend sh -lc "PYTHONPATH=/app pytest"
 
-Expected backend result as of v0.16:
+Expected backend result as of v0.59.51:
 
-119 passed
+541 passed, 1 intentional platform-specific skip
 
 ### Git safety check
 

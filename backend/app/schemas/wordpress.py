@@ -1122,3 +1122,102 @@ class WordPressDeploymentReconciliationResult(SQLModel):
     original_authorization_nonce_preserved: Literal[True] = True
     original_transition_history_preserved: Literal[True] = True
     further_reconciliation_required: Literal[False] = False
+
+
+class WordPressActivationPreflightRequest(WordPressDeploymentBackupEvidence):
+    """Complete immutable input contract for activation inspection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    installation_audit_id: int = Field(gt=0)
+    operator: str = Field(min_length=3, max_length=200)
+    expected_plugin_slug: str = Field(min_length=3, max_length=100)
+    expected_plugin_path: str = Field(min_length=3, max_length=255)
+    expected_plugin_version: str = Field(min_length=1, max_length=32)
+    expected_zip_sha256: str = Field(min_length=64, max_length=64)
+    expected_plugin_inventory_hash: str = Field(min_length=64, max_length=64)
+    expected_active_plugin_inventory_hash: str = Field(min_length=64, max_length=64)
+    expected_page_snapshot_hash: str = Field(min_length=64, max_length=64)
+    expected_body_hash: str = Field(min_length=64, max_length=64)
+    expected_media31_snapshot_hash: str = Field(min_length=64, max_length=64)
+    expected_media32_snapshot_hash: str = Field(min_length=64, max_length=64)
+    expected_runtime_identity: WordPressDeploymentExpectedRuntimeIdentity
+    repository_head: str = Field(min_length=40, max_length=40)
+    repository_origin_main: str = Field(min_length=40, max_length=40)
+    repository_tag: str = Field(min_length=2, max_length=32)
+    repository_working_tree_clean: bool
+    protected_paths_unchanged: bool
+    no_relevant_wordpress_change_after_backup: bool
+    browser_console_findings: str = Field(min_length=3, max_length=2000)
+
+    @field_validator(
+        "expected_zip_sha256",
+        "expected_plugin_inventory_hash",
+        "expected_active_plugin_inventory_hash",
+        "expected_page_snapshot_hash",
+        "expected_body_hash",
+        "expected_media31_snapshot_hash",
+        "expected_media32_snapshot_hash",
+        "repository_head",
+        "repository_origin_main",
+    )
+    @classmethod
+    def validate_activation_hashes(cls, value: str) -> str:
+        expected_length = 40 if len(value) == 40 else 64
+        if len(value) != expected_length or re.fullmatch(r"[0-9a-f]+", value) is None:
+            raise ValueError("Activation identity hashes must be lowercase hexadecimal.")
+        return value
+
+
+class WordPressActivationPreflight(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    installation_audit_id: int
+    status: Literal["activation_preflight_blocked", "activation_preflight_ready"]
+    activation_preflight_ready: bool
+    activation_handle: str | None = None
+    activation_handle_fingerprint: str | None = None
+    confirmation_phrase: str | None = None
+    binding_hash: str | None = None
+    expires_at: datetime | None = None
+    backup_deadline: datetime | None = None
+    artifact: dict[str, Any]
+    inspected_state: dict[str, Any]
+    gate_results: list[WordPressDraftGateResult]
+    proposed_wordpress_write_scope: list[str]
+    proposed_atlas_write_scope: list[str]
+    expected_post_plugin_inventory_hash: str | None = None
+    expected_post_active_plugin_inventory_hash: str | None = None
+    inspection_only: Literal[True] = True
+    token_issued: Literal[False] = False
+    nonce_consumed: Literal[False] = False
+    activation_audit_created: Literal[False] = False
+    wordpress_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+
+
+class WordPressActivationApplyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    activation_handle: str = Field(min_length=32, max_length=200)
+    confirmation_phrase: str = Field(min_length=1, max_length=100)
+
+
+class WordPressActivationResult(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    installation_audit_id: int
+    activation_audit_id: int
+    status: Literal["verified", "verification_failed", "failed"]
+    completion_mode: Literal["guarded_metadata_bridge_activation"] = "guarded_metadata_bridge_activation"
+    binding_hash: str
+    state_history: list[str]
+    gate_results: list[WordPressDraftGateResult]
+    inspected_state: dict[str, Any]
+    wordpress_write_count: Literal[1] = 1
+    wordpress_write_scope: list[str]
+    atlas_write_count: Literal[2] = 2
+    atlas_write_scope: list[str]
+    metadata_application_authorized: Literal[False] = False
+    cache_purge_count: Literal[0] = 0
+    further_action_required: bool

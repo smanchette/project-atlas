@@ -627,6 +627,9 @@ def _observe(session: Session, proof: WordPressDeploymentBackupEvidence | None =
         "page": _resource_snapshot(page),
         "page_snapshot_hash": _hash(page),
         "page_body_hash": wordpress_body_hash(page_body) if page_body else None,
+        "page_body_begins_expected_h2": page_body.startswith(
+            "<h2>Drywood Termite Tenting in Orlando, Florida</h2>"
+        ) if page_body else False,
         "page_title": page_title,
         "page_excerpt": page_excerpt,
         "page_canonical": page.get("link") if isinstance(page, dict) else None,
