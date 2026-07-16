@@ -86,3 +86,29 @@ def test_0018_upgrade_downgrade_reupgrade_plugin_upgrade_audit(monkeypatch, tmp_
     command.upgrade(config, "20260716_0019")
     assert "wordpresspluginupgradeaudit" in inspect(engine).get_table_names()
     get_settings.cache_clear()
+
+
+def test_0020_upgrade_downgrade_reupgrade_bootstrap_cleanup_audit(monkeypatch, tmp_path):
+    database = tmp_path / "bootstrap-cleanup-matrix.sqlite3"; config = config_for(monkeypatch, database)
+    command.upgrade(config, "20260716_0019")
+    engine = create_engine(f"sqlite:///{database.as_posix()}")
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO setting (setting_key, setting_value, description, created_at, updated_at) VALUES ('cleanup-migration-sentinel','kept','unrelated','2026-07-16','2026-07-16')"))
+    command.upgrade(config, "20260716_0020")
+    inspector = inspect(engine)
+    assert "wordpressbootstrapcleanupaudit" in inspector.get_table_names()
+    assert {item["name"] for item in inspector.get_unique_constraints("wordpressbootstrapcleanupaudit")} >= {
+        "uq_wordpressbootstrapcleanupaudit_deactivation_handle",
+        "uq_wordpressbootstrapcleanupaudit_deletion_handle",
+    }
+    assert {item["name"] for item in inspector.get_check_constraints("wordpressbootstrapcleanupaudit")} >= {
+        "ck_wordpressbootstrapcleanupaudit_action",
+        "ck_wordpressbootstrapcleanupaudit_status",
+    }
+    command.downgrade(config, "20260716_0019")
+    assert "wordpressbootstrapcleanupaudit" not in inspect(engine).get_table_names()
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT setting_value FROM setting WHERE setting_key='cleanup-migration-sentinel'" )).scalar_one() == "kept"
+    command.upgrade(config, "20260716_0020")
+    assert "wordpressbootstrapcleanupaudit" in inspect(engine).get_table_names()
+    get_settings.cache_clear()

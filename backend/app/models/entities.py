@@ -533,6 +533,74 @@ class WordPressPluginUpgradeAudit(SQLModel, table=True):
     error_message: str | None = Field(default=None, max_length=2000)
 
 
+class WordPressBootstrapCleanupAudit(SQLModel, table=True):
+    """Durable record for the separately gated upgrade-bootstrap cleanup."""
+
+    __table_args__ = (
+        CheckConstraint(
+            "action_type = 'cleanup_upgrade_bootstrap'",
+            name="ck_wordpressbootstrapcleanupaudit_action",
+        ),
+        CheckConstraint(
+            "status IN ('pending','deactivated','verified','verification_failed','failed')",
+            name="ck_wordpressbootstrapcleanupaudit_status",
+        ),
+        UniqueConstraint(
+            "deactivation_handle_fingerprint",
+            name="uq_wordpressbootstrapcleanupaudit_deactivation_handle",
+        ),
+        UniqueConstraint(
+            "deletion_handle_fingerprint",
+            name="uq_wordpressbootstrapcleanupaudit_deletion_handle",
+        ),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
+    wordpress_post_id: int = Field(index=True)
+    installation_audit_id: int = Field(foreign_key="wordpressdeploymentaudit.id", index=True)
+    activation_audit_id: int = Field(foreign_key="wordpressactivationaudit.id", index=True)
+    upgrade_audit_id: int = Field(foreign_key="wordpresspluginupgradeaudit.id", index=True)
+    action_type: str = Field(default="cleanup_upgrade_bootstrap", max_length=64, index=True)
+    status: str = Field(default="pending", max_length=40, index=True)
+    operator: str = Field(max_length=200)
+    bootstrap_slug: str = Field(max_length=100)
+    bootstrap_path: str = Field(max_length=255)
+    bootstrap_version: str = Field(max_length=32)
+    bootstrap_zip_sha256: str = Field(max_length=64)
+    bridge_version: str = Field(max_length=32)
+    deactivation_phrase_hash: str = Field(max_length=64)
+    deletion_phrase_hash: str = Field(max_length=64)
+    deactivation_handle_fingerprint: str = Field(max_length=64, index=True)
+    deletion_handle_fingerprint: str | None = Field(default=None, max_length=64, index=True)
+    deactivation_binding_hash: str = Field(max_length=64, index=True)
+    deletion_binding_hash: str | None = Field(default=None, max_length=64, index=True)
+    release_identity: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    backup_evidence: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    browser_evidence_id: str = Field(max_length=200)
+    browser_evidence_hashes: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    pre_snapshot: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    deactivated_snapshot: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    final_snapshot: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    previous_inventories: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    deactivated_inventories: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    final_inventories: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    metadata_rendering_state: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    page_media_snapshots: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    gate_results: list[dict[str, Any]] = Field(sa_column=Column(JSON, nullable=False))
+    wordpress_write_count: int = Field(default=0)
+    wordpress_write_scope: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    atlas_write_count: int = Field(default=0)
+    atlas_write_scope: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    verification_findings: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    recovery_recommendation: str | None = Field(default=None, max_length=64)
+    transition_history: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    attempted_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    deactivated_at: datetime | None = None
+    completed_at: datetime | None = None
+    error_code: str | None = Field(default=None, max_length=64)
+    error_message: str | None = Field(default=None, max_length=2000)
+
+
 class WordPressMetadataLifecycleAudit(SQLModel, table=True):
     """Durable record for one isolated Metadata Bridge lifecycle mutation."""
 

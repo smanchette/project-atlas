@@ -69,6 +69,11 @@ from app.schemas.wordpress import (
     WordPressPluginUpgradeRecoveryAssessment,
     WordPressPluginUpgradeRecoveryRequest,
     WordPressPluginUpgradeResult,
+    WordPressBootstrapCleanupApplyRequest,
+    WordPressBootstrapCleanupPreflight,
+    WordPressBootstrapCleanupPreflightRequest,
+    WordPressBootstrapCleanupResult,
+    WordPressBootstrapDeletionPreflightRequest,
     WordPressMetadataLifecycleApplyRequest,
     WordPressMetadataLifecyclePreflight,
     WordPressMetadataLifecyclePreflightRequest,
@@ -145,6 +150,12 @@ from app.services.wordpress_plugin_upgrade import (
     apply_plugin_upgrade,
     assess_plugin_upgrade_recovery,
     plugin_upgrade_preflight,
+)
+from app.services.wordpress_bootstrap_cleanup import (
+    cleanup_preflight,
+    deactivate_bootstrap,
+    delete_bootstrap,
+    deletion_preflight,
 )
 from app.services.wordpress_metadata_lifecycle import (
     disable_apply,
@@ -294,6 +305,54 @@ def metadata_bridge_upgrade_recovery_assess(
     session: Session = Depends(get_session),
 ) -> WordPressPluginUpgradeRecoveryAssessment:
     return assess_plugin_upgrade_recovery(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/cleanup/preflight/{page_id}",
+    response_model=WordPressBootstrapCleanupPreflight,
+)
+def upgrade_bootstrap_cleanup_preflight(
+    page_id: int,
+    payload: WordPressBootstrapCleanupPreflightRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapCleanupPreflight:
+    return cleanup_preflight(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/cleanup/deactivate/{page_id}",
+    response_model=WordPressBootstrapCleanupResult,
+)
+def upgrade_bootstrap_cleanup_deactivate(
+    page_id: int,
+    payload: WordPressBootstrapCleanupApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapCleanupResult:
+    return deactivate_bootstrap(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/cleanup/delete/preflight/{page_id}",
+    response_model=WordPressBootstrapCleanupPreflight,
+)
+def upgrade_bootstrap_cleanup_delete_preflight(
+    page_id: int,
+    payload: WordPressBootstrapDeletionPreflightRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapCleanupPreflight:
+    return deletion_preflight(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/cleanup/delete/apply/{page_id}",
+    response_model=WordPressBootstrapCleanupResult,
+)
+def upgrade_bootstrap_cleanup_delete_apply(
+    page_id: int,
+    payload: WordPressBootstrapCleanupApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapCleanupResult:
+    return delete_bootstrap(session, page_id, payload)
 
 
 @router.post("/metadata/staging/preflight/{page_id}", response_model=WordPressMetadataLifecyclePreflight)

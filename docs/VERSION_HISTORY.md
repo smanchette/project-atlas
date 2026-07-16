@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.59
+
+Added a separately gated, two-phase upgrade-bootstrap cleanup lifecycle. Token-free preflights bind fresh backups, schema-v1 evidence, verified installation/activation/upgrade audits, runtime identity, exact plugin inventories, and page/media/metadata state. Phrase-gated deactivation can only set the fixed bootstrap inactive; a separate phrase-gated deletion can only delete that already-inactive fixed bootstrap. Migration 0020 adds `WordPressBootstrapCleanupAudit`, and Data Backup v0.36 preserves its audit history. Publication does not authorize live cleanup.
+
 ## v0.59.57
 
 Replaced the unusable wp-admin upload-nonce transport with a separately approved, application-password-compatible, single-purpose upgrade bootstrap. The exact deployed Metadata Bridge 0.57.4 artifact has no self-upgrade route, so the guarded preflight now fails closed until bootstrap 0.1.0 is separately installed and active. Atlas can then send only the locked 0.57.5 ZIP to one fixed REST endpoint. The bootstrap validates the complete archive and becomes unusable after the bridge reaches 0.57.5. Publication does not authorize bootstrap installation or the live bridge upgrade.

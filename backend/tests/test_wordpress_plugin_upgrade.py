@@ -631,7 +631,7 @@ def test_target_and_current_zip_contracts_are_locked():
     assert deployment.ZIP_SHA256 == "09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7"
 
 
-def test_upgrade_audit_is_in_data_backup_v035_contract():
-    assert backup_service.BACKUP_VERSION == "0.35"
+def test_upgrade_audit_is_in_data_backup_v036_contract():
+    assert backup_service.BACKUP_VERSION == "0.36"
     assert backup_service.BACKUP_MODELS["wordpress_plugin_upgrade_audits"] is WordPressPluginUpgradeAudit
     assert "0.34" in backup_service.SUPPORTED_BACKUP_VERSIONS

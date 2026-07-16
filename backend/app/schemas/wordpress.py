@@ -1367,6 +1367,122 @@ class WordPressPluginUpgradeRecoveryAssessment(SQLModel):
     automatic_recovery_performed: Literal[False] = False
 
 
+class WordPressBootstrapCleanupPreflightRequest(WordPressDeploymentBackupEvidence):
+    """Immutable proof for deactivating the fixed upgrade bootstrap."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    installation_audit_id: Literal[1]
+    activation_audit_id: Literal[1]
+    upgrade_audit_id: Literal[1]
+    operator: str = Field(min_length=3, max_length=200)
+    expected_bridge_slug: Literal["project-atlas-metadata-bridge"]
+    expected_bridge_path: Literal["project-atlas-metadata-bridge/project-atlas-metadata-bridge.php"]
+    expected_bridge_version: Literal["0.57.5"]
+    expected_bridge_zip_sha256: Literal["09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7"]
+    expected_bootstrap_slug: Literal["project-atlas-upgrade-bootstrap"]
+    expected_bootstrap_path: Literal["project-atlas-upgrade-bootstrap/project-atlas-upgrade-bootstrap.php"]
+    expected_bootstrap_version: Literal["0.1.0"]
+    expected_bootstrap_zip_sha256: Literal["4c8b4b0c697b2b352a10f405950c7b6a750236be96aec81fcd45176ece1189bd"]
+    expected_plugin_inventory_hash: str = Field(min_length=64, max_length=64)
+    expected_active_plugin_inventory_hash: str = Field(min_length=64, max_length=64)
+    expected_page_snapshot_hash: str = Field(min_length=64, max_length=64)
+    expected_body_hash: str = Field(min_length=64, max_length=64)
+    expected_media31_snapshot_hash: str = Field(min_length=64, max_length=64)
+    expected_media32_snapshot_hash: str = Field(min_length=64, max_length=64)
+    expected_runtime_identity: WordPressDeploymentExpectedRuntimeIdentity
+    repository_head: str = Field(min_length=40, max_length=40)
+    repository_origin_main: str = Field(min_length=40, max_length=40)
+    repository_tag: str = Field(min_length=2, max_length=32)
+    repository_branch: Literal["main"]
+    repository_working_tree_clean: bool
+    protected_paths_unchanged: bool
+    no_relevant_wordpress_change_after_backup: bool
+    browser_console_findings: str = Field(min_length=3, max_length=2000)
+
+    @field_validator(
+        "expected_plugin_inventory_hash",
+        "expected_active_plugin_inventory_hash",
+        "expected_page_snapshot_hash",
+        "expected_body_hash",
+        "expected_media31_snapshot_hash",
+        "expected_media32_snapshot_hash",
+        "repository_head",
+        "repository_origin_main",
+    )
+    @classmethod
+    def validate_cleanup_hashes(cls, value: str) -> str:
+        length = 40 if len(value) == 40 else 64
+        if len(value) != length or re.fullmatch(r"[0-9a-f]+", value) is None:
+            raise ValueError("Bootstrap-cleanup identity hashes must be lowercase hexadecimal.")
+        return value
+
+
+class WordPressBootstrapDeletionPreflightRequest(WordPressBootstrapCleanupPreflightRequest):
+    """Fresh proof for deleting one already-deactivated bootstrap."""
+
+    cleanup_audit_id: int = Field(gt=0)
+
+
+class WordPressBootstrapCleanupPreflight(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    phase: Literal["deactivation", "deletion"]
+    status: Literal["bootstrap_cleanup_preflight_blocked", "bootstrap_cleanup_preflight_ready"]
+    bootstrap_cleanup_preflight_ready: bool
+    cleanup_handle: str | None = None
+    cleanup_handle_fingerprint: str | None = None
+    confirmation_phrase: str | None = None
+    binding_hash: str | None = None
+    expires_at: datetime | None = None
+    backup_deadline: datetime | None = None
+    inspected_state: dict[str, Any]
+    gate_results: list[WordPressDraftGateResult]
+    proposed_wordpress_write_scope: list[str]
+    proposed_atlas_write_scope: list[str]
+    expected_post_plugin_inventory_hash: str | None = None
+    expected_post_active_plugin_inventory_hash: str | None = None
+    inspection_only: Literal[True] = True
+    token_issued: Literal[False] = False
+    nonce_consumed: Literal[False] = False
+    audit_created: Literal[False] = False
+    wordpress_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+
+
+class WordPressBootstrapCleanupApplyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cleanup_handle: str = Field(min_length=32, max_length=200)
+    confirmation_phrase: str = Field(min_length=1, max_length=120)
+
+
+class WordPressBootstrapCleanupResult(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    cleanup_audit_id: int
+    phase: Literal["deactivation", "deletion"]
+    status: Literal["deactivated", "verified", "verification_failed", "failed"]
+    binding_hash: str
+    state_history: list[str]
+    gate_results: list[WordPressDraftGateResult]
+    inspected_state: dict[str, Any]
+    wordpress_write_count: int
+    wordpress_write_scope: list[str]
+    atlas_write_count: int
+    atlas_write_scope: list[str]
+    recovery_recommendation: Literal[
+        "no_action",
+        "guarded_reactivation",
+        "guarded_reinstall",
+        "siteground_restore",
+    ]
+    metadata_application_authorized: Literal[False] = False
+    rendering_change_authorized: Literal[False] = False
+    cache_purge_count: Literal[0] = 0
+    further_action_required: bool
+
+
 class WordPressMetadataLifecyclePreflightRequest(WordPressActivationPreflightRequest):
     """Immutable proof used by each isolated metadata lifecycle preflight."""
 
