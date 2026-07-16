@@ -93,6 +93,81 @@ class _ReconciliationHandleEntry:
     expires_at: datetime
 
 
+@dataclass(frozen=True)
+class _PluginIdentifier:
+    """Fail-closed interpretation of one raw WordPress plugin identifier."""
+
+    raw_identifier: Any
+    posix_identifier: str | None
+    plugin_directory: str | None
+    plugin_slug: str | None
+    entry_filename: str | None
+    authorized_entry_path: str | None
+    extensionless_rest_identifier: bool
+    valid: bool
+    error: str | None = None
+
+
+def _normalize_plugin_identifier(raw_identifier: Any) -> _PluginIdentifier:
+    """Normalize only for identity matching; never mutate raw hash inputs.
+
+    WordPress core REST removes the final ``.php`` from its ``plugin`` field.
+    Only the locked extensionless bridge identifier may regain that suffix.
+    """
+
+    def invalid(error: str) -> _PluginIdentifier:
+        return _PluginIdentifier(raw_identifier, None, None, None, None, None, False, False, error)
+
+    if not isinstance(raw_identifier, str) or not raw_identifier or raw_identifier != raw_identifier.strip():
+        return invalid("identifier must be a nonempty unpadded string")
+    if "\x00" in raw_identifier:
+        return invalid("identifier contains a null byte")
+    if raw_identifier.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", raw_identifier):
+        return invalid("identifier is absolute")
+
+    posix_identifier = raw_identifier.replace("\\", "/")
+    if posix_identifier.startswith("/") or posix_identifier.endswith("/"):
+        return invalid("identifier has a leading or trailing slash")
+    segments = posix_identifier.split("/")
+    if any(not segment for segment in segments):
+        return invalid("identifier contains an empty segment")
+    if any(segment in {".", ".."} for segment in segments):
+        return invalid("identifier contains traversal")
+    if any(re.fullmatch(r"[A-Za-z0-9._-]+", segment) is None for segment in segments):
+        return invalid("identifier contains malformed characters")
+
+    directory = segments[0] if len(segments) > 1 else None
+    filename = segments[-1]
+    expected_path = PurePosixPath(PLUGIN_FILE).as_posix()
+    expected_extensionless = expected_path.removesuffix(".php")
+    authorized_path = None
+    extensionless = False
+    if posix_identifier == expected_path:
+        authorized_path = expected_path
+    elif posix_identifier == expected_extensionless:
+        authorized_path = expected_path
+        extensionless = True
+
+    return _PluginIdentifier(
+        raw_identifier=raw_identifier,
+        posix_identifier=posix_identifier,
+        plugin_directory=directory,
+        plugin_slug=directory if directory == PLUGIN_SLUG else None,
+        entry_filename=filename,
+        authorized_entry_path=authorized_path,
+        extensionless_rest_identifier=extensionless,
+        valid=True,
+    )
+
+
+def _matching_reconciliation_plugins(plugins: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in plugins
+        if _normalize_plugin_identifier(item.get("plugin")).authorized_entry_path == PLUGIN_FILE
+    ]
+
+
 _reconciliation_handle_lock = Lock()
 _reconciliation_handles: dict[str, _ReconciliationHandleEntry] = {}
 _reconciliation_handle_timers: dict[str, Timer] = {}
@@ -623,7 +698,7 @@ def _reconciliation_gates(
     evidence_valid: bool,
     evidence_reason: str,
 ) -> list[WordPressDraftGateResult]:
-    matches = [item for item in observed.get("plugins", []) if item.get("plugin") == PLUGIN_FILE]
+    matches = _matching_reconciliation_plugins(observed.get("plugins", []))
     rendered = observed.get("rendered", {})
     page = observed.get("page", {})
     media31 = observed.get("media31", {})
@@ -642,9 +717,15 @@ def _reconciliation_gates(
         and matches[0].get("status") == "inactive"
         and metadata_state_count == 0
         and metadata_audit_count == 0
+        and rendered.get("verified") is True
         and not rendered.get("atlas_metadata_marker_present", False)
+        and _rendered_metadata_absent(rendered)
         and observed.get("page_snapshot_hash") == request.expected_page_snapshot_hash
         and observed.get("page_body_hash") == request.expected_body_hash
+        and observed.get("media31_snapshot_hash") == request.expected_media31_snapshot_hash
+        and observed.get("media32_snapshot_hash") == request.expected_media32_snapshot_hash
+        and observed.get("page_references_media32") is False
+        and observed.get("cache_headers") == rendered.get("cache_headers", {}) == audit.pre_snapshot.get("cache_headers", {})
     )
     return [
         _gate("evidence_contract", "Fresh signed canonical schema-v1 browser evidence is valid", evidence_valid and request.manual_browser_evidence.evidence_schema_version == 1, evidence_reason or "Schema-v1 browser evidence is required."),
@@ -662,7 +743,7 @@ def _reconciliation_gates(
         _gate("plugin_version", "Installed Metadata Bridge version remains exact", len(matches) == 1 and matches[0].get("version") == request.expected_plugin_version, "Installed plugin version changed."),
         _gate("plugin_inventory", "Complete inactive plugin inventory hash remains exact", observed.get("plugin_inventory_hash") == request.expected_plugin_inventory_hash, "Complete plugin inventory changed."),
         _gate("active_inventory", "Active-plugin inventory remains at the pre-install baseline", observed.get("active_plugin_inventory_hash") == request.expected_active_plugin_inventory_hash == audit.pre_snapshot.get("active_plugin_inventory_hash"), "Active-plugin inventory changed."),
-        _gate("inactive_safety_state", "Inactive safety state corroborates rendering disabled, null payload, empty payload hash, and revision zero", observable_safety_state, "Inactive safety state cannot be corroborated from independent inventory, Atlas records, page snapshots, and rendered absence."),
+        _gate("inactive_safety_corroboration", "Inactive safety is corroborated without claiming a direct private-option read", observable_safety_state, "Inactive safety requires the core inactive inventory, zero Atlas metadata rows, exact page/body/media snapshots, rendered metadata absence, and an unchanged cache observation."),
         _gate("metadata_rows", "Atlas metadata audit and state rows remain absent", metadata_audit_count == 0 and metadata_state_count == 0, "Atlas metadata state or audit rows exist."),
         _gate("page_identity", "Page 8 title, slug, URL, status, excerpt, canonical, and featured media remain locked", page.get("id") == 8 and page.get("status") == "publish" and page.get("slug") == EXPECTED_SLUG and page.get("link") == EXPECTED_URL and page.get("featured_media") == EXPECTED_FEATURED_MEDIA and observed.get("page_title") == EXPECTED_TITLE and rendered.get("canonical") == [EXPECTED_URL], "Page identity changed."),
         _gate("page_snapshot", "Complete page snapshot remains exact", observed.get("page_snapshot_hash") == request.expected_page_snapshot_hash, "Page snapshot changed."),
@@ -976,12 +1057,15 @@ def _reconciliation_public_snapshot(
         "transition_history_hash": _transition_history_hash(transitions),
         "inactive_metadata_safety": {
             "verification_source": "corroborated_inactive_inventory_atlas_rows_and_rendered_absence",
-            "rendering_enabled": False,
-            "payload": None,
-            "payload_hash": "",
-            "revision": "0",
+            "private_option_name": "_project_atlas_metadata_safety_v1",
+            "private_option_known_to_exist_from_prior_read_only_diagnosis": True,
+            "private_option_directly_read": False,
+            "private_option_serialized_value_available": False,
+            "direct_payload_or_revision_claimed": False,
             "metadata_state_rows": metadata_state_count,
             "metadata_audit_rows": metadata_audit_count,
+            "rendered_metadata_absent": _rendered_metadata_absent(observed.get("rendered", {})),
+            "cache_purge_observed": False,
         },
         "reconciliation_cache_purge_count": 0,
         "wordpress_write_count": 0,

@@ -23,13 +23,14 @@ from app.services import wordpress_deployment as deployment
 from app.services.wordpress_rendered_state import acquire_rendered_state, build_manual_browser_evidence
 
 
-KEY = "v0.59.46-local-test-signing-key-with-more-than-32-bytes"
-VERSION = "v0.59.41"
+KEY = "v0.59.48-local-test-signing-key-with-more-than-32-bytes"
+VERSION = "v0.59.48"
 COMMIT = "e" * 40
 MANIFEST = "d" * 64
 SOURCE_COMPATIBILITY = "project-atlas-release-identity-v0.59.8"
 PLUGIN_INVENTORY = "9" * 64
 ACTIVE_INVENTORY = "8" * 64
+LIVE_ACTIVE_INVENTORY = "9e2d39fce63cd085dc6da2df89bc2a1016c2ad298f86a570c0a8136f4eeaa862"
 PAGE_SNAPSHOT = "4" * 64
 MEDIA31_SNAPSHOT = "6" * 64
 MEDIA32_SNAPSHOT = "2" * 64
@@ -115,7 +116,7 @@ def artifact(**changes):
 
 def observed(**changes):
     inventory = {
-        "plugins": [{"plugin": deployment.PLUGIN_FILE, "version": deployment.PLUGIN_VERSION, "status": "inactive"}],
+        "plugins": [{"plugin": deployment.PLUGIN_FILE.removesuffix(".php"), "version": deployment.PLUGIN_VERSION, "status": "inactive"}],
         "active_plugins": [],
         "plugin_inventory_hash": PLUGIN_INVENTORY,
         "active_plugin_inventory_hash": ACTIVE_INVENTORY,
@@ -219,6 +220,145 @@ def mock_inspection(monkeypatch, state=None, release=None):
     monkeypatch.setenv("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", KEY)
     monkeypatch.setattr(deployment, "_verify_artifact", lambda: (release or artifact(), [deployment._gate("program_root", "root", True, ""), deployment._gate("artifact_hash", "hash", True, ""), deployment._gate("artifact_portable", "portable", True, ""), deployment._gate("release_identity", "release", True, "")]))
     monkeypatch.setattr(deployment, "_observe", lambda *_: state or observed())
+
+
+@pytest.mark.parametrize(
+    ("raw", "posix", "extensionless"),
+    [
+        ("project-atlas-metadata-bridge/project-atlas-metadata-bridge", "project-atlas-metadata-bridge/project-atlas-metadata-bridge", True),
+        (deployment.PLUGIN_FILE, deployment.PLUGIN_FILE, False),
+        (r"project-atlas-metadata-bridge\project-atlas-metadata-bridge", "project-atlas-metadata-bridge/project-atlas-metadata-bridge", True),
+        (r"project-atlas-metadata-bridge\project-atlas-metadata-bridge.php", deployment.PLUGIN_FILE, False),
+    ],
+)
+def test_locked_plugin_identifier_normalizes_without_changing_raw(raw, posix, extensionless):
+    identity = deployment._normalize_plugin_identifier(raw)
+    assert identity.valid
+    assert identity.raw_identifier == raw
+    assert identity.posix_identifier == posix
+    assert identity.plugin_directory == identity.plugin_slug == deployment.PLUGIN_SLUG
+    assert identity.authorized_entry_path == deployment.PLUGIN_FILE
+    assert identity.extensionless_rest_identifier is extensionless
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "/project-atlas-metadata-bridge/project-atlas-metadata-bridge",
+        "project-atlas-metadata-bridge/project-atlas-metadata-bridge/",
+        "project-atlas-metadata-bridge//project-atlas-metadata-bridge",
+        "project-atlas-metadata-bridge/../project-atlas-metadata-bridge",
+        "../project-atlas-metadata-bridge/project-atlas-metadata-bridge",
+        r"C:\project-atlas-metadata-bridge\project-atlas-metadata-bridge",
+        "project-atlas-metadata-bridge/\x00project-atlas-metadata-bridge",
+        "project-atlas-metadata-bridge/project atlas metadata bridge",
+        " project-atlas-metadata-bridge/project-atlas-metadata-bridge",
+    ],
+)
+def test_malformed_plugin_identifiers_fail_closed(raw):
+    identity = deployment._normalize_plugin_identifier(raw)
+    assert not identity.valid
+    assert identity.raw_identifier == raw
+    assert identity.authorized_entry_path is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "project-atlas-metadata-bridge/different-entry",
+        "project-atlas-metadata-bridge/different-entry.php",
+        "project-atlas-metadata-bridge-extra/project-atlas-metadata-bridge",
+        "unrelated/unrelated",
+        "single-file-plugin",
+    ],
+)
+def test_unrelated_identifiers_are_not_rewritten_to_the_authorized_entry(raw):
+    identity = deployment._normalize_plugin_identifier(raw)
+    assert identity.valid
+    assert identity.raw_identifier == raw
+    assert identity.authorized_entry_path is None
+
+
+def test_normalized_matching_preserves_raw_inventory_and_hash_definitions():
+    plugins = [
+        {"plugin": "project-atlas-metadata-bridge/project-atlas-metadata-bridge", "version": "0.57.4", "status": "inactive"},
+        {"plugin": "sg-security/sg-security", "version": "1.6.5", "status": "active"},
+    ]
+    before = json.loads(json.dumps(plugins))
+    before_hash = deployment._hash(plugins)
+    matches = deployment._matching_reconciliation_plugins(plugins)
+    assert matches == [plugins[0]]
+    assert plugins == before
+    assert deployment._hash(plugins) == before_hash
+    raw_active = ["sg-ai-studio/sg-ai-studio", "sg-cachepress/sg-cachepress", "sg-security/sg-security", "wordpress-starter/siteground-wizard"]
+    assert deployment._hash(raw_active) == LIVE_ACTIVE_INVENTORY
+
+
+def test_real_extensionless_rest_shape_reaches_ready_with_corroborated_safety(monkeypatch, db):
+    state = observed()
+    raw_plugins = json.loads(json.dumps(state["plugins"]))
+    mock_inspection(monkeypatch, state=state)
+    with Session(db) as session:
+        seed(session)
+        result = deployment.verify_install_reconciliation(session, 41, request())
+    gates = {gate.code: gate for gate in result.gate_results}
+    assert result.reconciliation_ready
+    assert gates["plugin_singleton"].passed
+    assert gates["plugin_inactive"].passed
+    assert gates["plugin_version"].passed
+    assert gates["inactive_safety_corroboration"].passed
+    assert state["plugins"] == raw_plugins
+    assert result.wordpress_write_count == result.atlas_write_count == 0
+    safety = result.inspected_state["inactive_metadata_safety"]
+    assert safety["private_option_directly_read"] is False
+    assert safety["direct_payload_or_revision_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    "duplicate_identifier",
+    [
+        deployment.PLUGIN_FILE,
+        r"project-atlas-metadata-bridge\project-atlas-metadata-bridge",
+        r"project-atlas-metadata-bridge\project-atlas-metadata-bridge.php",
+    ],
+)
+def test_ambiguous_normalized_plugin_identities_fail_singleton(monkeypatch, db, duplicate_identifier):
+    state = observed()
+    state["plugins"].append({"plugin": duplicate_identifier, "version": deployment.PLUGIN_VERSION, "status": "inactive"})
+    mock_inspection(monkeypatch, state=state)
+    with Session(db) as session:
+        seed(session)
+        result = deployment.verify_install_reconciliation(session, 41, request())
+    gates = {gate.code: gate for gate in result.gate_results}
+    assert not result.reconciliation_ready
+    assert not gates["plugin_singleton"].passed
+    assert not gates["inactive_safety_corroboration"].passed
+
+
+@pytest.mark.parametrize(
+    "malformed_identifier",
+    [
+        "/project-atlas-metadata-bridge/project-atlas-metadata-bridge",
+        "project-atlas-metadata-bridge/../project-atlas-metadata-bridge",
+        "project-atlas-metadata-bridge/\x00project-atlas-metadata-bridge",
+        "project-atlas-metadata-bridge/",
+        "project-atlas-metadata-bridge/different-entry",
+    ],
+)
+def test_malformed_or_similar_live_inventory_cannot_match(monkeypatch, db, malformed_identifier):
+    state = observed()
+    state["plugins"][0]["plugin"] = malformed_identifier
+    mock_inspection(monkeypatch, state=state)
+    with Session(db) as session:
+        seed(session)
+        result = deployment.verify_install_reconciliation(session, 41, request())
+    gates = {gate.code: gate for gate in result.gate_results}
+    assert not result.reconciliation_ready
+    assert not gates["plugin_singleton"].passed
+    assert not gates["plugin_inactive"].passed
+    assert not gates["plugin_version"].passed
+    assert not gates["inactive_safety_corroboration"].passed
 
 
 def test_successful_verify_and_phrase_gated_atlas_only_apply(monkeypatch, db):

@@ -50,13 +50,16 @@ The original authorization nonce and original transitions are preserved. No seco
 
 ## Inactive-plugin inspection limitation
 
-An inactive WordPress plugin cannot expose its own REST status route. Therefore Atlas does not claim a direct inactive-plugin option or private post-meta read. The disabled rendering, null payload, empty payload hash, and revision-zero state are fail-closed corroborated from all of the following together:
+> **v0.59.48 correction:** WordPress core REST reports the `plugin` identity without its final `.php`. v0.59.48 normalizes that narrowly for identity matching while preserving the exact raw REST inventory for hashing. The details and fail-closed cases are recorded in `V0_59_48_INSTALLED_INACTIVE_PLUGIN_PATH_NORMALIZATION.md`.
+
+An inactive WordPress plugin cannot expose its own REST status route. Therefore Atlas does not claim a direct inactive-plugin option, payload, revision, or private post-meta read. The inactive safety state is fail-closed corroborated from all of the following together:
 
 - the exact plugin is inactive;
 - Atlas metadata state and audit row counts are both zero;
-- page and body snapshots remain exact;
+- page, body, and media snapshots remain exact;
 - fresh signed public evidence proves no Atlas marker, meta description, Open Graph, Twitter, JSON-LD, or media 32 reference;
-- active-plugin inventory remains at the pre-install baseline.
+- active-plugin inventory remains at the pre-install baseline;
+- the cache observation remains unchanged, and reconciliation has no cache-purge transport.
 
 If any corroborating gate fails, reconciliation is blocked. Direct installed plugin bytes are likewise not exposed by WordPress REST while inactive; Atlas verifies the locked local ZIP byte-for-byte against source and requires the installed entry path and declared version to match the authorized audit. The report must describe this accurately and must not claim a direct remote file checksum.
 
