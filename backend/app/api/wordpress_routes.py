@@ -63,6 +63,12 @@ from app.schemas.wordpress import (
     WordPressActivationPreflight,
     WordPressActivationPreflightRequest,
     WordPressActivationResult,
+    WordPressPluginUpgradeApplyRequest,
+    WordPressPluginUpgradePreflight,
+    WordPressPluginUpgradePreflightRequest,
+    WordPressPluginUpgradeRecoveryAssessment,
+    WordPressPluginUpgradeRecoveryRequest,
+    WordPressPluginUpgradeResult,
     WordPressMetadataLifecycleApplyRequest,
     WordPressMetadataLifecyclePreflight,
     WordPressMetadataLifecyclePreflightRequest,
@@ -135,6 +141,11 @@ from app.services.wordpress_heading_correction import (
     verify_heading_correction,
 )
 from app.services.wordpress_activation import activation_preflight, apply_activation
+from app.services.wordpress_plugin_upgrade import (
+    apply_plugin_upgrade,
+    assess_plugin_upgrade_recovery,
+    plugin_upgrade_preflight,
+)
 from app.services.wordpress_metadata_lifecycle import (
     disable_apply,
     disable_preflight,
@@ -247,6 +258,42 @@ def metadata_bridge_activation_apply(
     session: Session = Depends(get_session),
 ) -> WordPressActivationResult:
     return apply_activation(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/metadata-bridge/upgrade/preflight/{page_id}",
+    response_model=WordPressPluginUpgradePreflight,
+)
+def metadata_bridge_upgrade_preflight(
+    page_id: int,
+    payload: WordPressPluginUpgradePreflightRequest,
+    session: Session = Depends(get_session),
+) -> WordPressPluginUpgradePreflight:
+    return plugin_upgrade_preflight(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/metadata-bridge/upgrade/apply/{page_id}",
+    response_model=WordPressPluginUpgradeResult,
+)
+def metadata_bridge_upgrade_apply(
+    page_id: int,
+    payload: WordPressPluginUpgradeApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressPluginUpgradeResult:
+    return apply_plugin_upgrade(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/metadata-bridge/upgrade/recovery/assess/{page_id}",
+    response_model=WordPressPluginUpgradeRecoveryAssessment,
+)
+def metadata_bridge_upgrade_recovery_assess(
+    page_id: int,
+    payload: WordPressPluginUpgradeRecoveryRequest,
+    session: Session = Depends(get_session),
+) -> WordPressPluginUpgradeRecoveryAssessment:
+    return assess_plugin_upgrade_recovery(session, page_id, payload)
 
 
 @router.post("/metadata/staging/preflight/{page_id}", response_model=WordPressMetadataLifecyclePreflight)

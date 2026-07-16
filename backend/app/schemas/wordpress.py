@@ -1235,6 +1235,138 @@ class WordPressActivationResult(SQLModel):
     further_action_required: bool
 
 
+class WordPressPluginUpgradePreflightRequest(WordPressDeploymentBackupEvidence):
+    """Immutable proof for the fixed 0.57.4-to-0.57.5 upgrade."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    installation_audit_id: int = Field(gt=0)
+    activation_audit_id: int = Field(gt=0)
+    operator: str = Field(min_length=3, max_length=200)
+    current_plugin_version: Literal["0.57.4"]
+    target_plugin_version: Literal["0.57.5"]
+    current_plugin_slug: Literal["project-atlas-metadata-bridge"]
+    current_plugin_path: Literal["project-atlas-metadata-bridge/project-atlas-metadata-bridge.php"]
+    current_zip_filename: Literal["project-atlas-metadata-bridge-0.57.4.zip"]
+    current_zip_sha256: Literal["939412e6e80e8344d95274444fda65b6122fe0c8249a2ced0a8582a418c4e232"]
+    target_zip_filename: Literal["project-atlas-metadata-bridge-0.57.5.zip"]
+    target_zip_sha256: Literal["09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7"]
+    expected_plugin_inventory_hash: str = Field(min_length=64, max_length=64)
+    expected_active_plugin_inventory_hash: str = Field(min_length=64, max_length=64)
+    expected_post_plugin_inventory_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_post_active_plugin_inventory_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_page_snapshot_hash: str = Field(min_length=64, max_length=64)
+    expected_body_hash: str = Field(min_length=64, max_length=64)
+    expected_media31_snapshot_hash: str = Field(min_length=64, max_length=64)
+    expected_media32_snapshot_hash: str = Field(min_length=64, max_length=64)
+    expected_runtime_identity: WordPressDeploymentExpectedRuntimeIdentity
+    repository_head: str = Field(min_length=40, max_length=40)
+    repository_origin_main: str = Field(min_length=40, max_length=40)
+    repository_tag: str = Field(min_length=2, max_length=32)
+    repository_branch: Literal["main"]
+    repository_working_tree_clean: bool
+    protected_paths_unchanged: bool
+    no_relevant_wordpress_change_after_backup: bool
+    browser_console_findings: str = Field(min_length=3, max_length=2000)
+
+    @field_validator(
+        "expected_plugin_inventory_hash",
+        "expected_active_plugin_inventory_hash",
+        "expected_post_plugin_inventory_hash",
+        "expected_post_active_plugin_inventory_hash",
+        "expected_page_snapshot_hash",
+        "expected_body_hash",
+        "expected_media31_snapshot_hash",
+        "expected_media32_snapshot_hash",
+        "repository_head",
+        "repository_origin_main",
+    )
+    @classmethod
+    def validate_upgrade_hashes(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        expected_length = 40 if len(value) == 40 else 64
+        if len(value) != expected_length or re.fullmatch(r"[0-9a-f]+", value) is None:
+            raise ValueError("Plugin-upgrade identity hashes must be lowercase hexadecimal.")
+        return value
+
+
+class WordPressPluginUpgradePreflight(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    status: Literal["plugin_upgrade_preflight_blocked", "plugin_upgrade_preflight_ready"]
+    plugin_upgrade_preflight_ready: bool
+    upgrade_handle: str | None = None
+    upgrade_handle_fingerprint: str | None = None
+    confirmation_phrase: str | None = None
+    binding_hash: str | None = None
+    expires_at: datetime | None = None
+    backup_deadline: datetime | None = None
+    current_version: Literal["0.57.4"] = "0.57.4"
+    target_version: Literal["0.57.5"] = "0.57.5"
+    artifact: dict[str, Any]
+    inspected_state: dict[str, Any]
+    gate_results: list[WordPressDraftGateResult]
+    proposed_wordpress_write_scope: list[str]
+    proposed_atlas_write_scope: list[str]
+    expected_post_plugin_inventory_hash: str | None = None
+    expected_post_active_plugin_inventory_hash: str | None = None
+    inspection_only: Literal[True] = True
+    token_issued: Literal[False] = False
+    nonce_returned: Literal[False] = False
+    audit_created: Literal[False] = False
+    wordpress_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+
+
+class WordPressPluginUpgradeApplyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    upgrade_handle: str = Field(min_length=32, max_length=200)
+    confirmation_phrase: str = Field(min_length=1, max_length=120)
+
+
+class WordPressPluginUpgradeResult(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    upgrade_audit_id: int
+    status: Literal["verified", "verification_failed", "failed"]
+    binding_hash: str
+    state_history: list[str]
+    previous_version: Literal["0.57.4"] = "0.57.4"
+    target_version: Literal["0.57.5"] = "0.57.5"
+    gate_results: list[WordPressDraftGateResult]
+    inspected_state: dict[str, Any]
+    wordpress_write_count: Literal[1] = 1
+    wordpress_write_scope: list[str]
+    atlas_write_count: Literal[2] = 2
+    atlas_write_scope: list[str]
+    recovery_recommendation: Literal["no_action", "guarded_downgrade", "siteground_restore"]
+    metadata_application_authorized: Literal[False] = False
+    rendering_change_authorized: Literal[False] = False
+    cache_purge_count: Literal[0] = 0
+    further_action_required: bool
+
+
+class WordPressPluginUpgradeRecoveryRequest(WordPressDeploymentBackupEvidence):
+    model_config = ConfigDict(extra="forbid")
+
+    upgrade_audit_id: int = Field(gt=0)
+
+
+class WordPressPluginUpgradeRecoveryAssessment(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    upgrade_audit_id: int
+    status: Literal["recovery_assessment_complete", "recovery_assessment_blocked"]
+    recommendation: Literal["no_action", "guarded_downgrade", "siteground_restore"]
+    gate_results: list[WordPressDraftGateResult]
+    inspected_state: dict[str, Any]
+    wordpress_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+    automatic_recovery_performed: Literal[False] = False
+
+
 class WordPressMetadataLifecyclePreflightRequest(WordPressActivationPreflightRequest):
     """Immutable proof used by each isolated metadata lifecycle preflight."""
 

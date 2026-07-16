@@ -950,6 +950,38 @@ export type WordPressDeploymentReconciliationResult = {
   wordpress_write_count: 0; atlas_write_count: 2; original_authorization_nonce_preserved: true;
   original_transition_history_preserved: true; further_reconciliation_required: false;
 };
+export type WordPressPluginUpgradePreflight = {
+  page_id:41; wordpress_post_id:8;
+  status:"plugin_upgrade_preflight_blocked"|"plugin_upgrade_preflight_ready";
+  plugin_upgrade_preflight_ready:boolean; upgrade_handle?:string|null;
+  upgrade_handle_fingerprint?:string|null; confirmation_phrase?:string|null;
+  binding_hash?:string|null; expires_at?:string|null; backup_deadline?:string|null;
+  current_version:"0.57.4"; target_version:"0.57.5";
+  artifact:Record<string,unknown>; inspected_state:Record<string,unknown>;
+  gate_results:WordPressDeploymentGate[]; proposed_wordpress_write_scope:string[];
+  proposed_atlas_write_scope:string[]; expected_post_plugin_inventory_hash?:string|null;
+  expected_post_active_plugin_inventory_hash?:string|null; inspection_only:true;
+  token_issued:false; nonce_returned:false; audit_created:false;
+  wordpress_write_count:0; atlas_write_count:0;
+};
+export type WordPressPluginUpgradeResult = {
+  page_id:41; wordpress_post_id:8; upgrade_audit_id:number;
+  status:"verified"|"verification_failed"|"failed"; binding_hash:string;
+  state_history:string[]; previous_version:"0.57.4"; target_version:"0.57.5";
+  gate_results:WordPressDeploymentGate[]; inspected_state:Record<string,unknown>;
+  wordpress_write_count:1; wordpress_write_scope:string[];
+  atlas_write_count:2; atlas_write_scope:string[];
+  recovery_recommendation:"no_action"|"guarded_downgrade"|"siteground_restore";
+  metadata_application_authorized:false; rendering_change_authorized:false;
+  cache_purge_count:0; further_action_required:boolean;
+};
+export type WordPressPluginUpgradeRecoveryAssessment = {
+  page_id:41; wordpress_post_id:8; upgrade_audit_id:number;
+  status:"recovery_assessment_complete"|"recovery_assessment_blocked";
+  recommendation:"no_action"|"guarded_downgrade"|"siteground_restore";
+  gate_results:WordPressDeploymentGate[]; inspected_state:Record<string,unknown>;
+  wordpress_write_count:0; atlas_write_count:0; automatic_recovery_performed:false;
+};
 export type WordPressMetadataVerification = { status: "verified" | "failed" | "not_applied"; metadata_correct: boolean; apply_needed: boolean; payload_hash: string; live_payload_hash?: string | null; gate_results: WordPressMetadataGate[]; read_only: true };
 export type WordPressMetadataRollbackDryRun = { status: "blocked" | "rollback_ready"; ready: boolean; current_payload_hash?: string | null; gate_results: WordPressMetadataGate[]; confirmation_token?: string | null; confirmation_phrase?: string | null; expires_at?: string | null };
 

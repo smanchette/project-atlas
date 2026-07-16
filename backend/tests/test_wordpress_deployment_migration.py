@@ -66,3 +66,23 @@ def test_0016_upgrade_downgrade_reupgrade_activation_audit(monkeypatch, tmp_path
     command.upgrade(config, "20260716_0017")
     assert "wordpressactivationaudit" in inspect(engine).get_table_names()
     get_settings.cache_clear()
+
+
+def test_0018_upgrade_downgrade_reupgrade_plugin_upgrade_audit(monkeypatch, tmp_path):
+    database = tmp_path / "upgrade-matrix.sqlite3"; config = config_for(monkeypatch, database)
+    command.upgrade(config, "20260716_0018")
+    engine = create_engine(f"sqlite:///{database.as_posix()}")
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO setting (setting_key, setting_value, description, created_at, updated_at) VALUES ('upgrade-migration-sentinel','kept','unrelated','2026-07-16','2026-07-16')"))
+    command.upgrade(config, "20260716_0019")
+    inspector = inspect(engine)
+    assert "wordpresspluginupgradeaudit" in inspector.get_table_names()
+    assert any(item["name"] == "uq_wordpresspluginupgradeaudit_handle_fingerprint" for item in inspector.get_unique_constraints("wordpresspluginupgradeaudit"))
+    assert {item["name"] for item in inspector.get_check_constraints("wordpresspluginupgradeaudit")} >= {"ck_wordpresspluginupgradeaudit_action", "ck_wordpresspluginupgradeaudit_status"}
+    command.downgrade(config, "20260716_0018")
+    assert "wordpresspluginupgradeaudit" not in inspect(engine).get_table_names()
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT setting_value FROM setting WHERE setting_key='upgrade-migration-sentinel'")).scalar_one() == "kept"
+    command.upgrade(config, "20260716_0019")
+    assert "wordpresspluginupgradeaudit" in inspect(engine).get_table_names()
+    get_settings.cache_clear()

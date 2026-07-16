@@ -96,7 +96,7 @@ def test_generator_builds_schema_two_manifest_without_commit_self_reference(monk
     manifest = json.loads(output.read_text(encoding="utf-8"))
     assert manifest == {
         "manifest_schema_version": 2,
-        "source_compatibility_id": "project-atlas-release-identity-v0.59.54",
+        "source_compatibility_id": "project-atlas-release-identity-v0.59.55",
         "atlas_version": "v0.59.8",
         "atlas_commit": commit,
         "atlas_tag": "v0.59.8",

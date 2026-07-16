@@ -46,11 +46,12 @@ def isolate_wordpress_audit_state() -> None:
         WordPressDeploymentNonce, WordPressDeploymentTransition,
         WordPressHeadingCorrectionAudit,
         WordPressActivationAudit,
+        WordPressPluginUpgradeAudit,
         WordPressMetadataLifecycleAudit,
     )
 
     models = (
-        WordPressMetadataLifecycleAudit, WordPressDeploymentTransition, WordPressDeploymentNonce, WordPressDeploymentAudit,
+        WordPressMetadataLifecycleAudit, WordPressPluginUpgradeAudit, WordPressDeploymentTransition, WordPressDeploymentNonce, WordPressDeploymentAudit,
         WordPressPublishAudit, WordPressMetadataSyncAudit, WordPressMetadataState,
         WordPressMediaSyncAudit, WordPressDraftAudit, WordPressHeadingCorrectionAudit,
         WordPressActivationAudit,

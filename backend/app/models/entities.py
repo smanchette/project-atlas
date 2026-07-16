@@ -477,6 +477,62 @@ class WordPressActivationAudit(SQLModel, table=True):
     error_message: str | None = Field(default=None, max_length=2000)
 
 
+class WordPressPluginUpgradeAudit(SQLModel, table=True):
+    """Durable record for one guarded Metadata Bridge artifact replacement."""
+
+    __table_args__ = (
+        CheckConstraint(
+            "action_type = 'upgrade_metadata_bridge'",
+            name="ck_wordpresspluginupgradeaudit_action",
+        ),
+        CheckConstraint(
+            "status IN ('pending','verified','verification_failed','failed')",
+            name="ck_wordpresspluginupgradeaudit_status",
+        ),
+        UniqueConstraint(
+            "handle_fingerprint",
+            name="uq_wordpresspluginupgradeaudit_handle_fingerprint",
+        ),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
+    wordpress_post_id: int = Field(index=True)
+    installation_audit_id: int = Field(foreign_key="wordpressdeploymentaudit.id", index=True)
+    activation_audit_id: int = Field(foreign_key="wordpressactivationaudit.id", index=True)
+    action_type: str = Field(default="upgrade_metadata_bridge", max_length=64, index=True)
+    status: str = Field(default="pending", max_length=40, index=True)
+    operator: str = Field(max_length=200)
+    confirmation_phrase_hash: str = Field(max_length=64)
+    handle_fingerprint: str = Field(max_length=64, index=True)
+    binding_hash: str = Field(max_length=64, index=True)
+    previous_version: str = Field(max_length=32)
+    target_version: str = Field(max_length=32)
+    previous_artifact_sha256: str = Field(max_length=64)
+    target_artifact_sha256: str = Field(max_length=64)
+    release_identity: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    backup_evidence: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    browser_evidence_id: str = Field(max_length=200)
+    browser_evidence_hashes: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    pre_snapshot: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    post_snapshot: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    previous_inventories: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    final_inventories: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    metadata_rendering_state: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    page_media_snapshots: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    gate_results: list[dict[str, Any]] = Field(sa_column=Column(JSON, nullable=False))
+    wordpress_write_count: int = Field(default=0)
+    wordpress_write_scope: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    atlas_write_count: int = Field(default=0)
+    atlas_write_scope: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    verification_findings: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    recovery_recommendation: str | None = Field(default=None, max_length=64)
+    transition_history: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    attempted_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    completed_at: datetime | None = None
+    error_code: str | None = Field(default=None, max_length=64)
+    error_message: str | None = Field(default=None, max_length=2000)
+
+
 class WordPressMetadataLifecycleAudit(SQLModel, table=True):
     """Durable record for one isolated Metadata Bridge lifecycle mutation."""
 

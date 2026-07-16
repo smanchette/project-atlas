@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.55
+
+Added a token-free, one-time-handle guarded Metadata Bridge upgrade from 0.57.4 to 0.57.5, a fixed standard-upgrader transport, post-upgrade verification, read-only recovery assessment, `WordPressPluginUpgradeAudit`, migration 0019, and Data Backup v0.35 portability. Publication does not authorize a live upgrade.
+
 ## v0.59.54
 
 Separated Metadata Bridge payload staging, rendering enablement, rendering disablement, and payload rollback. Metadata Bridge 0.57.5 adds four isolated plugin-owned write surfaces and disables the legacy combined apply endpoint. Atlas adds token-free preflights, short-lived one-time process-memory handles, four lifecycle audit types, four-hour backup enforcement, schema-v1 evidence fallback, exact Organization plus Service payload validation, and Data Backup v0.34 lifecycle-audit portability.

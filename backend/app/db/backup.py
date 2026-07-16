@@ -25,6 +25,7 @@ from app.models import (
     WordPressDeploymentNonce,
     WordPressDeploymentTransition,
     WordPressActivationAudit,
+    WordPressPluginUpgradeAudit,
     WordPressMetadataLifecycleAudit,
     WordPressMediaSyncAudit,
     WordPressMetadataState,
@@ -34,7 +35,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.34"
+BACKUP_VERSION = "0.35"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -54,6 +55,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.32",
     "0.33",
     "0.34",
+    "0.35",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -80,6 +82,7 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "wordpress_deployment_nonces": WordPressDeploymentNonce,
     "wordpress_deployment_transitions": WordPressDeploymentTransition,
     "wordpress_activation_audits": WordPressActivationAudit,
+    "wordpress_plugin_upgrade_audits": WordPressPluginUpgradeAudit,
     "wordpress_metadata_lifecycle_audits": WordPressMetadataLifecycleAudit,
     "wordpress_publish_audits": WordPressPublishAudit,
     "wordpress_media_sync_audits": WordPressMediaSyncAudit,
@@ -559,6 +562,25 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             for record in data["wordpress_activation_audits"]
         }
 
+        for record in data["wordpress_plugin_upgrade_audits"]:
+            attempted_at = _datetime_value(record["attempted_at"], "wordpress_plugin_upgrade_audits.attempted_at")
+            restored_record = {
+                **record,
+                "generated_page_id": _mapped_id(generated_page_ids, record["generated_page_id"], "wordpress_plugin_upgrade_audits.generated_page_id"),
+                "installation_audit_id": _mapped_id(deployment_audit_ids, record["installation_audit_id"], "wordpress_plugin_upgrade_audits.installation_audit_id"),
+                "activation_audit_id": _mapped_id(activation_audit_ids, record["activation_audit_id"], "wordpress_plugin_upgrade_audits.activation_audit_id"),
+                "attempted_at": attempted_at,
+                "completed_at": _datetime_value(record["completed_at"], "wordpress_plugin_upgrade_audits.completed_at") if record.get("completed_at") else None,
+            }
+            _upsert(
+                session,
+                WordPressPluginUpgradeAudit,
+                select(WordPressPluginUpgradeAudit).where(
+                    WordPressPluginUpgradeAudit.handle_fingerprint == record["handle_fingerprint"]
+                ),
+                restored_record,
+            )
+
         for record in data["wordpress_metadata_lifecycle_audits"]:
             attempted_at = _datetime_value(record["attempted_at"], "wordpress_metadata_lifecycle_audits.attempted_at")
             restored_record = {
@@ -708,6 +730,9 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "wordpress_activation_audits" not in data:
         data["wordpress_activation_audits"] = []
         counts["wordpress_activation_audits"] = 0
+    if "wordpress_plugin_upgrade_audits" not in data:
+        data["wordpress_plugin_upgrade_audits"] = []
+        counts["wordpress_plugin_upgrade_audits"] = 0
     if "wordpress_metadata_lifecycle_audits" not in data:
         data["wordpress_metadata_lifecycle_audits"] = []
         counts["wordpress_metadata_lifecycle_audits"] = 0
@@ -833,6 +858,7 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         "wordpress_deployment_nonces": ("jti",),
         "wordpress_deployment_transitions": ("request_identifier",),
         "wordpress_activation_audits": ("handle_fingerprint",),
+        "wordpress_plugin_upgrade_audits": ("handle_fingerprint",),
         "wordpress_metadata_lifecycle_audits": ("handle_fingerprint",),
         "wordpress_publish_audits": ("generated_page_id", "attempted_at", "publish_payload_hash"),
         "wordpress_media_sync_audits": ("generated_page_id", "attempted_at", "source_checksum"),
@@ -914,6 +940,11 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
         "wordpress_activation_audits": (
             ("generated_page_id", "generated_pages", False),
             ("installation_audit_id", "wordpress_deployment_audits", False),
+        ),
+        "wordpress_plugin_upgrade_audits": (
+            ("generated_page_id", "generated_pages", False),
+            ("installation_audit_id", "wordpress_deployment_audits", False),
+            ("activation_audit_id", "wordpress_activation_audits", False),
         ),
         "wordpress_metadata_lifecycle_audits": (
             ("generated_page_id", "generated_pages", False),
