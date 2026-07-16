@@ -63,6 +63,10 @@ from app.schemas.wordpress import (
     WordPressActivationPreflight,
     WordPressActivationPreflightRequest,
     WordPressActivationResult,
+    WordPressMetadataLifecycleApplyRequest,
+    WordPressMetadataLifecyclePreflight,
+    WordPressMetadataLifecyclePreflightRequest,
+    WordPressMetadataLifecycleResult,
     WordPressHeadingCorrectionApplyRequest,
     WordPressHeadingCorrectionApplyResult,
     WordPressHeadingCorrectionDryRun,
@@ -131,6 +135,16 @@ from app.services.wordpress_heading_correction import (
     verify_heading_correction,
 )
 from app.services.wordpress_activation import activation_preflight, apply_activation
+from app.services.wordpress_metadata_lifecycle import (
+    disable_apply,
+    disable_preflight,
+    rendering_apply,
+    rendering_preflight,
+    rollback_apply as lifecycle_rollback_apply,
+    rollback_preflight as lifecycle_rollback_preflight,
+    staging_apply,
+    staging_preflight,
+)
 
 router = APIRouter(prefix="/wordpress", tags=["wordpress sandbox"])
 
@@ -233,6 +247,46 @@ def metadata_bridge_activation_apply(
     session: Session = Depends(get_session),
 ) -> WordPressActivationResult:
     return apply_activation(session, page_id, payload)
+
+
+@router.post("/metadata/staging/preflight/{page_id}", response_model=WordPressMetadataLifecyclePreflight)
+def metadata_staging_preflight(page_id: int, payload: WordPressMetadataLifecyclePreflightRequest, session: Session = Depends(get_session)) -> WordPressMetadataLifecyclePreflight:
+    return staging_preflight(session, page_id, payload)
+
+
+@router.post("/metadata/staging/apply/{page_id}", response_model=WordPressMetadataLifecycleResult)
+def metadata_staging_apply(page_id: int, payload: WordPressMetadataLifecycleApplyRequest, session: Session = Depends(get_session)) -> WordPressMetadataLifecycleResult:
+    return staging_apply(session, page_id, payload)
+
+
+@router.post("/metadata/rendering/preflight/{page_id}", response_model=WordPressMetadataLifecyclePreflight)
+def metadata_rendering_preflight(page_id: int, payload: WordPressMetadataLifecyclePreflightRequest, session: Session = Depends(get_session)) -> WordPressMetadataLifecyclePreflight:
+    return rendering_preflight(session, page_id, payload)
+
+
+@router.post("/metadata/rendering/apply/{page_id}", response_model=WordPressMetadataLifecycleResult)
+def metadata_rendering_apply(page_id: int, payload: WordPressMetadataLifecycleApplyRequest, session: Session = Depends(get_session)) -> WordPressMetadataLifecycleResult:
+    return rendering_apply(session, page_id, payload)
+
+
+@router.post("/metadata/rendering/disable/preflight/{page_id}", response_model=WordPressMetadataLifecyclePreflight)
+def metadata_rendering_disable_preflight(page_id: int, payload: WordPressMetadataLifecyclePreflightRequest, session: Session = Depends(get_session)) -> WordPressMetadataLifecyclePreflight:
+    return disable_preflight(session, page_id, payload)
+
+
+@router.post("/metadata/rendering/disable/apply/{page_id}", response_model=WordPressMetadataLifecycleResult)
+def metadata_rendering_disable_apply(page_id: int, payload: WordPressMetadataLifecycleApplyRequest, session: Session = Depends(get_session)) -> WordPressMetadataLifecycleResult:
+    return disable_apply(session, page_id, payload)
+
+
+@router.post("/metadata/staging/rollback/preflight/{page_id}", response_model=WordPressMetadataLifecyclePreflight)
+def metadata_staging_rollback_preflight(page_id: int, payload: WordPressMetadataLifecyclePreflightRequest, session: Session = Depends(get_session)) -> WordPressMetadataLifecyclePreflight:
+    return lifecycle_rollback_preflight(session, page_id, payload)
+
+
+@router.post("/metadata/staging/rollback/apply/{page_id}", response_model=WordPressMetadataLifecycleResult)
+def metadata_staging_rollback_apply(page_id: int, payload: WordPressMetadataLifecycleApplyRequest, session: Session = Depends(get_session)) -> WordPressMetadataLifecycleResult:
+    return lifecycle_rollback_apply(session, page_id, payload)
 
 
 @router.get("/settings", response_model=WordPressSettingsRead)

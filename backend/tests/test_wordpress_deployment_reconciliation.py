@@ -27,7 +27,7 @@ KEY = "v0.59.48-local-test-signing-key-with-more-than-32-bytes"
 VERSION = "v0.59.48"
 COMMIT = "e" * 40
 MANIFEST = "d" * 64
-SOURCE_COMPATIBILITY = "project-atlas-release-identity-v0.59.8"
+SOURCE_COMPATIBILITY = "project-atlas-release-identity-v0.59.54"
 PLUGIN_INVENTORY = "9" * 64
 ACTIVE_INVENTORY = "8" * 64
 LIVE_ACTIVE_INVENTORY = "9e2d39fce63cd085dc6da2df89bc2a1016c2ad298f86a570c0a8136f4eeaa862"
@@ -282,7 +282,7 @@ def test_unrelated_identifiers_are_not_rewritten_to_the_authorized_entry(raw):
 
 def test_normalized_matching_preserves_raw_inventory_and_hash_definitions():
     plugins = [
-        {"plugin": "project-atlas-metadata-bridge/project-atlas-metadata-bridge", "version": "0.57.4", "status": "inactive"},
+        {"plugin": "project-atlas-metadata-bridge/project-atlas-metadata-bridge", "version": deployment.PLUGIN_VERSION, "status": "inactive"},
         {"plugin": "sg-security/sg-security", "version": "1.6.5", "status": "active"},
     ]
     before = json.loads(json.dumps(plugins))
@@ -479,7 +479,7 @@ def test_atlas_state_drift_blocks(monkeypatch, db, condition):
             session.commit()
         if condition == "metadata_audit":
             from app.models import WordPressMetadataSyncAudit
-            session.add(WordPressMetadataSyncAudit(generated_page_id=41, wordpress_post_id=8, action_type="test", status="pending", wordpress_site_url="https://example.test", payload_hash="a" * 64, payload_snapshot={}, gate_results=[], data_backup_file_name="test.json", wordpress_backup_reference="test", plugin_version="0.57.4"))
+            session.add(WordPressMetadataSyncAudit(generated_page_id=41, wordpress_post_id=8, action_type="test", status="pending", wordpress_site_url="https://example.test", payload_hash="a" * 64, payload_snapshot={}, gate_results=[], data_backup_file_name="test.json", wordpress_backup_reference="test", plugin_version=deployment.PLUGIN_VERSION))
             session.commit()
         result = deployment.verify_install_reconciliation(session, 41, request())
         assert not result.reconciliation_ready

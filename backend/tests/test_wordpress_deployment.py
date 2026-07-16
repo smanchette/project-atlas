@@ -78,7 +78,7 @@ def db(tmp_path):
 def authorize_request(pre, reference="sg-backup-123"):
     values = proof(wordpress_backup_reference=reference)
     model = WordPressDeploymentAuthorizeRequest(**values, confirmation_token="placeholder", confirmation_phrase=deployment.INSTALL_PHRASE, operator="Shawn Manchette", shawn_approved_at=datetime.now(UTC), evidence_directory="docs/deployment-records/wordpress/orlando-page-8/2026/2026-07-12/v0.59-install")
-    artifact = {"atlas_version":TEST_ATLAS_VERSION,"atlas_commit":TEST_ATLAS_COMMIT,"atlas_tag":TEST_ATLAS_TAG,"release_manifest_sha256":"d"*64,"release_source_compatibility_id":"project-atlas-release-identity-v0.59.8","release_verification_source":"expected_identity_and_checksum_verified_manifest","release_manifest_integrity_verified":True,"release_expected_identity_matched":True,"release_git_metadata_available":False,"release_runtime_identity_verified":True,"plugin_slug":deployment.PLUGIN_SLUG,"plugin_path":deployment.PLUGIN_FILE,"plugin_version":deployment.PLUGIN_VERSION,"zip_file_name":deployment.ZIP_NAME,"zip_sha256":deployment.ZIP_SHA256}
+    artifact = {"atlas_version":TEST_ATLAS_VERSION,"atlas_commit":TEST_ATLAS_COMMIT,"atlas_tag":TEST_ATLAS_TAG,"release_manifest_sha256":"d"*64,"release_source_compatibility_id":"project-atlas-release-identity-v0.59.54","release_verification_source":"expected_identity_and_checksum_verified_manifest","release_manifest_integrity_verified":True,"release_expected_identity_matched":True,"release_git_metadata_available":False,"release_runtime_identity_verified":True,"plugin_slug":deployment.PLUGIN_SLUG,"plugin_path":deployment.PLUGIN_FILE,"plugin_version":deployment.PLUGIN_VERSION,"zip_file_name":deployment.ZIP_NAME,"zip_sha256":deployment.ZIP_SHA256}
     context = deployment._bound_context(pre, model, artifact)
     model.confirmation_token = deployment._sign_context("authorize_manual_plugin_install", context, datetime.now(UTC)+timedelta(minutes=10))
     dry = WordPressDeploymentInstallDryRun(status="preflight_ready",ready=True,artifact=artifact,inspected_state=pre,gate_results=[])
@@ -101,7 +101,7 @@ def test_install_routes_are_fixed_and_no_activation_or_upload_route():
 def _preflight_artifact():
     return {
         "atlas_version":TEST_ATLAS_VERSION,"atlas_commit":TEST_ATLAS_COMMIT,"atlas_tag":TEST_ATLAS_TAG,
-        "release_manifest_sha256":"d"*64,"release_source_compatibility_id":"project-atlas-release-identity-v0.59.8",
+        "release_manifest_sha256":"d"*64,"release_source_compatibility_id":"project-atlas-release-identity-v0.59.54",
         "release_verification_source":"expected_identity_and_checksum_verified_manifest","release_manifest_integrity_verified":True,
         "release_expected_identity_matched":True,"release_git_metadata_available":False,"release_runtime_identity_verified":True,
         "plugin_slug":deployment.PLUGIN_SLUG,"plugin_path":deployment.PLUGIN_FILE,"plugin_version":deployment.PLUGIN_VERSION,
@@ -229,7 +229,7 @@ def test_authorization_consumes_nonce_and_preserves_exact_initial_sequence(monke
 def test_authorization_token_binds_the_same_runtime_release_identity():
     pre=snapshot();request,_=authorize_request(pre)
     token=deployment._verify(request.confirmation_token,"authorize_manual_plugin_install",41)
-    assert token["context"]["atlas_release"]=={"version":TEST_ATLAS_VERSION,"commit":TEST_ATLAS_COMMIT,"tag":TEST_ATLAS_TAG,"manifest_sha256":"d"*64,"source_compatibility_id":"project-atlas-release-identity-v0.59.8","verification_source":"expected_identity_and_checksum_verified_manifest","manifest_integrity_verified":True,"expected_release_matched":True,"git_metadata_available":False,"runtime_identity_verified":True}
+    assert token["context"]["atlas_release"]=={"version":TEST_ATLAS_VERSION,"commit":TEST_ATLAS_COMMIT,"tag":TEST_ATLAS_TAG,"manifest_sha256":"d"*64,"source_compatibility_id":"project-atlas-release-identity-v0.59.54","verification_source":"expected_identity_and_checksum_verified_manifest","manifest_integrity_verified":True,"expected_release_matched":True,"git_metadata_available":False,"runtime_identity_verified":True}
 
 
 def test_nonce_replay_and_duplicate_deployment_are_blocked(monkeypatch,db):

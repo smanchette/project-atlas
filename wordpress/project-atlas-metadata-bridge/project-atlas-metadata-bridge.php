@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Project Atlas Metadata Bridge
  * Description: Guarded Orlando-only metadata rendering bridge for Project Atlas.
- * Version: 0.57.4
+ * Version: 0.57.5
  * Requires at least: 6.5
  * Requires PHP: 8.1
  * Author: Project Atlas
@@ -10,7 +10,7 @@
 
 if (!defined('ABSPATH')) { exit; }
 
-define('ATLAS_METADATA_BRIDGE_VERSION', '0.57.4');
+define('ATLAS_METADATA_BRIDGE_VERSION', '0.57.5');
 define('ATLAS_METADATA_POST_ID', 8);
 define('ATLAS_METADATA_MEDIA_ID', 31);
 define('ATLAS_METADATA_EXCLUDED_MEDIA_ID', 32);
@@ -63,22 +63,14 @@ function atlas_metadata_hash(array $payload): string {
 
 function atlas_metadata_approved_payload(): array {
     $url = 'https://www.drywoodtenting.com/drywood-termite-tenting-orlando-fl/';
-    $image_url = 'https://www.drywoodtenting.com/wp-content/uploads/2026/07/orlando-drywood-termite-tenting-hero.png';
-    $title = 'Drywood Termite Tenting in Orlando, FL';
     $description = 'Flo-Zone Pest And Termite Solutions Inc provides professional drywood termite tenting services for homes and properties in Orlando, Florida.';
     $organization = 'Flo-Zone Pest And Termite Solutions Inc';
-    $image_id = $url . '#primaryimage';
-    return ['schema_version'=>'1.0','page_id'=>41,'wordpress_post_id'=>8,'meta_description'=>$description,
-        'open_graph'=>['og:title'=>$title,'og:description'=>$description,'og:image'=>$image_url,'og:url'=>$url,'og:type'=>'website'],
-        'twitter'=>['twitter:card'=>'summary_large_image','twitter:title'=>$title,'twitter:description'=>$description,'twitter:image'=>$image_url],
+    $organization_id = 'https://www.drywoodtenting.com/#organization';
+    return ['schema_version'=>'2.0','page_id'=>41,'wordpress_post_id'=>8,'meta_description'=>$description,
         'json_ld'=>['@context'=>'https://schema.org','@graph'=>[
-            ['@type'=>'WebSite','@id'=>'https://www.drywoodtenting.com/#website','url'=>'https://www.drywoodtenting.com/','name'=>$organization],
-            ['@type'=>'Organization','@id'=>'https://www.drywoodtenting.com/#organization','name'=>$organization,'url'=>'https://www.drywoodtenting.com/','telephone'=>'(844) 600-8368','email'=>'Office@Flo-ZoneTenting.com','identifier'=>['@type'=>'PropertyValue','name'=>'License identifier','value'=>'JB360566']],
-            ['@type'=>'Person','@id'=>'https://www.drywoodtenting.com/#jordan-ward','name'=>'Jordan Ward','jobTitle'=>'Certified Operator','worksFor'=>['@id'=>'https://www.drywoodtenting.com/#organization']],
-            ['@type'=>'ImageObject','@id'=>$image_id,'url'=>$image_url,'contentUrl'=>$image_url,'caption'=>'Two-story Orlando Florida home professionally covered for drywood termite tenting'],
-            ['@type'=>'Service','@id'=>$url.'#service','name'=>$title,'serviceType'=>'Drywood termite tenting','areaServed'=>['@type'=>'City','name'=>'Orlando','containedInPlace'=>['@type'=>'State','name'=>'Florida']],'provider'=>['@id'=>'https://www.drywoodtenting.com/#organization'],'image'=>['@id'=>$image_id]],
-            ['@type'=>'WebPage','@id'=>$url.'#webpage','url'=>$url,'name'=>$title,'description'=>$description,'isPartOf'=>['@id'=>'https://www.drywoodtenting.com/#website'],'about'=>['@id'=>$url.'#service'],'primaryImageOfPage'=>['@id'=>$image_id]],
-        ]], 'media_id'=>31, 'excluded_media_ids'=>[32]];
+            ['@type'=>'Organization','@id'=>$organization_id,'name'=>$organization,'telephone'=>'(844) 600-8368','email'=>'Office@Flo-ZoneTenting.com','identifier'=>['@type'=>'PropertyValue','name'=>'License','value'=>'JB360566']],
+            ['@type'=>'Service','@id'=>$url.'#service','serviceType'=>'Drywood termite tenting','areaServed'=>'Orlando, Florida','provider'=>['@id'=>$organization_id]],
+        ]]];
 }
 
 function atlas_metadata_validate_images($value, string $key = ''): array {
@@ -129,27 +121,83 @@ add_action('rest_api_init', function (): void {
         'methods' => 'PUT', 'permission_callback' => 'atlas_metadata_permission',
         'callback' => 'atlas_metadata_rollback',
     ]);
+    register_rest_route('project-atlas/v2', '/pages/8/metadata/stage', [
+        'methods' => 'PUT', 'permission_callback' => 'atlas_metadata_permission',
+        'callback' => 'atlas_metadata_stage',
+    ]);
+    register_rest_route('project-atlas/v2', '/pages/8/metadata/rendering/enable', [
+        'methods' => 'PUT', 'permission_callback' => 'atlas_metadata_permission',
+        'callback' => 'atlas_metadata_rendering_enable',
+    ]);
+    register_rest_route('project-atlas/v2', '/pages/8/metadata/rendering/disable', [
+        'methods' => 'PUT', 'permission_callback' => 'atlas_metadata_permission',
+        'callback' => 'atlas_metadata_rendering_disable',
+    ]);
+    register_rest_route('project-atlas/v2', '/pages/8/metadata/stage/rollback', [
+        'methods' => 'PUT', 'permission_callback' => 'atlas_metadata_permission',
+        'callback' => 'atlas_metadata_stage_rollback',
+    ]);
 });
 
 function atlas_metadata_apply(WP_REST_Request $request) {
+    return new WP_Error('atlas_legacy_combined_apply_disabled', 'The combined payload-and-rendering endpoint is deprecated and disabled. Use the separated v2 lifecycle.', ['status' => 410]);
+}
+
+function atlas_metadata_snapshot_hash(array $snapshot): string {
+    $bound = [];
+    foreach (['rendering_enabled','enabled_metadata_state','activation_generation','plugin_checksum','payload_hash','revision','payload'] as $key) { $bound[$key] = $snapshot[$key] ?? null; }
+    return hash('sha256', wp_json_encode(atlas_metadata_canonicalize($bound), JSON_UNESCAPED_SLASHES));
+}
+
+function atlas_metadata_lifecycle_request(WP_REST_Request $request): array|WP_Error {
     $body = $request->get_json_params(); $payload = $body['payload'] ?? null; $expected_hash = (string) ($body['payload_hash'] ?? '');
-    $snapshot = atlas_metadata_snapshot(); $errors = atlas_metadata_validate_payload($payload);
-    if ($errors) { return new WP_Error('atlas_invalid_payload', implode(' ', $errors), ['status' => 422]); }
-    if (!hash_equals(atlas_metadata_hash($payload), $expected_hash)) { return new WP_Error('atlas_hash_mismatch', 'Payload hash mismatch.', ['status' => 409]); }
+    $snapshot = atlas_metadata_snapshot();
     if (!hash_equals($snapshot['revision'], (string) ($body['expected_revision'] ?? ''))) { return new WP_Error('atlas_revision_conflict', 'Metadata revision changed.', ['status' => 409]); }
-    if (!hash_equals(hash('sha256', wp_json_encode(atlas_metadata_canonicalize($snapshot), JSON_UNESCAPED_SLASHES)), (string)($body['expected_snapshot_hash'] ?? ''))) { return new WP_Error('atlas_snapshot_conflict', 'Metadata snapshot changed.', ['status' => 409]); }
-    if (!hash_equals($snapshot['activation_generation'], (string)($body['activation_generation'] ?? '')) || !hash_equals(atlas_metadata_plugin_checksum(), (string)($body['plugin_checksum'] ?? ''))) { return new WP_Error('atlas_activation_conflict', 'Activation generation or plugin checksum changed.', ['status' => 409]); }
+    if (!hash_equals(atlas_metadata_snapshot_hash($snapshot), (string)($body['expected_snapshot_hash'] ?? ''))) { return new WP_Error('atlas_snapshot_conflict', 'Metadata snapshot changed.', ['status' => 409]); }
     $post = get_post(8); if (!$post || $post->post_status !== 'publish' || $post->post_name !== 'drywood-termite-tenting-orlando-fl') { return new WP_Error('atlas_post_changed', 'Orlando post identity changed.', ['status' => 409]); }
     if ((int) get_post_thumbnail_id(8) !== 31 || get_post(31) === null || get_post(32) === null) { return new WP_Error('atlas_media_changed', 'Expected media state changed.', ['status' => 409]); }
-    $revision = (string) (((int) $snapshot['revision']) + 1);
+    return ['body'=>$body, 'payload'=>$payload, 'expected_hash'=>$expected_hash, 'snapshot'=>$snapshot];
+}
+
+function atlas_metadata_stage(WP_REST_Request $request) {
+    $context = atlas_metadata_lifecycle_request($request); if (is_wp_error($context)) { return $context; }
+    ['payload'=>$payload,'expected_hash'=>$expected_hash,'snapshot'=>$snapshot] = $context;
+    $errors = atlas_metadata_validate_payload($payload);
+    if ($errors) { return new WP_Error('atlas_invalid_payload', implode(' ', $errors), ['status' => 422]); }
+    if ($snapshot['rendering_enabled'] || $snapshot['payload'] !== null || $snapshot['payload_hash'] !== '' || $snapshot['revision'] !== '0') { return new WP_Error('atlas_stage_state_conflict', 'Initial staging state changed.', ['status' => 409]); }
+    if (!hash_equals(atlas_metadata_hash($payload), $expected_hash)) { return new WP_Error('atlas_hash_mismatch', 'Payload hash mismatch.', ['status' => 409]); }
     update_post_meta(8, '_atlas_metadata_payload', $payload);
-    update_post_meta(8, '_atlas_metadata_payload_hash', atlas_metadata_hash(atlas_metadata_approved_payload()));
-    update_post_meta(8, '_atlas_metadata_revision', $revision);
+    update_post_meta(8, '_atlas_metadata_payload_hash', $expected_hash);
+    update_post_meta(8, '_atlas_metadata_revision', '1');
+    delete_post_meta(8, '_atlas_metadata_enabled');
+    return rest_ensure_response(['status'=>'metadata_staged','post_id'=>8,'payload_hash'=>$expected_hash,'revision'=>'1','rendering_enabled'=>false]);
+}
+
+function atlas_metadata_rendering_enable(WP_REST_Request $request) {
+    $context = atlas_metadata_lifecycle_request($request); if (is_wp_error($context)) { return $context; }
+    ['expected_hash'=>$expected_hash,'snapshot'=>$snapshot] = $context;
+    if ($snapshot['rendering_enabled'] || $snapshot['revision'] !== '1' || !is_array($snapshot['payload']) || !hash_equals($snapshot['payload_hash'], $expected_hash) || atlas_metadata_validate_payload($snapshot['payload'])) { return new WP_Error('atlas_enable_state_conflict', 'Exact disabled staged payload required.', ['status' => 409]); }
     update_post_meta(8, '_atlas_metadata_enabled', '1');
-    update_option(ATLAS_METADATA_SAFETY_OPTION, ['activation_generation'=>$snapshot['activation_generation'], 'enabled'=>true,
-        'authorized_generation'=>$snapshot['activation_generation'], 'plugin_version'=>ATLAS_METADATA_BRIDGE_VERSION,
-        'plugin_checksum'=>atlas_metadata_plugin_checksum()], false);
-    return rest_ensure_response(['status' => 'metadata_applied', 'post_id' => 8, 'payload_hash' => $expected_hash, 'revision' => $revision, 'previous_snapshot' => $snapshot, 'rendering_enabled' => true]);
+    update_option(ATLAS_METADATA_SAFETY_OPTION, ['activation_generation'=>$snapshot['activation_generation'],'enabled'=>true,'authorized_generation'=>$snapshot['activation_generation'],'plugin_version'=>ATLAS_METADATA_BRIDGE_VERSION,'plugin_checksum'=>atlas_metadata_plugin_checksum()], false);
+    return rest_ensure_response(['status'=>'metadata_rendering_enabled','post_id'=>8,'payload_hash'=>$expected_hash,'revision'=>'1','rendering_enabled'=>true]);
+}
+
+function atlas_metadata_rendering_disable(WP_REST_Request $request) {
+    $context = atlas_metadata_lifecycle_request($request); if (is_wp_error($context)) { return $context; }
+    ['expected_hash'=>$expected_hash,'snapshot'=>$snapshot] = $context;
+    if (!$snapshot['rendering_enabled'] || $snapshot['revision'] !== '1' || !is_array($snapshot['payload']) || !hash_equals($snapshot['payload_hash'], $expected_hash)) { return new WP_Error('atlas_disable_state_conflict', 'Exact enabled staged payload required.', ['status' => 409]); }
+    delete_post_meta(8, '_atlas_metadata_enabled');
+    update_option(ATLAS_METADATA_SAFETY_OPTION, ['activation_generation'=>$snapshot['activation_generation'],'enabled'=>false,'authorized_generation'=>'','plugin_version'=>ATLAS_METADATA_BRIDGE_VERSION,'plugin_checksum'=>atlas_metadata_plugin_checksum()], false);
+    return rest_ensure_response(['status'=>'metadata_rendering_disabled','post_id'=>8,'payload_hash'=>$expected_hash,'revision'=>'1','rendering_enabled'=>false]);
+}
+
+function atlas_metadata_stage_rollback(WP_REST_Request $request) {
+    $context = atlas_metadata_lifecycle_request($request); if (is_wp_error($context)) { return $context; }
+    ['body'=>$body,'expected_hash'=>$expected_hash,'snapshot'=>$snapshot] = $context;
+    if ($snapshot['rendering_enabled']) { return new WP_Error('atlas_rollback_rendering_enabled', 'Rendering must be disabled before payload rollback.', ['status' => 409]); }
+    if ($snapshot['revision'] !== '1' || !is_array($snapshot['payload']) || !hash_equals($snapshot['payload_hash'], $expected_hash) || (string)($body['rollback_revision'] ?? '') !== '0') { return new WP_Error('atlas_rollback_state_conflict', 'Exact staged payload and rollback revision are required.', ['status' => 409]); }
+    delete_post_meta(8, '_atlas_metadata_payload'); delete_post_meta(8, '_atlas_metadata_payload_hash'); delete_post_meta(8, '_atlas_metadata_revision'); delete_post_meta(8, '_atlas_metadata_enabled');
+    return rest_ensure_response(['status'=>'metadata_payload_rolled_back','post_id'=>8,'payload_hash'=>'','revision'=>'0','rendering_enabled'=>false]);
 }
 
 function atlas_metadata_rollback(WP_REST_Request $request) {
@@ -181,7 +229,5 @@ add_action('wp_head', function (): void {
         || !hash_equals(atlas_metadata_hash($snapshot['payload']), $snapshot['payload_hash'])) { return; }
     $p = $snapshot['payload']; echo "\n<!-- Project Atlas Metadata Bridge v" . esc_html(ATLAS_METADATA_BRIDGE_VERSION) . " -->\n";
     echo '<meta name="description" content="' . esc_attr($p['meta_description']) . '">' . "\n";
-    foreach ($p['open_graph'] as $property => $content) { echo '<meta property="' . esc_attr($property) . '" content="' . esc_attr($content) . '">' . "\n"; }
-    foreach ($p['twitter'] as $name => $content) { echo '<meta name="' . esc_attr($name) . '" content="' . esc_attr($content) . '">' . "\n"; }
     echo '<script type="application/ld+json" data-project-atlas="metadata">' . wp_json_encode($p['json_ld'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . '</script>' . "\n";
 }, 20);

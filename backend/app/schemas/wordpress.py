@@ -778,6 +778,18 @@ class WordPressMetadataPayload(SQLModel):
     excluded_media_ids: list[int] = [32]
 
 
+class WordPressMetadataLifecyclePayload(SQLModel):
+    """Exact v0.59.54 staging payload; it intentionally contains no media fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["2.0"] = "2.0"
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    meta_description: str
+    json_ld: dict[str, Any]
+
+
 class WordPressMetadataBackupProof(SQLModel):
     confirmed_data_backup_file: str = Field(min_length=1, max_length=255)
     confirmed_media_backup_identity: str = Field(min_length=1, max_length=255)
@@ -1220,4 +1232,80 @@ class WordPressActivationResult(SQLModel):
     atlas_write_scope: list[str]
     metadata_application_authorized: Literal[False] = False
     cache_purge_count: Literal[0] = 0
+    further_action_required: bool
+
+
+class WordPressMetadataLifecyclePreflightRequest(WordPressActivationPreflightRequest):
+    """Immutable proof used by each isolated metadata lifecycle preflight."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    activation_audit_id: int = Field(gt=0)
+    candidate_payload: WordPressMetadataLifecyclePayload
+
+
+class WordPressMetadataLifecyclePreflight(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    action: Literal[
+        "stage_metadata_payload",
+        "enable_metadata_rendering",
+        "disable_metadata_rendering",
+        "rollback_metadata_payload",
+    ]
+    status: Literal["metadata_lifecycle_preflight_blocked", "metadata_lifecycle_preflight_ready"]
+    preflight_ready: bool
+    lifecycle_handle: str | None = None
+    handle_fingerprint: str | None = None
+    expires_at: datetime | None = None
+    binding_hash: str | None = None
+    confirmation_phrase: str | None = None
+    canonical_payload: WordPressMetadataLifecyclePayload
+    payload_sha256: str
+    expected_revision: str
+    inspected_state: dict[str, Any]
+    gate_results: list[WordPressDraftGateResult]
+    proposed_wordpress_write_scope: list[str]
+    proposed_atlas_write_scope: list[str]
+    inspection_only: Literal[True] = True
+    token_issued: Literal[False] = False
+    nonce_issued: Literal[False] = False
+    nonce_consumed: Literal[False] = False
+    audit_created: Literal[False] = False
+    wordpress_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+
+
+class WordPressMetadataLifecycleApplyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lifecycle_handle: str = Field(min_length=32, max_length=200)
+    confirmation_phrase: str = Field(min_length=1, max_length=100)
+
+
+class WordPressMetadataLifecycleResult(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    lifecycle_audit_id: int
+    action: Literal[
+        "stage_metadata_payload",
+        "enable_metadata_rendering",
+        "disable_metadata_rendering",
+        "rollback_metadata_payload",
+    ]
+    status: Literal["verified", "verification_failed", "failed"]
+    binding_hash: str
+    state_history: list[str]
+    payload_hash: str
+    wordpress_revision: str
+    rendering_enabled: bool
+    inspected_state: dict[str, Any]
+    gate_results: list[WordPressDraftGateResult]
+    wordpress_write_count: Literal[1] = 1
+    wordpress_write_scope: list[str]
+    atlas_write_count: Literal[2] = 2
+    atlas_write_scope: list[str]
+    cache_purge_count: Literal[0] = 0
+    page_write_count: Literal[0] = 0
+    media_write_count: Literal[0] = 0
     further_action_required: bool

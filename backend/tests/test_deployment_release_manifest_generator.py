@@ -83,7 +83,7 @@ def test_generator_rejects_remote_divergence(monkeypatch, tmp_path):
 def test_generator_builds_schema_two_manifest_without_commit_self_reference(monkeypatch, tmp_path):
     root = tmp_path / "project"
     root.mkdir()
-    artifact = root / "wordpress/dist/project-atlas-metadata-bridge-0.57.4.zip"
+    artifact = root / "wordpress/dist/project-atlas-metadata-bridge-0.57.5.zip"
     artifact.parent.mkdir(parents=True)
     artifact.write_bytes(b"test")
     commit = "a" * 40
@@ -96,12 +96,12 @@ def test_generator_builds_schema_two_manifest_without_commit_self_reference(monk
     manifest = json.loads(output.read_text(encoding="utf-8"))
     assert manifest == {
         "manifest_schema_version": 2,
-        "source_compatibility_id": "project-atlas-release-identity-v0.59.8",
+        "source_compatibility_id": "project-atlas-release-identity-v0.59.54",
         "atlas_version": "v0.59.8",
         "atlas_commit": commit,
         "atlas_tag": "v0.59.8",
-        "plugin_version": "0.57.4",
-        "plugin_zip_filename": "project-atlas-metadata-bridge-0.57.4.zip",
+        "plugin_version": "0.57.5",
+        "plugin_zip_filename": "project-atlas-metadata-bridge-0.57.5.zip",
         "plugin_zip_sha256": release.SOURCE_EXPECTATIONS.plugin_zip_sha256,
         "generated_at": manifest["generated_at"],
     }

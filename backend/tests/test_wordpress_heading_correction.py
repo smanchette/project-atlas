@@ -27,6 +27,7 @@ from app.schemas.wordpress import (
     WordPressHeadingCorrectionReconcileRequest,
     WordPressHeadingCorrectionVerifyRequest,
 )
+from app.services.wordpress_deployment_release import resolve_program_root
 from app.services import wordpress_heading_correction as correction
 from app.services import wordpress_heading_contract as heading_contract_service
 from app.services.wordpress_heading_contract import (
@@ -1113,7 +1114,7 @@ def test_apply_request_and_wordpress_payload_reject_protected_fields() -> None:
 
 def test_frontend_keeps_only_the_opaque_handle_in_component_memory() -> None:
     source = (
-        Path(__file__).resolve().parents[2]
+        resolve_program_root()
         / "frontend"
         / "src"
         / "pages"
