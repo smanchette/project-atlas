@@ -383,12 +383,218 @@ def test_later_apply_creates_new_verified_audit_and_preserves_failed_audit(monke
         assert state.payload_hash == payload_hash and state.payload == payload
 
 
-def audit(action, status="verified"):
-    return type("Audit", (), {"action_type": action, "status": status})()
+def test_recovery_disable_creates_new_audit_and_preserves_failed_enable(monkeypatch, lifecycle_db):
+    payload = lifecycle.approved_payload().model_dump(mode="json")
+    payload_hash = lifecycle.payload_sha256()
+    before = optimistic_snapshot(
+        payload=payload,
+        payload_hash=payload_hash,
+        revision="1",
+        rendering_enabled=True,
+        enabled_metadata_state=True,
+    )
+    after = optimistic_snapshot(
+        payload=payload,
+        payload_hash=payload_hash,
+        revision="1",
+        rendering_enabled=False,
+        enabled_metadata_state=False,
+    )
+    inspected = {
+        "plugin_status": before,
+        "page_snapshot_hash": "1" * 64,
+        "page_body_hash": "2" * 64,
+        "media31_snapshot_hash": "3" * 64,
+        "media32_snapshot_hash": "4" * 64,
+        "site": {"name": "My WordPress", "description": ""},
+        "cache_headers": {},
+    }
+    rerun = SimpleNamespace(
+        preflight_ready=True,
+        binding_hash="5" * 64,
+        completion_mode=lifecycle.RECOVERY_DISABLE_MODE,
+        inspected_state=inspected,
+        canonical_payload=lifecycle.approved_payload(),
+        payload_sha256=payload_hash,
+        gate_results=[],
+    )
+    entry = SimpleNamespace(
+        request=DummyLifecycleRequest(),
+        binding_hash=rerun.binding_hash,
+        expires_at=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    observed_after = {
+        **{
+            key: inspected[key]
+            for key in (
+                "page_snapshot_hash",
+                "page_body_hash",
+                "media31_snapshot_hash",
+                "media32_snapshot_hash",
+                "site",
+                "cache_headers",
+            )
+        },
+        "wordpress_request_methods": ["GET"],
+        "rendered": empty_rendered(),
+    }
+    source = failed_enable_audit()
+    historical = WordPressMetadataLifecycleAudit(
+        id=3,
+        generated_page_id=41,
+        wordpress_post_id=8,
+        installation_audit_id=1,
+        activation_audit_id=1,
+        action_type=source.action_type,
+        completion_mode=lifecycle.STANDARD_MODE,
+        status=source.status,
+        operator="Shawn Manchette",
+        confirmation_phrase_hash="a" * 64,
+        handle_fingerprint="b" * 64,
+        binding_hash="c" * 64,
+        release_identity={},
+        backup_evidence={},
+        browser_evidence_id="failed-enable-evidence",
+        browser_evidence_hashes={},
+        payload_hash=payload_hash,
+        previous_revision="1",
+        final_revision="1",
+        previous_rendering_enabled=False,
+        final_rendering_enabled=True,
+        pre_snapshot=source.pre_snapshot,
+        post_snapshot=source.post_snapshot,
+        page_media_snapshots=source.page_media_snapshots,
+        gate_results=source.gate_results,
+        wordpress_write_count=1,
+        wordpress_write_scope=lifecycle.WORDPRESS_SCOPES["enable_metadata_rendering"],
+        atlas_write_count=2,
+        atlas_write_scope=lifecycle.ATLAS_SCOPE,
+        transition_history=["pending", "verification_failed"],
+        completed_at=datetime.now(UTC),
+        error_code="verification_failed",
+        recovery_recommendation=None,
+    )
+    monkeypatch.setattr(lifecycle, "_consume_handle", lambda handle, action: entry)
+    monkeypatch.setattr(lifecycle, "lifecycle_preflight", lambda *args, **kwargs: rerun)
+    monkeypatch.setattr(
+        lifecycle,
+        "_send_operation",
+        lambda *args, **kwargs: {"status": "metadata_rendering_disabled", "revision": "1", "rendering_enabled": False},
+    )
+    monkeypatch.setattr(lifecycle, "_read_status", lambda session: deepcopy(after))
+    monkeypatch.setattr(lifecycle, "_observe", lambda session, proof: deepcopy(observed_after))
+
+    with Session(lifecycle_db) as session:
+        session.add(historical)
+        session.add(
+            WordPressMetadataState(
+                generated_page_id=41,
+                wordpress_post_id=8,
+                status="staged",
+                payload=payload,
+                payload_hash=payload_hash,
+                wordpress_revision="1",
+            )
+        )
+        session.commit()
+        original = deepcopy(session.get(WordPressMetadataLifecycleAudit, 3).model_dump())
+        result = lifecycle.apply_lifecycle(
+            session,
+            41,
+            WordPressMetadataLifecycleApplyRequest(
+                lifecycle_handle="h" * 32,
+                confirmation_phrase=lifecycle.PHRASES["disable_metadata_rendering"],
+            ),
+            "disable_metadata_rendering",
+        )
+        preserved = session.get(WordPressMetadataLifecycleAudit, 3)
+        created = session.get(WordPressMetadataLifecycleAudit, result.lifecycle_audit_id)
+        assert preserved.model_dump() == original
+        assert created.id != 3 and created.status == "verified"
+        assert created.completion_mode == lifecycle.RECOVERY_DISABLE_MODE
+        assert created.wordpress_write_scope == lifecycle.WORDPRESS_SCOPES["disable_metadata_rendering"]
+        assert created.wordpress_write_count == 1 and created.atlas_write_count == 2
+        assert result.completion_mode == lifecycle.RECOVERY_DISABLE_MODE
+        assert result.rendering_enabled is False and result.wordpress_revision == "1"
+        assert result.payload_hash == payload_hash
+        state = session.exec(select(WordPressMetadataState)).one()
+        assert state.status == "staged" and state.payload == payload
+        assert state.payload_hash == payload_hash and state.wordpress_revision == "1"
+
+
+def audit(action, status="verified", audit_id=1, **changes):
+    value = {"id": audit_id, "action_type": action, "status": status}
+    value.update(changes)
+    return SimpleNamespace(**value)
 
 
 def staged_snapshot(enabled=False):
     return {"payload": lifecycle.approved_payload().model_dump(mode="json"), "payload_hash": lifecycle.payload_sha256(), "revision": "1", "rendering_enabled": enabled}
+
+
+def metadata_state(status="staged"):
+    return SimpleNamespace(
+        status=status,
+        payload=lifecycle.approved_payload().model_dump(mode="json"),
+        payload_hash=lifecycle.payload_sha256(),
+        wordpress_revision="1",
+    )
+
+
+def recovery_observation(*, metadata_present=False, drift=None):
+    value = {
+        "page_snapshot_hash": "1" * 64,
+        "page_body_hash": "2" * 64,
+        "media31_snapshot_hash": "3" * 64,
+        "media32_snapshot_hash": "4" * 64,
+        "cache_headers": {},
+        "rendered": empty_rendered(),
+    }
+    if metadata_present:
+        value["rendered"]["metadata_inventory"]["meta_descriptions"] = [lifecycle.approved_payload().meta_description]
+    if drift:
+        value[drift] = "9" * 64
+    return value
+
+
+def failed_enable_audit(**changes):
+    payload = lifecycle.approved_payload().model_dump(mode="json")
+    payload_hash = lifecycle.payload_sha256()
+    pre = optimistic_snapshot(payload=payload, payload_hash=payload_hash, revision="1", rendering_enabled=False)
+    post = optimistic_snapshot(payload=payload, payload_hash=payload_hash, revision="1", rendering_enabled=True, enabled_metadata_state=True)
+    value = {
+        "id": 3,
+        "action_type": "enable_metadata_rendering",
+        "status": "verification_failed",
+        "transition_history": ["pending", "verification_failed"],
+        "wordpress_write_count": 1,
+        "wordpress_write_scope": lifecycle.WORDPRESS_SCOPES["enable_metadata_rendering"],
+        "atlas_write_count": 2,
+        "previous_revision": "1",
+        "final_revision": "1",
+        "previous_rendering_enabled": False,
+        "final_rendering_enabled": True,
+        "pre_snapshot": pre,
+        "post_snapshot": post,
+        "page_media_snapshots": {
+            "page_snapshot_hash": "1" * 64,
+            "page_body_hash": "2" * 64,
+            "media31_snapshot_hash": "3" * 64,
+            "media32_snapshot_hash": "4" * 64,
+            "cache_headers": {},
+        },
+        "gate_results": [
+            {"code": "plugin_state", "passed": True},
+            {"code": "page", "passed": True},
+            {"code": "media", "passed": True},
+            {"code": "cache", "passed": True},
+            {"code": "rendered_exact", "passed": False},
+        ],
+        "completed_at": datetime.now(UTC),
+        "recovery_recommendation": None,
+    }
+    value.update(changes)
+    return SimpleNamespace(**value)
 
 
 def test_enable_requires_verified_staging_and_does_not_accept_drift():
@@ -398,9 +604,105 @@ def test_enable_requires_verified_staging_and_does_not_accept_drift():
 
 
 def test_disable_preserves_payload_contract():
-    gates = gate_map(lifecycle._operation_gates("disable_metadata_rendering", staged_snapshot(True), object(), [audit("enable_metadata_rendering")], lifecycle.payload_sha256(), observation()))
-    assert gates["enabled"].passed
+    audits = [audit("stage_metadata_payload", audit_id=1), audit("enable_metadata_rendering", audit_id=2)]
+    gates = gate_map(lifecycle._operation_gates("disable_metadata_rendering", staged_snapshot(True), metadata_state("rendering_enabled"), audits, lifecycle.payload_sha256(), observation()))
+    assert gates["verified_enable_ready"].passed
     assert lifecycle._expected_revision("disable_metadata_rendering") == "1"
+
+
+def test_recovery_disable_allows_current_production_shaped_failed_enable():
+    audits = [audit("stage_metadata_payload", audit_id=2), failed_enable_audit()]
+    result = lifecycle._disable_eligibility(
+        staged_snapshot(True), metadata_state(), audits, lifecycle.payload_sha256(), recovery_observation()
+    )
+    assert result == {
+        "eligible": True,
+        "reason_code": "recovery_disable_ready",
+        "message": "The conclusively accepted failed-verification enablement is eligible for recovery disablement.",
+        "completion_mode": "recovery_after_failed_enable_verification",
+        "source_enable_audit_id": 3,
+    }
+
+
+@pytest.mark.parametrize(
+    ("audit_changes", "snapshot_changes", "state_changes", "observation_changes", "reason"),
+    [
+        ({"wordpress_write_count": 0}, {}, {}, {}, "enable_mutation_not_proven"),
+        ({"wordpress_write_count": None}, {}, {}, {}, "enable_mutation_not_proven"),
+        ({"wordpress_write_count": 2}, {}, {}, {}, "enable_mutation_not_proven"),
+        ({"wordpress_write_scope": ["PUT /wrong"]}, {}, {}, {}, "enable_mutation_not_proven"),
+        ({"post_snapshot": None}, {}, {}, {}, "enable_outcome_uncertain"),
+        ({"transition_history": ["pending", "verified", "verification_failed"]}, {}, {}, {}, "enable_outcome_uncertain"),
+        ({"recovery_recommendation": "siteground_restore"}, {}, {}, {}, "recovery_recommendation_mismatch"),
+        ({}, {"rendering_enabled": False}, {}, {}, "rendering_not_enabled"),
+        ({}, {"payload_hash": "9" * 64}, {}, {}, "staged_payload_drift"),
+        ({}, {"revision": "2"}, {}, {}, "staged_payload_drift"),
+        ({}, {}, {"status": "rendering_enabled"}, {}, "staged_payload_drift"),
+        ({}, {}, {}, {"metadata_present": True}, "public_metadata_unexpectedly_present"),
+        ({}, {}, {}, {"drift": "media31_snapshot_hash"}, "enable_outcome_uncertain"),
+    ],
+)
+def test_recovery_disable_fails_closed(audit_changes, snapshot_changes, state_changes, observation_changes, reason):
+    candidate = failed_enable_audit(**audit_changes)
+    snapshot = staged_snapshot(True)
+    snapshot.update(snapshot_changes)
+    state = metadata_state()
+    for key, value in state_changes.items():
+        setattr(state, key, value)
+    observed = recovery_observation(**observation_changes)
+    result = lifecycle._disable_eligibility(
+        snapshot,
+        state,
+        [audit("stage_metadata_payload", audit_id=2), candidate],
+        lifecycle.payload_sha256(),
+        observed,
+    )
+    assert result["eligible"] is False
+    assert result["reason_code"] == reason
+
+
+def test_recovery_disable_blocks_pending_later_enable_and_completed_recovery():
+    base = [audit("stage_metadata_payload", audit_id=2), failed_enable_audit()]
+    cases = [
+        (base + [audit("enable_metadata_rendering", "pending", 4)], "pending_rendering_operation"),
+        (base + [audit("disable_metadata_rendering", "verified", 4)], "recovery_already_completed"),
+        (base + [audit("rollback_metadata_payload", "failed", 4)], "conflicting_rendering_history"),
+    ]
+    for audits, reason in cases:
+        result = lifecycle._disable_eligibility(
+            staged_snapshot(True), metadata_state(), audits, lifecycle.payload_sha256(), recovery_observation()
+        )
+        assert result["eligible"] is False and result["reason_code"] == reason
+
+
+def test_later_verified_enable_uses_ordinary_mode_not_recovery_mode():
+    audits = [
+        audit("stage_metadata_payload", audit_id=2),
+        failed_enable_audit(),
+        audit("enable_metadata_rendering", "verified", 4),
+    ]
+    result = lifecycle._disable_eligibility(
+        staged_snapshot(True),
+        metadata_state("rendering_enabled"),
+        audits,
+        lifecycle.payload_sha256(),
+        recovery_observation(),
+    )
+    assert result["eligible"] is True
+    assert result["reason_code"] == "verified_enable_ready"
+    assert result["completion_mode"] == "ordinary_after_verified_enable"
+
+
+def test_rendering_source_diagnostics_are_read_only_and_find_public_hook_contract():
+    result = lifecycle.rendering_source_diagnostics()
+    assert result["read_only"] is True
+    assert result["wordpress_write_count"] == result["atlas_write_count"] == 0
+    assert result["hook"] == "wp_head" and result["hook_priority"] == 20
+    assert result["hook_priority_exact"] is True
+    assert result["page_target"] == "is_page(8)"
+    assert result["payload_post_id"] == result["enabled_state_post_id"] == 8
+    assert result["normal_public_request_reachable"] is True
+    assert result["root_cause_classification"] == "other_exactly_described_condition"
 
 
 def test_rollback_fails_closed_while_rendering_enabled():

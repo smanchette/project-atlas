@@ -1511,6 +1511,11 @@ class WordPressMetadataLifecyclePreflight(SQLModel):
     canonical_payload: WordPressMetadataLifecyclePayload
     payload_sha256: str
     expected_revision: str
+    completion_mode: Literal[
+        "standard",
+        "ordinary_after_verified_enable",
+        "recovery_after_failed_enable_verification",
+    ] = "standard"
     inspected_state: dict[str, Any]
     gate_results: list[WordPressDraftGateResult]
     proposed_wordpress_write_scope: list[str]
@@ -1544,6 +1549,11 @@ class WordPressMetadataLifecycleResult(SQLModel):
     status: Literal["verified", "verification_failed", "failed"]
     binding_hash: str
     state_history: list[str]
+    completion_mode: Literal[
+        "standard",
+        "ordinary_after_verified_enable",
+        "recovery_after_failed_enable_verification",
+    ] = "standard"
     payload_hash: str
     wordpress_revision: str
     rendering_enabled: bool

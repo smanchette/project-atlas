@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.68
+
+Added a fail-closed recovery-disable eligibility path for the exact case where a rendering-enable mutation was conclusively accepted but its public rendered verification failed. Ordinary disablement after a verified enable remains unchanged. Recovery requires the fixed enable endpoint and one accepted write, exact `pending -> verification_failed` history, unchanged staged payload/hash/revision/page/media/cache state, absent public metadata, verified staging history, and the `disable_rendering` recommendation. A future recovery disable creates a new audit with completion mode `recovery_after_failed_enable_verification`; it never rewrites the failed enable audit. Migration 0021 adds durable lifecycle completion-mode and recovery-recommendation fields. Metadata Bridge PHP and the 0.57.5 ZIP are unchanged. Publication does not authorize live disablement.
+
 ## v0.59.64
 
 Replaced the metadata-staging blanket `not audits` check with an explicit fail-closed lifecycle-history eligibility model. A pristine initial state may now proceed after terminal failed staging attempts only when durable audit evidence proves the request was rejected without an accepted metadata mutation: exact `pending -> failed` history, completed failure, trustworthy attempted-write count, failed WordPress-response gate when a request was attempted, identical initial pre/post snapshots, revision `0 -> 0`, rendering `false -> false`, and no metadata state or sync-audit rows. Pending, verified, uncertain, partially mutated, malformed, or non-staging history remains blocked with precise non-secret reason codes. Metadata Bridge PHP and the 0.57.5 ZIP are unchanged. Publication does not authorize live staging or rendering enablement.

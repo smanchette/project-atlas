@@ -112,3 +112,26 @@ def test_0020_upgrade_downgrade_reupgrade_bootstrap_cleanup_audit(monkeypatch, t
     command.upgrade(config, "20260716_0020")
     assert "wordpressbootstrapcleanupaudit" in inspect(engine).get_table_names()
     get_settings.cache_clear()
+
+
+def test_0021_upgrade_downgrade_reupgrade_lifecycle_recovery_fields(monkeypatch, tmp_path):
+    database = tmp_path / "metadata-recovery-matrix.sqlite3"
+    config = config_for(monkeypatch, database)
+    command.upgrade(config, "20260716_0020")
+    engine = create_engine(f"sqlite:///{database.as_posix()}")
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO setting (setting_key, setting_value, description, created_at, updated_at) VALUES ('recovery-migration-sentinel','kept','unrelated','2026-07-17','2026-07-17')"))
+    command.upgrade(config, "20260717_0021")
+    columns = {item["name"] for item in inspect(engine).get_columns("wordpressmetadatalifecycleaudit")}
+    assert {"completion_mode", "recovery_recommendation"} <= columns
+    indexes = {item["name"] for item in inspect(engine).get_indexes("wordpressmetadatalifecycleaudit")}
+    assert "ix_wordpressmetadatalifecycleaudit_completion_mode" in indexes
+    command.downgrade(config, "20260716_0020")
+    columns = {item["name"] for item in inspect(engine).get_columns("wordpressmetadatalifecycleaudit")}
+    assert "completion_mode" not in columns and "recovery_recommendation" not in columns
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT setting_value FROM setting WHERE setting_key='recovery-migration-sentinel'")).scalar_one() == "kept"
+    command.upgrade(config, "20260717_0021")
+    columns = {item["name"] for item in inspect(engine).get_columns("wordpressmetadatalifecycleaudit")}
+    assert {"completion_mode", "recovery_recommendation"} <= columns
+    get_settings.cache_clear()

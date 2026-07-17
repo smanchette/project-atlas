@@ -621,6 +621,7 @@ class WordPressMetadataLifecycleAudit(SQLModel, table=True):
     installation_audit_id: int = Field(foreign_key="wordpressdeploymentaudit.id", index=True)
     activation_audit_id: int = Field(foreign_key="wordpressactivationaudit.id", index=True)
     action_type: str = Field(max_length=64, index=True)
+    completion_mode: str = Field(default="standard", max_length=80, index=True)
     status: str = Field(default="pending", max_length=40, index=True)
     operator: str = Field(max_length=200)
     confirmation_phrase_hash: str = Field(max_length=64)
@@ -648,6 +649,7 @@ class WordPressMetadataLifecycleAudit(SQLModel, table=True):
     completed_at: datetime | None = None
     error_code: str | None = Field(default=None, max_length=64)
     error_message: str | None = Field(default=None, max_length=2000)
+    recovery_recommendation: str | None = Field(default=None, max_length=64)
 
 
 class PageImageAssignment(TimestampMixin, table=True):

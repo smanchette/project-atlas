@@ -45,6 +45,7 @@ from app.services.wordpress_deployment import (
     _verify_artifact,
 )
 from app.services.wordpress_deployment_release import SOURCE_EXPECTATIONS
+from app.services.wordpress_deployment_release import resolve_program_root
 from app.services.wordpress_rendered_state import EXPECTED_H1, validate_manual_browser_evidence
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 
@@ -59,6 +60,7 @@ Action = Literal[
 PLUGIN_VERSION = "0.57.5"
 PLUGIN_SLUG = "project-atlas-metadata-bridge"
 PLUGIN_ENTRY = "project-atlas-metadata-bridge/project-atlas-metadata-bridge.php"
+ATLAS_METADATA_SAFETY_OPTION_NAME = "_project_atlas_metadata_safety_v1"
 HANDLE_TTL = timedelta(minutes=10)
 PHRASES: dict[Action, str] = {
     "stage_metadata_payload": "STAGE PROJECT ATLAS METADATA PAYLOAD",
@@ -77,6 +79,9 @@ WORDPRESS_SCOPES: dict[Action, list[str]] = {
     for action, path in PLUGIN_PATHS.items()
 }
 ATLAS_SCOPE = ["create one pending WordPressMetadataLifecycleAudit", "finalize that audit and the single page-41 WordPressMetadataState after read-only verification"]
+STANDARD_MODE = "standard"
+ORDINARY_DISABLE_MODE = "ordinary_after_verified_enable"
+RECOVERY_DISABLE_MODE = "recovery_after_failed_enable_verification"
 
 # This is the exact field contract enforced by
 # atlas_metadata_snapshot_hash() in Metadata Bridge 0.57.5.  Repository,
@@ -187,6 +192,11 @@ def lifecycle_preflight(
     lifecycle_audits = list(session.exec(select(WordPressMetadataLifecycleAudit).where(WordPressMetadataLifecycleAudit.generated_page_id == 41).order_by(WordPressMetadataLifecycleAudit.id)))
     state = session.exec(select(WordPressMetadataState).where(WordPressMetadataState.generated_page_id == 41)).first()
     legacy_sync_audits = list(session.exec(select(WordPressMetadataSyncAudit).where(WordPressMetadataSyncAudit.generated_page_id == 41)))
+    disable_eligibility = (
+        _disable_eligibility(snapshot, state, lifecycle_audits, expected_hash, observed, legacy_sync_audits)
+        if action == "disable_metadata_rendering"
+        else None
+    )
     gates = [
         _gate("artifact", "Published plugin artifact is verified", not artifact_error and artifact.get("plugin_version") == PLUGIN_VERSION and artifact.get("zip_sha256") == SOURCE_EXPECTATIONS.plugin_zip_sha256, artifact_error or "Plugin artifact identity differs."),
         *_backup_gates(proof),
@@ -210,7 +220,16 @@ def lifecycle_preflight(
         _gate("php_findings", "PHP, REST, and header findings are clean", _clean_findings(request.php_error_log_findings), "PHP, REST, or header findings require review."),
         _gate("browser_findings", "Browser-console and visible-site findings are clean", _clean_findings(request.browser_console_findings), "Browser or visible-site findings require review."),
         _gate("read_only", "Preflight performed GET/read requests only", observed.get("wordpress_request_methods") == ["GET"], "Preflight did not remain read-only."),
-        *_operation_gates(action, snapshot, state, lifecycle_audits, expected_hash, observed, legacy_sync_audits),
+        *_operation_gates(
+            action,
+            snapshot,
+            state,
+            lifecycle_audits,
+            expected_hash,
+            observed,
+            legacy_sync_audits,
+            disable_eligibility=disable_eligibility,
+        ),
     ]
     ready = all(g.passed for g in gates)
     expires_at = bound_expiry
@@ -238,6 +257,7 @@ def lifecycle_preflight(
         canonical_payload=expected_payload,
         payload_sha256=expected_hash,
         expected_revision=_expected_revision(action),
+        completion_mode=(disable_eligibility or {}).get("completion_mode", STANDARD_MODE),
         inspected_state={
             **observed,
             "plugin_status": _public_status(plugin_status),
@@ -246,6 +266,7 @@ def lifecycle_preflight(
                 if action == "stage_metadata_payload"
                 else {}
             ),
+            **({"disable_eligibility": disable_eligibility} if disable_eligibility is not None else {}),
         },
         gate_results=gates,
         proposed_wordpress_write_scope=WORDPRESS_SCOPES[action] if ready else [],
@@ -271,6 +292,7 @@ def apply_lifecycle(session: Session, page_id: int, request: WordPressMetadataLi
         installation_audit_id=entry.request.installation_audit_id,
         activation_audit_id=entry.request.activation_audit_id,
         action_type=action,
+        completion_mode=getattr(rerun, "completion_mode", STANDARD_MODE),
         status="pending",
         operator=entry.request.operator,
         confirmation_phrase_hash=hashlib.sha256(PHRASES[action].encode()).hexdigest(),
@@ -314,7 +336,17 @@ def rollback_preflight(session, page_id, request): return lifecycle_preflight(se
 def rollback_apply(session, page_id, request): return apply_lifecycle(session, page_id, request, "rollback_metadata_payload")
 
 
-def _operation_gates(action, snapshot, state, audits, expected_hash, observed, sync_audits=()):
+def _operation_gates(
+    action,
+    snapshot,
+    state,
+    audits,
+    expected_hash,
+    observed,
+    sync_audits=(),
+    *,
+    disable_eligibility=None,
+):
     revision, enabled, payload, live_hash = str(snapshot.get("revision", "0")), bool(snapshot.get("rendering_enabled")), snapshot.get("payload"), snapshot.get("payload_hash") or ""
     verified = {audit.action_type for audit in audits if audit.status == "verified"}
     metadata_absent = not observed.get("rendered", {}).get("atlas_metadata_marker_present", False) and _rendered_metadata_absent(observed.get("rendered", {}))
@@ -340,8 +372,172 @@ def _operation_gates(action, snapshot, state, audits, expected_hash, observed, s
     if action == "enable_metadata_rendering":
         return common + [_gate("staged", "Verified staging exists with exact payload at revision 1", "stage_metadata_payload" in verified and payload == approved_payload().model_dump(mode="json") and live_hash == expected_hash and revision == "1" and not enabled, "A verified exact staged payload is required."), _gate("metadata_absent", "Fresh evidence proves metadata remains absent", metadata_absent, "Metadata renders before enablement.")]
     if action == "disable_metadata_rendering":
-        return common + [_gate("enabled", "Verified rendering enablement exists and rendering is enabled", "enable_metadata_rendering" in verified and enabled and live_hash == expected_hash and revision == "1", "Rendering is not in the exact enabled state.")]
+        eligibility = disable_eligibility or _disable_eligibility(
+            snapshot, state, audits, expected_hash, observed, sync_audits
+        )
+        return common + [
+            _gate(
+                eligibility["reason_code"],
+                "Verified enablement or conclusively proven failed-verification recovery is eligible",
+                eligibility["eligible"],
+                eligibility["message"],
+            )
+        ]
     return common + [_gate("disabled", "Rendering is disabled before rollback", not enabled, "Disable rendering before payload rollback."), _gate("staged_payload", "Exact staged payload and revision 1 remain", payload == approved_payload().model_dump(mode="json") and live_hash == expected_hash and revision == "1", "Staged payload drifted."), _gate("disable_history", "A verified disable audit exists after enablement", "disable_metadata_rendering" in verified, "Verified rendering disablement required.")]
+
+
+def _disable_eligibility(snapshot, state, audits, expected_hash, observed, sync_audits=()):
+    """Classify ordinary or recovery disablement without relaxing any mutation binding."""
+    payload = approved_payload().model_dump(mode="json")
+    revision = str(snapshot.get("revision", "0"))
+    live_hash = snapshot.get("payload_hash") or ""
+    if snapshot.get("rendering_enabled") is not True:
+        return _disable_result(False, "rendering_not_enabled", "Rendering is not enabled.")
+    if snapshot.get("payload") != payload or live_hash != expected_hash or revision != "1":
+        return _disable_result(False, "staged_payload_drift", "The staged payload, hash, or revision drifted.")
+    if sync_audits:
+        return _disable_result(False, "conflicting_rendering_history", "Legacy metadata sync history exists.")
+    if any(getattr(audit, "status", None) == "pending" for audit in audits):
+        return _disable_result(False, "pending_rendering_operation", "A lifecycle audit remains pending.")
+
+    staging = [
+        audit
+        for audit in audits
+        if getattr(audit, "action_type", None) == "stage_metadata_payload"
+        and getattr(audit, "status", None) == "verified"
+    ]
+    if not staging:
+        return _disable_result(False, "conflicting_rendering_history", "A verified staging audit is required.")
+
+    relevant = [
+        audit
+        for audit in audits
+        if getattr(audit, "action_type", None)
+        in {"enable_metadata_rendering", "disable_metadata_rendering", "rollback_metadata_payload"}
+    ]
+    if any(
+        getattr(audit, "action_type", None) == "disable_metadata_rendering"
+        and getattr(audit, "status", None) == "verified"
+        for audit in relevant
+    ):
+        return _disable_result(False, "recovery_already_completed", "A verified rendering disablement already exists.")
+    if any(getattr(audit, "action_type", None) == "rollback_metadata_payload" for audit in relevant):
+        return _disable_result(False, "conflicting_rendering_history", "Payload rollback history conflicts with disablement.")
+
+    verified_enables = [
+        audit
+        for audit in relevant
+        if getattr(audit, "action_type", None) == "enable_metadata_rendering"
+        and getattr(audit, "status", None) == "verified"
+    ]
+    failed_enables = [
+        audit
+        for audit in relevant
+        if getattr(audit, "action_type", None) == "enable_metadata_rendering"
+        and getattr(audit, "status", None) == "verification_failed"
+    ]
+    latest = relevant[-1] if relevant else None
+    if latest in verified_enables:
+        if not _metadata_state_matches(state, "rendering_enabled", payload, expected_hash, "1"):
+            return _disable_result(False, "staged_payload_drift", "Atlas metadata state differs from verified rendering state.")
+        return _disable_result(
+            True,
+            "verified_enable_ready",
+            "A verified rendering enablement is eligible for ordinary disablement.",
+            ORDINARY_DISABLE_MODE,
+            getattr(latest, "id", None),
+        )
+    if not failed_enables or latest not in failed_enables:
+        return _disable_result(False, "conflicting_rendering_history", "No eligible latest rendering enablement exists.")
+    candidate = latest
+    if verified_enables:
+        return _disable_result(False, "conflicting_rendering_history", "A later failed enablement conflicts with verified enablement history.")
+    if getattr(candidate, "transition_history", None) != ["pending", "verification_failed"]:
+        return _disable_result(False, "enable_outcome_uncertain", "The failed enablement transition history is malformed.")
+    if getattr(candidate, "wordpress_write_count", None) != 1:
+        return _disable_result(False, "enable_mutation_not_proven", "Exactly one accepted rendering-enable mutation is required.")
+    if getattr(candidate, "wordpress_write_scope", None) != WORDPRESS_SCOPES["enable_metadata_rendering"]:
+        return _disable_result(False, "enable_mutation_not_proven", "The accepted mutation was not the fixed rendering-enable endpoint.")
+    if not _failed_enable_outcome_is_conclusive(candidate, payload, expected_hash, observed):
+        return _disable_result(False, "enable_outcome_uncertain", "The failed enablement does not prove an exact accepted mutation.")
+    recommendation = _failed_enable_recovery_recommendation(candidate)
+    if recommendation != "disable_rendering":
+        return _disable_result(False, "recovery_recommendation_mismatch", "The durable recovery recommendation is not disable_rendering.")
+    rendered = observed.get("rendered", {})
+    if rendered.get("atlas_metadata_marker_present") or not _rendered_metadata_absent(rendered):
+        return _disable_result(False, "public_metadata_unexpectedly_present", "Public Atlas metadata is present.")
+    if not _metadata_state_matches(state, "staged", payload, expected_hash, "1"):
+        return _disable_result(False, "staged_payload_drift", "Atlas staged metadata state drifted.")
+    return _disable_result(
+        True,
+        "recovery_disable_ready",
+        "The conclusively accepted failed-verification enablement is eligible for recovery disablement.",
+        RECOVERY_DISABLE_MODE,
+        getattr(candidate, "id", None),
+    )
+
+
+def _disable_result(eligible, reason_code, message, completion_mode=STANDARD_MODE, source_audit_id=None):
+    return {
+        "eligible": bool(eligible),
+        "reason_code": reason_code,
+        "message": message,
+        "completion_mode": completion_mode,
+        "source_enable_audit_id": source_audit_id,
+    }
+
+
+def _metadata_state_matches(state, status, payload, payload_hash, revision):
+    return bool(
+        state
+        and getattr(state, "status", None) == status
+        and getattr(state, "payload", None) == payload
+        and getattr(state, "payload_hash", None) == payload_hash
+        and str(getattr(state, "wordpress_revision", "")) == revision
+    )
+
+
+def _failed_enable_outcome_is_conclusive(audit, payload, payload_hash, observed):
+    pre = getattr(audit, "pre_snapshot", None)
+    post = getattr(audit, "post_snapshot", None)
+    if not isinstance(pre, dict) or not isinstance(post, dict):
+        return False
+    if not (
+        getattr(audit, "completed_at", None) is not None
+        and getattr(audit, "atlas_write_count", None) == 2
+        and getattr(audit, "final_revision", None) == "1"
+        and getattr(audit, "previous_rendering_enabled", None) is False
+        and getattr(audit, "final_rendering_enabled", None) is True
+        and pre.get("rendering_enabled") is False
+        and post.get("rendering_enabled") is True
+        and pre.get("payload") == post.get("payload") == payload
+        and pre.get("payload_hash") == post.get("payload_hash") == payload_hash
+        and str(pre.get("revision")) == str(post.get("revision")) == "1"
+        and post.get("active") is True
+        and post.get("version") == PLUGIN_VERSION
+    ):
+        return False
+    failed = [gate.get("code") for gate in (getattr(audit, "gate_results", None) or []) if gate.get("passed") is False]
+    if failed != ["rendered_exact"]:
+        return False
+    recorded = getattr(audit, "page_media_snapshots", None) or {}
+    return all(
+        recorded.get(key) == observed.get(key)
+        for key in ("page_snapshot_hash", "page_body_hash", "media31_snapshot_hash", "media32_snapshot_hash", "cache_headers")
+    )
+
+
+def _failed_enable_recovery_recommendation(audit):
+    explicit = getattr(audit, "recovery_recommendation", None)
+    if explicit:
+        return explicit
+    # v0.59.64 audit 3 predates the dedicated column. Its exact, sole failed
+    # rendered_exact gate plus a conclusively enabled snapshot deterministically
+    # maps to the already reported disable_rendering recommendation.
+    failed = [gate.get("code") for gate in (getattr(audit, "gate_results", None) or []) if gate.get("passed") is False]
+    if failed == ["rendered_exact"] and getattr(audit, "final_rendering_enabled", None) is True:
+        return "disable_rendering"
+    return None
 
 
 def _staging_history_eligibility(audits, state=None, sync_audits=()):
@@ -511,13 +707,17 @@ def _read_status(session):
 
 def _finish(session, audit, status, gates, snapshot):
     audit.status=status; audit.post_snapshot=_public_status(snapshot); audit.final_revision=str(snapshot.get("revision", audit.previous_revision)); audit.final_rendering_enabled=bool(snapshot.get("rendering_enabled")); audit.gate_results=[g.model_dump(mode="json") for g in gates]; audit.atlas_write_count=2; audit.transition_history=[*audit.transition_history,status]; audit.completed_at=datetime.now(UTC); audit.error_code=None if status=="verified" else status; audit.error_message=None if status=="verified" else "; ".join(g.message for g in gates if not g.passed)[:2000]
+    if audit.action_type == "enable_metadata_rendering" and status == "verification_failed":
+        audit.recovery_recommendation = _failed_enable_recovery_recommendation(audit)
+    elif audit.action_type == "disable_metadata_rendering" and status == "verified":
+        audit.recovery_recommendation = "no_action"
     state=session.exec(select(WordPressMetadataState).where(WordPressMetadataState.generated_page_id==41)).first()
     if status=="verified":
         state=state or WordPressMetadataState(generated_page_id=41,wordpress_post_id=8)
         state.status={"stage_metadata_payload":"staged","enable_metadata_rendering":"rendering_enabled","disable_metadata_rendering":"staged","rollback_metadata_payload":"not_applied"}[audit.action_type]
         state.payload=snapshot.get("payload"); state.payload_hash=snapshot.get("payload_hash") or None; state.wordpress_revision=str(snapshot.get("revision","0")); state.last_verified_at=datetime.now(UTC); state.last_wordpress_metadata_sync_at=datetime.now(UTC); session.add(state)
     session.add(audit); session.commit(); session.refresh(audit)
-    return WordPressMetadataLifecycleResult(lifecycle_audit_id=audit.id or 0,action=audit.action_type,status=status,binding_hash=audit.binding_hash,state_history=audit.transition_history,payload_hash=snapshot.get("payload_hash") or "",wordpress_revision=str(snapshot.get("revision",audit.previous_revision)),rendering_enabled=bool(snapshot.get("rendering_enabled")),inspected_state=_public_status(snapshot),gate_results=gates,wordpress_write_scope=audit.wordpress_write_scope,atlas_write_scope=audit.atlas_write_scope,further_action_required=status!="verified")
+    return WordPressMetadataLifecycleResult(lifecycle_audit_id=audit.id or 0,action=audit.action_type,status=status,binding_hash=audit.binding_hash,state_history=audit.transition_history,completion_mode=audit.completion_mode,payload_hash=snapshot.get("payload_hash") or "",wordpress_revision=str(snapshot.get("revision",audit.previous_revision)),rendering_enabled=bool(snapshot.get("rendering_enabled")),inspected_state=_public_status(snapshot),gate_results=gates,wordpress_write_scope=audit.wordpress_write_scope,atlas_write_scope=audit.atlas_write_scope,further_action_required=status!="verified")
 
 
 def _plugin_exact(observed):
@@ -526,6 +726,56 @@ def _plugin_exact(observed):
 def _binding(action,request,observed,snapshot,audits,payload_hash,expires): return {"action":action,"request":request.model_dump(mode="json",exclude={"manual_browser_evidence"}),"evidence":{"id":request.manual_browser_evidence.evidence_id,"head":request.manual_browser_evidence.rendered_head_hash,"visible":request.manual_browser_evidence.visible_content_hash,"expires":request.manual_browser_evidence.expires_at},"state":{"plugin":_public_status(snapshot),"page":observed.get("page_snapshot_hash"),"body":observed.get("page_body_hash"),"media31":observed.get("media31_snapshot_hash"),"media32":observed.get("media32_snapshot_hash"),"cache":_hash(observed.get("cache_headers",{})),"audit_history":[[a.id,a.action_type,a.status] for a in audits]},"payload_hash":payload_hash,"expires_at":expires.isoformat() if expires else None}
 def _page_media(value): return {key:value.get(key) for key in ("page_snapshot_hash","page_body_hash","media31_snapshot_hash","media32_snapshot_hash","cache_headers")}
 def _public_status(value): return {key:value.get(key) for key in ("plugin","version","checksum","active","rendering_enabled","enabled_metadata_state","activation_generation","plugin_checksum","payload_hash","revision","payload","_error") if key in value}
+
+
+def rendering_source_diagnostics() -> dict[str, Any]:
+    """Inspect the locked plugin source without WordPress or Atlas writes."""
+    source_path = resolve_program_root() / "wordpress/project-atlas-metadata-bridge/project-atlas-metadata-bridge.php"
+    source = source_path.read_text(encoding="utf-8")
+    hook_registered = "add_action('wp_head'" in source
+    hook_priority_exact = "}, 20);" in source[source.index("add_action('wp_head'") :]
+    page_target_exact = "if (!is_page(8)) { return; }" in source
+    payload_lookup_exact = "get_post_meta(ATLAS_METADATA_POST_ID, '_atlas_metadata_payload', true)" in source
+    enabled_lookup_exact = "get_post_meta(ATLAS_METADATA_POST_ID, '_atlas_metadata_enabled', true) === '1'" in source
+    safety_lookup_exact = "get_option(ATLAS_METADATA_SAFETY_OPTION, [])" in source
+    normal_public_reachable = all(
+        (
+            hook_registered,
+            hook_priority_exact,
+            page_target_exact,
+            payload_lookup_exact,
+            enabled_lookup_exact,
+            safety_lookup_exact,
+            "<meta name=\"description\"" in source,
+            "application/ld+json" in source,
+        )
+    )
+    return {
+        "read_only": True,
+        "wordpress_write_count": 0,
+        "atlas_write_count": 0,
+        "hook": "wp_head",
+        "hook_priority": 20,
+        "document_title_parts_hook": False,
+        "admin_only": False,
+        "rest_only": False,
+        "page_target": "is_page(8)",
+        "payload_post_id": 8,
+        "enabled_state_post_id": 8,
+        "safety_option": ATLAS_METADATA_SAFETY_OPTION_NAME,
+        "hook_registered": hook_registered,
+        "hook_priority_exact": hook_priority_exact,
+        "page_target_exact": page_target_exact,
+        "payload_lookup_exact": payload_lookup_exact,
+        "enabled_lookup_exact": enabled_lookup_exact,
+        "safety_lookup_exact": safety_lookup_exact,
+        "normal_public_request_reachable": normal_public_reachable,
+        "root_cause_classification": "other_exactly_described_condition",
+        "finding": (
+            "The local 0.57.5 source registers the expected public wp_head hook and exact page/state lookups; "
+            "source inspection alone cannot distinguish cache or optimizer delivery from a runtime hook failure."
+        ),
+    }
 
 
 def _canonical_optimistic_snapshot(value: dict[str, Any]) -> dict[str, Any]:
