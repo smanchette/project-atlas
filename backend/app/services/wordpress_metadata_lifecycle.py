@@ -210,7 +210,7 @@ def lifecycle_preflight(
         _gate("php_findings", "PHP, REST, and header findings are clean", _clean_findings(request.php_error_log_findings), "PHP, REST, or header findings require review."),
         _gate("browser_findings", "Browser-console and visible-site findings are clean", _clean_findings(request.browser_console_findings), "Browser or visible-site findings require review."),
         _gate("read_only", "Preflight performed GET/read requests only", observed.get("wordpress_request_methods") == ["GET"], "Preflight did not remain read-only."),
-        *_operation_gates(action, snapshot, state, lifecycle_audits, expected_hash, observed),
+        *_operation_gates(action, snapshot, state, lifecycle_audits, expected_hash, observed, legacy_sync_audits),
     ]
     ready = all(g.passed for g in gates)
     expires_at = bound_expiry
@@ -238,7 +238,15 @@ def lifecycle_preflight(
         canonical_payload=expected_payload,
         payload_sha256=expected_hash,
         expected_revision=_expected_revision(action),
-        inspected_state={**observed, "plugin_status": _public_status(plugin_status)},
+        inspected_state={
+            **observed,
+            "plugin_status": _public_status(plugin_status),
+            **(
+                {"staging_history": _staging_history_eligibility(lifecycle_audits, state, legacy_sync_audits)}
+                if action == "stage_metadata_payload"
+                else {}
+            ),
+        },
         gate_results=gates,
         proposed_wordpress_write_scope=WORDPRESS_SCOPES[action] if ready else [],
         proposed_atlas_write_scope=ATLAS_SCOPE if ready else [],
@@ -306,18 +314,120 @@ def rollback_preflight(session, page_id, request): return lifecycle_preflight(se
 def rollback_apply(session, page_id, request): return apply_lifecycle(session, page_id, request, "rollback_metadata_payload")
 
 
-def _operation_gates(action, snapshot, state, audits, expected_hash, observed):
+def _operation_gates(action, snapshot, state, audits, expected_hash, observed, sync_audits=()):
     revision, enabled, payload, live_hash = str(snapshot.get("revision", "0")), bool(snapshot.get("rendering_enabled")), snapshot.get("payload"), snapshot.get("payload_hash") or ""
     verified = {audit.action_type for audit in audits if audit.status == "verified"}
     metadata_absent = not observed.get("rendered", {}).get("atlas_metadata_marker_present", False) and _rendered_metadata_absent(observed.get("rendered", {}))
     common = [_gate("cache", "No cache purge is requested or observed", observed.get("cache_headers") == observed.get("rendered", {}).get("cache_headers", {}), "Cache observation changed.")]
     if action == "stage_metadata_payload":
-        return common + [_gate("initial_state", "Payload is null, hash empty, revision 0, and rendering disabled", payload is None and not live_hash and revision == "0" and not enabled and state is None and not audits, "Initial metadata state drifted."), _gate("metadata_absent", "No Atlas metadata currently renders", metadata_absent, "Metadata already renders.")]
+        live_initial = payload is None and not live_hash and revision == "0" and not enabled and state is None and not sync_audits
+        history = _staging_history_eligibility(audits, state, sync_audits)
+        return common + [
+            _gate(
+                "initial_state_ready" if live_initial else "live_metadata_state_not_initial",
+                "Payload is null, hash empty, revision 0, rendering disabled, and metadata rows absent",
+                live_initial,
+                "Live payload, payload hash, revision, rendering state, metadata state, or sync-audit rows are not initial.",
+            ),
+            _gate(
+                "historical_failed_attempts_only" if history["eligible"] else history["reason_code"],
+                "Lifecycle history contains only terminal zero-mutation failed staging attempts",
+                history["eligible"],
+                history["message"],
+            ),
+            _gate("metadata_absent", "No Atlas metadata currently renders", metadata_absent, "Metadata already renders."),
+        ]
     if action == "enable_metadata_rendering":
         return common + [_gate("staged", "Verified staging exists with exact payload at revision 1", "stage_metadata_payload" in verified and payload == approved_payload().model_dump(mode="json") and live_hash == expected_hash and revision == "1" and not enabled, "A verified exact staged payload is required."), _gate("metadata_absent", "Fresh evidence proves metadata remains absent", metadata_absent, "Metadata renders before enablement.")]
     if action == "disable_metadata_rendering":
         return common + [_gate("enabled", "Verified rendering enablement exists and rendering is enabled", "enable_metadata_rendering" in verified and enabled and live_hash == expected_hash and revision == "1", "Rendering is not in the exact enabled state.")]
     return common + [_gate("disabled", "Rendering is disabled before rollback", not enabled, "Disable rendering before payload rollback."), _gate("staged_payload", "Exact staged payload and revision 1 remain", payload == approved_payload().model_dump(mode="json") and live_hash == expected_hash and revision == "1", "Staged payload drifted."), _gate("disable_history", "A verified disable audit exists after enablement", "disable_metadata_rendering" in verified, "Verified rendering disablement required.")]
+
+
+def _staging_history_eligibility(audits, state=None, sync_audits=()):
+    """Classify whether durable history proves another initial staging attempt is safe."""
+    summaries = []
+    if state is not None or sync_audits:
+        return _history_result(False, "live_metadata_state_not_initial", summaries, "Atlas metadata state or sync-audit rows already exist.")
+    for audit in audits:
+        summary = {
+            "audit_id": getattr(audit, "id", None),
+            "action_type": getattr(audit, "action_type", None),
+            "status": getattr(audit, "status", None),
+            "transition_history": getattr(audit, "transition_history", None),
+            "attempted_wordpress_write_count": getattr(audit, "wordpress_write_count", None),
+            "accepted_metadata_mutation_count": None,
+            "recovery_recommendation": None,
+        }
+        summaries.append(summary)
+        action = summary["action_type"]
+        status = summary["status"]
+        if status == "pending":
+            return _history_result(False, "pending_lifecycle_audit", summaries, f"Lifecycle audit {summary['audit_id']} remains pending.")
+        if action == "stage_metadata_payload" and status == "verified":
+            return _history_result(False, "prior_verified_staging_exists", summaries, f"Lifecycle audit {summary['audit_id']} already verified staging.")
+        if status == "verification_failed":
+            return _history_result(False, "prior_mutation_outcome_uncertain", summaries, f"Lifecycle audit {summary['audit_id']} has an uncertain verification result.")
+        if action != "stage_metadata_payload" or status != "failed":
+            return _history_result(False, "conflicting_lifecycle_history", summaries, f"Lifecycle audit {summary['audit_id']} has a conflicting action or status.")
+        if summary["transition_history"] != ["pending", "failed"]:
+            return _history_result(False, "conflicting_lifecycle_history", summaries, f"Lifecycle audit {summary['audit_id']} has conflicting transition history.")
+        attempted = summary["attempted_wordpress_write_count"]
+        if type(attempted) is not int or attempted not in {0, 1}:
+            return _history_result(False, "prior_mutation_outcome_uncertain", summaries, f"Lifecycle audit {summary['audit_id']} lacks trustworthy mutation-count evidence.")
+        pre = getattr(audit, "pre_snapshot", None)
+        post = getattr(audit, "post_snapshot", None)
+        rejected_before_mutation = any(
+            isinstance(gate, dict)
+            and gate.get("code") == "wordpress_response"
+            and gate.get("passed") is False
+            and (
+                gate.get("message") in set(SAFE_WORDPRESS_CONFLICT_CODES.values())
+                or (
+                    gate.get("message") == "HTTP 409"
+                    and isinstance(pre, dict)
+                    and isinstance(post, dict)
+                    and pre.get("plugin_checksum") is None
+                    and post.get("plugin_checksum") is None
+                )
+            )
+            for gate in (getattr(audit, "gate_results", None) or [])
+        )
+        finalized = (
+            getattr(audit, "completed_at", None) is not None
+            and getattr(audit, "atlas_write_count", None) == 2
+            and getattr(audit, "error_code", None) == "failed"
+        )
+        if not isinstance(pre, dict) or not isinstance(post, dict) or not finalized or (attempted == 1 and not rejected_before_mutation):
+            return _history_result(False, "prior_mutation_outcome_uncertain", summaries, f"Lifecycle audit {summary['audit_id']} does not prove a completed rejected request.")
+        unchanged = (
+            pre == post
+            and _metadata_snapshot_is_initial(pre)
+            and _metadata_snapshot_is_initial(post)
+            and getattr(audit, "previous_revision", None) == "0"
+            and getattr(audit, "final_revision", None) == "0"
+            and getattr(audit, "previous_rendering_enabled", None) is False
+            and getattr(audit, "final_rendering_enabled", None) is False
+        )
+        if not unchanged:
+            return _history_result(False, "prior_failed_attempt_mutated_state", summaries, f"Lifecycle audit {summary['audit_id']} does not prove unchanged initial metadata state.")
+        summary["accepted_metadata_mutation_count"] = 0
+        summary["recovery_recommendation"] = "no_action"
+    return _history_result(True, "historical_failed_attempts_only", summaries, "Only terminal zero-mutation failed staging attempts exist.")
+
+
+def _metadata_snapshot_is_initial(snapshot):
+    return (
+        snapshot.get("payload") is None
+        and snapshot.get("payload_hash") == ""
+        and snapshot.get("revision") == "0"
+        and snapshot.get("rendering_enabled") is False
+        and snapshot.get("enabled_metadata_state") is False
+    )
+
+
+def _history_result(eligible, reason_code, summaries, message):
+    return {"eligible": eligible, "reason_code": reason_code, "audit_summaries": summaries, "message": message}
 
 
 def _post_gates(action, before, after, original, observed, expected_hash):

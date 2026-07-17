@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.64
+
+Replaced the metadata-staging blanket `not audits` check with an explicit fail-closed lifecycle-history eligibility model. A pristine initial state may now proceed after terminal failed staging attempts only when durable audit evidence proves the request was rejected without an accepted metadata mutation: exact `pending -> failed` history, completed failure, trustworthy attempted-write count, failed WordPress-response gate when a request was attempted, identical initial pre/post snapshots, revision `0 -> 0`, rendering `false -> false`, and no metadata state or sync-audit rows. Pending, verified, uncertain, partially mutated, malformed, or non-staging history remains blocked with precise non-secret reason codes. Metadata Bridge PHP and the 0.57.5 ZIP are unchanged. Publication does not authorize live staging or rendering enablement.
+
 ## v0.59.62
 
 Fixed backend/Metadata Bridge optimistic-snapshot hash parity for the separated metadata lifecycle. The backend now preserves and validates the installed executable `plugin_checksum`, canonicalizes the exact seven fields hashed by Metadata Bridge 0.57.5, and reports allowlisted non-secret conflict reason codes. Failed lifecycle audit ID 1 remains immutable historical evidence of the pre-fix HTTP 409 and its zero accepted WordPress mutations. Metadata Bridge PHP and the 0.57.5 ZIP are unchanged. Publication does not authorize another staging attempt or rendering enablement.

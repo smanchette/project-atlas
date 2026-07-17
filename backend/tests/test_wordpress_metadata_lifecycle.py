@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from copy import deepcopy
 import hashlib
 import inspect
 import json
@@ -10,8 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.main import app
+from app.models.entities import WordPressMetadataLifecycleAudit, WordPressMetadataState
+from app.schemas.wordpress import WordPressMetadataLifecycleApplyRequest
 from app.services import wordpress_metadata_lifecycle as lifecycle
 from app.services.wordpress_deployment_release import resolve_program_root
 
@@ -56,6 +60,29 @@ def optimistic_snapshot(**changes):
     return value
 
 
+def failed_staging_audit(audit_id=1, **changes):
+    before = optimistic_snapshot()
+    value = {
+        "id": audit_id,
+        "action_type": "stage_metadata_payload",
+        "status": "failed",
+        "transition_history": ["pending", "failed"],
+        "wordpress_write_count": 1,
+        "atlas_write_count": 2,
+        "previous_revision": "0",
+        "final_revision": "0",
+        "previous_rendering_enabled": False,
+        "final_rendering_enabled": False,
+        "pre_snapshot": deepcopy(before),
+        "post_snapshot": deepcopy(before),
+        "gate_results": [{"code": "wordpress_response", "passed": False, "message": "optimistic_snapshot_hash_mismatch"}],
+        "completed_at": datetime.now(UTC),
+        "error_code": "failed",
+    }
+    value.update(changes)
+    return SimpleNamespace(**value)
+
+
 def test_routes_are_separate_post_only_surfaces():
     routes = {(route.path, method) for route in app.routes for method in getattr(route, "methods", set())}
     expected = {
@@ -92,7 +119,268 @@ def test_staging_requires_empty_disabled_revision_zero():
     assert all(g.passed for g in lifecycle._operation_gates("stage_metadata_payload", valid, None, [], lifecycle.payload_sha256(), observation()))
     for key, value in (("payload", {}), ("payload_hash", "a" * 64), ("revision", "1"), ("rendering_enabled", True)):
         changed = {**valid, key: value}
-        assert not gate_map(lifecycle._operation_gates("stage_metadata_payload", changed, None, [], lifecycle.payload_sha256(), observation()))["initial_state"].passed
+        assert not gate_map(lifecycle._operation_gates("stage_metadata_payload", changed, None, [], lifecycle.payload_sha256(), observation()))["live_metadata_state_not_initial"].passed
+
+
+@pytest.mark.parametrize("audits", [
+    [],
+    [failed_staging_audit()],
+    [failed_staging_audit(1), failed_staging_audit(2)],
+])
+def test_staging_history_allows_only_zero_mutation_failed_attempts(audits):
+    result = lifecycle._staging_history_eligibility(audits)
+    assert result["eligible"] is True
+    assert result["reason_code"] == "historical_failed_attempts_only"
+    assert all(item["accepted_metadata_mutation_count"] == 0 for item in result["audit_summaries"])
+    assert all(item["recovery_recommendation"] == "no_action" for item in result["audit_summaries"])
+
+
+def test_current_production_shaped_failed_audit_is_eligible_without_rewrite():
+    audit = failed_staging_audit()
+    audit.pre_snapshot["plugin_checksum"] = None
+    audit.post_snapshot["plugin_checksum"] = None
+    audit.gate_results[0]["message"] = "HTTP 409"
+    original = deepcopy(vars(audit))
+    result = lifecycle._staging_history_eligibility([audit])
+    assert result["eligible"] is True
+    assert result["audit_summaries"] == [{
+        "audit_id": 1,
+        "action_type": "stage_metadata_payload",
+        "status": "failed",
+        "transition_history": ["pending", "failed"],
+        "attempted_wordpress_write_count": 1,
+        "accepted_metadata_mutation_count": 0,
+        "recovery_recommendation": "no_action",
+    }]
+    assert vars(audit) == original
+
+
+def test_generic_http_409_is_not_safe_for_current_snapshot_contract():
+    audit = failed_staging_audit()
+    audit.gate_results[0]["message"] = "HTTP 409"
+    result = lifecycle._staging_history_eligibility([audit])
+    assert result["eligible"] is False
+    assert result["reason_code"] == "prior_mutation_outcome_uncertain"
+
+
+@pytest.mark.parametrize(("changes", "reason"), [
+    ({"status": "pending", "transition_history": ["pending"]}, "pending_lifecycle_audit"),
+    ({"status": "verified", "transition_history": ["pending", "verified"]}, "prior_verified_staging_exists"),
+    ({"wordpress_write_count": None}, "prior_mutation_outcome_uncertain"),
+    ({"wordpress_write_count": 2}, "prior_mutation_outcome_uncertain"),
+    ({"status": "verification_failed", "transition_history": ["pending", "verification_failed"]}, "prior_mutation_outcome_uncertain"),
+    ({"action_type": "enable_metadata_rendering"}, "conflicting_lifecycle_history"),
+    ({"action_type": "disable_metadata_rendering"}, "conflicting_lifecycle_history"),
+    ({"action_type": "rollback_metadata_payload"}, "conflicting_lifecycle_history"),
+    ({"action_type": "unknown"}, "conflicting_lifecycle_history"),
+    ({"status": "unknown"}, "conflicting_lifecycle_history"),
+    ({"transition_history": ["pending", "verified", "failed"]}, "conflicting_lifecycle_history"),
+    ({"post_snapshot": None}, "prior_mutation_outcome_uncertain"),
+    ({"gate_results": []}, "prior_mutation_outcome_uncertain"),
+    ({"gate_results": [{"code": "wordpress_response", "passed": False, "message": "ReadTimeout"}]}, "prior_mutation_outcome_uncertain"),
+    ({"completed_at": None}, "prior_mutation_outcome_uncertain"),
+])
+def test_staging_history_rejects_unsafe_or_ambiguous_audits(changes, reason):
+    result = lifecycle._staging_history_eligibility([failed_staging_audit(**changes)])
+    assert result["eligible"] is False
+    assert result["reason_code"] == reason
+
+
+@pytest.mark.parametrize("post_change", [
+    {"revision": "1"},
+    {"payload_hash": "a" * 64},
+    {"payload": {}},
+    {"rendering_enabled": True},
+    {"enabled_metadata_state": True},
+])
+def test_failed_audit_with_changed_metadata_state_is_rejected(post_change):
+    audit = failed_staging_audit()
+    audit.post_snapshot.update(post_change)
+    result = lifecycle._staging_history_eligibility([audit])
+    assert result["eligible"] is False
+    assert result["reason_code"] == "prior_failed_attempt_mutated_state"
+
+
+def test_one_unsafe_audit_blocks_an_otherwise_safe_history():
+    unsafe = failed_staging_audit(2, status="pending", transition_history=["pending"])
+    result = lifecycle._staging_history_eligibility([failed_staging_audit(1), unsafe])
+    assert result["eligible"] is False
+    assert result["reason_code"] == "pending_lifecycle_audit"
+
+
+@pytest.mark.parametrize(("state", "sync_audits"), [(object(), ()), (None, (object(),))])
+def test_metadata_state_or_sync_rows_block_initial_staging(state, sync_audits):
+    result = lifecycle._staging_history_eligibility([], state, sync_audits)
+    assert result["eligible"] is False
+    assert result["reason_code"] == "live_metadata_state_not_initial"
+
+
+def test_operation_gates_allow_new_preflight_after_safe_failed_history():
+    gates = gate_map(lifecycle._operation_gates(
+        "stage_metadata_payload",
+        {"payload": None, "payload_hash": "", "revision": "0", "rendering_enabled": False},
+        None,
+        [failed_staging_audit()],
+        lifecycle.payload_sha256(),
+        observation(),
+    ))
+    assert gates["initial_state_ready"].passed
+    assert gates["historical_failed_attempts_only"].passed
+    assert gates["metadata_absent"].passed
+
+
+@pytest.fixture
+def lifecycle_db(tmp_path):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'lifecycle.sqlite3').as_posix()}")
+    SQLModel.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
+def persisted_failed_staging_audit():
+    before = optimistic_snapshot()
+    return WordPressMetadataLifecycleAudit(
+        generated_page_id=41,
+        wordpress_post_id=8,
+        installation_audit_id=1,
+        activation_audit_id=1,
+        action_type="stage_metadata_payload",
+        status="failed",
+        operator="Shawn Manchette",
+        confirmation_phrase_hash="a" * 64,
+        handle_fingerprint="b" * 64,
+        binding_hash="c" * 64,
+        release_identity={},
+        backup_evidence={},
+        browser_evidence_id="historical-evidence",
+        browser_evidence_hashes={},
+        payload_hash=lifecycle.payload_sha256(),
+        previous_revision="0",
+        final_revision="0",
+        previous_rendering_enabled=False,
+        final_rendering_enabled=False,
+        pre_snapshot=deepcopy(before),
+        post_snapshot=deepcopy(before),
+        page_media_snapshots={},
+        gate_results=[{"code": "wordpress_response", "passed": False, "message": "optimistic_snapshot_hash_mismatch"}],
+        wordpress_write_count=1,
+        wordpress_write_scope=["one rejected staging request"],
+        atlas_write_count=2,
+        atlas_write_scope=["pending audit", "failed audit"],
+        transition_history=["pending", "failed"],
+        completed_at=datetime.now(UTC),
+        error_code="failed",
+    )
+
+
+class DummyRuntimeIdentity:
+    def model_dump(self, mode="json"):
+        return {"atlas_version": "v0.59.64", "atlas_commit": "d" * 40, "atlas_tag": "v0.59.64"}
+
+
+class DummyLifecycleRequest:
+    installation_audit_id = 1
+    activation_audit_id = 1
+    operator = "Shawn Manchette"
+    expected_runtime_identity = DummyRuntimeIdentity()
+    manual_browser_evidence = SimpleNamespace(
+        evidence_id="fresh-evidence",
+        rendered_head_hash="e" * 64,
+        visible_content_hash="f" * 64,
+        evidence_schema_version=1,
+    )
+
+    def model_dump(self, mode="json", include=None, exclude=None):
+        value = {
+            "atlas_data_backup_file": "atlas-data.json",
+            "atlas_media_backup_file": "atlas-media.zip",
+            "atlas_program_backup_file": "atlas-program.zip",
+            "wordpress_backup_method": "SiteGround on-demand full-site backup",
+            "wordpress_backup_reference": "Atlas Backup",
+            "wordpress_backup_completed_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+            "wordpress_database_included_attestation": True,
+            "wordpress_plugins_included_attestation": True,
+            "wordpress_restore_capability_attestation": True,
+            "confirmer_identity": "Shawn Manchette",
+            "php_error_log_findings": "No findings",
+            "observed_write_summary": "No relevant changes",
+            "manual_browser_evidence": None,
+        }
+        if include is not None:
+            value = {key: item for key, item in value.items() if key in include}
+        for key in exclude or ():
+            value.pop(key, None)
+        return value
+
+
+def test_later_apply_creates_new_verified_audit_and_preserves_failed_audit(monkeypatch, lifecycle_db):
+    before = optimistic_snapshot()
+    payload = lifecycle.approved_payload().model_dump(mode="json")
+    payload_hash = lifecycle.payload_sha256()
+    after = optimistic_snapshot(payload=payload, payload_hash=payload_hash, revision="1")
+    inspected = {
+        "plugin_status": before,
+        "page_snapshot_hash": "1" * 64,
+        "page_body_hash": "2" * 64,
+        "media31_snapshot_hash": "3" * 64,
+        "media32_snapshot_hash": "4" * 64,
+        "site": {"name": "My WordPress", "description": ""},
+        "cache_headers": {},
+    }
+    rerun = SimpleNamespace(
+        preflight_ready=True,
+        binding_hash="5" * 64,
+        inspected_state=inspected,
+        canonical_payload=lifecycle.approved_payload(),
+        payload_sha256=payload_hash,
+        gate_results=[],
+    )
+    entry = SimpleNamespace(
+        request=DummyLifecycleRequest(),
+        binding_hash=rerun.binding_hash,
+        expires_at=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    observed_after = {
+        **{key: inspected[key] for key in ("page_snapshot_hash", "page_body_hash", "media31_snapshot_hash", "media32_snapshot_hash", "site", "cache_headers")},
+        "wordpress_request_methods": ["GET"],
+        "rendered": empty_rendered(),
+    }
+    monkeypatch.setattr(lifecycle, "_consume_handle", lambda handle, action: entry)
+    monkeypatch.setattr(lifecycle, "lifecycle_preflight", lambda *args, **kwargs: rerun)
+    monkeypatch.setattr(lifecycle, "_send_operation", lambda *args, **kwargs: {"status": "metadata_staged", "revision": "1", "rendering_enabled": False})
+    monkeypatch.setattr(lifecycle, "_read_status", lambda session: deepcopy(after))
+    monkeypatch.setattr(lifecycle, "_observe", lambda session, proof: deepcopy(observed_after))
+
+    with Session(lifecycle_db) as session:
+        historical = persisted_failed_staging_audit()
+        session.add(historical)
+        session.commit()
+        session.refresh(historical)
+        original = {
+            "status": historical.status,
+            "history": deepcopy(historical.transition_history),
+            "pre": deepcopy(historical.pre_snapshot),
+            "post": deepcopy(historical.post_snapshot),
+        }
+        result = lifecycle.apply_lifecycle(
+            session,
+            41,
+            WordPressMetadataLifecycleApplyRequest(
+                lifecycle_handle="h" * 32,
+                confirmation_phrase=lifecycle.PHRASES["stage_metadata_payload"],
+            ),
+            "stage_metadata_payload",
+        )
+        audits = list(session.exec(select(WordPressMetadataLifecycleAudit).order_by(WordPressMetadataLifecycleAudit.id)))
+        assert [audit.id for audit in audits] == [1, 2]
+        assert result.lifecycle_audit_id == 2 and result.status == "verified"
+        assert audits[1].transition_history == ["pending", "verified"]
+        assert audits[1].wordpress_write_count == 1 and audits[1].atlas_write_count == 2
+        assert audits[1].final_revision == "1" and audits[1].final_rendering_enabled is False
+        assert {"status": audits[0].status, "history": audits[0].transition_history, "pre": audits[0].pre_snapshot, "post": audits[0].post_snapshot} == original
+        state = session.exec(select(WordPressMetadataState)).one()
+        assert state.status == "staged" and state.wordpress_revision == "1"
+        assert state.payload_hash == payload_hash and state.payload == payload
 
 
 def audit(action, status="verified"):
