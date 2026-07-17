@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.62
+
+Fixed backend/Metadata Bridge optimistic-snapshot hash parity for the separated metadata lifecycle. The backend now preserves and validates the installed executable `plugin_checksum`, canonicalizes the exact seven fields hashed by Metadata Bridge 0.57.5, and reports allowlisted non-secret conflict reason codes. Failed lifecycle audit ID 1 remains immutable historical evidence of the pre-fix HTTP 409 and its zero accepted WordPress mutations. Metadata Bridge PHP and the 0.57.5 ZIP are unchanged. Publication does not authorize another staging attempt or rendering enablement.
+
 ## v0.59.59
 
 Added a separately gated, two-phase upgrade-bootstrap cleanup lifecycle. Token-free preflights bind fresh backups, schema-v1 evidence, verified installation/activation/upgrade audits, runtime identity, exact plugin inventories, and page/media/metadata state. Phrase-gated deactivation can only set the fixed bootstrap inactive; a separate phrase-gated deletion can only delete that already-inactive fixed bootstrap. Migration 0020 adds `WordPressBootstrapCleanupAudit`, and Data Backup v0.36 preserves its audit history. Publication does not authorize live cleanup.

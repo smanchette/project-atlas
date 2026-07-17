@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 from threading import Lock, Timer
 from typing import Any, Literal
@@ -76,6 +77,33 @@ WORDPRESS_SCOPES: dict[Action, list[str]] = {
     for action, path in PLUGIN_PATHS.items()
 }
 ATLAS_SCOPE = ["create one pending WordPressMetadataLifecycleAudit", "finalize that audit and the single page-41 WordPressMetadataState after read-only verification"]
+
+# This is the exact field contract enforced by
+# atlas_metadata_snapshot_hash() in Metadata Bridge 0.57.5.  Repository,
+# plugin identity, page, media, site, and cache bindings remain in the signed
+# Atlas lifecycle binding; they are intentionally not added to this plugin-owned
+# optimistic hash because the installed plugin does not hash those fields.
+OPTIMISTIC_SNAPSHOT_FIELDS = (
+    "rendering_enabled",
+    "enabled_metadata_state",
+    "activation_generation",
+    "plugin_checksum",
+    "payload_hash",
+    "revision",
+    "payload",
+)
+
+SAFE_WORDPRESS_CONFLICT_CODES = {
+    "atlas_snapshot_conflict": "optimistic_snapshot_hash_mismatch",
+    "atlas_revision_conflict": "snapshot_field_mismatch",
+    "atlas_stage_state_conflict": "snapshot_field_mismatch",
+    "atlas_enable_state_conflict": "snapshot_field_mismatch",
+    "atlas_disable_state_conflict": "snapshot_field_mismatch",
+    "atlas_rollback_state_conflict": "snapshot_field_mismatch",
+    "atlas_post_changed": "snapshot_field_mismatch",
+    "atlas_media_changed": "snapshot_field_mismatch",
+    "atlas_hash_mismatch": "snapshot_field_mismatch",
+}
 
 
 @dataclass(frozen=True)
@@ -153,6 +181,7 @@ def lifecycle_preflight(
     observed = _observe(session, proof) if evidence_ok and not artifact_error else _unavailable(evidence_reason or artifact_error)
     plugin_status = _read_status(session) if "_error" not in observed else {"_error": "observation_unavailable"}
     snapshot = plugin_status.get("snapshot") if isinstance(plugin_status.get("snapshot"), dict) else plugin_status
+    snapshot_error = _snapshot_contract_error(plugin_status)
     installation = session.get(WordPressDeploymentAudit, request.installation_audit_id)
     activation = session.get(WordPressActivationAudit, request.activation_audit_id)
     lifecycle_audits = list(session.exec(select(WordPressMetadataLifecycleAudit).where(WordPressMetadataLifecycleAudit.generated_page_id == 41).order_by(WordPressMetadataLifecycleAudit.id)))
@@ -170,6 +199,7 @@ def lifecycle_preflight(
         _gate("plugin", "Metadata Bridge 0.57.5 is installed exactly once and active", _plugin_exact(observed), "The separated-lifecycle bridge must be installed once and active."),
         _gate("plugin_identity", "Expected plugin path, version, ZIP, and inventories are exact", request.expected_plugin_slug == PLUGIN_SLUG and request.expected_plugin_path == PLUGIN_ENTRY and request.expected_plugin_version == PLUGIN_VERSION and request.expected_zip_sha256 == SOURCE_EXPECTATIONS.plugin_zip_sha256 and observed.get("plugin_inventory_hash") == request.expected_plugin_inventory_hash and observed.get("active_plugin_inventory_hash") == request.expected_active_plugin_inventory_hash, "Plugin artifact or inventory identity drifted."),
         _gate("plugin_status", "Plugin status endpoint is available and exact", plugin_status.get("version") == PLUGIN_VERSION and plugin_status.get("active") is True and not plugin_status.get("_error"), "Plugin status is unavailable or mismatched."),
+        _gate("optimistic_snapshot", "Plugin-owned optimistic snapshot is complete and canonical", snapshot_error is None, snapshot_error or "Optimistic snapshot is unavailable."),
         _gate("legacy_metadata_audits", "Legacy combined metadata-sync audits remain absent", not legacy_sync_audits, "A legacy combined metadata operation exists."),
         _gate("candidate_payload", "Candidate payload is exactly the canonical approved payload", request.candidate_payload.model_dump(mode="json") == expected_payload.model_dump(mode="json"), "Candidate payload includes a mismatch or unapproved schema node."),
         _gate("page", "Page 8 identity, body, title, status, slug, URL, and featured media remain exact", observed.get("page_body_hash") == request.expected_body_hash == EXPECTED_CORRECTED_BODY_HASH and observed.get("page_snapshot_hash") == request.expected_page_snapshot_hash and observed.get("page", {}).get("id") == 8 and observed.get("page", {}).get("status") == "publish" and observed.get("page", {}).get("featured_media") == 31, "Page 8 changed."),
@@ -328,7 +358,11 @@ def _rendered_exact(rendered):
 
 
 def _send_operation(session, action, preflight, before):
-    body: dict[str, Any] = {"expected_revision": str(before.get("revision", "0")), "expected_snapshot_hash": _snapshot_hash(before)}
+    try:
+        snapshot_hash = _snapshot_hash(before)
+    except ValueError as exc:
+        return {"_error": str(exc), "reason_code": str(exc), "status_code": 409}
+    body: dict[str, Any] = {"expected_revision": str(before.get("revision", "0")), "expected_snapshot_hash": snapshot_hash}
     if action == "stage_metadata_payload": body.update(payload=preflight.canonical_payload.model_dump(mode="json"), payload_hash=preflight.payload_sha256)
     elif action in {"enable_metadata_rendering", "disable_metadata_rendering"}: body.update(payload_hash=preflight.payload_sha256)
     else: body.update(payload_hash=preflight.payload_sha256, rollback_revision="0")
@@ -337,7 +371,19 @@ def _send_operation(session, action, preflight, before):
     try:
         with httpx.Client(timeout=20, follow_redirects=False) as client:
             response = client.put(f"{settings.site_url.rstrip('/')}{PLUGIN_PATHS[action]}", json=body, auth=httpx.BasicAuth(settings.username, password), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
-        if response.status_code >= 400: return {"_error": f"HTTP {response.status_code}"}
+        if response.status_code >= 400:
+            try:
+                value = response.json()
+            except ValueError:
+                value = {}
+            wordpress_code = value.get("code") if isinstance(value, dict) else None
+            reason_code = SAFE_WORDPRESS_CONFLICT_CODES.get(wordpress_code, f"wordpress_http_{response.status_code}")
+            return {
+                "_error": reason_code,
+                "reason_code": reason_code,
+                "wordpress_error_code": wordpress_code if wordpress_code in SAFE_WORDPRESS_CONFLICT_CODES else None,
+                "status_code": response.status_code,
+            }
         value = response.json(); return value if isinstance(value, dict) else {"_error": "non_object_response"}
     except (httpx.HTTPError, ValueError) as exc: return {"_error": exc.__class__.__name__}
 
@@ -369,8 +415,50 @@ def _plugin_exact(observed):
     return len(matches)==1 and matches[0].get("status") in {"active","network-active"} and matches[0].get("version")==PLUGIN_VERSION
 def _binding(action,request,observed,snapshot,audits,payload_hash,expires): return {"action":action,"request":request.model_dump(mode="json",exclude={"manual_browser_evidence"}),"evidence":{"id":request.manual_browser_evidence.evidence_id,"head":request.manual_browser_evidence.rendered_head_hash,"visible":request.manual_browser_evidence.visible_content_hash,"expires":request.manual_browser_evidence.expires_at},"state":{"plugin":_public_status(snapshot),"page":observed.get("page_snapshot_hash"),"body":observed.get("page_body_hash"),"media31":observed.get("media31_snapshot_hash"),"media32":observed.get("media32_snapshot_hash"),"cache":_hash(observed.get("cache_headers",{})),"audit_history":[[a.id,a.action_type,a.status] for a in audits]},"payload_hash":payload_hash,"expires_at":expires.isoformat() if expires else None}
 def _page_media(value): return {key:value.get(key) for key in ("page_snapshot_hash","page_body_hash","media31_snapshot_hash","media32_snapshot_hash","cache_headers")}
-def _public_status(value): return {key:value.get(key) for key in ("plugin","version","checksum","active","rendering_enabled","enabled_metadata_state","activation_generation","payload_hash","revision","payload","_error") if key in value}
-def _snapshot_hash(value): return hashlib.sha256(json.dumps({key:value.get(key) for key in ("rendering_enabled","enabled_metadata_state","activation_generation","plugin_checksum","payload_hash","revision","payload")},sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
+def _public_status(value): return {key:value.get(key) for key in ("plugin","version","checksum","active","rendering_enabled","enabled_metadata_state","activation_generation","plugin_checksum","payload_hash","revision","payload","_error") if key in value}
+
+
+def _canonical_optimistic_snapshot(value: dict[str, Any]) -> dict[str, Any]:
+    """Return the exact normalized object hashed by Metadata Bridge 0.57.5."""
+    if "plugin_checksum" not in value or not value.get("plugin_checksum"):
+        raise ValueError("plugin_checksum_missing")
+    checksum = value["plugin_checksum"]
+    if not isinstance(checksum, str) or re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
+        raise ValueError("plugin_checksum_mismatch")
+    installed_checksum = value.get("checksum")
+    if installed_checksum is not None and checksum != installed_checksum:
+        raise ValueError("plugin_checksum_mismatch")
+    if value.get("version") is not None and value.get("version") != PLUGIN_VERSION:
+        raise ValueError("snapshot_field_mismatch")
+    if value.get("active") is not None and value.get("active") is not True:
+        raise ValueError("snapshot_field_mismatch")
+    if any(key not in value for key in OPTIMISTIC_SNAPSHOT_FIELDS):
+        raise ValueError("snapshot_field_mismatch")
+    if type(value["rendering_enabled"]) is not bool or type(value["enabled_metadata_state"]) is not bool:
+        raise ValueError("snapshot_field_mismatch")
+    if not isinstance(value["activation_generation"], str) or not isinstance(value["payload_hash"], str):
+        raise ValueError("snapshot_field_mismatch")
+    if not isinstance(value["revision"], str) or re.fullmatch(r"0|[1-9][0-9]*", value["revision"]) is None:
+        raise ValueError("snapshot_field_mismatch")
+    if value["payload"] is not None and not isinstance(value["payload"], dict):
+        raise ValueError("snapshot_field_mismatch")
+    return {key: value[key] for key in OPTIMISTIC_SNAPSHOT_FIELDS}
+
+
+def _snapshot_contract_error(value: dict[str, Any]) -> str | None:
+    try:
+        _canonical_optimistic_snapshot(value)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def _snapshot_hash(value):
+    canonical = _canonical_optimistic_snapshot(value)
+    # wp_json_encode() retains PHP's default Unicode escaping because the
+    # plugin passes JSON_UNESCAPED_SLASHES, not JSON_UNESCAPED_UNICODE.
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
 def _expected_revision(action): return "1" if action!="rollback_metadata_payload" else "0"
 def _parse_timestamp(value):
     parsed=datetime.fromisoformat(value.replace("Z","+00:00"))
