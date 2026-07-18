@@ -90,6 +90,12 @@ def test_reason_code_contract_is_complete():
         "public_metadata_still_stale", "public_metadata_mismatch",
         "unapproved_schema_node_present", "duplicate_metadata_present",
     }
+    assert cache.CACHE_OBSERVATION_REASON_CODES == {
+        "siteground_cache_provider_verified", "cache_headers_missing",
+        "cache_provider_unrecognized", "cache_header_value_invalid",
+        "cache_status_hit", "cache_status_miss", "cache_status_bypass",
+        "stale_public_cache_confirmed",
+    }
 
 
 def test_cache_aware_audit_is_in_versioned_data_backup():
@@ -184,6 +190,236 @@ def test_cache_provider_requires_siteground_headers():
     assert cache._siteground_cache_hit({"x-cache-enabled": "True", "x-proxy-cache": "HIT"})
     assert not cache._siteground_cache_hit({"x-cache-enabled": "True", "x-proxy-cache": "MISS"})
     assert not cache._siteground_cache_present({"cf-cache-status": "HIT"})
+
+
+@pytest.mark.parametrize("identifier", [
+    "project-atlas-metadata-bridge/project-atlas-metadata-bridge",
+    "project-atlas-metadata-bridge/project-atlas-metadata-bridge.php",
+    "project-atlas-metadata-bridge\\project-atlas-metadata-bridge",
+])
+def test_cache_aware_plugin_identity_reuses_fail_closed_normalization(identifier):
+    plugins = [{"plugin": identifier, "version": "0.57.6", "status": "active"}]
+    raw_hash = cache._hash(plugins)
+    status = {"plugin": cache.PLUGIN_SLUG, "version": "0.57.6", "active": True}
+    assert cache._plugin_exact({"plugins": plugins}, status)
+    assert cache._hash(plugins) == raw_hash
+    assert plugins[0]["plugin"] == identifier
+
+
+@pytest.mark.parametrize("identifiers", [
+    [
+        "project-atlas-metadata-bridge/project-atlas-metadata-bridge",
+        "project-atlas-metadata-bridge/project-atlas-metadata-bridge.php",
+    ],
+    ["../project-atlas-metadata-bridge/project-atlas-metadata-bridge"],
+    ["/project-atlas-metadata-bridge/project-atlas-metadata-bridge"],
+    ["project-atlas-metadata-bridge//project-atlas-metadata-bridge"],
+    ["project-atlas-metadata-bridge/project-atlas-metadata-bridge\x00"],
+])
+def test_cache_aware_plugin_identity_rejects_duplicate_ambiguous_or_malformed(identifiers):
+    plugins = [{"plugin": value, "version": "0.57.6", "status": "active"} for value in identifiers]
+    status = {"plugin": cache.PLUGIN_SLUG, "version": "0.57.6", "active": True}
+    assert not cache._plugin_exact({"plugins": plugins}, status)
+
+
+def test_cache_aware_plugin_identity_rejects_version_or_activity_drift():
+    plugin = {"plugin": "project-atlas-metadata-bridge/project-atlas-metadata-bridge", "version": "0.57.5", "status": "active"}
+    status = {"plugin": cache.PLUGIN_SLUG, "version": "0.57.6", "active": True}
+    assert not cache._plugin_exact({"plugins": [plugin]}, status)
+    plugin["version"] = "0.57.6"
+    plugin["status"] = "inactive"
+    assert not cache._plugin_exact({"plugins": [plugin]}, status)
+
+
+@pytest.mark.parametrize(("headers", "verified", "reason", "status_reason"), [
+    ({"X-Cache-Enabled": "True"}, True, "siteground_cache_provider_verified", None),
+    ({"x-proxy-cache": "HIT"}, True, "siteground_cache_provider_verified", "cache_status_hit"),
+    ({"X-Proxy-Cache": "miss"}, True, "siteground_cache_provider_verified", "cache_status_miss"),
+    ({"x-proxy-cache": "BYPASS"}, True, "siteground_cache_provider_verified", "cache_status_bypass"),
+    ({"X-Proxy-Cache-Info": "DT:1"}, True, "siteground_cache_provider_verified", None),
+    ({}, False, "cache_headers_missing", None),
+    ({"Server": "nginx"}, False, "cache_provider_unrecognized", None),
+    ({"X-Proxy-Cache": "UNKNOWN"}, False, "cache_header_value_invalid", None),
+    ({"X-Cache-Enabled": "maybe"}, False, "cache_header_value_invalid", None),
+])
+def test_siteground_cache_provider_detection_is_precise(headers, verified, reason, status_reason):
+    result = cache._siteground_cache_evidence(headers)
+    assert result["verified"] is verified
+    assert result["reason_code"] == reason
+    assert result["status_reason_code"] == status_reason
+
+
+def test_public_header_sanitizer_is_case_insensitive_and_drops_sensitive_values():
+    headers = [
+        ("X-Proxy-Cache", "HIT"),
+        ("x-proxy-cache-info", "DT:1"),
+        ("Server", "nginx"),
+        ("Set-Cookie", "wordpress_logged_in=secret"),
+        ("Authorization", "Basic secret"),
+        ("Cookie", "session=secret"),
+        ("X-Private-Token", "secret"),
+    ]
+    assert cache._cache_headers(headers) == {
+        "server": "nginx",
+        "x-proxy-cache": "HIT",
+        "x-proxy-cache-info": "DT:1",
+    }
+
+
+def test_cache_headers_cannot_be_supplied_by_the_preflight_caller():
+    request_model = cache.WordPressCacheAwareRenderingPreflightRequest
+    assert "cache_headers" not in request_model.model_fields
+    assert request_model.model_config.get("extra") == "forbid"
+
+
+def test_public_observation_binds_direct_http_headers_to_signed_browser_identity():
+    evidence = SimpleNamespace(
+        rendered_head_hash="a" * 64,
+        visible_content_hash="b" * 64,
+        captured_at=(datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+        expires_at=(datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+        page_identity={
+            "document_title": "Drywood Termite Tenting in Orlando, FL – My WordPress",
+            "h1": cache.EXPECTED_H1,
+            "canonical_url": cache.CANONICAL_URL,
+            "featured_image_url": "https://www.drywoodtenting.com/wp-content/uploads/2026/07/orlando-drywood-termite-tenting-hero.png",
+            "featured_image_alt": "Two-story Orlando Florida home professionally covered for drywood termite tenting",
+        },
+    )
+    observation = {
+        "source": "public", "outcome": "public_html_verified", "verified": True,
+        "status_code": 200, "final_url": cache.CANONICAL_URL, "redirect_count": 0,
+        "observed_at": datetime.now(UTC).isoformat(),
+        "head_hash": "a" * 64, "visible_hash": "b" * 64,
+        "document_title": [evidence.page_identity["document_title"]],
+        "h1": [evidence.page_identity["h1"]], "canonical": [cache.CANONICAL_URL],
+        "featured_image_url": evidence.page_identity["featured_image_url"],
+        "featured_image_alt": evidence.page_identity["featured_image_alt"],
+        "cache_headers": {"x-cache-enabled": "True", "x-proxy-cache": "HIT"},
+        "admin_page_detected": False, "login_page_detected": False,
+        "authenticated_context_detected": False, "challenge_page_detected": False,
+        "error_page_detected": False,
+    }
+    assert cache._public_observation_matches_evidence(observation, evidence) == (True, "public_header_observation_bound")
+    for changes, reason in [
+        ({"status_code": 202}, "public_http_202_challenge"),
+        ({"status_code": 403}, "public_http_403_error"),
+        ({"final_url": "https://example.com/"}, "public_final_url_mismatch"),
+        ({"redirect_count": 1}, "public_redirect_mismatch"),
+        ({"observed_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()}, "public_observation_timestamp_mismatch"),
+        ({"head_hash": "c" * 64}, "public_body_identity_mismatch"),
+        ({"challenge_page_detected": True}, "public_body_identity_mismatch"),
+    ]:
+        candidate = {**observation, **changes}
+        assert cache._public_observation_matches_evidence(candidate, evidence) == (False, reason)
+
+
+def test_cache_aware_preflight_reaches_ready_with_normalized_plugin_and_bound_cache_headers(monkeypatch):
+    identity = {
+        "document_title": "Drywood Termite Tenting in Orlando, FL – My WordPress",
+        "h1": cache.EXPECTED_H1,
+        "canonical_url": cache.CANONICAL_URL,
+        "featured_image_url": "https://www.drywoodtenting.com/wp-content/uploads/2026/07/orlando-drywood-termite-tenting-hero.png",
+        "featured_image_alt": "Two-story Orlando Florida home professionally covered for drywood termite tenting",
+    }
+    manual = SimpleNamespace(
+        evidence_id="fresh-cache-evidence",
+        evidence_schema="project-atlas-manual-browser-evidence",
+        evidence_schema_version=1,
+        capture_helper_version="0.59.15",
+        captured_at=(datetime.now(UTC) - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        expires_at=(datetime.now(UTC) + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        rendered_head_hash="a" * 64,
+        visible_content_hash="b" * 64,
+        page_identity=identity,
+    )
+    public = {
+        "source": "public", "outcome": "public_html_verified", "verified": True,
+        "status_code": 200, "final_url": cache.CANONICAL_URL, "redirect_count": 0,
+        "observed_at": datetime.now(UTC).isoformat(),
+        "head_hash": manual.rendered_head_hash, "visible_hash": manual.visible_content_hash,
+        "document_title": [identity["document_title"]], "h1": [identity["h1"]],
+        "canonical": [identity["canonical_url"]],
+        "featured_image_url": identity["featured_image_url"], "featured_image_alt": identity["featured_image_alt"],
+        "cache_headers": {"x-cache-enabled": "True", "x-proxy-cache": "HIT", "x-proxy-cache-info": "DT:1"},
+        "admin_page_detected": False, "login_page_detected": False,
+        "authenticated_context_detected": False, "challenge_page_detected": False, "error_page_detected": False,
+    }
+    empty_inventory = {
+        "meta_descriptions": [], "canonicals": [cache.CANONICAL_URL], "open_graph": [], "twitter": [],
+        "json_ld": [], "title_count": 1, "canonical_count": 1, "atlas_ownership_markers": [],
+        "featured_image_references": [], "media32_references": [], "unexpected_metadata_owners": [], "duplicates": [],
+    }
+    observed = {
+        "plugins": [{"plugin": "project-atlas-metadata-bridge/project-atlas-metadata-bridge", "version": "0.57.6", "status": "active"}],
+        "page": {"id": 8, "status": "publish", "featured_media": 31},
+        "page_snapshot_hash": "1" * 64, "page_body_hash": cache.EXPECTED_CORRECTED_BODY_HASH,
+        "media31_snapshot_hash": "3" * 64, "media32_snapshot_hash": "4" * 64,
+        "page_references_media32": False, "site": {"name": "My WordPress", "description": ""},
+        "rendered": {
+            "h1": [cache.EXPECTED_H1], "canonical": [cache.CANONICAL_URL],
+            "metadata_inventory": empty_inventory, "atlas_metadata_marker_present": False,
+            "media32_reference_present": False, "public_http_observation": public,
+        },
+        "wordpress_request_methods": ["GET"],
+    }
+    disabled = {
+        "plugin": cache.PLUGIN_SLUG, "version": "0.57.6", "active": True,
+        "rendering_enabled": False, "enabled_metadata_state": False,
+        "payload_hash": cache.payload_sha256(), "revision": "1",
+        "payload": cache.approved_payload().model_dump(mode="json"),
+    }
+    staging = SimpleNamespace(id=2, action_type="stage_metadata_payload", status="verified")
+    recovery = SimpleNamespace(id=4, action_type="disable_metadata_rendering", status="verified", completion_mode="recovery_after_failed_enable_verification")
+    state = SimpleNamespace(status="staged", payload_hash=cache.payload_sha256(), wordpress_revision="1")
+
+    class Results:
+        def __init__(self, first_value=None): self.first_value = first_value
+        def first(self): return self.first_value
+        def __iter__(self): return iter(())
+
+    class Session:
+        calls = 0
+        def get(self, model, identifier): return staging if identifier == 2 else recovery
+        def exec(self, statement):
+            self.calls += 1
+            return Results(state if self.calls == 1 else None)
+
+    expected_identity = SimpleNamespace(atlas_commit="d" * 40, atlas_tag="v0.59.74")
+
+    class Request:
+        manual_browser_evidence = manual
+        staging_audit_id = 2
+        recovery_disable_audit_id = 4
+        expected_runtime_identity = expected_identity
+        repository_head = "d" * 40
+        repository_origin_main = "d" * 40
+        repository_tag = "v0.59.74"
+        repository_working_tree_clean = True
+        protected_paths_unchanged = True
+        no_relevant_wordpress_change_after_backup = True
+        expected_body_hash = cache.EXPECTED_CORRECTED_BODY_HASH
+        expected_page_snapshot_hash = "1" * 64
+        expected_media31_snapshot_hash = "3" * 64
+        expected_media32_snapshot_hash = "4" * 64
+        def model_dump(self, **kwargs): return {"request": "locked"}
+
+    monkeypatch.setattr(cache, "validate_manual_browser_evidence", lambda *args, **kwargs: (True, "Verified."))
+    monkeypatch.setattr(cache, "_backup_proof", lambda request: SimpleNamespace(wordpress_backup_completed_at=datetime.now(UTC) - timedelta(minutes=10)))
+    monkeypatch.setattr(cache, "_backup_gates", lambda proof: [cache._gate("backups", "Backups valid", True, "")])
+    monkeypatch.setattr(cache, "_observe", lambda session, proof: observed)
+    monkeypatch.setattr(cache, "_read_plugin_status", lambda session: {**disabled, "snapshot": disabled})
+    monkeypatch.setattr(cache, "_artifact_identity", lambda: {"valid": True})
+    monkeypatch.setattr(cache, "_runtime_identity", lambda: {"verified": True})
+    monkeypatch.setattr(cache, "_runtime_matches", lambda value, request: True)
+    monkeypatch.setattr(cache, "_audit_three_preserved", lambda session: True)
+    result = cache.rendering_preflight(Session(), 41, Request(), issue_handle=False)
+    assert result.preflight_ready is True
+    assert result.status == "cache_aware_rendering_preflight_ready"
+    assert all(gate.passed for gate in result.gate_results)
+    assert result.wordpress_write_count == result.cache_write_count == result.atlas_write_count == 0
+    assert result.audit_created is False
+    assert result.inspected_state["cache_evidence"]["status_reason_code"] == "cache_status_hit"
 
 
 def test_rendering_handle_is_single_use_and_restart_invalidates():

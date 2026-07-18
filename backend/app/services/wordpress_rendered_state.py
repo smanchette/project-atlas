@@ -7,7 +7,7 @@ from html.parser import HTMLParser
 import json
 import re
 import unicodedata
-from typing import Any
+from typing import Any, Iterable, Mapping
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -41,7 +41,22 @@ SECRET_PATTERN = re.compile(
 BOT_PATTERN = re.compile(r"cloudflare|siteground|captcha|access denied|bot protection|checking your browser|cf-chl", re.I)
 CHALLENGE_PATTERN = re.compile(r"cloudflare|captcha|access denied|bot protection|checking your browser|cf-chl", re.I)
 ERROR_PATTERN = re.compile(r"critical error|error 404|page not found|template fallback|checking your browser", re.I)
-CACHE_HEADERS = {"age", "cache-control", "cf-cache-status", "x-cache", "x-proxy-cache", "x-sg-cache"}
+PUBLIC_RESPONSE_HEADER_ALLOWLIST = {
+    "age",
+    "cache-control",
+    "cf-cache-status",
+    "etag",
+    "expires",
+    "last-modified",
+    "server",
+    "via",
+    "x-cache",
+    "x-cache-enabled",
+    "x-proxy-cache",
+    "x-proxy-cache-info",
+    "x-sg-cache",
+}
+CACHE_HEADERS = PUBLIC_RESPONSE_HEADER_ALLOWLIST
 CACHE_BUSTING_QUERY_KEYS = {"_", "cb", "cache", "cachebust", "timestamp", "ver", "v"}
 VOLATILE_ATTRIBUTES = {"nonce", "integrity", "crossorigin"}
 WP_VOLATILE_TOKEN = re.compile(r"^(?:wp-|wp_|postid-|page-id-|page-template-|logged-in|admin-bar)", re.I)
@@ -77,6 +92,29 @@ def _hash(value: str) -> str:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def sanitize_public_response_headers(
+    headers: Mapping[str, Any] | Iterable[tuple[str, Any]],
+) -> dict[str, str]:
+    """Return only non-secret public cache diagnostics with stable lowercase names.
+
+    Repeated allowlisted headers are retained in encounter order as a comma-separated
+    value. Control characters and non-string values fail closed by omission; callers
+    separately reject observations whose required cache evidence is then unavailable.
+    """
+
+    items = headers.items() if isinstance(headers, Mapping) else headers
+    collected: dict[str, list[str]] = {}
+    for raw_name, raw_value in items:
+        name = str(raw_name).strip().lower()
+        if name not in PUBLIC_RESPONSE_HEADER_ALLOWLIST or not isinstance(raw_value, str):
+            continue
+        value = raw_value.strip()
+        if not value or len(value) > 2048 or any(ord(character) < 32 and character != "\t" for character in value):
+            continue
+        collected.setdefault(name, []).append(value)
+    return {name: ", ".join(values) for name, values in sorted(collected.items())}
 
 
 def _parse_evidence_timestamp(value: datetime | str) -> datetime:
@@ -727,9 +765,22 @@ def _valid_duplicate_h1_inventory(value: Any) -> bool:
 def _html_result(response: httpx.Response, outcome: str, source: str) -> dict[str, Any]:
     final_url = str(response.url)
     headers = {key.lower(): value for key, value in response.headers.items()}
+    sanitized_headers = sanitize_public_response_headers(response.headers.multi_items())
     body = response.text
     context = classify_public_page_context(body, final_url=final_url, status_code=response.status_code)
-    base: dict[str, Any] = {"source": source, "outcome": outcome, "final_url": final_url, "status_code": response.status_code, "content_type": headers.get("content-type", ""), "cache_headers": {key: value for key, value in headers.items() if key in CACHE_HEADERS}, "verified": False, **context}
+    base: dict[str, Any] = {
+        "source": source,
+        "outcome": outcome,
+        "final_url": final_url,
+        "status_code": response.status_code,
+        "observed_at": datetime.now(UTC).isoformat(),
+        "redirect_count": len(response.history),
+        "content_type": headers.get("content-type", ""),
+        "cache_headers": sanitized_headers,
+        "body_sha256": hashlib.sha256(response.content).hexdigest(),
+        "verified": False,
+        **context,
+    }
     if 300 <= response.status_code < 400 or final_url != EXPECTED_URL:
         return {**base, "outcome": "unexpected_redirect"}
     if response.status_code == 403 and BOT_PATTERN.search(body + " " + " ".join(headers.values())):
@@ -754,6 +805,40 @@ def _html_result(response: httpx.Response, outcome: str, source: str) -> dict[st
     normalized_head = _canonical_json({"page": {"titles": parsed.titles, "canonicals": parsed.canonicals}, "head_elements": parsed.head_elements, "inventory": inventory})
     normalized_visible = _text(" ".join(parsed.visible))
     return {**base, "outcome": outcome, "verified": True, "head_hash": _hash(normalized_head), "visible_hash": _hash(normalized_visible), "document_title": parsed.titles, "h1": parsed.h1, "canonical": parsed.canonicals, "featured_image_url": EXPECTED_MEDIA_URL, "featured_image_alt": EXPECTED_MEDIA_ALT, "atlas_metadata_marker_present": bool(inventory["atlas_ownership_markers"]), "media32_reference_present": bool(inventory["media32_references"])}
+
+
+def _public_http_observation(value: dict[str, Any] | None) -> dict[str, Any]:
+    """Expose only sanitized, credential-free response facts for deterministic binding."""
+
+    value = value or {}
+    allowed = {
+        "source",
+        "outcome",
+        "final_url",
+        "status_code",
+        "observed_at",
+        "redirect_count",
+        "content_type",
+        "cache_headers",
+        "body_sha256",
+        "verified",
+        "head_hash",
+        "visible_hash",
+        "document_title",
+        "h1",
+        "canonical",
+        "featured_image_url",
+        "featured_image_alt",
+        "atlas_metadata_marker_present",
+        "media32_reference_present",
+        "admin_page_detected",
+        "login_page_detected",
+        "authenticated_context_detected",
+        "challenge_page_detected",
+        "error_page_detected",
+        "admin_detection_signals",
+    }
+    return {key: value.get(key) for key in sorted(allowed) if key in value}
 
 
 def acquire_rendered_state(username: str, password: str, *, manual_evidence: dict[str, Any] | Any | None = None, evidence_signing_key: str = "", verified_bypass_url: str = "", bypass_independently_verified: bool = False, client: httpx.Client | None = None) -> dict[str, Any]:
@@ -781,6 +866,9 @@ def acquire_rendered_state(username: str, password: str, *, manual_evidence: dic
             candidate = _html_result(response, outcome, source)
             if source == "public":
                 public_result = candidate
+                if manual_evidence is not None:
+                    result = candidate
+                    break
             if candidate.get("verified"):
                 return candidate
             result = candidate
@@ -793,7 +881,8 @@ def acquire_rendered_state(username: str, password: str, *, manual_evidence: dic
             manual_evidence = manual_evidence.model_dump(mode="json")
         identity = manual_evidence["page_identity"]
         absence = manual_evidence["absence_findings"]
-        return {"source": "manual_browser_evidence", "outcome": "manual_browser_evidence_verified", "verified": True, "final_url": EXPECTED_URL, "head_hash": manual_evidence["rendered_head_hash"], "visible_hash": manual_evidence["visible_content_hash"], "document_title": [identity["document_title"]], "h1": [identity["h1"]], "canonical": [identity["canonical_url"]], "featured_image_url": identity["featured_image_url"], "featured_image_alt": identity["featured_image_alt"], "browser_evidence_identifier": manual_evidence["evidence_id"], "evidence_schema": manual_evidence["evidence_schema"], "evidence_schema_version": manual_evidence["evidence_schema_version"], "capture_helper_version": manual_evidence["capture_helper_version"], "evidence_timestamp": manual_evidence["captured_at"], "evidence_expires_at": manual_evidence["expires_at"], "metadata_inventory": manual_evidence["metadata_inventory"], "metadata_inventory_hash": manual_evidence["metadata_inventory_hash"], "privacy_attestations": manual_evidence["privacy_attestations"], "signature_validated": True, "atlas_metadata_marker_present": not absence["atlas_ownership_marker_absent"], "media32_reference_present": not absence["media32_absent"], "cache_headers": {}}
+        public_observation = _public_http_observation(public_result)
+        return {"source": "manual_browser_evidence", "outcome": "manual_browser_evidence_verified", "verified": True, "final_url": EXPECTED_URL, "head_hash": manual_evidence["rendered_head_hash"], "visible_hash": manual_evidence["visible_content_hash"], "document_title": [identity["document_title"]], "h1": [identity["h1"]], "canonical": [identity["canonical_url"]], "featured_image_url": identity["featured_image_url"], "featured_image_alt": identity["featured_image_alt"], "browser_evidence_identifier": manual_evidence["evidence_id"], "evidence_schema": manual_evidence["evidence_schema"], "evidence_schema_version": manual_evidence["evidence_schema_version"], "capture_helper_version": manual_evidence["capture_helper_version"], "evidence_timestamp": manual_evidence["captured_at"], "evidence_expires_at": manual_evidence["expires_at"], "metadata_inventory": manual_evidence["metadata_inventory"], "metadata_inventory_hash": manual_evidence["metadata_inventory_hash"], "privacy_attestations": manual_evidence["privacy_attestations"], "signature_validated": True, "atlas_metadata_marker_present": not absence["atlas_ownership_marker_absent"], "media32_reference_present": not absence["media32_absent"], "cache_headers": public_observation.get("cache_headers", {}), "public_http_observation": public_observation}
     if public_result and public_result.get("outcome") == "bot_protection_blocked":
         result = public_result
     return {**result, "manual_evidence_outcome": "manual_browser_evidence_required", "manual_evidence_reason": reason, "verified": False}

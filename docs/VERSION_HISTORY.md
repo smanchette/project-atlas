@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.74
+
+Fixed the cache-aware rendering preflight without changing Metadata Bridge PHP. Plugin identity matching now reuses Atlas's established fail-closed WordPress REST identifier normalizer, preserving raw plugin inventories while accepting only the locked extensionless or complete bridge entry path. Signed browser evidence remains authoritative for DOM state, while one separate credential-free public HTTP observation supplies only allowlisted, sanitized status and cache-header evidence. The observations are bound by exact URL, zero redirects, page identity, rendered hashes, and lifetime. SiteGround detection rejects empty, malformed, unrecognized, challenge, HTTP 202/403, redirected, or identity-mismatched responses; `server: nginx` is supporting evidence only. Rendering and cache apply routes remain separate, single-use-handle and phrase gated. Metadata Bridge remains version 0.57.6 with an unchanged ZIP.
+
 ## v0.59.71
 
 Added an independently version-bound Metadata Bridge 0.57.5-to-0.57.6 upgrade profile and single-purpose bootstrap 0.2.0. The guarded preflight binds the verified prior installation, activation, upgrade, bootstrap-cleanup, staging, and recovery-disable history; exact backups and runtime identity; the staged payload hash and revision 1; disabled rendering; page/media/cache snapshots; and both locked artifacts. Apply can perform only one fixed bootstrap replacement and preserves active status and all staged metadata state. Post-upgrade verification requires the exact disabled-preview HTTP 409 contract and registered cache-aware routes; preview output remains explicitly deferred to a later rendering preflight. Bootstrap 0.2.0 cleanup is separately phrase-gated and cannot match 0.1.0. Publication does not authorize a live bootstrap action, bridge upgrade, rendering change, cache purge, or page/media mutation.

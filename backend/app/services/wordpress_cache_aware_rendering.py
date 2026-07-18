@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import secrets
 from threading import Lock, Timer
 from typing import Any, Literal
@@ -37,6 +38,7 @@ from app.services.wordpress_deployment import (
     _backup_gates,
     _gate,
     _hash,
+    _normalize_plugin_identifier,
     _observe,
     _rendered_metadata_absent,
     _target,
@@ -48,7 +50,11 @@ from app.services.wordpress_deployment_release import (
 )
 from app.services.wordpress_metadata import _parse_html
 from app.services.wordpress_metadata_lifecycle import approved_payload, payload_sha256
-from app.services.wordpress_rendered_state import EXPECTED_H1, validate_manual_browser_evidence
+from app.services.wordpress_rendered_state import (
+    EXPECTED_H1,
+    sanitize_public_response_headers,
+    validate_manual_browser_evidence,
+)
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 
 
@@ -73,6 +79,16 @@ REASON_CODES = {
     "cache_purge_ready", "cache_purge_failed", "public_metadata_verified",
     "public_metadata_still_stale", "public_metadata_mismatch",
     "unapproved_schema_node_present", "duplicate_metadata_present",
+}
+CACHE_OBSERVATION_REASON_CODES = {
+    "siteground_cache_provider_verified",
+    "cache_headers_missing",
+    "cache_provider_unrecognized",
+    "cache_header_value_invalid",
+    "cache_status_hit",
+    "cache_status_miss",
+    "cache_status_bypass",
+    "stale_public_cache_confirmed",
 }
 
 
@@ -123,7 +139,12 @@ def rendering_preflight(
     artifact = _artifact_identity()
     runtime = _runtime_identity()
     rendered = observed.get("rendered", {})
-    cache_headers = _cache_headers(rendered.get("cache_headers", observed.get("cache_headers", {})))
+    public_observation = rendered.get("public_http_observation", {})
+    cache_headers = _cache_headers(public_observation.get("cache_headers", {}))
+    public_bound, public_reason = _public_observation_matches_evidence(
+        public_observation, request.manual_browser_evidence
+    )
+    cache_evidence = _siteground_cache_evidence(cache_headers)
     expected_hash = payload_sha256()
     gates = [
         *_backup_gates(proof),
@@ -143,7 +164,24 @@ def rendering_preflight(
         _gate("media", "Media 31 and 32 remain exact and media 32 absent", observed.get("media31_snapshot_hash") == request.expected_media31_snapshot_hash and observed.get("media32_snapshot_hash") == request.expected_media32_snapshot_hash and not observed.get("page_references_media32") and not rendered.get("media32_reference_present"), "Media state changed."),
         _gate("site", "Site Title and Tagline remain exact", observed.get("site") == {"name": "My WordPress", "description": ""}, "Site identity changed."),
         _gate("public_absent", "Public metadata is absent before rendering", _rendered_metadata_absent(rendered) and not rendered.get("atlas_metadata_marker_present"), "Metadata unexpectedly renders before enablement."),
-        _gate("cache_provider", "Public response identifies SiteGround proxy caching", _siteground_cache_present(cache_headers), "SiteGround proxy cache headers are unavailable."),
+        _gate(
+            "public_header_observation_bound" if public_bound else public_reason,
+            "Credential-free direct HTTP response is bound to the signed browser evidence",
+            public_bound,
+            "Direct public response status, URL, redirect, page identity, or rendered hashes differ from the signed evidence.",
+        ),
+        _gate(
+            "siteground_cache_provider_verified" if cache_evidence["verified"] else cache_evidence["reason_code"],
+            "Sanitized public response headers verify the SiteGround cache provider",
+            cache_evidence["verified"],
+            "SiteGround cache-provider headers are missing, malformed, or unrecognized.",
+        ),
+        _gate(
+            "stale_public_cache_confirmed",
+            "Direct public response is a SiteGround cache HIT with the signed pre-enable metadata absence",
+            public_bound and cache_evidence.get("status_reason_code") == "cache_status_hit" and _rendered_metadata_absent(rendered),
+            "A bound SiteGround cache HIT serving the signed pre-enable state was not proven.",
+        ),
         _gate("read_only", "Inspection used WordPress GET/read operations only", observed.get("wordpress_request_methods") == ["GET"], "Inspection was not read-only."),
     ]
     ready = all(g.passed for g in gates)
@@ -160,7 +198,9 @@ def rendering_preflight(
     binding_hash = _hash({
         "action": "cache_aware_rendering", "request": request.model_dump(mode="json", exclude={"manual_browser_evidence"}),
         "evidence": _evidence_summary(request), "plugin": _public_status(snapshot), "artifact": artifact,
-        "page_media": _page_media(observed), "cache_headers": cache_headers, "expires_at": expires_at.isoformat() if expires_at else None,
+        "page_media": _page_media(observed), "public_http_observation": public_observation,
+        "cache_headers": cache_headers, "cache_evidence": cache_evidence,
+        "expires_at": expires_at.isoformat() if expires_at else None,
     })
     handle = None
     if ready and issue_handle and expires_at:
@@ -177,7 +217,7 @@ def rendering_preflight(
         proposed_wordpress_write_scope=[f"PUT {RENDERING_PATH}", "rendering state only; payload and revision immutable"] if ready else [],
         proposed_cache_write_scope=[f"POST {CACHE_PATH}", f"one SiteGround purge for {CANONICAL_URL}"] if ready else [],
         proposed_atlas_write_scope=["create and transition one WordPressCacheAwareRenderingAudit", "finalize WordPressMetadataState only after origin and public verification"] if ready else [],
-        inspected_state={"plugin_status": _public_status(snapshot), "page_media": _page_media(observed), "cache_headers": cache_headers, "artifact": artifact},
+        inspected_state={"plugin_status": _public_status(snapshot), "page_media": _page_media(observed), "public_http_observation": public_observation, "cache_headers": cache_headers, "cache_evidence": cache_evidence, "artifact": artifact},
         gate_results=gates,
     )
 
@@ -351,7 +391,18 @@ def _read_public_page():
         with httpx.Client(timeout=20, follow_redirects=False) as client:
             response = client.get(CANONICAL_URL, headers={"User-Agent": "Project-Atlas-Cache-Verification/0.59.70"})
         parsed = _parse_html(response.text)
-        return {"status_code": response.status_code, "final_url": str(response.url), "cache_headers": _cache_headers(dict(response.headers)), "parsed": parsed, "head_hash": parsed.get("head_hash"), "visible_hash": parsed.get("visible_hash"), "media32_reference_present": "orlando-drywood-termite-tenting-hero-1.png" in response.text}
+        return {
+            "status_code": response.status_code,
+            "final_url": str(response.url),
+            "redirect_count": len(response.history),
+            "content_type": response.headers.get("content-type", ""),
+            "cache_headers": _cache_headers(response.headers.multi_items()),
+            "body_sha256": hashlib.sha256(response.content).hexdigest(),
+            "parsed": parsed,
+            "head_hash": parsed.get("head_hash"),
+            "visible_hash": parsed.get("visible_hash"),
+            "media32_reference_present": "orlando-drywood-termite-tenting-hero-1.png" in response.text,
+        }
     except httpx.HTTPError as exc:
         return {"_error": exc.__class__.__name__, "status_code": None, "final_url": None, "cache_headers": {}, "parsed": {}}
 
@@ -424,8 +475,28 @@ def _runtime_matches(value, request):
 
 
 def _plugin_exact(observed, status):
-    matches = [item for item in observed.get("plugins", []) if item.get("plugin") == PLUGIN_ENTRY]
-    return len(matches) == 1 and matches[0].get("status") in {"active", "network-active"} and matches[0].get("version") == PLUGIN_VERSION and status.get("version") == PLUGIN_VERSION and status.get("active") is True
+    """Match through the shared fail-closed normalizer without rewriting inventories."""
+
+    plugins = observed.get("plugins", [])
+    if not isinstance(plugins, list) or any(not isinstance(item, dict) for item in plugins):
+        return False
+    normalized = [_normalize_plugin_identifier(item.get("plugin")) for item in plugins]
+    if any(not identity.valid for identity in normalized):
+        return False
+    matches = [
+        item
+        for item, identity in zip(plugins, normalized, strict=True)
+        if identity.authorized_entry_path == PLUGIN_ENTRY
+    ]
+    return (
+        len(matches) == 1
+        and _normalize_plugin_identifier(matches[0].get("plugin")).plugin_slug == PLUGIN_SLUG
+        and matches[0].get("status") in {"active", "network-active"}
+        and matches[0].get("version") == PLUGIN_VERSION
+        and status.get("plugin") == PLUGIN_SLUG
+        and status.get("version") == PLUGIN_VERSION
+        and status.get("active") is True
+    )
 
 
 def _audit_three_preserved(session):
@@ -433,9 +504,94 @@ def _audit_three_preserved(session):
     return bool(audit and audit.action_type == "enable_metadata_rendering" and audit.status == "verification_failed")
 
 
-def _siteground_cache_present(headers): return str(headers.get("x-cache-enabled", "")).lower() == "true" or "x-proxy-cache" in headers
-def _siteground_cache_hit(headers): return _siteground_cache_present(headers) and str(headers.get("x-proxy-cache", headers.get("x-cache", ""))).upper() == "HIT"
-def _cache_headers(headers): return {str(k).lower(): str(v) for k, v in headers.items() if str(k).lower() in {"age", "cache-control", "x-cache", "x-cache-enabled", "x-proxy-cache", "x-sg-cache", "etag", "last-modified"}}
+def _siteground_cache_evidence(headers):
+    sanitized = _cache_headers(headers)
+    if not sanitized:
+        return {"verified": False, "reason_code": "cache_headers_missing", "status_reason_code": None, "headers": {}}
+
+    enabled = sanitized.get("x-cache-enabled", "").lower()
+    if enabled and enabled not in {"true", "false"}:
+        return {"verified": False, "reason_code": "cache_header_value_invalid", "status_reason_code": None, "headers": sanitized}
+
+    raw_status = sanitized.get("x-proxy-cache", sanitized.get("x-cache", ""))
+    status = raw_status.strip().upper()
+    status_codes = {
+        "HIT": "cache_status_hit",
+        "MISS": "cache_status_miss",
+        "BYPASS": "cache_status_bypass",
+    }
+    if status and status not in status_codes:
+        return {"verified": False, "reason_code": "cache_header_value_invalid", "status_reason_code": None, "headers": sanitized}
+
+    proxy_info = sanitized.get("x-proxy-cache-info", "")
+    proxy_info_valid = bool(re.search(r"(?:^|[\s,;])DT:\d+(?:$|[\s,;])", proxy_info, re.I)) if proxy_info else False
+    if proxy_info and not proxy_info_valid:
+        return {"verified": False, "reason_code": "cache_header_value_invalid", "status_reason_code": None, "headers": sanitized}
+
+    verified = enabled == "true" or status in status_codes or proxy_info_valid
+    return {
+        "verified": verified,
+        "reason_code": "siteground_cache_provider_verified" if verified else "cache_provider_unrecognized",
+        "status_reason_code": status_codes.get(status),
+        "supporting_nginx": "nginx" in sanitized.get("server", "").lower(),
+        "headers": sanitized,
+    }
+
+
+def _siteground_cache_present(headers): return _siteground_cache_evidence(headers)["verified"]
+def _siteground_cache_hit(headers): return _siteground_cache_evidence(headers).get("status_reason_code") == "cache_status_hit"
+def _cache_headers(headers): return sanitize_public_response_headers(headers)
+
+
+def _public_observation_matches_evidence(observation, evidence):
+    if not isinstance(observation, dict) or not observation:
+        return False, "cache_headers_missing"
+    status = observation.get("status_code")
+    if status == 202:
+        return False, "public_http_202_challenge"
+    if status == 403:
+        return False, "public_http_403_error"
+    if status != 200:
+        return False, "public_http_status_invalid"
+    if observation.get("final_url") != CANONICAL_URL:
+        return False, "public_final_url_mismatch"
+    if observation.get("redirect_count") != 0:
+        return False, "public_redirect_mismatch"
+    try:
+        observed_at = _timestamp(observation.get("observed_at"))
+        captured_at = _timestamp(evidence.captured_at)
+        expires_at = _timestamp(evidence.expires_at)
+    except (TypeError, ValueError, HTTPException):
+        return False, "public_observation_timestamp_invalid"
+    if not captured_at <= observed_at <= expires_at:
+        return False, "public_observation_timestamp_mismatch"
+    if observation.get("source") != "public" or observation.get("verified") is not True or observation.get("outcome") != "public_html_verified":
+        return False, "public_body_identity_mismatch"
+    if any(
+        observation.get(field)
+        for field in (
+            "admin_page_detected",
+            "login_page_detected",
+            "authenticated_context_detected",
+            "challenge_page_detected",
+            "error_page_detected",
+        )
+    ):
+        return False, "public_body_identity_mismatch"
+    if observation.get("head_hash") != evidence.rendered_head_hash or observation.get("visible_hash") != evidence.visible_content_hash:
+        return False, "public_body_identity_mismatch"
+    if (
+        observation.get("document_title") != [evidence.page_identity["document_title"]]
+        or observation.get("h1") != [evidence.page_identity["h1"]]
+        or observation.get("canonical") != [evidence.page_identity["canonical_url"]]
+        or observation.get("featured_image_url") != evidence.page_identity["featured_image_url"]
+        or observation.get("featured_image_alt") != evidence.page_identity["featured_image_alt"]
+    ):
+        return False, "public_body_identity_mismatch"
+    headers = observation.get("cache_headers", {})
+    if headers != _cache_headers(headers):
+        return False, "sensitive_headers_retained"
+    return True, "public_header_observation_bound"
 def _cache_refreshed(before, after):
     state = str(after.get("x-proxy-cache", after.get("x-cache", ""))).upper()
     if state in {"MISS", "BYPASS", "EXPIRED", "REVALIDATED"}: return True

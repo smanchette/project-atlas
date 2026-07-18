@@ -35,8 +35,8 @@ from test_wordpress_plugin_upgrade import (
 )
 
 
-VERSION = "v0.59.71"
-SOURCE_COMPATIBILITY = "project-atlas-release-identity-v0.59.71"
+VERSION = "v0.59.74"
+SOURCE_COMPATIBILITY = "project-atlas-release-identity-v0.59.74"
 PAYLOAD = lifecycle.approved_payload().model_dump(mode="json")
 PAYLOAD_HASH = lifecycle.payload_sha256(PAYLOAD)
 

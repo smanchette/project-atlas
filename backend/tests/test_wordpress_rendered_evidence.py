@@ -8,6 +8,7 @@ from pathlib import Path
 import runpy
 import sys
 
+import httpx
 import pytest
 
 from app.schemas.wordpress import WordPressManualBrowserEvidence
@@ -25,9 +26,11 @@ from app.services.wordpress_rendered_state import (
     EXPECTED_URL,
     _canonical_json,
     _evidence_payload,
+    acquire_rendered_state,
     build_manual_browser_evidence,
     canonical_evidence_timestamp,
     classify_public_page_context,
+    sanitize_public_response_headers,
     validate_manual_browser_evidence,
 )
 
@@ -69,6 +72,69 @@ def resign(value: dict) -> dict:
     encoded = _canonical_json(_evidence_payload(changed))
     changed["helper_signature"] = hmac.new(KEY.encode(), encoded.encode(), hashlib.sha256).hexdigest()
     return changed
+
+
+class StaticPublicClient:
+    def __init__(self, response: httpx.Response):
+        self.response = response
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.response
+
+
+def test_signed_browser_fallback_preserves_separate_sanitized_public_http_observation():
+    signed = evidence()
+    response = httpx.Response(
+        200,
+        request=httpx.Request("GET", EXPECTED_URL),
+        headers={
+            "Content-Type": "text/html; charset=UTF-8",
+            "X-Cache-Enabled": "True",
+            "X-Proxy-Cache": "HIT",
+            "X-Proxy-Cache-Info": "DT:1",
+            "Server": "nginx",
+            "Set-Cookie": "wordpress_logged_in=secret",
+        },
+        text=HTML,
+    )
+    client = StaticPublicClient(response)
+    result = acquire_rendered_state(
+        "unused",
+        "unused",
+        manual_evidence=signed,
+        evidence_signing_key=KEY,
+        client=client,
+    )
+    assert len(client.calls) == 1
+    assert result["source"] == "manual_browser_evidence"
+    assert result["head_hash"] == signed["rendered_head_hash"]
+    observation = result["public_http_observation"]
+    assert observation["source"] == "public"
+    assert observation["status_code"] == 200
+    assert observation["redirect_count"] == 0
+    assert observation["head_hash"] == signed["rendered_head_hash"]
+    assert observation["visible_hash"] == signed["visible_content_hash"]
+    assert observation["cache_headers"] == {
+        "server": "nginx",
+        "x-cache-enabled": "True",
+        "x-proxy-cache": "HIT",
+        "x-proxy-cache-info": "DT:1",
+    }
+    encoded = json.dumps(result).lower()
+    assert "set-cookie" not in encoded
+    assert "wordpress_logged_in" not in encoded
+
+
+def test_public_header_sanitizer_preserves_repeats_and_rejects_secrets():
+    assert sanitize_public_response_headers([
+        ("Via", "proxy-a"),
+        ("via", "proxy-b"),
+        ("Authorization", "Basic secret"),
+        ("Cookie", "secret"),
+        ("Set-Cookie", "secret"),
+    ]) == {"via": "proxy-a, proxy-b"}
 
 
 def test_signed_timestamps_are_canonical_utc_with_fixed_microseconds():
