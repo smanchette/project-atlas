@@ -78,6 +78,13 @@ from app.schemas.wordpress import (
     WordPressMetadataLifecyclePreflight,
     WordPressMetadataLifecyclePreflightRequest,
     WordPressMetadataLifecycleResult,
+    WordPressCacheAwareRenderingApplyRequest,
+    WordPressCacheAwareRenderingPreflight,
+    WordPressCacheAwareRenderingPreflightRequest,
+    WordPressCacheAwareRenderingResult,
+    WordPressCachePurgeApplyRequest,
+    WordPressCachePurgePreflight,
+    WordPressCachePurgePreflightRequest,
     WordPressHeadingCorrectionApplyRequest,
     WordPressHeadingCorrectionApplyResult,
     WordPressHeadingCorrectionDryRun,
@@ -166,6 +173,12 @@ from app.services.wordpress_metadata_lifecycle import (
     rollback_preflight as lifecycle_rollback_preflight,
     staging_apply,
     staging_preflight,
+)
+from app.services.wordpress_cache_aware_rendering import (
+    cache_apply as siteground_cache_apply,
+    cache_preflight as siteground_cache_preflight,
+    rendering_apply as cache_aware_rendering_apply,
+    rendering_preflight as cache_aware_rendering_preflight,
 )
 
 router = APIRouter(prefix="/wordpress", tags=["wordpress sandbox"])
@@ -373,6 +386,42 @@ def metadata_rendering_preflight(page_id: int, payload: WordPressMetadataLifecyc
 @router.post("/metadata/rendering/apply/{page_id}", response_model=WordPressMetadataLifecycleResult)
 def metadata_rendering_apply(page_id: int, payload: WordPressMetadataLifecycleApplyRequest, session: Session = Depends(get_session)) -> WordPressMetadataLifecycleResult:
     return rendering_apply(session, page_id, payload)
+
+
+@router.post("/metadata/rendering/cache-aware/preflight/{page_id}", response_model=WordPressCacheAwareRenderingPreflight)
+def metadata_cache_aware_rendering_preflight(
+    page_id: int,
+    payload: WordPressCacheAwareRenderingPreflightRequest,
+    session: Session = Depends(get_session),
+) -> WordPressCacheAwareRenderingPreflight:
+    return cache_aware_rendering_preflight(session, page_id, payload)
+
+
+@router.post("/metadata/rendering/cache-aware/apply/{page_id}", response_model=WordPressCacheAwareRenderingResult)
+def metadata_cache_aware_rendering_apply(
+    page_id: int,
+    payload: WordPressCacheAwareRenderingApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressCacheAwareRenderingResult:
+    return cache_aware_rendering_apply(session, page_id, payload)
+
+
+@router.post("/cache/siteground/preflight/{page_id}", response_model=WordPressCachePurgePreflight)
+def metadata_siteground_cache_preflight(
+    page_id: int,
+    payload: WordPressCachePurgePreflightRequest,
+    session: Session = Depends(get_session),
+) -> WordPressCachePurgePreflight:
+    return siteground_cache_preflight(session, page_id, payload)
+
+
+@router.post("/cache/siteground/apply/{page_id}", response_model=WordPressCacheAwareRenderingResult)
+def metadata_siteground_cache_apply(
+    page_id: int,
+    payload: WordPressCachePurgeApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressCacheAwareRenderingResult:
+    return siteground_cache_apply(session, page_id, payload)
 
 
 @router.post("/metadata/rendering/disable/preflight/{page_id}", response_model=WordPressMetadataLifecyclePreflight)

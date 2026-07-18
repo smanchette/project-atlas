@@ -28,6 +28,7 @@ from app.models import (
     WordPressPluginUpgradeAudit,
     WordPressBootstrapCleanupAudit,
     WordPressMetadataLifecycleAudit,
+    WordPressCacheAwareRenderingAudit,
     WordPressMediaSyncAudit,
     WordPressMetadataState,
     WordPressMetadataSyncAudit,
@@ -36,7 +37,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.36"
+BACKUP_VERSION = "0.37"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -58,6 +59,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.34",
     "0.35",
     "0.36",
+    "0.37",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -87,6 +89,7 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "wordpress_plugin_upgrade_audits": WordPressPluginUpgradeAudit,
     "wordpress_bootstrap_cleanup_audits": WordPressBootstrapCleanupAudit,
     "wordpress_metadata_lifecycle_audits": WordPressMetadataLifecycleAudit,
+    "wordpress_cache_aware_rendering_audits": WordPressCacheAwareRenderingAudit,
     "wordpress_publish_audits": WordPressPublishAudit,
     "wordpress_media_sync_audits": WordPressMediaSyncAudit,
     "wordpress_metadata_states": WordPressMetadataState,

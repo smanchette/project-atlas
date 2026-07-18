@@ -19,6 +19,7 @@ from app.models import (
     WordPressActivationAudit,
     WordPressDeploymentAudit,
     WordPressMetadataLifecycleAudit,
+    WordPressCacheAwareRenderingAudit,
     WordPressMetadataState,
     WordPressMetadataSyncAudit,
 )
@@ -42,7 +43,7 @@ from app.services.wordpress_deployment import (
     _observe,
     _rendered_metadata_absent,
     _target,
-    _verify_artifact,
+    _verify_artifact as _verify_release_artifact,
 )
 from app.services.wordpress_deployment_release import SOURCE_EXPECTATIONS
 from app.services.wordpress_deployment_release import resolve_program_root
@@ -57,7 +58,7 @@ Action = Literal[
     "rollback_metadata_payload",
 ]
 
-PLUGIN_VERSION = "0.57.5"
+PLUGIN_VERSION = "0.57.6"
 PLUGIN_SLUG = "project-atlas-metadata-bridge"
 PLUGIN_ENTRY = "project-atlas-metadata-bridge/project-atlas-metadata-bridge.php"
 ATLAS_METADATA_SAFETY_OPTION_NAME = "_project_atlas_metadata_safety_v1"
@@ -84,7 +85,7 @@ ORDINARY_DISABLE_MODE = "ordinary_after_verified_enable"
 RECOVERY_DISABLE_MODE = "recovery_after_failed_enable_verification"
 
 # This is the exact field contract enforced by
-# atlas_metadata_snapshot_hash() in Metadata Bridge 0.57.5.  Repository,
+# atlas_metadata_snapshot_hash() in Metadata Bridge 0.57.6.  Repository,
 # plugin identity, page, media, site, and cache bindings remain in the signed
 # Atlas lifecycle binding; they are intentionally not added to this plugin-owned
 # optimistic hash because the installed plugin does not hash those fields.
@@ -158,6 +159,27 @@ def payload_sha256(payload: WordPressMetadataLifecyclePayload | dict[str, Any] |
     return hashlib.sha256(json.dumps(value or approved_payload().model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
 
 
+def _verify_artifact():
+    """Use release identity gates plus the separately locked 0.57.6 lifecycle artifact."""
+    artifact, gates = _verify_release_artifact()
+    from app.services.wordpress_cache_aware_rendering import _artifact_identity
+
+    lifecycle_artifact = _artifact_identity()
+    artifact.update(
+        plugin_version=PLUGIN_VERSION,
+        zip_file_name=lifecycle_artifact.get("zip_name"),
+        zip_sha256=lifecycle_artifact.get("zip_sha256"),
+    )
+    retained = [gate for gate in gates if gate.code in {"program_root", "release_identity"}]
+    retained.extend(
+        [
+            _gate("artifact_hash", "Lifecycle ZIP SHA-256 is locked", lifecycle_artifact.get("valid") is True, lifecycle_artifact.get("error") or "Lifecycle ZIP checksum mismatch."),
+            _gate("artifact_portable", "Lifecycle ZIP is portable and byte-equal to source", lifecycle_artifact.get("byte_equal") is True and lifecycle_artifact.get("portable") is True, "Lifecycle ZIP structure/source mismatch."),
+        ]
+    )
+    return artifact, retained
+
+
 def lifecycle_preflight(
     session: Session,
     page_id: int,
@@ -190,10 +212,11 @@ def lifecycle_preflight(
     installation = session.get(WordPressDeploymentAudit, request.installation_audit_id)
     activation = session.get(WordPressActivationAudit, request.activation_audit_id)
     lifecycle_audits = list(session.exec(select(WordPressMetadataLifecycleAudit).where(WordPressMetadataLifecycleAudit.generated_page_id == 41).order_by(WordPressMetadataLifecycleAudit.id)))
+    cache_aware_audits = list(session.exec(select(WordPressCacheAwareRenderingAudit).where(WordPressCacheAwareRenderingAudit.generated_page_id == 41).order_by(WordPressCacheAwareRenderingAudit.id)))
     state = session.exec(select(WordPressMetadataState).where(WordPressMetadataState.generated_page_id == 41)).first()
     legacy_sync_audits = list(session.exec(select(WordPressMetadataSyncAudit).where(WordPressMetadataSyncAudit.generated_page_id == 41)))
     disable_eligibility = (
-        _disable_eligibility(snapshot, state, lifecycle_audits, expected_hash, observed, legacy_sync_audits)
+        _disable_eligibility(snapshot, state, lifecycle_audits, expected_hash, observed, legacy_sync_audits, cache_aware_audits)
         if action == "disable_metadata_rendering"
         else None
     )
@@ -206,7 +229,7 @@ def lifecycle_preflight(
         _gate("post_backup", "No relevant WordPress change followed backup creation", request.no_relevant_wordpress_change_after_backup, "A fresh SiteGround backup is required."),
         _gate("installation_audit", "Installation audit 1 remains verified", bool(installation and installation.id == 1 and installation.status == "verified"), "Verified installation audit 1 required."),
         _gate("activation_audit", "Activation audit 1 remains verified", bool(activation and activation.id == 1 and activation.status == "verified"), "Verified activation audit 1 required."),
-        _gate("plugin", "Metadata Bridge 0.57.5 is installed exactly once and active", _plugin_exact(observed), "The separated-lifecycle bridge must be installed once and active."),
+        _gate("plugin", "Metadata Bridge 0.57.6 is installed exactly once and active", _plugin_exact(observed), "The cache-aware lifecycle bridge must be installed once and active."),
         _gate("plugin_identity", "Expected plugin path, version, ZIP, and inventories are exact", request.expected_plugin_slug == PLUGIN_SLUG and request.expected_plugin_path == PLUGIN_ENTRY and request.expected_plugin_version == PLUGIN_VERSION and request.expected_zip_sha256 == SOURCE_EXPECTATIONS.plugin_zip_sha256 and observed.get("plugin_inventory_hash") == request.expected_plugin_inventory_hash and observed.get("active_plugin_inventory_hash") == request.expected_active_plugin_inventory_hash, "Plugin artifact or inventory identity drifted."),
         _gate("plugin_status", "Plugin status endpoint is available and exact", plugin_status.get("version") == PLUGIN_VERSION and plugin_status.get("active") is True and not plugin_status.get("_error"), "Plugin status is unavailable or mismatched."),
         _gate("optimistic_snapshot", "Plugin-owned optimistic snapshot is complete and canonical", snapshot_error is None, snapshot_error or "Optimistic snapshot is unavailable."),
@@ -229,6 +252,7 @@ def lifecycle_preflight(
             observed,
             legacy_sync_audits,
             disable_eligibility=disable_eligibility,
+            cache_aware_audits=cache_aware_audits,
         ),
     ]
     ready = all(g.passed for g in gates)
@@ -239,7 +263,7 @@ def lifecycle_preflight(
     if ready and (not expires_at or expires_at <= datetime.now(UTC)):
         ready = False
         gates.append(_gate("lifetime", "Handle has a positive bounded lifetime", False, "Evidence or backup expires before authorization."))
-    binding = _binding(action, request, observed, snapshot, lifecycle_audits, expected_hash, expires_at)
+    binding = _binding(action, request, observed, snapshot, lifecycle_audits, expected_hash, expires_at, cache_aware_audits)
     binding_hash = _hash(binding)
     handle = fingerprint = None
     if ready and issue_handle and expires_at:
@@ -346,6 +370,7 @@ def _operation_gates(
     sync_audits=(),
     *,
     disable_eligibility=None,
+    cache_aware_audits=(),
 ):
     revision, enabled, payload, live_hash = str(snapshot.get("revision", "0")), bool(snapshot.get("rendering_enabled")), snapshot.get("payload"), snapshot.get("payload_hash") or ""
     verified = {audit.action_type for audit in audits if audit.status == "verified"}
@@ -373,7 +398,7 @@ def _operation_gates(
         return common + [_gate("staged", "Verified staging exists with exact payload at revision 1", "stage_metadata_payload" in verified and payload == approved_payload().model_dump(mode="json") and live_hash == expected_hash and revision == "1" and not enabled, "A verified exact staged payload is required."), _gate("metadata_absent", "Fresh evidence proves metadata remains absent", metadata_absent, "Metadata renders before enablement.")]
     if action == "disable_metadata_rendering":
         eligibility = disable_eligibility or _disable_eligibility(
-            snapshot, state, audits, expected_hash, observed, sync_audits
+            snapshot, state, audits, expected_hash, observed, sync_audits, cache_aware_audits
         )
         return common + [
             _gate(
@@ -386,7 +411,7 @@ def _operation_gates(
     return common + [_gate("disabled", "Rendering is disabled before rollback", not enabled, "Disable rendering before payload rollback."), _gate("staged_payload", "Exact staged payload and revision 1 remain", payload == approved_payload().model_dump(mode="json") and live_hash == expected_hash and revision == "1", "Staged payload drifted."), _gate("disable_history", "A verified disable audit exists after enablement", "disable_metadata_rendering" in verified, "Verified rendering disablement required.")]
 
 
-def _disable_eligibility(snapshot, state, audits, expected_hash, observed, sync_audits=()):
+def _disable_eligibility(snapshot, state, audits, expected_hash, observed, sync_audits=(), cache_aware_audits=()):
     """Classify ordinary or recovery disablement without relaxing any mutation binding."""
     payload = approved_payload().model_dump(mode="json")
     revision = str(snapshot.get("revision", "0"))
@@ -408,6 +433,44 @@ def _disable_eligibility(snapshot, state, audits, expected_hash, observed, sync_
     ]
     if not staging:
         return _disable_result(False, "conflicting_rendering_history", "A verified staging audit is required.")
+
+    cache_candidate = cache_aware_audits[-1] if cache_aware_audits else None
+    if cache_candidate and getattr(cache_candidate, "status", None) in {"verification_failed", "failed"}:
+        final = getattr(cache_candidate, "final_state", None) or {}
+        transitions = getattr(cache_candidate, "transition_history", None) or []
+        eligible_transition = transitions in (
+            ["pending_rendering", "verification_failed"],
+            ["pending_rendering", "failed"],
+            ["pending_rendering", "origin_verified", "verification_failed"],
+            ["pending_rendering", "origin_verified", "failed"],
+            ["pending_rendering", "origin_verified", "pending_cache_purge", "verification_failed"],
+            ["pending_rendering", "origin_verified", "pending_cache_purge", "failed"],
+        )
+        fixed_scope = getattr(cache_candidate, "wordpress_write_scope", None) == [f"PUT {PLUGIN_PATHS['enable_metadata_rendering']}"]
+        invariant_snapshots = getattr(cache_candidate, "page_media_snapshots", None) or {}
+        page_media_unchanged = all(
+            invariant_snapshots.get(key) == observed.get(key)
+            for key in ("page_snapshot_hash", "page_body_hash", "media31_snapshot_hash", "media32_snapshot_hash")
+        )
+        if (
+            eligible_transition
+            and getattr(cache_candidate, "wordpress_write_count", None) == 1
+            and fixed_scope
+            and getattr(cache_candidate, "recovery_recommendation", None) == "disable_rendering"
+            and final.get("rendering_enabled") is True
+            and final.get("payload_hash") == expected_hash
+            and str(final.get("revision")) == "1"
+            and page_media_unchanged
+            and _metadata_state_matches(state, "staged", payload, expected_hash, "1")
+        ):
+            return _disable_result(
+                True,
+                "cache_aware_recovery_disable_ready",
+                "The failed cache-aware verification proves one accepted enablement and is eligible for guarded disablement.",
+                RECOVERY_DISABLE_MODE,
+                getattr(cache_candidate, "id", None),
+            )
+        return _disable_result(False, "cache_aware_enable_outcome_uncertain", "The cache-aware failure does not conclusively prove the fixed enablement and unchanged protected state.")
 
     relevant = [
         audit
@@ -636,7 +699,7 @@ def _post_gates(action, before, after, original, observed, expected_hash):
     payload_hash, revision, enabled, payload = expected
     gates = [
         _gate("plugin_state", "Plugin lifecycle state matches exactly", after.get("payload_hash", "") == payload_hash and str(after.get("revision", "0")) == revision and bool(after.get("rendering_enabled")) is enabled and after.get("payload") == payload, "Plugin state differs after the one write."),
-        _gate("plugin_active", "Plugin remains active at version 0.57.5", after.get("active") is True and after.get("version") == PLUGIN_VERSION, "Plugin activation or identity changed."),
+        _gate("plugin_active", "Plugin remains active at version 0.57.6", after.get("active") is True and after.get("version") == PLUGIN_VERSION, "Plugin activation or identity changed."),
         _gate("page", "Page and body remain unchanged", observed.get("page_snapshot_hash") == original.get("page_snapshot_hash") and observed.get("page_body_hash") == original.get("page_body_hash"), "Page changed."),
         _gate("media", "Media 31 and 32 remain unchanged", observed.get("media31_snapshot_hash") == original.get("media31_snapshot_hash") and observed.get("media32_snapshot_hash") == original.get("media32_snapshot_hash"), "Media changed."),
         _gate("site", "Site Title and Tagline remain unchanged", observed.get("site") == original.get("site"), "Site identity changed."),
@@ -723,18 +786,18 @@ def _finish(session, audit, status, gates, snapshot):
 def _plugin_exact(observed):
     matches=_matching_reconciliation_plugins(observed.get("plugins",[]))
     return len(matches)==1 and matches[0].get("status") in {"active","network-active"} and matches[0].get("version")==PLUGIN_VERSION
-def _binding(action,request,observed,snapshot,audits,payload_hash,expires): return {"action":action,"request":request.model_dump(mode="json",exclude={"manual_browser_evidence"}),"evidence":{"id":request.manual_browser_evidence.evidence_id,"head":request.manual_browser_evidence.rendered_head_hash,"visible":request.manual_browser_evidence.visible_content_hash,"expires":request.manual_browser_evidence.expires_at},"state":{"plugin":_public_status(snapshot),"page":observed.get("page_snapshot_hash"),"body":observed.get("page_body_hash"),"media31":observed.get("media31_snapshot_hash"),"media32":observed.get("media32_snapshot_hash"),"cache":_hash(observed.get("cache_headers",{})),"audit_history":[[a.id,a.action_type,a.status] for a in audits]},"payload_hash":payload_hash,"expires_at":expires.isoformat() if expires else None}
+def _binding(action,request,observed,snapshot,audits,payload_hash,expires,cache_aware_audits=()): return {"action":action,"request":request.model_dump(mode="json",exclude={"manual_browser_evidence"}),"evidence":{"id":request.manual_browser_evidence.evidence_id,"head":request.manual_browser_evidence.rendered_head_hash,"visible":request.manual_browser_evidence.visible_content_hash,"expires":request.manual_browser_evidence.expires_at},"state":{"plugin":_public_status(snapshot),"page":observed.get("page_snapshot_hash"),"body":observed.get("page_body_hash"),"media31":observed.get("media31_snapshot_hash"),"media32":observed.get("media32_snapshot_hash"),"cache":_hash(observed.get("cache_headers",{})),"audit_history":[[a.id,a.action_type,a.status] for a in audits],"cache_aware_history":[[a.id,a.status,a.wordpress_write_count,a.cache_write_count,a.recovery_recommendation] for a in cache_aware_audits]},"payload_hash":payload_hash,"expires_at":expires.isoformat() if expires else None}
 def _page_media(value): return {key:value.get(key) for key in ("page_snapshot_hash","page_body_hash","media31_snapshot_hash","media32_snapshot_hash","cache_headers")}
 def _public_status(value): return {key:value.get(key) for key in ("plugin","version","checksum","active","rendering_enabled","enabled_metadata_state","activation_generation","plugin_checksum","payload_hash","revision","payload","_error") if key in value}
 
 
 def rendering_source_diagnostics() -> dict[str, Any]:
     """Inspect the locked plugin source without WordPress or Atlas writes."""
-    source_path = resolve_program_root() / "wordpress/project-atlas-metadata-bridge/project-atlas-metadata-bridge.php"
+    source_path = resolve_program_root() / "wordpress/project-atlas-metadata-bridge-0.57.6/project-atlas-metadata-bridge.php"
     source = source_path.read_text(encoding="utf-8")
     hook_registered = "add_action('wp_head'" in source
     hook_priority_exact = "}, 20);" in source[source.index("add_action('wp_head'") :]
-    page_target_exact = "if (!is_page(8)) { return; }" in source
+    page_target_exact = "if (!is_page(8)) { return ''; }" in source or "if (!is_page(8)) { return; }" in source
     payload_lookup_exact = "get_post_meta(ATLAS_METADATA_POST_ID, '_atlas_metadata_payload', true)" in source
     enabled_lookup_exact = "get_post_meta(ATLAS_METADATA_POST_ID, '_atlas_metadata_enabled', true) === '1'" in source
     safety_lookup_exact = "get_option(ATLAS_METADATA_SAFETY_OPTION, [])" in source
@@ -772,14 +835,14 @@ def rendering_source_diagnostics() -> dict[str, Any]:
         "normal_public_request_reachable": normal_public_reachable,
         "root_cause_classification": "other_exactly_described_condition",
         "finding": (
-            "The local 0.57.5 source registers the expected public wp_head hook and exact page/state lookups; "
+            "The local 0.57.6 source registers the expected public wp_head hook and exact page/state lookups; "
             "source inspection alone cannot distinguish cache or optimizer delivery from a runtime hook failure."
         ),
     }
 
 
 def _canonical_optimistic_snapshot(value: dict[str, Any]) -> dict[str, Any]:
-    """Return the exact normalized object hashed by Metadata Bridge 0.57.5."""
+    """Return the exact normalized object hashed by Metadata Bridge 0.57.6."""
     if "plugin_checksum" not in value or not value.get("plugin_checksum"):
         raise ValueError("plugin_checksum_missing")
     checksum = value["plugin_checksum"]

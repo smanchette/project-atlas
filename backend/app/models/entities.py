@@ -652,6 +652,59 @@ class WordPressMetadataLifecycleAudit(SQLModel, table=True):
     recovery_recommendation: str | None = Field(default=None, max_length=64)
 
 
+class WordPressCacheAwareRenderingAudit(SQLModel, table=True):
+    """Durable orchestration record for rendering, origin proof, and one URL purge."""
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending_rendering','origin_verified','pending_cache_purge','verified','verification_failed','failed')",
+            name="ck_wordpresscacheawarerenderingaudit_status",
+        ),
+        UniqueConstraint("rendering_handle_fingerprint", name="uq_cacheaware_rendering_handle"),
+        UniqueConstraint("cache_handle_fingerprint", name="uq_cacheaware_cache_handle"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
+    wordpress_post_id: int = Field(index=True)
+    staging_audit_id: int = Field(foreign_key="wordpressmetadatalifecycleaudit.id", index=True)
+    recovery_disable_audit_id: int = Field(foreign_key="wordpressmetadatalifecycleaudit.id", index=True)
+    status: str = Field(default="pending_rendering", max_length=40, index=True)
+    operator: str = Field(max_length=200)
+    rendering_handle_fingerprint: str = Field(max_length=64, index=True)
+    cache_handle_fingerprint: str | None = Field(default=None, max_length=64, index=True)
+    rendering_binding_hash: str = Field(max_length=64, index=True)
+    cache_binding_hash: str | None = Field(default=None, max_length=64, index=True)
+    rendering_phrase_hash: str = Field(max_length=64)
+    cache_phrase_hash: str | None = Field(default=None, max_length=64)
+    release_identity: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    backup_evidence: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    payload_hash: str = Field(max_length=64, index=True)
+    revision: str = Field(max_length=40)
+    cache_provider: str | None = Field(default=None, max_length=80)
+    cache_scope: str | None = Field(default=None, max_length=80)
+    cache_target: str | None = Field(default=None, max_length=500)
+    pre_purge_headers: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    post_purge_headers: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    origin_verification: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    public_verification: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    public_evidence: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    page_media_snapshots: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    gate_results: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    wordpress_write_count: int = Field(default=0)
+    cache_write_count: int = Field(default=0)
+    atlas_write_count: int = Field(default=0)
+    wordpress_write_scope: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    cache_write_scope: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    atlas_write_scope: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    transition_history: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    final_state: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    recovery_recommendation: str | None = Field(default=None, max_length=64)
+    attempted_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    completed_at: datetime | None = None
+    error_code: str | None = Field(default=None, max_length=80)
+    error_message: str | None = Field(default=None, max_length=2000)
+
+
 class PageImageAssignment(TimestampMixin, table=True):
     __table_args__ = (
         UniqueConstraint(

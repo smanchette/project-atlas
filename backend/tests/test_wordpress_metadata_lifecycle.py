@@ -45,7 +45,7 @@ ZIP_CHECKSUM = "09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7
 def optimistic_snapshot(**changes):
     value = {
         "plugin": "project-atlas-metadata-bridge",
-        "version": "0.57.5",
+        "version": "0.57.6",
         "checksum": EXECUTABLE_CHECKSUM,
         "active": True,
         "rendering_enabled": False,

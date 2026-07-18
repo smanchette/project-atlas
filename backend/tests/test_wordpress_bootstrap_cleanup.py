@@ -450,6 +450,6 @@ def test_fixed_wordpress_mutations_do_not_accept_caller_target_or_body():
 
 
 def test_cleanup_audit_is_in_data_backup_v036_contract():
-    assert backup_service.BACKUP_VERSION == "0.36"
+    assert backup_service.BACKUP_VERSION == "0.37"
     assert backup_service.BACKUP_MODELS["wordpress_bootstrap_cleanup_audits"] is WordPressBootstrapCleanupAudit
     assert "0.35" in backup_service.SUPPORTED_BACKUP_VERSIONS

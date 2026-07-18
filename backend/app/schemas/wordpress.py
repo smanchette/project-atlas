@@ -1567,3 +1567,99 @@ class WordPressMetadataLifecycleResult(SQLModel):
     page_write_count: Literal[0] = 0
     media_write_count: Literal[0] = 0
     further_action_required: bool
+
+
+class WordPressCacheAwareRenderingPreflightRequest(WordPressMetadataLifecyclePreflightRequest):
+    """Locked proof for the disabled staged state and cache-aware orchestration."""
+
+    model_config = ConfigDict(extra="forbid")
+    staging_audit_id: int = Field(gt=0)
+    recovery_disable_audit_id: int = Field(gt=0)
+
+
+class WordPressCacheAwareRenderingPreflight(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    status: Literal["cache_aware_rendering_preflight_blocked", "cache_aware_rendering_preflight_ready"]
+    preflight_ready: bool
+    rendering_handle: str | None = None
+    handle_fingerprint: str | None = None
+    binding_hash: str | None = None
+    expires_at: datetime | None = None
+    rendering_confirmation_phrase: str | None = None
+    cache_confirmation_phrase: str | None = None
+    proposed_wordpress_write_scope: list[str]
+    proposed_cache_write_scope: list[str]
+    proposed_atlas_write_scope: list[str]
+    inspected_state: dict[str, Any]
+    gate_results: list[WordPressDraftGateResult]
+    inspection_only: Literal[True] = True
+    token_issued: Literal[False] = False
+    audit_created: Literal[False] = False
+    wordpress_write_count: Literal[0] = 0
+    cache_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+
+
+class WordPressCacheAwareRenderingApplyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+    rendering_handle: str = Field(min_length=32, max_length=200)
+    confirmation_phrase: str = Field(min_length=1, max_length=100)
+
+
+class WordPressCachePurgePreflightRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+    cache_aware_audit_id: int = Field(gt=0)
+
+
+class WordPressCachePurgePreflight(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    status: Literal["cache_purge_preflight_blocked", "cache_purge_preflight_ready"]
+    preflight_ready: bool
+    cache_handle: str | None = None
+    handle_fingerprint: str | None = None
+    binding_hash: str | None = None
+    expires_at: datetime | None = None
+    confirmation_phrase: str | None = None
+    cache_provider: Literal["siteground_speed_optimizer"] = "siteground_speed_optimizer"
+    cache_scope: Literal["single_canonical_url"] = "single_canonical_url"
+    cache_target: str
+    gate_results: list[WordPressDraftGateResult]
+    inspection_only: Literal[True] = True
+    wordpress_write_count: Literal[0] = 0
+    cache_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+
+
+class WordPressCachePurgeApplyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+    cache_handle: str = Field(min_length=32, max_length=200)
+    confirmation_phrase: str = Field(min_length=1, max_length=100)
+
+
+class WordPressCacheAwareRenderingResult(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    cache_aware_audit_id: int
+    status: Literal[
+        "pending_rendering", "origin_verified", "pending_cache_purge", "verified",
+        "verification_failed", "failed",
+    ]
+    transition_history: list[str]
+    payload_hash: str
+    wordpress_revision: str
+    rendering_enabled: bool
+    cache_provider: str | None = None
+    cache_scope: str | None = None
+    cache_target: str | None = None
+    reason_code: str
+    gate_results: list[WordPressDraftGateResult]
+    wordpress_write_count: int
+    cache_write_count: int
+    atlas_write_count: int
+    wordpress_write_scope: list[str]
+    cache_write_scope: list[str]
+    atlas_write_scope: list[str]
+    recovery_recommendation: str
+    further_action_required: bool
