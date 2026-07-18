@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.76
+
+Separated cache-aware pre-enable proof responsibilities so fresh signed schema-v1 browser evidence remains authoritative for public DOM and metadata state while a credential-free direct HTTP response supplies only bound transport, body-hash, and sanitized SiteGround provider evidence. An exact, zero-redirect HTTP 403 may now identify the provider through recognized headers without treating its body as page content or claiming a cache HIT. HTTP 202, challenges, unsafe browser evidence, mismatched URLs or timing, and missing or malformed provider headers remain blocked. Post-purge HTTP 200 and exact-metadata verification is unchanged. Metadata Bridge remains version 0.57.6 with an unchanged ZIP.
+
 ## v0.59.74
 
 Fixed the cache-aware rendering preflight without changing Metadata Bridge PHP. Plugin identity matching now reuses Atlas's established fail-closed WordPress REST identifier normalizer, preserving raw plugin inventories while accepting only the locked extensionless or complete bridge entry path. Signed browser evidence remains authoritative for DOM state, while one separate credential-free public HTTP observation supplies only allowlisted, sanitized status and cache-header evidence. The observations are bound by exact URL, zero redirects, page identity, rendered hashes, and lifetime. SiteGround detection rejects empty, malformed, unrecognized, challenge, HTTP 202/403, redirected, or identity-mismatched responses; `server: nginx` is supporting evidence only. Rendering and cache apply routes remain separate, single-use-handle and phrase gated. Metadata Bridge remains version 0.57.6 with an unchanged ZIP.

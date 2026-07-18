@@ -89,6 +89,13 @@ CACHE_OBSERVATION_REASON_CODES = {
     "cache_status_miss",
     "cache_status_bypass",
     "stale_public_cache_confirmed",
+    "direct_cache_hit_verified",
+    "direct_cache_miss_verified",
+    "provider_verified_status_blocked",
+    "browser_public_state_verified",
+    "browser_public_state_verified_cache_provider_bound",
+    "public_observation_mismatch",
+    "challenge_response_rejected",
 }
 
 
@@ -145,6 +152,12 @@ def rendering_preflight(
         public_observation, request.manual_browser_evidence
     )
     cache_evidence = _siteground_cache_evidence(cache_headers)
+    browser_public_state_verified = bool(
+        evidence_ok
+        and _rendered_metadata_absent(rendered)
+        and not rendered.get("atlas_metadata_marker_present")
+        and not rendered.get("media32_reference_present")
+    )
     expected_hash = payload_sha256()
     gates = [
         *_backup_gates(proof),
@@ -163,12 +176,12 @@ def rendering_preflight(
         _gate("page", "Page, body, title, status, H1, canonical, and featured media remain exact", observed.get("page_body_hash") == request.expected_body_hash == EXPECTED_CORRECTED_BODY_HASH and observed.get("page_snapshot_hash") == request.expected_page_snapshot_hash and observed.get("page", {}).get("id") == 8 and observed.get("page", {}).get("status") == "publish" and observed.get("page", {}).get("featured_media") == 31 and rendered.get("h1") == [EXPECTED_H1] and rendered.get("canonical") == [CANONICAL_URL], "Page identity changed."),
         _gate("media", "Media 31 and 32 remain exact and media 32 absent", observed.get("media31_snapshot_hash") == request.expected_media31_snapshot_hash and observed.get("media32_snapshot_hash") == request.expected_media32_snapshot_hash and not observed.get("page_references_media32") and not rendered.get("media32_reference_present"), "Media state changed."),
         _gate("site", "Site Title and Tagline remain exact", observed.get("site") == {"name": "My WordPress", "description": ""}, "Site identity changed."),
-        _gate("public_absent", "Public metadata is absent before rendering", _rendered_metadata_absent(rendered) and not rendered.get("atlas_metadata_marker_present"), "Metadata unexpectedly renders before enablement."),
+        _gate("browser_public_state_verified", "Signed browser evidence proves public metadata is absent before rendering", browser_public_state_verified, "Signed browser evidence does not prove the expected metadata-absent public state."),
         _gate(
-            "public_header_observation_bound" if public_bound else public_reason,
-            "Credential-free direct HTTP response is bound to the signed browser evidence",
+            public_reason,
+            "Direct HTTP status and sanitized provider headers are bound to the signed browser evidence",
             public_bound,
-            "Direct public response status, URL, redirect, page identity, or rendered hashes differ from the signed evidence.",
+            "Direct public response status, URL, redirects, timing, challenge classification, or sanitized headers are not safely bound.",
         ),
         _gate(
             "siteground_cache_provider_verified" if cache_evidence["verified"] else cache_evidence["reason_code"],
@@ -177,10 +190,10 @@ def rendering_preflight(
             "SiteGround cache-provider headers are missing, malformed, or unrecognized.",
         ),
         _gate(
-            "stale_public_cache_confirmed",
-            "Direct public response is a SiteGround cache HIT with the signed pre-enable metadata absence",
-            public_bound and cache_evidence.get("status_reason_code") == "cache_status_hit" and _rendered_metadata_absent(rendered),
-            "A bound SiteGround cache HIT serving the signed pre-enable state was not proven.",
+            "browser_public_state_verified_cache_provider_bound",
+            "Signed browser evidence proves the metadata-absent pre-enable state and is bound to the verified SiteGround provider",
+            public_bound and cache_evidence.get("verified") is True and browser_public_state_verified,
+            "The signed metadata-absent browser state is not safely bound to verified SiteGround provider evidence.",
         ),
         _gate("read_only", "Inspection used WordPress GET/read operations only", observed.get("wordpress_request_methods") == ["GET"], "Inspection was not read-only."),
     ]
@@ -217,7 +230,7 @@ def rendering_preflight(
         proposed_wordpress_write_scope=[f"PUT {RENDERING_PATH}", "rendering state only; payload and revision immutable"] if ready else [],
         proposed_cache_write_scope=[f"POST {CACHE_PATH}", f"one SiteGround purge for {CANONICAL_URL}"] if ready else [],
         proposed_atlas_write_scope=["create and transition one WordPressCacheAwareRenderingAudit", "finalize WordPressMetadataState only after origin and public verification"] if ready else [],
-        inspected_state={"plugin_status": _public_status(snapshot), "page_media": _page_media(observed), "public_http_observation": public_observation, "cache_headers": cache_headers, "cache_evidence": cache_evidence, "artifact": artifact},
+        inspected_state={"plugin_status": _public_status(snapshot), "page_media": _page_media(observed), "public_http_observation": public_observation, "cache_headers": cache_headers, "cache_evidence": cache_evidence, "browser_public_state_verified": browser_public_state_verified, "artifact": artifact},
         gate_results=gates,
     )
 
@@ -513,7 +526,7 @@ def _siteground_cache_evidence(headers):
     if enabled and enabled not in {"true", "false"}:
         return {"verified": False, "reason_code": "cache_header_value_invalid", "status_reason_code": None, "headers": sanitized}
 
-    raw_status = sanitized.get("x-proxy-cache", sanitized.get("x-cache", ""))
+    raw_status = sanitized.get("x-proxy-cache", sanitized.get("x-sg-cache", sanitized.get("x-cache", "")))
     status = raw_status.strip().upper()
     status_codes = {
         "HIT": "cache_status_hit",
@@ -544,54 +557,102 @@ def _cache_headers(headers): return sanitize_public_response_headers(headers)
 
 
 def _public_observation_matches_evidence(observation, evidence):
+    """Bind transport/provider facts without treating direct HTTP as rendered evidence.
+
+    The signed browser capture is authoritative for DOM and metadata.  This
+    direct observation contributes only transport, timing, body-hash, and
+    sanitized cache-provider facts.  A provider-identified HTTP 403 is allowed
+    only at the pre-enable gate; final public verification remains in
+    ``_public_exact`` and still requires HTTP 200 with exact rendered metadata.
+    """
+
     if not isinstance(observation, dict) or not observation:
-        return False, "cache_headers_missing"
-    status = observation.get("status_code")
-    if status == 202:
-        return False, "public_http_202_challenge"
-    if status == 403:
-        return False, "public_http_403_error"
-    if status != 200:
-        return False, "public_http_status_invalid"
-    if observation.get("final_url") != CANONICAL_URL:
-        return False, "public_final_url_mismatch"
+        return False, "public_observation_mismatch"
+    if hasattr(evidence, "model_dump"):
+        evidence = evidence.model_dump(mode="json", exclude_none=True)
+    elif not isinstance(evidence, dict) and hasattr(evidence, "__dict__"):
+        evidence = vars(evidence)
+    if not _browser_evidence_safe_for_public_binding(evidence):
+        return False, "public_observation_mismatch"
+    if observation.get("source") != "public":
+        return False, "public_observation_mismatch"
+    if observation.get("final_url") != evidence.get("final_url") or observation.get("final_url") != CANONICAL_URL:
+        return False, "public_observation_mismatch"
     if observation.get("redirect_count") != 0:
-        return False, "public_redirect_mismatch"
+        return False, "public_observation_mismatch"
     try:
         observed_at = _timestamp(observation.get("observed_at"))
-        captured_at = _timestamp(evidence.captured_at)
-        expires_at = _timestamp(evidence.expires_at)
+        captured_at = _timestamp(evidence.get("captured_at"))
+        expires_at = _timestamp(evidence.get("expires_at"))
     except (TypeError, ValueError, HTTPException):
-        return False, "public_observation_timestamp_invalid"
+        return False, "public_observation_mismatch"
     if not captured_at <= observed_at <= expires_at:
-        return False, "public_observation_timestamp_mismatch"
-    if observation.get("source") != "public" or observation.get("verified") is not True or observation.get("outcome") != "public_html_verified":
-        return False, "public_body_identity_mismatch"
-    if any(
-        observation.get(field)
-        for field in (
-            "admin_page_detected",
-            "login_page_detected",
-            "authenticated_context_detected",
-            "challenge_page_detected",
-            "error_page_detected",
+        return False, "public_observation_mismatch"
+    headers = observation.get("cache_headers", {})
+    if not isinstance(headers, dict) or headers != _cache_headers(headers):
+        return False, "public_observation_mismatch"
+    status = observation.get("status_code")
+    if status == 202 or observation.get("challenge_page_detected") or observation.get("outcome") == "bot_protection_blocked":
+        return False, "challenge_response_rejected"
+    if observation.get("outcome") in {"error_page_detected", "unexpected_redirect", "network_failed"}:
+        return False, "public_observation_mismatch"
+    if any(observation.get(field) for field in ("admin_page_detected", "login_page_detected", "authenticated_context_detected", "error_page_detected")):
+        return False, "public_observation_mismatch"
+    if not isinstance(observation.get("body_sha256"), str) or re.fullmatch(r"[0-9a-f]{64}", observation["body_sha256"]) is None:
+        return False, "public_observation_mismatch"
+
+    provider = _siteground_cache_evidence(headers)
+    if status == 403:
+        if not provider.get("verified"):
+            return False, provider.get("reason_code", "public_observation_mismatch")
+        return True, "provider_verified_status_blocked"
+    if status != 200 or "text/html" not in str(observation.get("content_type", "")).lower():
+        return False, "public_observation_mismatch"
+    if not provider.get("verified"):
+        return False, provider.get("reason_code", "public_observation_mismatch")
+    status_reason = provider.get("status_reason_code")
+    if status_reason == "cache_status_hit":
+        return True, "direct_cache_hit_verified"
+    if status_reason == "cache_status_miss":
+        return True, "direct_cache_miss_verified"
+    return True, "siteground_cache_provider_verified"
+
+
+def _browser_evidence_safe_for_public_binding(evidence):
+    if not isinstance(evidence, dict) and hasattr(evidence, "__dict__"):
+        evidence = vars(evidence)
+    if not isinstance(evidence, dict) or evidence.get("final_url") != CANONICAL_URL:
+        return False
+    identity = evidence.get("page_identity", {})
+    if identity.get("canonical_url") != CANONICAL_URL:
+        return False
+    navigation = evidence.get("navigation_outcome", {})
+    if (
+        navigation.get("status_code") != 200
+        or navigation.get("redirect_count") != 0
+        or navigation.get("outcome") != "success"
+        or "text/html" not in str(navigation.get("content_type", "")).lower()
+        or any(
+            navigation.get(field)
+            for field in (
+                "admin_page_detected",
+                "login_page_detected",
+                "authenticated_context_detected",
+                "challenge_page_detected",
+                "error_page_detected",
+            )
         )
     ):
-        return False, "public_body_identity_mismatch"
-    if observation.get("head_hash") != evidence.rendered_head_hash or observation.get("visible_hash") != evidence.visible_content_hash:
-        return False, "public_body_identity_mismatch"
-    if (
-        observation.get("document_title") != [evidence.page_identity["document_title"]]
-        or observation.get("h1") != [evidence.page_identity["h1"]]
-        or observation.get("canonical") != [evidence.page_identity["canonical_url"]]
-        or observation.get("featured_image_url") != evidence.page_identity["featured_image_url"]
-        or observation.get("featured_image_alt") != evidence.page_identity["featured_image_alt"]
-    ):
-        return False, "public_body_identity_mismatch"
-    headers = observation.get("cache_headers", {})
-    if headers != _cache_headers(headers):
-        return False, "sensitive_headers_retained"
-    return True, "public_header_observation_bound"
+        return False
+    privacy = evidence.get("privacy_attestations", {})
+    return privacy == {
+        "credentials_used": False,
+        "cookies_stored": False,
+        "authorization_headers_stored": False,
+        "authenticated_html_stored": False,
+        "admin_session_used": False,
+        "secrets_detected": False,
+    }
 def _cache_refreshed(before, after):
     state = str(after.get("x-proxy-cache", after.get("x-cache", ""))).upper()
     if state in {"MISS", "BYPASS", "EXPIRED", "REVALIDATED"}: return True

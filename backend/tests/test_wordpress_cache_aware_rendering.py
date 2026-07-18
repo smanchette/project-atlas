@@ -71,6 +71,72 @@ def public_result(**changes):
     value.update(changes); return value
 
 
+def binding_evidence(**changes):
+    captured = datetime.now(UTC) - timedelta(minutes=1)
+    value = {
+        "evidence_id": "fresh-cache-evidence",
+        "evidence_schema": "project-atlas-manual-browser-evidence",
+        "evidence_schema_version": 1,
+        "capture_helper_version": "0.59.15",
+        "captured_at": captured.isoformat(),
+        "expires_at": (captured + timedelta(minutes=10)).isoformat(),
+        "final_url": cache.CANONICAL_URL,
+        "rendered_head_hash": "a" * 64,
+        "visible_content_hash": "b" * 64,
+        "page_identity": {
+            "document_title": "Drywood Termite Tenting in Orlando, FL â€“ My WordPress",
+            "h1": cache.EXPECTED_H1,
+            "canonical_url": cache.CANONICAL_URL,
+            "featured_image_url": "https://www.drywoodtenting.com/wp-content/uploads/2026/07/orlando-drywood-termite-tenting-hero.png",
+            "featured_image_alt": "Two-story Orlando Florida home professionally covered for drywood termite tenting",
+        },
+        "navigation_outcome": {
+            "status_code": 200,
+            "content_type": "text/html",
+            "redirect_count": 0,
+            "outcome": "success",
+            "admin_page_detected": False,
+            "login_page_detected": False,
+            "authenticated_context_detected": False,
+            "challenge_page_detected": False,
+            "error_page_detected": False,
+            "admin_detection_signals": [],
+        },
+        "privacy_attestations": {
+            "credentials_used": False,
+            "cookies_stored": False,
+            "authorization_headers_stored": False,
+            "authenticated_html_stored": False,
+            "admin_session_used": False,
+            "secrets_detected": False,
+        },
+    }
+    value.update(changes)
+    return SimpleNamespace(**value, model_dump=lambda **_: value)
+
+
+def binding_observation(*, status=200, headers=None, **changes):
+    value = {
+        "source": "public",
+        "outcome": "public_html_verified" if status == 200 else "unavailable",
+        "verified": status == 200,
+        "status_code": status,
+        "final_url": cache.CANONICAL_URL,
+        "redirect_count": 0,
+        "observed_at": datetime.now(UTC).isoformat(),
+        "content_type": "text/html",
+        "body_sha256": "c" * 64,
+        "cache_headers": headers if headers is not None else {"x-proxy-cache": "HIT"},
+        "admin_page_detected": False,
+        "login_page_detected": False,
+        "authenticated_context_detected": False,
+        "challenge_page_detected": False,
+        "error_page_detected": False,
+    }
+    value.update(changes)
+    return value
+
+
 def test_routes_are_separate_post_only_surfaces():
     routes = {(route.path, method) for route in app.routes for method in getattr(route, "methods", set())}
     expected = {
@@ -94,7 +160,10 @@ def test_reason_code_contract_is_complete():
         "siteground_cache_provider_verified", "cache_headers_missing",
         "cache_provider_unrecognized", "cache_header_value_invalid",
         "cache_status_hit", "cache_status_miss", "cache_status_bypass",
-        "stale_public_cache_confirmed",
+        "stale_public_cache_confirmed", "direct_cache_hit_verified",
+        "direct_cache_miss_verified", "provider_verified_status_blocked",
+        "browser_public_state_verified", "browser_public_state_verified_cache_provider_bound",
+        "public_observation_mismatch", "challenge_response_rejected",
     }
 
 
@@ -170,11 +239,20 @@ def test_public_exact_rejects_forbidden_schema_node():
 
 
 @pytest.mark.parametrize("changes", [
-    {"status_code": 404}, {"status_code": 500}, {"final_url": "https://example.com/"},
+    {"status_code": 202}, {"status_code": 403}, {"status_code": 404}, {"status_code": 500},
+    {"final_url": "https://example.com/"},
     {"media32_reference_present": True},
 ])
 def test_public_exact_rejects_http_url_and_media_drift(changes):
     assert cache._public_exact(public_result(**changes))[0] is False
+
+
+def test_final_public_verification_rejects_metadata_absence_after_purge():
+    parsed = cache._parse_html(
+        f'<html><head><link rel="canonical" href="{cache.CANONICAL_URL}"></head>'
+        f'<body><h1>{cache.EXPECTED_H1}</h1></body></html>'
+    )
+    assert cache._public_exact(public_result(parsed=parsed)) == (False, "public_metadata_still_stale")
 
 
 def test_cache_refresh_requires_proven_miss_age_reset_or_identity_change():
@@ -236,11 +314,13 @@ def test_cache_aware_plugin_identity_rejects_version_or_activity_drift():
     ({"x-proxy-cache": "HIT"}, True, "siteground_cache_provider_verified", "cache_status_hit"),
     ({"X-Proxy-Cache": "miss"}, True, "siteground_cache_provider_verified", "cache_status_miss"),
     ({"x-proxy-cache": "BYPASS"}, True, "siteground_cache_provider_verified", "cache_status_bypass"),
+    ({"x-sg-cache": "HIT"}, True, "siteground_cache_provider_verified", "cache_status_hit"),
     ({"X-Proxy-Cache-Info": "DT:1"}, True, "siteground_cache_provider_verified", None),
     ({}, False, "cache_headers_missing", None),
     ({"Server": "nginx"}, False, "cache_provider_unrecognized", None),
     ({"X-Proxy-Cache": "UNKNOWN"}, False, "cache_header_value_invalid", None),
     ({"X-Cache-Enabled": "maybe"}, False, "cache_header_value_invalid", None),
+    ({"X-SG-Cache": "unknown"}, False, "cache_header_value_invalid", None),
 ])
 def test_siteground_cache_provider_detection_is_precise(headers, verified, reason, status_reason):
     result = cache._siteground_cache_evidence(headers)
@@ -285,11 +365,24 @@ def test_public_observation_binds_direct_http_headers_to_signed_browser_identity
             "featured_image_url": "https://www.drywoodtenting.com/wp-content/uploads/2026/07/orlando-drywood-termite-tenting-hero.png",
             "featured_image_alt": "Two-story Orlando Florida home professionally covered for drywood termite tenting",
         },
+        final_url=cache.CANONICAL_URL,
+        navigation_outcome={
+            "status_code": 200, "content_type": "text/html", "redirect_count": 0, "outcome": "success",
+            "admin_page_detected": False, "login_page_detected": False,
+            "authenticated_context_detected": False, "challenge_page_detected": False,
+            "error_page_detected": False, "admin_detection_signals": [],
+        },
+        privacy_attestations={
+            "credentials_used": False, "cookies_stored": False,
+            "authorization_headers_stored": False, "authenticated_html_stored": False,
+            "admin_session_used": False, "secrets_detected": False,
+        },
     )
     observation = {
         "source": "public", "outcome": "public_html_verified", "verified": True,
         "status_code": 200, "final_url": cache.CANONICAL_URL, "redirect_count": 0,
         "observed_at": datetime.now(UTC).isoformat(),
+        "content_type": "text/html", "body_sha256": "c" * 64,
         "head_hash": "a" * 64, "visible_hash": "b" * 64,
         "document_title": [evidence.page_identity["document_title"]],
         "h1": [evidence.page_identity["h1"]], "canonical": [cache.CANONICAL_URL],
@@ -300,21 +393,83 @@ def test_public_observation_binds_direct_http_headers_to_signed_browser_identity
         "authenticated_context_detected": False, "challenge_page_detected": False,
         "error_page_detected": False,
     }
-    assert cache._public_observation_matches_evidence(observation, evidence) == (True, "public_header_observation_bound")
+    assert cache._public_observation_matches_evidence(observation, evidence) == (True, "direct_cache_hit_verified")
     for changes, reason in [
-        ({"status_code": 202}, "public_http_202_challenge"),
-        ({"status_code": 403}, "public_http_403_error"),
-        ({"final_url": "https://example.com/"}, "public_final_url_mismatch"),
-        ({"redirect_count": 1}, "public_redirect_mismatch"),
-        ({"observed_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()}, "public_observation_timestamp_mismatch"),
-        ({"head_hash": "c" * 64}, "public_body_identity_mismatch"),
-        ({"challenge_page_detected": True}, "public_body_identity_mismatch"),
+        ({"status_code": 202}, "challenge_response_rejected"),
+        ({"status_code": 404}, "public_observation_mismatch"),
+        ({"final_url": "https://example.com/"}, "public_observation_mismatch"),
+        ({"redirect_count": 1}, "public_observation_mismatch"),
+        ({"observed_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()}, "public_observation_mismatch"),
+        ({"body_sha256": "invalid"}, "public_observation_mismatch"),
+        ({"challenge_page_detected": True}, "challenge_response_rejected"),
     ]:
         candidate = {**observation, **changes}
         assert cache._public_observation_matches_evidence(candidate, evidence) == (False, reason)
 
 
-def test_cache_aware_preflight_reaches_ready_with_normalized_plugin_and_bound_cache_headers(monkeypatch):
+@pytest.mark.parametrize("headers", [
+    {"x-proxy-cache-info": "DT:1", "server": "nginx", "etag": 'W/"6a27b6bb-34"'},
+    {"x-cache-enabled": "true"},
+])
+def test_public_observation_accepts_provider_verified_http_403(headers):
+    assert cache._public_observation_matches_evidence(
+        binding_observation(status=403, headers=headers), binding_evidence()
+    ) == (True, "provider_verified_status_blocked")
+
+
+def test_public_observation_accepts_exact_production_shaped_http_403():
+    observation = binding_observation(
+        status=403,
+        headers={"etag": 'W/"6a27b6bb-34"', "server": "nginx", "x-proxy-cache-info": "DT:1"},
+        body_sha256="889403e5cfbb7981f7a26aced0d7492524e5397d6996f7fccd67562d2a4a71a3",
+        outcome="unavailable",
+        verified=False,
+    )
+    assert cache._public_observation_matches_evidence(observation, binding_evidence()) == (
+        True, "provider_verified_status_blocked"
+    )
+
+
+def test_public_observation_accepts_stronger_direct_miss_path():
+    assert cache._public_observation_matches_evidence(
+        binding_observation(headers={"x-proxy-cache": "MISS"}), binding_evidence()
+    ) == (True, "direct_cache_miss_verified")
+
+
+@pytest.mark.parametrize("headers", [{}, {"server": "nginx"}, {"x-proxy-cache-info": "not-dt"}])
+def test_public_http_403_without_recognized_provider_headers_blocks(headers):
+    passed, reason = cache._public_observation_matches_evidence(
+        binding_observation(status=403, headers=headers), binding_evidence()
+    )
+    assert passed is False
+    assert reason in {"cache_headers_missing", "cache_provider_unrecognized", "cache_header_value_invalid"}
+
+
+@pytest.mark.parametrize(("observation_changes", "evidence_changes", "reason"), [
+    ({"status_code": 202}, {}, "challenge_response_rejected"),
+    ({"outcome": "bot_protection_blocked"}, {}, "challenge_response_rejected"),
+    ({"outcome": "error_page_detected"}, {}, "public_observation_mismatch"),
+    ({"final_url": "https://example.com/"}, {}, "public_observation_mismatch"),
+    ({"redirect_count": 1}, {}, "public_observation_mismatch"),
+    ({"observed_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()}, {}, "public_observation_mismatch"),
+    ({}, {"final_url": "https://example.com/"}, "public_observation_mismatch"),
+    ({}, {"navigation_outcome": {"status_code": 200, "content_type": "text/html", "redirect_count": 0, "outcome": "success", "challenge_page_detected": True}}, "public_observation_mismatch"),
+    ({}, {"privacy_attestations": {"credentials_used": True}}, "public_observation_mismatch"),
+])
+def test_public_observation_binding_fails_closed(observation_changes, evidence_changes, reason):
+    assert cache._public_observation_matches_evidence(
+        binding_observation(**observation_changes), binding_evidence(**evidence_changes)
+    ) == (False, reason)
+
+
+@pytest.mark.parametrize(("public_status", "public_headers", "expected_reason"), [
+    (200, {"x-cache-enabled": "True", "x-proxy-cache": "HIT", "x-proxy-cache-info": "DT:1"}, "direct_cache_hit_verified"),
+    (403, {"etag": 'W/"6a27b6bb-34"', "server": "nginx", "x-proxy-cache-info": "DT:1"}, "provider_verified_status_blocked"),
+    (403, {"x-cache-enabled": "true"}, "provider_verified_status_blocked"),
+])
+def test_cache_aware_preflight_reaches_ready_with_normalized_plugin_and_bound_cache_headers(
+    monkeypatch, public_status, public_headers, expected_reason
+):
     identity = {
         "document_title": "Drywood Termite Tenting in Orlando, FL – My WordPress",
         "h1": cache.EXPECTED_H1,
@@ -332,16 +487,31 @@ def test_cache_aware_preflight_reaches_ready_with_normalized_plugin_and_bound_ca
         rendered_head_hash="a" * 64,
         visible_content_hash="b" * 64,
         page_identity=identity,
+        final_url=cache.CANONICAL_URL,
+        navigation_outcome={
+            "status_code": 200, "content_type": "text/html", "redirect_count": 0, "outcome": "success",
+            "admin_page_detected": False, "login_page_detected": False,
+            "authenticated_context_detected": False, "challenge_page_detected": False,
+            "error_page_detected": False, "admin_detection_signals": [],
+        },
+        privacy_attestations={
+            "credentials_used": False, "cookies_stored": False,
+            "authorization_headers_stored": False, "authenticated_html_stored": False,
+            "admin_session_used": False, "secrets_detected": False,
+        },
     )
     public = {
-        "source": "public", "outcome": "public_html_verified", "verified": True,
-        "status_code": 200, "final_url": cache.CANONICAL_URL, "redirect_count": 0,
+        "source": "public", "outcome": "public_html_verified" if public_status == 200 else "unavailable",
+        "verified": public_status == 200,
+        "status_code": public_status, "final_url": cache.CANONICAL_URL, "redirect_count": 0,
         "observed_at": datetime.now(UTC).isoformat(),
+        "content_type": "text/html",
+        "body_sha256": "c" * 64 if public_status == 200 else "889403e5cfbb7981f7a26aced0d7492524e5397d6996f7fccd67562d2a4a71a3",
         "head_hash": manual.rendered_head_hash, "visible_hash": manual.visible_content_hash,
         "document_title": [identity["document_title"]], "h1": [identity["h1"]],
         "canonical": [identity["canonical_url"]],
         "featured_image_url": identity["featured_image_url"], "featured_image_alt": identity["featured_image_alt"],
-        "cache_headers": {"x-cache-enabled": "True", "x-proxy-cache": "HIT", "x-proxy-cache-info": "DT:1"},
+        "cache_headers": public_headers,
         "admin_page_detected": False, "login_page_detected": False,
         "authenticated_context_detected": False, "challenge_page_detected": False, "error_page_detected": False,
     }
@@ -419,7 +589,12 @@ def test_cache_aware_preflight_reaches_ready_with_normalized_plugin_and_bound_ca
     assert all(gate.passed for gate in result.gate_results)
     assert result.wordpress_write_count == result.cache_write_count == result.atlas_write_count == 0
     assert result.audit_created is False
-    assert result.inspected_state["cache_evidence"]["status_reason_code"] == "cache_status_hit"
+    expected_cache_status = "cache_status_hit" if public_status == 200 else None
+    assert result.inspected_state["cache_evidence"]["status_reason_code"] == expected_cache_status
+    assert result.inspected_state["browser_public_state_verified"] is True
+    assert gate_map(result.gate_results)["browser_public_state_verified"].passed is True
+    assert gate_map(result.gate_results)[expected_reason].passed is True
+    assert gate_map(result.gate_results)["browser_public_state_verified_cache_provider_bound"].passed is True
 
 
 def test_rendering_handle_is_single_use_and_restart_invalidates():
@@ -467,6 +642,27 @@ def test_preflights_are_source_level_zero_write():
         assert "_authenticated_json(session, \"PUT\"" not in source
         assert "_authenticated_json(session, \"POST\"" not in source
         assert "session.commit" not in source
+
+
+def test_pre_enable_403_is_transport_only_and_final_verification_remains_strict():
+    binding_source = inspect.getsource(cache._public_observation_matches_evidence)
+    assert 'status == 403' in binding_source
+    assert '"provider_verified_status_blocked"' in binding_source
+    assert "rendered_head_hash" not in binding_source
+    assert "visible_content_hash" not in binding_source
+    assert "metadata_inventory" not in binding_source
+    assert cache._public_exact(public_result(status_code=403))[0] is False
+    assert 'value.get("status_code") != 200' in inspect.getsource(cache._public_exact)
+    assert inspect.getsource(cache.cache_apply).count("_read_public_page()") == 2
+
+
+def test_pre_enable_headers_are_observed_not_caller_supplied():
+    fields = cache.WordPressCacheAwareRenderingPreflightRequest.model_fields
+    assert "cache_headers" not in fields
+    assert "public_http_observation" not in fields
+    preflight_source = inspect.getsource(cache.rendering_preflight)
+    assert 'rendered.get("public_http_observation", {})' in preflight_source
+    assert "request.cache_headers" not in preflight_source
 
 
 def test_no_page_media_site_plugin_or_payload_mutation_transport():
