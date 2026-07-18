@@ -91,8 +91,8 @@ def manifest_values(**overrides):
         "atlas_version": "v0.59.8",
         "atlas_commit": "c" * 40,
         "atlas_tag": "v0.59.8",
-        "plugin_version": "0.57.5",
-        "plugin_zip_filename": "project-atlas-metadata-bridge-0.57.5.zip",
+        "plugin_version": release.SOURCE_EXPECTATIONS.plugin_version,
+        "plugin_zip_filename": release.SOURCE_EXPECTATIONS.plugin_zip_filename,
         "plugin_zip_sha256": release.SOURCE_EXPECTATIONS.plugin_zip_sha256,
         "generated_at": datetime.now(UTC).isoformat(),
     }
@@ -167,7 +167,7 @@ def test_git_unavailable_checksum_verified_manifest_path(tmp_path):
     assert identity.atlas_version == "v0.59.8" and identity.atlas_commit == "c" * 40
     assert identity.verification_source == "expected_identity_and_checksum_verified_manifest" and not identity.git_metadata_available
     assert identity.manifest_integrity_verified and identity.expected_release_matched and identity.runtime_identity_verified
-    assert identity.plugin_version == "0.57.5"
+    assert identity.plugin_version == release.SOURCE_EXPECTATIONS.plugin_version
 
 
 def test_git_available_manifest_head_and_tag_verification(tmp_path):
@@ -230,8 +230,8 @@ def test_current_checksum_valid_v0594_schema_one_manifest_is_rejected(tmp_path):
         "atlas_version": "v0.59.4",
         "atlas_commit": "a" * 40,
         "atlas_tag": "v0.59.4",
-        "plugin_version": "0.57.5",
-        "plugin_zip_filename": "project-atlas-metadata-bridge-0.57.5.zip",
+        "plugin_version": release.SOURCE_EXPECTATIONS.plugin_version,
+        "plugin_zip_filename": release.SOURCE_EXPECTATIONS.plugin_zip_filename,
         "plugin_zip_sha256": release.SOURCE_EXPECTATIONS.plugin_zip_sha256,
         "generated_at": datetime.now(UTC).isoformat(),
     }
@@ -311,7 +311,7 @@ def test_verified_runtime_identity_flows_to_artifact(monkeypatch):
     assert artifact["atlas_version"] == "v0.59.8" and artifact["atlas_commit"] == "c" * 40 and artifact["atlas_tag"] == "v0.59.8"
     assert artifact["release_manifest_integrity_verified"] and artifact["release_expected_identity_matched"] and artifact["release_runtime_identity_verified"]
     assert artifact["release_git_metadata_available"] is False
-    assert artifact["plugin_version"] == "0.57.5"
+    assert artifact["plugin_version"] == release.SOURCE_EXPECTATIONS.plugin_version
 
 
 def test_readiness_api_source_uses_the_same_verified_runtime_identity(monkeypatch):
@@ -320,7 +320,7 @@ def test_readiness_api_source_uses_the_same_verified_runtime_identity(monkeypatc
     readiness = deployment.deployment_readiness()
     assert readiness["release_status"] == "verified"
     assert readiness["release"] == identity.identity()
-    assert readiness["source_expectations"]["plugin_version"] == "0.57.5"
+    assert readiness["source_expectations"]["plugin_version"] == release.SOURCE_EXPECTATIONS.plugin_version
 
 
 def test_wrong_checksum_and_missing_source_block_without_empty_checksum(monkeypatch, tmp_path):

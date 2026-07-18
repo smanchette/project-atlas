@@ -1236,21 +1236,31 @@ class WordPressActivationResult(SQLModel):
 
 
 class WordPressPluginUpgradePreflightRequest(WordPressDeploymentBackupEvidence):
-    """Immutable proof for the fixed 0.57.4-to-0.57.5 upgrade."""
+    """Immutable proof for one explicitly supported fixed bridge-upgrade profile."""
 
     model_config = ConfigDict(extra="forbid")
 
     installation_audit_id: int = Field(gt=0)
     activation_audit_id: int = Field(gt=0)
     operator: str = Field(min_length=3, max_length=200)
-    current_plugin_version: Literal["0.57.4"]
-    target_plugin_version: Literal["0.57.5"]
+    current_plugin_version: Literal["0.57.4", "0.57.5"]
+    target_plugin_version: Literal["0.57.5", "0.57.6"]
     current_plugin_slug: Literal["project-atlas-metadata-bridge"]
     current_plugin_path: Literal["project-atlas-metadata-bridge/project-atlas-metadata-bridge.php"]
-    current_zip_filename: Literal["project-atlas-metadata-bridge-0.57.4.zip"]
-    current_zip_sha256: Literal["939412e6e80e8344d95274444fda65b6122fe0c8249a2ced0a8582a418c4e232"]
-    target_zip_filename: Literal["project-atlas-metadata-bridge-0.57.5.zip"]
-    target_zip_sha256: Literal["09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7"]
+    current_zip_filename: Literal["project-atlas-metadata-bridge-0.57.4.zip", "project-atlas-metadata-bridge-0.57.5.zip"]
+    current_zip_sha256: Literal["939412e6e80e8344d95274444fda65b6122fe0c8249a2ced0a8582a418c4e232", "09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7"]
+    target_zip_filename: Literal["project-atlas-metadata-bridge-0.57.5.zip", "project-atlas-metadata-bridge-0.57.6.zip"]
+    target_zip_sha256: Literal["09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7", "3b2d0035f995c3006e0d3be02596bd2cf19ef7e4a97572168621beb7a9abf788"]
+    previous_upgrade_audit_id: int | None = Field(default=None, gt=0)
+    bootstrap_cleanup_audit_id: int | None = Field(default=None, gt=0)
+    staging_audit_id: int | None = Field(default=None, gt=0)
+    recovery_disable_audit_id: int | None = Field(default=None, gt=0)
+    expected_payload_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_revision: str | None = Field(default=None, max_length=40)
+    expected_metadata_state_status: str | None = Field(default=None, max_length=40)
+    expected_metadata_state_rows: int | None = Field(default=None, ge=0)
+    expected_metadata_sync_audit_rows: int | None = Field(default=None, ge=0)
+    expected_cache_purge_count: int | None = Field(default=None, ge=0)
     expected_plugin_inventory_hash: str = Field(min_length=64, max_length=64)
     expected_active_plugin_inventory_hash: str = Field(min_length=64, max_length=64)
     expected_post_plugin_inventory_hash: str | None = Field(default=None, min_length=64, max_length=64)
@@ -1278,6 +1288,7 @@ class WordPressPluginUpgradePreflightRequest(WordPressDeploymentBackupEvidence):
         "expected_body_hash",
         "expected_media31_snapshot_hash",
         "expected_media32_snapshot_hash",
+        "expected_payload_hash",
         "repository_head",
         "repository_origin_main",
     )
@@ -1302,8 +1313,8 @@ class WordPressPluginUpgradePreflight(SQLModel):
     binding_hash: str | None = None
     expires_at: datetime | None = None
     backup_deadline: datetime | None = None
-    current_version: Literal["0.57.4"] = "0.57.4"
-    target_version: Literal["0.57.5"] = "0.57.5"
+    current_version: Literal["0.57.4", "0.57.5"] = "0.57.4"
+    target_version: Literal["0.57.5", "0.57.6"] = "0.57.5"
     artifact: dict[str, Any]
     inspected_state: dict[str, Any]
     gate_results: list[WordPressDraftGateResult]
@@ -1333,8 +1344,8 @@ class WordPressPluginUpgradeResult(SQLModel):
     status: Literal["verified", "verification_failed", "failed"]
     binding_hash: str
     state_history: list[str]
-    previous_version: Literal["0.57.4"] = "0.57.4"
-    target_version: Literal["0.57.5"] = "0.57.5"
+    previous_version: Literal["0.57.4", "0.57.5"] = "0.57.4"
+    target_version: Literal["0.57.5", "0.57.6"] = "0.57.5"
     gate_results: list[WordPressDraftGateResult]
     inspected_state: dict[str, Any]
     wordpress_write_count: Literal[1] = 1
@@ -1374,16 +1385,19 @@ class WordPressBootstrapCleanupPreflightRequest(WordPressDeploymentBackupEvidenc
 
     installation_audit_id: Literal[1]
     activation_audit_id: Literal[1]
-    upgrade_audit_id: Literal[1]
+    upgrade_audit_id: int = Field(gt=0)
     operator: str = Field(min_length=3, max_length=200)
     expected_bridge_slug: Literal["project-atlas-metadata-bridge"]
     expected_bridge_path: Literal["project-atlas-metadata-bridge/project-atlas-metadata-bridge.php"]
-    expected_bridge_version: Literal["0.57.5"]
-    expected_bridge_zip_sha256: Literal["09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7"]
+    expected_bridge_version: Literal["0.57.5", "0.57.6"]
+    expected_bridge_zip_sha256: Literal["09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7", "3b2d0035f995c3006e0d3be02596bd2cf19ef7e4a97572168621beb7a9abf788"]
     expected_bootstrap_slug: Literal["project-atlas-upgrade-bootstrap"]
     expected_bootstrap_path: Literal["project-atlas-upgrade-bootstrap/project-atlas-upgrade-bootstrap.php"]
-    expected_bootstrap_version: Literal["0.1.0"]
-    expected_bootstrap_zip_sha256: Literal["4c8b4b0c697b2b352a10f405950c7b6a750236be96aec81fcd45176ece1189bd"]
+    expected_bootstrap_version: Literal["0.1.0", "0.2.0"]
+    expected_bootstrap_zip_sha256: Literal["4c8b4b0c697b2b352a10f405950c7b6a750236be96aec81fcd45176ece1189bd", "873701da2ed42212e7d7c9b12816eeb0560d2751d7494c2b706008c0d5c1383a"]
+    expected_payload_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_revision: str | None = Field(default=None, max_length=40)
+    expected_metadata_state_status: str | None = Field(default=None, max_length=40)
     expected_plugin_inventory_hash: str = Field(min_length=64, max_length=64)
     expected_active_plugin_inventory_hash: str = Field(min_length=64, max_length=64)
     expected_page_snapshot_hash: str = Field(min_length=64, max_length=64)
@@ -1407,11 +1421,14 @@ class WordPressBootstrapCleanupPreflightRequest(WordPressDeploymentBackupEvidenc
         "expected_body_hash",
         "expected_media31_snapshot_hash",
         "expected_media32_snapshot_hash",
+        "expected_payload_hash",
         "repository_head",
         "repository_origin_main",
     )
     @classmethod
-    def validate_cleanup_hashes(cls, value: str) -> str:
+    def validate_cleanup_hashes(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         length = 40 if len(value) == 40 else 64
         if len(value) != length or re.fullmatch(r"[0-9a-f]+", value) is None:
             raise ValueError("Bootstrap-cleanup identity hashes must be lowercase hexadecimal.")

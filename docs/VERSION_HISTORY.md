@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.71
+
+Added an independently version-bound Metadata Bridge 0.57.5-to-0.57.6 upgrade profile and single-purpose bootstrap 0.2.0. The guarded preflight binds the verified prior installation, activation, upgrade, bootstrap-cleanup, staging, and recovery-disable history; exact backups and runtime identity; the staged payload hash and revision 1; disabled rendering; page/media/cache snapshots; and both locked artifacts. Apply can perform only one fixed bootstrap replacement and preserves active status and all staged metadata state. Post-upgrade verification requires the exact disabled-preview HTTP 409 contract and registered cache-aware routes; preview output remains explicitly deferred to a later rendering preflight. Bootstrap 0.2.0 cleanup is separately phrase-gated and cannot match 0.1.0. Publication does not authorize a live bootstrap action, bridge upgrade, rendering change, cache purge, or page/media mutation.
+
 ## v0.59.68
 
 Added a fail-closed recovery-disable eligibility path for the exact case where a rendering-enable mutation was conclusively accepted but its public rendered verification failed. Ordinary disablement after a verified enable remains unchanged. Recovery requires the fixed enable endpoint and one accepted write, exact `pending -> verification_failed` history, unchanged staged payload/hash/revision/page/media/cache state, absent public metadata, verified staging history, and the `disable_rendering` recommendation. A future recovery disable creates a new audit with completion mode `recovery_after_failed_enable_verification`; it never rewrites the failed enable audit. Migration 0021 adds durable lifecycle completion-mode and recovery-recommendation fields. Metadata Bridge PHP and the 0.57.5 ZIP are unchanged. Publication does not authorize live disablement.

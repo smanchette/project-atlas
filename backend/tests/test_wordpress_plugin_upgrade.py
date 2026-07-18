@@ -25,7 +25,7 @@ from app.schemas.wordpress import (
     WordPressPluginUpgradePreflightRequest,
 )
 from app.services import wordpress_deployment as deployment
-from app.services import wordpress_plugin_upgrade as upgrade
+from app.services import wordpress_plugin_upgrade_0575 as upgrade
 from app.services.wordpress_rendered_state import build_manual_browser_evidence
 
 
@@ -138,8 +138,8 @@ def bootstrap_status(*, available=True, plugin_version=upgrade.CURRENT_VERSION):
         "target_plugin": deployment.PLUGIN_FILE,
         "current_version": upgrade.CURRENT_VERSION,
         "target_version": upgrade.TARGET_VERSION,
-        "target_zip": deployment.ZIP_NAME,
-        "target_zip_sha256": deployment.ZIP_SHA256,
+        "target_zip": upgrade.ZIP_NAME,
+        "target_zip_sha256": upgrade.ZIP_SHA256,
         "available": available,
         "plugin": {
             "installed": True,
@@ -162,9 +162,9 @@ def artifact():
         "release_manifest_integrity_verified": True,
         "release_expected_identity_matched": True,
         "plugin_version": upgrade.TARGET_VERSION,
-        "zip_file_name": deployment.ZIP_NAME,
-        "zip_sha256": deployment.ZIP_SHA256,
-        "plugin_source_sha256": deployment.SOURCE_SHA256,
+        "zip_file_name": upgrade.ZIP_NAME,
+        "zip_sha256": upgrade.ZIP_SHA256,
+        "plugin_source_sha256": upgrade.SOURCE_SHA256,
     }
 
 
@@ -200,8 +200,8 @@ def request(before=None, **changes):
         "current_plugin_path": deployment.PLUGIN_FILE,
         "current_zip_filename": upgrade.CURRENT_ZIP_NAME,
         "current_zip_sha256": upgrade.CURRENT_ZIP_SHA256,
-        "target_zip_filename": deployment.ZIP_NAME,
-        "target_zip_sha256": deployment.ZIP_SHA256,
+        "target_zip_filename": upgrade.ZIP_NAME,
+        "target_zip_sha256": upgrade.ZIP_SHA256,
         "expected_plugin_inventory_hash": before["plugin_inventory_hash"],
         "expected_active_plugin_inventory_hash": before["active_plugin_inventory_hash"],
         "expected_post_plugin_inventory_hash": expected_post.get("plugin_inventory_hash"),
@@ -281,7 +281,9 @@ def test_preflight_is_zero_write_and_returns_one_time_handle(monkeypatch, db):
     with Session(db) as session:
         seed(session)
         result = upgrade.plugin_upgrade_preflight(session, 41, request(before))
-        assert result.plugin_upgrade_preflight_ready and result.upgrade_handle
+        assert result.plugin_upgrade_preflight_ready and result.upgrade_handle, [
+            (gate.code, gate.message) for gate in result.gate_results if not gate.passed
+        ]
         assert result.confirmation_phrase == upgrade.UPGRADE_PHRASE
         assert result.wordpress_write_count == result.atlas_write_count == 0
         assert result.token_issued is result.nonce_returned is result.audit_created is False
@@ -515,8 +517,8 @@ def test_fixed_transport_uses_application_password_rest_and_exact_artifact(monke
     assert set(captured["request"]) == {"files", "auth", "headers"}
     assert set(captured["request"]["files"]) == {"artifact"}
     name, body, content_type = captured["request"]["files"]["artifact"]
-    assert name == deployment.ZIP_NAME
-    assert hashlib.sha256(body).hexdigest() == deployment.ZIP_SHA256
+    assert name == upgrade.ZIP_NAME
+    assert hashlib.sha256(body).hexdigest() == upgrade.ZIP_SHA256
     assert content_type == "application/zip"
 
 
@@ -628,7 +630,8 @@ def test_target_and_current_zip_contracts_are_locked():
     assert current["zip_sha256"] == upgrade.CURRENT_ZIP_SHA256
     assert upgrade._target_entry_sha256()
     assert upgrade._target_artifact_disables_legacy_route()
-    assert deployment.ZIP_SHA256 == "09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7"
+    assert upgrade.ZIP_SHA256 == "09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7"
+    assert deployment.ZIP_SHA256 == "3b2d0035f995c3006e0d3be02596bd2cf19ef7e4a97572168621beb7a9abf788"
 
 
 def test_upgrade_audit_is_in_data_backup_v036_contract():

@@ -16,8 +16,8 @@ from app.schemas.wordpress import (
     WordPressBootstrapCleanupPreflightRequest,
     WordPressBootstrapDeletionPreflightRequest,
 )
-from app.services import wordpress_bootstrap_cleanup as cleanup
-from app.services import wordpress_plugin_upgrade as upgrade
+from app.services import wordpress_bootstrap_cleanup_0575 as cleanup
+from app.services import wordpress_plugin_upgrade_0575 as upgrade
 from test_wordpress_plugin_upgrade import (
     COMMIT,
     KEY,
