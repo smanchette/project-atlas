@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.78
+
+Corrected cache-aware rendering and SiteGround cache-purge apply binding so a required second public observation may have a later timestamp and naturally advanced cache age without invalidating its one-time handle. Both phases now bind a deterministic stable public-observation fingerprint and an explicit temporal contract covering the original observation, evidence lifetime where applicable, handle lifetime, backup deadline, maximum two-minute interval, and one-second clock-reversal tolerance. URL, redirects, HTTP/provider classification, sanitized stable provider headers, browser/page identity, rendered hashes, metadata inventory, runtime, plugin, payload, revision, page/media snapshots, backup identity, and audit state remain fail-closed. Raw sanitized observations remain diagnostic-only. Final post-purge verification still requires two exact HTTP 200 public responses. Metadata Bridge remains version 0.57.6 with an unchanged ZIP.
+
 ## v0.59.76
 
 Separated cache-aware pre-enable proof responsibilities so fresh signed schema-v1 browser evidence remains authoritative for public DOM and metadata state while a credential-free direct HTTP response supplies only bound transport, body-hash, and sanitized SiteGround provider evidence. An exact, zero-redirect HTTP 403 may now identify the provider through recognized headers without treating its body as page content or claiming a cache HIT. HTTP 202, challenges, unsafe browser evidence, mismatched URLs or timing, and missing or malformed provider headers remain blocked. Post-purge HTTP 200 and exact-metadata verification is unchanged. Metadata Bridge remains version 0.57.6 with an unchanged ZIP.

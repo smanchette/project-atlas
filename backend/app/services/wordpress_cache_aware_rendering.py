@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import hashlib
@@ -72,6 +73,24 @@ CACHE_PATH = "/wp-json/project-atlas/v3/pages/8/cache/siteground/purge"
 CACHE_PROVIDER = "siteground_speed_optimizer"
 CACHE_SCOPE = "single_canonical_url"
 HANDLE_TTL = timedelta(minutes=10)
+MAX_OBSERVATION_INTERVAL = timedelta(minutes=2)
+CLOCK_REVERSAL_TOLERANCE = timedelta(seconds=1)
+VOLATILE_PUBLIC_OBSERVATION_FIELDS = frozenset({
+    "observed_at", "observation_started_at", "observation_completed_at",
+    "elapsed_ms", "generated_at", "request_id",
+})
+VOLATILE_CACHE_HEADERS = frozenset({"age", "expires", "last-modified"})
+BINDING_REASON_CODES = frozenset({
+    "stable_public_observation_mismatch",
+    "public_observation_expired",
+    "apply_observation_before_preflight",
+    "observation_window_exceeded",
+    "cache_provider_drift",
+    "public_url_drift",
+    "volatile_timestamp_change_allowed",
+    "volatile_cache_age_change_allowed",
+    "public_identity_drift",
+})
 ALLOWED_SCHEMA_TYPES = ["Organization", "Service"]
 REASON_CODES = {
     "origin_metadata_verified", "origin_metadata_missing", "public_cache_hit_stale",
@@ -104,6 +123,12 @@ class _RenderingHandle:
     request: WordPressCacheAwareRenderingPreflightRequest
     binding_hash: str
     expires_at: datetime
+    stable_public_observation_fingerprint: str = ""
+    preflight_observed_at: datetime | None = None
+    evidence_captured_at: datetime | None = None
+    evidence_expires_at: datetime | None = None
+    backup_deadline: datetime | None = None
+    preflight_public_observation: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -111,12 +136,244 @@ class _CacheHandle:
     audit_id: int
     binding_hash: str
     expires_at: datetime
+    stable_public_observation_fingerprint: str = ""
+    preflight_observed_at: datetime | None = None
+    backup_deadline: datetime | None = None
+    preflight_public_observation: dict[str, Any] | None = None
 
 
 _lock = Lock()
 _rendering_handles: dict[str, _RenderingHandle] = {}
 _cache_handles: dict[str, _CacheHandle] = {}
 _timers: dict[tuple[str, str], Timer] = {}
+
+
+def _stable_provider_headers(headers: dict[str, Any]) -> dict[str, str]:
+    """Normalize provider identity while excluding naturally volatile cache timing."""
+
+    stable: dict[str, str] = {}
+    for name, raw_value in _cache_headers(headers).items():
+        if name in VOLATILE_CACHE_HEADERS:
+            continue
+        value = raw_value.strip()
+        if name in {"x-cache", "x-proxy-cache", "x-sg-cache", "cf-cache-status"}:
+            value = value.upper()
+        elif name == "x-cache-enabled":
+            value = value.lower()
+        elif name == "x-proxy-cache-info":
+            value = re.sub(r"(?i)(?:^|(?<=[\s,;]))DT:\d+(?=$|[\s,;])", "DT:*", value)
+        elif name in {"server", "via"}:
+            value = value.lower()
+        stable[name] = value
+    return stable
+
+
+def _evidence_value(evidence: Any) -> dict[str, Any]:
+    if hasattr(evidence, "model_dump"):
+        return evidence.model_dump(mode="json", exclude_none=True)
+    if isinstance(evidence, dict):
+        return evidence
+    if hasattr(evidence, "__dict__"):
+        return vars(evidence)
+    return {}
+
+
+def _stable_public_observation(observation: dict[str, Any], evidence: Any | None = None) -> dict[str, Any]:
+    """Return only immutable transport/provider and signed public-identity facts."""
+
+    evidence_value = _evidence_value(evidence) if evidence is not None else {}
+    headers = observation.get("cache_headers", {}) if isinstance(observation, dict) else {}
+    provider = _siteground_cache_evidence(headers if isinstance(headers, dict) else {})
+    status = observation.get("status_code") if isinstance(observation, dict) else None
+    if status == 403 and provider.get("verified"):
+        response_classification = "provider_verified_status_blocked"
+    elif status == 200 and provider.get("verified"):
+        response_classification = provider.get("status_reason_code") or "siteground_cache_provider_verified"
+    else:
+        response_classification = f"http_{status}" if isinstance(status, int) else "status_unavailable"
+    parsed = observation.get("parsed", {}) if isinstance(observation, dict) else {}
+    stable = {
+        "request_url": CANONICAL_URL,
+        "final_url": observation.get("final_url") if isinstance(observation, dict) else None,
+        "redirect_count": observation.get("redirect_count") if isinstance(observation, dict) else None,
+        "status_code": status,
+        "response_classification": response_classification,
+        "content_type_class": "html" if "text/html" in str(observation.get("content_type", "")).lower() else "other",
+        "provider": {
+            "verified": provider.get("verified") is True,
+            "reason_code": provider.get("reason_code"),
+            "status_reason_code": provider.get("status_reason_code"),
+            "headers": _stable_provider_headers(headers if isinstance(headers, dict) else {}),
+        },
+        "challenge_error": {
+            key: bool(observation.get(key))
+            for key in (
+                "challenge_page_detected", "error_page_detected", "admin_page_detected",
+                "login_page_detected", "authenticated_context_detected",
+            )
+        },
+        "outcome": observation.get("outcome") if isinstance(observation, dict) else None,
+        "body_sha256": observation.get("body_sha256") if status == 200 else None,
+        "public_rendered_hashes": {
+            "head": observation.get("head_hash") if status == 200 else None,
+            "visible": observation.get("visible_hash") if status == 200 else None,
+            "metadata_inventory": _hash(parsed) if status == 200 and isinstance(parsed, dict) else None,
+        },
+    }
+    if evidence_value:
+        stable["signed_browser_identity"] = {
+            "evidence_id": evidence_value.get("evidence_id"),
+            "rendered_head_hash": evidence_value.get("rendered_head_hash"),
+            "visible_content_hash": evidence_value.get("visible_content_hash"),
+            "metadata_inventory_hash": evidence_value.get("metadata_inventory_hash"),
+            "page_identity_hash": _hash(evidence_value.get("page_identity", {})),
+        }
+    return stable
+
+
+def _stable_public_observation_fingerprint(observation: dict[str, Any], evidence: Any | None = None) -> str:
+    return _hash(_stable_public_observation(observation, evidence))
+
+
+def _public_observed_at(observation: dict[str, Any]) -> datetime:
+    value = observation.get("observation_completed_at", observation.get("observed_at"))
+    return _timestamp(value)
+
+
+def _temporal_conflict(
+    *,
+    preflight_observed_at: datetime,
+    apply_observed_at: datetime,
+    evidence_expires_at: datetime | None,
+    handle_expires_at: datetime,
+    backup_deadline: datetime,
+    now: datetime | None = None,
+) -> str | None:
+    current = (now or datetime.now(UTC)).astimezone(UTC)
+    preflight = _timestamp(preflight_observed_at)
+    apply = _timestamp(apply_observed_at)
+    handle_expiry = _timestamp(handle_expires_at)
+    backup_expiry = _timestamp(backup_deadline)
+    evidence_expiry = _timestamp(evidence_expires_at) if evidence_expires_at is not None else None
+    if apply > current + CLOCK_REVERSAL_TOLERANCE:
+        return "public_observation_expired"
+    if apply + CLOCK_REVERSAL_TOLERANCE < preflight:
+        return "apply_observation_before_preflight"
+    if apply - preflight > MAX_OBSERVATION_INTERVAL:
+        return "observation_window_exceeded"
+    if evidence_expiry is not None and (apply > evidence_expiry or current > evidence_expiry):
+        return "public_observation_expired"
+    if apply > handle_expiry or current > handle_expiry:
+        return "public_observation_expired"
+    if apply > backup_expiry or current > backup_expiry:
+        return "public_observation_expired"
+    return None
+
+
+def _stable_observation_conflict(before: dict[str, Any], after: dict[str, Any]) -> str | None:
+    if before.get("final_url") != after.get("final_url") or after.get("final_url") != CANONICAL_URL:
+        return "public_url_drift"
+    if before.get("redirect_count") != after.get("redirect_count"):
+        return "stable_public_observation_mismatch"
+    if before.get("provider") != after.get("provider"):
+        return "cache_provider_drift"
+    if before.get("signed_browser_identity") != after.get("signed_browser_identity"):
+        return "public_identity_drift"
+    if (
+        before.get("body_sha256") != after.get("body_sha256")
+        or before.get("public_rendered_hashes") != after.get("public_rendered_hashes")
+    ):
+        return "public_identity_drift"
+    if before != after:
+        return "stable_public_observation_mismatch"
+    return None
+
+
+def _volatile_observation_gates(before: dict[str, Any], after: dict[str, Any]) -> list[Any]:
+    before_headers = _cache_headers(before.get("cache_headers", {}))
+    after_headers = _cache_headers(after.get("cache_headers", {}))
+    timestamp_changed = before.get("observed_at") != after.get("observed_at") or before.get("observation_completed_at") != after.get("observation_completed_at")
+    cache_age_changed = before_headers.get("age") != after_headers.get("age")
+    return [
+        _gate("volatile_timestamp_change_allowed", "Apply observation timestamp may advance inside the bound window", True, ""),
+        _gate("volatile_cache_age_change_allowed", "Cache Age may change without weakening provider identity", True, ""),
+    ] if timestamp_changed or cache_age_changed else []
+
+
+def _raise_binding_conflict(code: str, message: str) -> None:
+    raise HTTPException(409, detail={"code": code, "message": message})
+
+
+def _preflight_conflict_code(gates: list[Any]) -> str:
+    failed = {gate.code for gate in gates if not gate.passed}
+    if failed & {"evidence", "public_observation_fresh", "lifetime", "backup_window"}:
+        return "public_observation_expired"
+    if failed & {
+        "cache_provider", "cache_headers_missing", "cache_provider_unrecognized",
+        "cache_header_value_invalid", "browser_public_state_verified_cache_provider_bound",
+    }:
+        return "cache_provider_drift"
+    if "browser_public_state_verified" in failed:
+        return "public_identity_drift"
+    return "stable_public_observation_mismatch"
+
+
+def _rendering_binding_hash(
+    request: WordPressCacheAwareRenderingPreflightRequest,
+    *,
+    snapshot: dict[str, Any],
+    artifact: dict[str, Any],
+    page_media: dict[str, Any],
+    audit_history: dict[str, Any],
+    stable_public_fingerprint: str,
+    preflight_observed_at: datetime,
+    expires_at: datetime | None,
+    backup_deadline: datetime,
+) -> str:
+    return _hash({
+        "action": "cache_aware_rendering",
+        "request": request.model_dump(mode="json", exclude={"manual_browser_evidence"}),
+        "evidence": _evidence_summary(request),
+        "plugin": _public_status(snapshot),
+        "artifact": artifact,
+        "page_media": page_media,
+        "audit_history": audit_history,
+        "stable_public_observation_fingerprint": stable_public_fingerprint,
+        "temporal_contract": {
+            "preflight_observed_at": _timestamp(preflight_observed_at).isoformat(),
+            "maximum_interval_seconds": int(MAX_OBSERVATION_INTERVAL.total_seconds()),
+            "clock_reversal_tolerance_seconds": int(CLOCK_REVERSAL_TOLERANCE.total_seconds()),
+            "evidence_captured_at": _timestamp(request.manual_browser_evidence.captured_at).isoformat(),
+            "evidence_expires_at": _timestamp(request.manual_browser_evidence.expires_at).isoformat(),
+            "handle_expires_at": _timestamp(expires_at).isoformat() if expires_at else None,
+            "backup_deadline": _timestamp(backup_deadline).isoformat(),
+        },
+    })
+
+
+def _cache_binding_hash(
+    *,
+    audit: WordPressCacheAwareRenderingAudit | None,
+    status: dict[str, Any],
+    preview: dict[str, Any],
+    stable_public_fingerprint: str,
+    preflight_observed_at: datetime,
+    expires_at: datetime | None,
+    backup_deadline: datetime,
+) -> str:
+    return _hash({
+        "audit": _audit_binding(audit),
+        "plugin": _public_status(status),
+        "origin": preview,
+        "stable_public_observation_fingerprint": stable_public_fingerprint,
+        "temporal_contract": {
+            "preflight_observed_at": _timestamp(preflight_observed_at).isoformat(),
+            "maximum_interval_seconds": int(MAX_OBSERVATION_INTERVAL.total_seconds()),
+            "clock_reversal_tolerance_seconds": int(CLOCK_REVERSAL_TOLERANCE.total_seconds()),
+            "handle_expires_at": _timestamp(expires_at).isoformat() if expires_at else None,
+            "backup_deadline": _timestamp(backup_deadline).isoformat(),
+        },
+    })
 
 
 def rendering_preflight(
@@ -152,6 +409,23 @@ def rendering_preflight(
         public_observation, request.manual_browser_evidence
     )
     cache_evidence = _siteground_cache_evidence(cache_headers)
+    stable_public_observation = _stable_public_observation(public_observation, request.manual_browser_evidence)
+    stable_public_fingerprint = _hash(stable_public_observation)
+    try:
+        public_observed_at = _public_observed_at(public_observation)
+    except (TypeError, ValueError, HTTPException):
+        public_observed_at = None
+    evidence_expires_at = _timestamp(request.manual_browser_evidence.expires_at)
+    evidence_captured_at = _timestamp(request.manual_browser_evidence.captured_at)
+    backup_deadline = _backup_deadline(proof.wordpress_backup_completed_at)
+    current_time = datetime.now(UTC)
+    public_time_valid = bool(
+        public_observed_at
+        and public_observed_at >= evidence_captured_at
+        and public_observed_at <= evidence_expires_at
+        and public_observed_at <= backup_deadline
+        and public_observed_at <= current_time + CLOCK_REVERSAL_TOLERANCE
+    )
     browser_public_state_verified = bool(
         evidence_ok
         and _rendered_metadata_absent(rendered)
@@ -195,6 +469,7 @@ def rendering_preflight(
             public_bound and cache_evidence.get("verified") is True and browser_public_state_verified,
             "The signed metadata-absent browser state is not safely bound to verified SiteGround provider evidence.",
         ),
+        _gate("public_observation_fresh", "Public provider observation is timezone-aware and inside evidence and backup windows", public_time_valid, "Public provider observation is missing, malformed, or expired."),
         _gate("read_only", "Inspection used WordPress GET/read operations only", observed.get("wordpress_request_methods") == ["GET"], "Inspection was not read-only."),
     ]
     ready = all(g.passed for g in gates)
@@ -202,22 +477,37 @@ def rendering_preflight(
     if ready and expires_at is None:
         expires_at = min(
             datetime.now(UTC) + HANDLE_TTL,
-            _timestamp(request.manual_browser_evidence.expires_at),
-            _backup_deadline(proof.wordpress_backup_completed_at),
+            evidence_expires_at,
+            backup_deadline,
         )
     if ready and (not expires_at or expires_at <= datetime.now(UTC)):
         ready = False
         gates.append(_gate("lifetime", "Authorization lifetime remains positive", False, "Evidence or backup expires before apply."))
-    binding_hash = _hash({
-        "action": "cache_aware_rendering", "request": request.model_dump(mode="json", exclude={"manual_browser_evidence"}),
-        "evidence": _evidence_summary(request), "plugin": _public_status(snapshot), "artifact": artifact,
-        "page_media": _page_media(observed), "public_http_observation": public_observation,
-        "cache_headers": cache_headers, "cache_evidence": cache_evidence,
-        "expires_at": expires_at.isoformat() if expires_at else None,
-    })
+    binding_observed_at = public_observed_at or datetime.min.replace(tzinfo=UTC)
+    binding_hash = _rendering_binding_hash(
+        request,
+        snapshot=snapshot,
+        artifact=artifact,
+        page_media=_page_media(observed),
+        audit_history={"staging": _audit_binding(staging), "recovery_disable": _audit_binding(recovery)},
+        stable_public_fingerprint=stable_public_fingerprint,
+        preflight_observed_at=binding_observed_at,
+        expires_at=expires_at,
+        backup_deadline=backup_deadline,
+    )
     handle = None
-    if ready and issue_handle and expires_at:
-        handle = _store_rendering(request, binding_hash, expires_at)
+    if ready and issue_handle and expires_at and public_observed_at:
+        handle = _store_rendering(
+            request,
+            binding_hash,
+            expires_at,
+            stable_public_observation_fingerprint=stable_public_fingerprint,
+            preflight_observed_at=public_observed_at,
+            evidence_captured_at=evidence_captured_at,
+            evidence_expires_at=evidence_expires_at,
+            backup_deadline=backup_deadline,
+            preflight_public_observation=public_observation,
+        )
     return WordPressCacheAwareRenderingPreflight(
         status="cache_aware_rendering_preflight_ready" if ready else "cache_aware_rendering_preflight_blocked",
         preflight_ready=ready,
@@ -230,7 +520,7 @@ def rendering_preflight(
         proposed_wordpress_write_scope=[f"PUT {RENDERING_PATH}", "rendering state only; payload and revision immutable"] if ready else [],
         proposed_cache_write_scope=[f"POST {CACHE_PATH}", f"one SiteGround purge for {CANONICAL_URL}"] if ready else [],
         proposed_atlas_write_scope=["create and transition one WordPressCacheAwareRenderingAudit", "finalize WordPressMetadataState only after origin and public verification"] if ready else [],
-        inspected_state={"plugin_status": _public_status(snapshot), "page_media": _page_media(observed), "public_http_observation": public_observation, "cache_headers": cache_headers, "cache_evidence": cache_evidence, "browser_public_state_verified": browser_public_state_verified, "artifact": artifact},
+        inspected_state={"plugin_status": _public_status(snapshot), "page_media": _page_media(observed), "audit_history": {"staging": _audit_binding(staging), "recovery_disable": _audit_binding(recovery)}, "public_http_observation": public_observation, "stable_public_observation": stable_public_observation, "stable_public_observation_fingerprint": stable_public_fingerprint, "public_observation_temporal": {"observed_at": public_observed_at.isoformat() if public_observed_at else None, "maximum_interval_seconds": int(MAX_OBSERVATION_INTERVAL.total_seconds()), "evidence_captured_at": evidence_captured_at.isoformat(), "evidence_expires_at": evidence_expires_at.isoformat(), "handle_expires_at": expires_at.isoformat() if expires_at else None, "backup_deadline": backup_deadline.isoformat()}, "cache_headers": cache_headers, "cache_evidence": cache_evidence, "browser_public_state_verified": browser_public_state_verified, "artifact": artifact},
         gate_results=gates,
     )
 
@@ -242,8 +532,43 @@ def rendering_apply(session: Session, page_id: int, request: WordPressCacheAware
         raise HTTPException(422, "The rendering confirmation phrase is incorrect.")
     entry = _consume_rendering(request.rendering_handle)
     rerun = rendering_preflight(session, page_id, entry.request, issue_handle=False, bound_expiry=entry.expires_at)
-    if not rerun.preflight_ready or rerun.binding_hash != entry.binding_hash:
-        raise HTTPException(409, "Rendering state changed. Run a fresh preflight.")
+    if not rerun.preflight_ready:
+        _raise_binding_conflict(_preflight_conflict_code(rerun.gate_results), "Rendering apply rerun failed a guarded preflight gate.")
+    rerun_public = rerun.inspected_state.get("public_http_observation", {})
+    rerun_stable = rerun.inspected_state.get("stable_public_observation", {})
+    stored_public = entry.preflight_public_observation or {}
+    stored_stable = _stable_public_observation(stored_public, entry.request.manual_browser_evidence)
+    conflict = _stable_observation_conflict(stored_stable, rerun_stable)
+    rerun_observed_at = _public_observed_at(rerun_public)
+    if conflict:
+        _raise_binding_conflict(conflict, "Stable public URL, provider, response, or signed identity changed after preflight.")
+    if entry.stable_public_observation_fingerprint != rerun.inspected_state.get("stable_public_observation_fingerprint"):
+        _raise_binding_conflict("stable_public_observation_mismatch", "Stable public observation fingerprint changed after preflight.")
+    if not entry.preflight_observed_at or not entry.backup_deadline:
+        _raise_binding_conflict("stable_public_observation_mismatch", "Rendering handle lacks the bound temporal contract.")
+    temporal_conflict = _temporal_conflict(
+        preflight_observed_at=entry.preflight_observed_at,
+        apply_observed_at=rerun_observed_at,
+        evidence_expires_at=entry.evidence_expires_at,
+        handle_expires_at=entry.expires_at,
+        backup_deadline=entry.backup_deadline,
+    )
+    if temporal_conflict:
+        _raise_binding_conflict(temporal_conflict, "Apply observation is outside the bound evidence, handle, backup, or elapsed-time window.")
+    candidate_binding = _rendering_binding_hash(
+        entry.request,
+        snapshot=rerun.inspected_state["plugin_status"],
+        artifact=rerun.inspected_state["artifact"],
+        page_media=rerun.inspected_state["page_media"],
+        audit_history=rerun.inspected_state["audit_history"],
+        stable_public_fingerprint=rerun.inspected_state["stable_public_observation_fingerprint"],
+        preflight_observed_at=entry.preflight_observed_at,
+        expires_at=entry.expires_at,
+        backup_deadline=entry.backup_deadline,
+    )
+    if candidate_binding != entry.binding_hash:
+        _raise_binding_conflict("stable_public_observation_mismatch", "A stable runtime, backup, plugin, payload, page, media, or audit binding changed.")
+    rerun.gate_results.extend(_volatile_observation_gates(stored_public, rerun_public))
     before = rerun.inspected_state["plugin_status"]
     audit = WordPressCacheAwareRenderingAudit(
         generated_page_id=41, wordpress_post_id=8, staging_audit_id=entry.request.staging_audit_id,
@@ -288,6 +613,14 @@ def cache_preflight(
     preview = _read_origin_preview(session) if audit else {"_error": "audit_unavailable"}
     observed = _observe(session, _audit_proof(audit)) if audit else _unavailable("audit_unavailable")
     public = _read_public_page()
+    stable_public_observation = _stable_public_observation(public)
+    stable_public_fingerprint = _hash(stable_public_observation)
+    try:
+        public_observed_at = _public_observed_at(public)
+    except (TypeError, ValueError, HTTPException):
+        public_observed_at = None
+    backup_deadline = _backup_deadline(_stored_backup_timestamp(audit)) if audit else datetime.min.replace(tzinfo=UTC)
+    public_time_valid = bool(public_observed_at and public_observed_at <= backup_deadline and public_observed_at <= datetime.now(UTC) + CLOCK_REVERSAL_TOLERANCE)
     gates = [
         _gate("audit", "Selected cache-aware audit is origin_verified", bool(audit and audit.status == "origin_verified"), "Origin-verified audit required."),
         _gate("rendering", "Rendering remains enabled with exact payload hash and revision 1", status.get("rendering_enabled") is True and status.get("payload_hash") == payload_sha256() and str(status.get("revision")) == "1", "Rendering or staged payload drifted."),
@@ -296,21 +629,40 @@ def cache_preflight(
         _gate("page_media", "Authenticated page, body, media, and site snapshots remain exact", bool(audit and _page_media(observed) == audit.page_media_snapshots), "Page, media, or site identity changed."),
         _gate("read_only", "Cache preflight used GET/read operations only", observed.get("wordpress_request_methods") == ["GET"], "Cache preflight was not read-only."),
         _gate("cache_provider", "Fixed SiteGround single-URL purge route is available", preview.get("cache_provider") == CACHE_PROVIDER and preview.get("cache_purge_available") is True and preview.get("cache_purge_scope") == CACHE_SCOPE, "Cache provider or route is unavailable."),
+        _gate("public_observation_fresh", "Cache observation is timezone-aware and inside the backup window", public_time_valid, "Cache observation is missing, malformed, or outside the backup window."),
     ]
     ready = all(g.passed for g in gates)
     expires_at = bound_expiry
     if ready and expires_at is None and audit:
-        expires_at = min(datetime.now(UTC) + HANDLE_TTL, _backup_deadline(_stored_backup_timestamp(audit)))
+        expires_at = min(datetime.now(UTC) + HANDLE_TTL, backup_deadline)
     if ready and (not expires_at or expires_at <= datetime.now(UTC)):
         ready = False
         gates.append(_gate("backup_window", "SiteGround backup remains within four hours", False, "Backup deadline expired."))
-    binding_hash = _hash({"audit": audit.id if audit else None, "status": audit.status if audit else None, "plugin": _public_status(status), "origin": preview, "public": public, "expires_at": expires_at.isoformat() if expires_at else None})
-    handle = _store_cache(audit.id, binding_hash, expires_at) if ready and issue_handle and audit and expires_at else None
+    binding_observed_at = public_observed_at or datetime.min.replace(tzinfo=UTC)
+    binding_hash = _cache_binding_hash(
+        audit=audit,
+        status=status,
+        preview=preview,
+        stable_public_fingerprint=stable_public_fingerprint,
+        preflight_observed_at=binding_observed_at,
+        expires_at=expires_at,
+        backup_deadline=backup_deadline,
+    )
+    handle = _store_cache(
+        audit.id,
+        binding_hash,
+        expires_at,
+        stable_public_observation_fingerprint=stable_public_fingerprint,
+        preflight_observed_at=public_observed_at,
+        backup_deadline=backup_deadline,
+        preflight_public_observation=public,
+    ) if ready and issue_handle and audit and expires_at and public_observed_at else None
     return WordPressCachePurgePreflight(
         status="cache_purge_preflight_ready" if ready else "cache_purge_preflight_blocked",
         preflight_ready=ready, cache_handle=handle, handle_fingerprint=_fingerprint(handle),
         binding_hash=binding_hash if ready else None, expires_at=expires_at if ready else None,
         confirmation_phrase=CACHE_PHRASE if ready else None, cache_target=CANONICAL_URL, gate_results=gates,
+        inspected_state={"plugin_status": _public_status(status), "origin_preview": preview, "public_http_observation": public, "stable_public_observation": stable_public_observation, "stable_public_observation_fingerprint": stable_public_fingerprint, "public_observation_temporal": {"observed_at": public_observed_at.isoformat() if public_observed_at else None, "maximum_interval_seconds": int(MAX_OBSERVATION_INTERVAL.total_seconds()), "handle_expires_at": expires_at.isoformat() if expires_at else None, "backup_deadline": backup_deadline.isoformat()}},
     )
 
 
@@ -321,11 +673,44 @@ def cache_apply(session: Session, page_id: int, request: WordPressCachePurgeAppl
         raise HTTPException(422, "The SiteGround cache-purge confirmation phrase is incorrect.")
     entry = _consume_cache(request.cache_handle)
     rerun = cache_preflight(session, page_id, WordPressCachePurgePreflightRequest(cache_aware_audit_id=entry.audit_id), issue_handle=False, bound_expiry=entry.expires_at)
-    if not rerun.preflight_ready or rerun.binding_hash != entry.binding_hash:
-        raise HTTPException(409, "Cache state changed. Run a fresh cache preflight.")
+    if not rerun.preflight_ready:
+        _raise_binding_conflict(_preflight_conflict_code(rerun.gate_results), "Cache apply rerun failed a guarded preflight gate.")
     audit = session.get(WordPressCacheAwareRenderingAudit, entry.audit_id)
     if not audit:
         raise HTTPException(404, "Cache-aware rendering audit not found.")
+    rerun_public = rerun.inspected_state.get("public_http_observation", {})
+    rerun_stable = rerun.inspected_state.get("stable_public_observation", {})
+    stored_public = entry.preflight_public_observation or {}
+    stored_stable = _stable_public_observation(stored_public)
+    conflict = _stable_observation_conflict(stored_stable, rerun_stable)
+    rerun_observed_at = _public_observed_at(rerun_public)
+    if conflict:
+        _raise_binding_conflict(conflict, "Stable public URL, provider, response, or identity changed after cache preflight.")
+    if entry.stable_public_observation_fingerprint != rerun.inspected_state.get("stable_public_observation_fingerprint"):
+        _raise_binding_conflict("stable_public_observation_mismatch", "Stable cache observation fingerprint changed after preflight.")
+    if not entry.preflight_observed_at or not entry.backup_deadline:
+        _raise_binding_conflict("stable_public_observation_mismatch", "Cache handle lacks the bound temporal contract.")
+    temporal_conflict = _temporal_conflict(
+        preflight_observed_at=entry.preflight_observed_at,
+        apply_observed_at=rerun_observed_at,
+        evidence_expires_at=None,
+        handle_expires_at=entry.expires_at,
+        backup_deadline=entry.backup_deadline,
+    )
+    if temporal_conflict:
+        _raise_binding_conflict(temporal_conflict, "Cache apply observation is outside the handle, backup, or elapsed-time window.")
+    candidate_binding = _cache_binding_hash(
+        audit=audit,
+        status=rerun.inspected_state["plugin_status"],
+        preview=rerun.inspected_state["origin_preview"],
+        stable_public_fingerprint=rerun.inspected_state["stable_public_observation_fingerprint"],
+        preflight_observed_at=entry.preflight_observed_at,
+        expires_at=entry.expires_at,
+        backup_deadline=entry.backup_deadline,
+    )
+    if candidate_binding != entry.binding_hash:
+        _raise_binding_conflict("stable_public_observation_mismatch", "A stable audit, plugin, origin, provider, or backup binding changed.")
+    rerun.gate_results.extend(_volatile_observation_gates(stored_public, rerun_public))
     audit.status = "pending_cache_purge"; audit.cache_handle_fingerprint = _fingerprint(request.cache_handle)
     audit.cache_binding_hash = entry.binding_hash; audit.cache_phrase_hash = hashlib.sha256(CACHE_PHRASE.encode()).hexdigest()
     audit.cache_provider = CACHE_PROVIDER; audit.cache_scope = CACHE_SCOPE; audit.cache_target = CANONICAL_URL
@@ -400,9 +785,11 @@ def _public_exact(value):
 
 
 def _read_public_page():
+    started_at = datetime.now(UTC)
     try:
         with httpx.Client(timeout=20, follow_redirects=False) as client:
             response = client.get(CANONICAL_URL, headers={"User-Agent": "Project-Atlas-Cache-Verification/0.59.70"})
+        completed_at = datetime.now(UTC)
         parsed = _parse_html(response.text)
         return {
             "status_code": response.status_code,
@@ -415,9 +802,14 @@ def _read_public_page():
             "head_hash": parsed.get("head_hash"),
             "visible_hash": parsed.get("visible_hash"),
             "media32_reference_present": "orlando-drywood-termite-tenting-hero-1.png" in response.text,
+            "observation_started_at": started_at.isoformat(),
+            "observation_completed_at": completed_at.isoformat(),
+            "observed_at": completed_at.isoformat(),
+            "elapsed_ms": max(0, int((completed_at - started_at).total_seconds() * 1000)),
         }
     except httpx.HTTPError as exc:
-        return {"_error": exc.__class__.__name__, "status_code": None, "final_url": None, "cache_headers": {}, "parsed": {}}
+        completed_at = datetime.now(UTC)
+        return {"_error": exc.__class__.__name__, "status_code": None, "final_url": None, "cache_headers": {}, "parsed": {}, "observation_started_at": started_at.isoformat(), "observation_completed_at": completed_at.isoformat(), "observed_at": completed_at.isoformat(), "elapsed_ms": max(0, int((completed_at - started_at).total_seconds() * 1000))}
 
 
 def _read_plugin_status(session): return _authenticated_json(session, "GET", "/wp-json/project-atlas/v1/status")
@@ -554,6 +946,16 @@ def _siteground_cache_evidence(headers):
 def _siteground_cache_present(headers): return _siteground_cache_evidence(headers)["verified"]
 def _siteground_cache_hit(headers): return _siteground_cache_evidence(headers).get("status_reason_code") == "cache_status_hit"
 def _cache_headers(headers): return sanitize_public_response_headers(headers)
+def _audit_binding(audit):
+    if audit is None:
+        return None
+    return {
+        key: getattr(audit, key, None)
+        for key in (
+            "id", "action_type", "status", "transition_history",
+            "wordpress_write_count", "cache_write_count", "atlas_write_count",
+        )
+    }
 
 
 def _public_observation_matches_evidence(observation, evidence):
@@ -685,16 +1087,46 @@ def _unavailable(reason): return {"_error": reason or "unavailable", "plugins": 
 def _fingerprint(handle): return hashlib.sha256(handle.encode()).hexdigest() if handle else None
 
 
-def _store_rendering(request, binding_hash, expires_at):
+def _store_rendering(
+    request,
+    binding_hash,
+    expires_at,
+    *,
+    stable_public_observation_fingerprint="",
+    preflight_observed_at=None,
+    evidence_captured_at=None,
+    evidence_expires_at=None,
+    backup_deadline=None,
+    preflight_public_observation=None,
+):
     handle = secrets.token_urlsafe(32)
     with _lock:
-        _rendering_handles[handle] = _RenderingHandle(request.model_copy(deep=True), binding_hash, expires_at)
+        _rendering_handles[handle] = _RenderingHandle(
+            request.model_copy(deep=True), binding_hash, expires_at,
+            stable_public_observation_fingerprint, preflight_observed_at,
+            evidence_captured_at, evidence_expires_at, backup_deadline,
+            deepcopy(preflight_public_observation) if preflight_public_observation is not None else None,
+        )
         _start_timer("rendering", handle, expires_at)
     return handle
-def _store_cache(audit_id, binding_hash, expires_at):
+def _store_cache(
+    audit_id,
+    binding_hash,
+    expires_at,
+    *,
+    stable_public_observation_fingerprint="",
+    preflight_observed_at=None,
+    backup_deadline=None,
+    preflight_public_observation=None,
+):
     handle = secrets.token_urlsafe(32)
     with _lock:
-        _cache_handles[handle] = _CacheHandle(audit_id, binding_hash, expires_at)
+        _cache_handles[handle] = _CacheHandle(
+            audit_id, binding_hash, expires_at,
+            stable_public_observation_fingerprint, preflight_observed_at,
+            backup_deadline,
+            deepcopy(preflight_public_observation) if preflight_public_observation is not None else None,
+        )
         _start_timer("cache", handle, expires_at)
     return handle
 def _consume_rendering(handle): return _consume("rendering", handle)
@@ -705,7 +1137,8 @@ def _consume(kind, handle):
         entry = store.pop(handle, None); timer = _timers.pop((kind, handle), None)
         if timer: timer.cancel()
     if not entry: raise HTTPException(422, f"{kind.title()} handle is unknown, expired, consumed, or cleared by restart.")
-    if entry.expires_at <= datetime.now(UTC): raise HTTPException(422, f"{kind.title()} handle expired.")
+    if entry.expires_at <= datetime.now(UTC):
+        _raise_binding_conflict("public_observation_expired", f"{kind.title()} handle expired.")
     return entry
 def _start_timer(kind, handle, expires_at):
     timer = Timer(max(0, (expires_at - datetime.now(UTC)).total_seconds()), _expire, args=(kind, handle)); timer.daemon = True; _timers[(kind, handle)] = timer; timer.start()

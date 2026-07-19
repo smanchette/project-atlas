@@ -1643,6 +1643,7 @@ class WordPressCachePurgePreflight(SQLModel):
     cache_scope: Literal["single_canonical_url"] = "single_canonical_url"
     cache_target: str
     gate_results: list[WordPressDraftGateResult]
+    inspected_state: dict[str, Any] = Field(default_factory=dict)
     inspection_only: Literal[True] = True
     wordpress_write_count: Literal[0] = 0
     cache_write_count: Literal[0] = 0
