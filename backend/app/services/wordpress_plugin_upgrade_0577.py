@@ -19,6 +19,7 @@ from sqlmodel import Session, select
 from app.models import (
     WordPressActivationAudit,
     WordPressBootstrapCleanupAudit,
+    WordPressBootstrapEstablishmentAudit,
     WordPressDeploymentAudit,
     WordPressMetadataLifecycleAudit,
     WordPressMetadataState,
@@ -137,6 +138,7 @@ def plugin_upgrade_preflight(
     activation = session.get(WordPressActivationAudit, request.activation_audit_id)
     prior_upgrades = list(session.exec(select(WordPressPluginUpgradeAudit)))
     cleanup_audits = list(session.exec(select(WordPressBootstrapCleanupAudit)))
+    establishment_audits = list(session.exec(select(WordPressBootstrapEstablishmentAudit)))
     lifecycle = list(session.exec(select(WordPressMetadataLifecycleAudit)))
     metadata_states = list(session.exec(select(WordPressMetadataState).where(WordPressMetadataState.generated_page_id == 41)))
     metadata_audits = list(session.exec(select(WordPressMetadataSyncAudit).where(WordPressMetadataSyncAudit.generated_page_id == 41)))
@@ -147,7 +149,7 @@ def plugin_upgrade_preflight(
         *bootstrap_artifact_gates,
         *_backup_gates(proof),
         *_upgrade_gates(
-            request, installation, activation, prior_upgrades, cleanup_audits, lifecycle,
+            request, installation, activation, prior_upgrades, cleanup_audits, establishment_audits, lifecycle,
             metadata_states, metadata_audits, observed, plugin_status,
             bootstrap_status, bootstrap_artifact, artifact, current_artifact, expected_post, evidence_valid,
             evidence_reason,
@@ -311,7 +313,7 @@ def assess_plugin_upgrade_recovery(
     )
 
 
-def _upgrade_gates(request, installation, activation, prior_upgrades, cleanup_audits, lifecycle, metadata_states, metadata_audits, observed, plugin_status, bootstrap_status, bootstrap_artifact, artifact, current_artifact, expected_post, evidence_valid, evidence_reason):
+def _upgrade_gates(request, installation, activation, prior_upgrades, cleanup_audits, establishment_audits, lifecycle, metadata_states, metadata_audits, observed, plugin_status, bootstrap_status, bootstrap_artifact, artifact, current_artifact, expected_post, evidence_valid, evidence_reason):
     matches = _matching_reconciliation_plugins(observed.get("plugins", []))
     rendered = observed.get("rendered", {})
     page = observed.get("page", {})
@@ -328,6 +330,7 @@ def _upgrade_gates(request, installation, activation, prior_upgrades, cleanup_au
     cleanup = next((audit for audit in cleanup_audits if audit.id == request.bootstrap_cleanup_audit_id), None)
     staging = next((audit for audit in lifecycle if audit.id == request.staging_audit_id), None)
     recovery_disable = next((audit for audit in lifecycle if audit.id == request.recovery_disable_audit_id), None)
+    establishment = max(establishment_audits, key=lambda item: item.id or 0, default=None)
     state = metadata_states[0] if len(metadata_states) == 1 else None
     unresolved = [audit for audit in prior_upgrades if audit.status in {"pending", "verification_failed"}]
     pending_lifecycle = [audit for audit in lifecycle if audit.status == "pending"]
@@ -344,6 +347,7 @@ def _upgrade_gates(request, installation, activation, prior_upgrades, cleanup_au
         _gate("bootstrap_cleanup_audit", "The bootstrap 0.2.0 cleanup audit is verified", bool(cleanup and cleanup.status == "verified" and cleanup.bootstrap_version == "0.2.0" and cleanup.bridge_version == CURRENT_VERSION), "Verified prior bootstrap-cleanup audit required."),
         _gate("staging_audit", "Staging audit 2 is verified for the exact payload", bool(staging and staging.action_type == "stage_metadata_payload" and staging.status == "verified" and staging.payload_hash == request.expected_payload_hash == EXPECTED_PAYLOAD_HASH and str(staging.final_revision) == "1" and staging.final_rendering_enabled is False), "Verified staging audit for the approved payload required."),
         _gate("recovery_disable_audit", "Recovery-disable audit is verified", bool(recovery_disable and recovery_disable.action_type == "disable_metadata_rendering" and recovery_disable.status == "verified" and recovery_disable.payload_hash == EXPECTED_PAYLOAD_HASH and str(recovery_disable.final_revision) == "1" and recovery_disable.final_rendering_enabled is False), "Verified recovery-disable audit required."),
+        _gate("bootstrap_establishment_audit", "The active 0.3.0 bootstrap passed immediate executable-checksum verification", bool(establishment and establishment.status == "verified" and establishment.bootstrap_path == "project-atlas-upgrade-bootstrap/project-atlas-upgrade-bootstrap.php" and establishment.bootstrap_version == BOOTSTRAP_VERSION and establishment.bootstrap_entry_sha256 == BOOTSTRAP_ENTRY_SHA256 and establishment.checksum_verification_result == "matched"), "A verified bootstrap-establishment audit is required; quarantine or unverified manual activation blocks upgrade."),
         _gate("upgrade_audit_clear", "No unresolved plugin upgrade exists", not unresolved, "An unresolved plugin upgrade already exists."),
         _gate("metadata_lifecycle_clear", "No metadata lifecycle action is pending", not pending_lifecycle, "A metadata lifecycle action is pending."),
         _gate("plugin_singleton", "Exactly one Metadata Bridge is installed", len(matches) == 1, "Plugin is missing, duplicated, wrapped, or malformed."),

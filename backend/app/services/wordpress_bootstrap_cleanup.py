@@ -14,6 +14,8 @@ from app.services import wordpress_bootstrap_cleanup_0577 as profile_0577
 
 
 def cleanup_preflight(session: Session, page_id: int, request: WordPressBootstrapCleanupPreflightRequest):
+    from app.services.wordpress_bootstrap_establishment import assert_no_establishment_quarantine
+    assert_no_establishment_quarantine(session)
     if request.expected_bootstrap_version == profile_0577.BOOTSTRAP_VERSION:
         return profile_0577.cleanup_preflight(session, page_id, request)
     if request.expected_bootstrap_version == profile_0576.BOOTSTRAP_VERSION:
@@ -24,6 +26,8 @@ def cleanup_preflight(session: Session, page_id: int, request: WordPressBootstra
 
 
 def deletion_preflight(session: Session, page_id: int, request: WordPressBootstrapDeletionPreflightRequest):
+    from app.services.wordpress_bootstrap_establishment import assert_no_establishment_quarantine
+    assert_no_establishment_quarantine(session)
     if request.expected_bootstrap_version == profile_0577.BOOTSTRAP_VERSION:
         return profile_0577.deletion_preflight(session, page_id, request)
     if request.expected_bootstrap_version == profile_0576.BOOTSTRAP_VERSION:
@@ -34,6 +38,8 @@ def deletion_preflight(session: Session, page_id: int, request: WordPressBootstr
 
 
 def deactivate_bootstrap(session: Session, page_id: int, request: WordPressBootstrapCleanupApplyRequest):
+    from app.services.wordpress_bootstrap_establishment import assert_no_establishment_quarantine
+    assert_no_establishment_quarantine(session)
     if request.confirmation_phrase == profile_0577.DEACTIVATION_PHRASE:
         return profile_0577.deactivate_bootstrap(session, page_id, request)
     if request.confirmation_phrase == profile_0576.DEACTIVATION_PHRASE:
@@ -42,6 +48,8 @@ def deactivate_bootstrap(session: Session, page_id: int, request: WordPressBoots
 
 
 def delete_bootstrap(session: Session, page_id: int, request: WordPressBootstrapCleanupApplyRequest):
+    from app.services.wordpress_bootstrap_establishment import assert_no_establishment_quarantine
+    assert_no_establishment_quarantine(session)
     if request.confirmation_phrase == profile_0577.DELETION_PHRASE:
         return profile_0577.delete_bootstrap(session, page_id, request)
     if request.confirmation_phrase == profile_0576.DELETION_PHRASE:

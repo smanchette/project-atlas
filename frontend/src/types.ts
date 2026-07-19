@@ -982,6 +982,21 @@ export type WordPressPluginUpgradeRecoveryAssessment = {
   gate_results:WordPressDeploymentGate[]; inspected_state:Record<string,unknown>;
   wordpress_write_count:0; atlas_write_count:0; automatic_recovery_performed:false;
 };
+export type WordPressBootstrapEstablishmentPreflight = {
+  page_id:41; wordpress_post_id:8; stage:string; ready:boolean; status:string;
+  establishment_audit_id?:number|null; handle?:string|null; handle_fingerprint?:string|null;
+  binding_hash?:string|null; confirmation_phrase?:string|null; expires_at?:string|null;
+  backup_deadline?:string|null; artifact:Record<string,unknown>; inspected_state:Record<string,unknown>;
+  gate_results:WordPressDeploymentGate[]; instructions:string[];
+  wordpress_write_count:0; cache_write_count:0; atlas_write_count:0;
+};
+export type WordPressBootstrapEstablishmentResult = {
+  page_id:41; wordpress_post_id:8; establishment_audit_id:number; stage:string; status:string;
+  state_history:string[]; binding_hash:string; gate_results:WordPressDeploymentGate[];
+  inspected_state:Record<string,unknown>; wordpress_write_count:number; wordpress_write_scope:string[];
+  cache_write_count:0; atlas_write_count:number; atlas_write_scope:string[];
+  recovery_recommendation:string; further_action_required:boolean;
+};
 export type WordPressMetadataVerification = { status: "verified" | "failed" | "not_applied"; metadata_correct: boolean; apply_needed: boolean; payload_hash: string; live_payload_hash?: string | null; gate_results: WordPressMetadataGate[]; read_only: true };
 export type WordPressMetadataRollbackDryRun = { status: "blocked" | "rollback_ready"; ready: boolean; current_payload_hash?: string | null; gate_results: WordPressMetadataGate[]; confirmation_token?: string | null; confirmation_phrase?: string | null; expires_at?: string | null };
 

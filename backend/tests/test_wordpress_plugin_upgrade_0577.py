@@ -14,6 +14,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.models import (
     WordPressBootstrapCleanupAudit,
+    WordPressBootstrapEstablishmentAudit,
     WordPressMetadataLifecycleAudit,
     WordPressMetadataState,
     WordPressPluginUpgradeAudit,
@@ -209,6 +210,22 @@ def lifecycle_audit(audit_id, action, status_value, final_rendering, *, payload_
 
 def seed(session):
     seed_installation_and_activation(session)
+    session.add(WordPressBootstrapEstablishmentAudit(
+        id=1, generated_page_id=41, wordpress_post_id=8, installation_audit_id=1, activation_audit_id=1,
+        status="verified", operator="Shawn Manchette", bootstrap_slug="project-atlas-upgrade-bootstrap",
+        bootstrap_directory="project-atlas-upgrade-bootstrap", bootstrap_path="project-atlas-upgrade-bootstrap/project-atlas-upgrade-bootstrap.php",
+        bootstrap_version="0.3.0", bootstrap_zip_filename="project-atlas-upgrade-bootstrap-0.3.0.zip",
+        bootstrap_zip_sha256=upgrade.BOOTSTRAP_ZIP_SHA256, bootstrap_entry_sha256=upgrade.BOOTSTRAP_ENTRY_SHA256,
+        manual_phrase_hash="a" * 64, activation_phrase_hash="b" * 64, manual_handle_fingerprint="c" * 64,
+        activation_handle_fingerprint="d" * 64, manual_binding_hash="e" * 64, activation_binding_hash="f" * 64,
+        release_identity={}, backup_evidence={}, browser_evidence_id="bootstrap-establishment", pre_snapshot={},
+        upload_snapshot={}, final_snapshot={}, source_inventories={}, upload_inventories={}, final_inventories={},
+        protected_state={}, gate_results=[], inactive_checksum_verifiable=False, approved_residual_risk=True,
+        checksum_verification_source=upgrade.BOOTSTRAP_STATUS_ROUTE, checksum_verification_result="matched",
+        wordpress_write_count=1, cache_write_count=0, atlas_write_count=3,
+        transition_history=["awaiting_manual_bootstrap_installation", "manual_installation_inventory_verified", "activation_pending_checksum_verification", "verified"],
+        recovery_recommendation="proceed_to_bridge_upgrade", completed_at=datetime.now(UTC),
+    ))
     session.add(WordPressPluginUpgradeAudit(
         id=1, generated_page_id=41, wordpress_post_id=8, installation_audit_id=1, activation_audit_id=1,
         status="verified", operator="Shawn Manchette", confirmation_phrase_hash="a" * 64, handle_fingerprint="b" * 64,
@@ -283,6 +300,21 @@ def test_0576_preflight_is_zero_write_and_profile_is_exact(monkeypatch, db):
         assert result.confirmation_phrase == upgrade.UPGRADE_PHRASE
         assert result.wordpress_write_count == result.atlas_write_count == 0
         assert session.exec(select(WordPressPluginUpgradeAudit)).all()[0].target_version == "0.57.5"
+
+
+@pytest.mark.parametrize("status_value", ["activation_pending_checksum_verification", "checksum_mismatch", "checksum_unavailable", "recovery_required"])
+def test_0577_upgrade_is_blocked_during_bootstrap_quarantine(monkeypatch, db, status_value):
+    before = configure(monkeypatch)
+    with Session(db) as session:
+        seed(session)
+        establishment = session.get(WordPressBootstrapEstablishmentAudit, 1)
+        establishment.status = status_value
+        establishment.checksum_verification_result = None
+        session.add(establishment); session.commit()
+        result = upgrade.plugin_upgrade_preflight(session, 41, request(before))
+        assert not result.plugin_upgrade_preflight_ready
+        assert result.upgrade_handle is None
+        assert "bootstrap_establishment_audit" in {gate.code for gate in result.gate_results if not gate.passed}
 
 
 def test_0576_apply_preserves_staged_state_and_defers_preview_output(monkeypatch, db):

@@ -601,6 +601,66 @@ class WordPressBootstrapCleanupAudit(SQLModel, table=True):
     error_message: str | None = Field(default=None, max_length=2000)
 
 
+class WordPressBootstrapEstablishmentAudit(SQLModel, table=True):
+    """Durable record for the audited manual bootstrap handoff and fixed activation."""
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('awaiting_manual_bootstrap_installation','manual_installation_inventory_verified','activation_pending_checksum_verification','verified','manual_installation_mismatch','manual_activation_detected','installation_partial','checksum_mismatch','checksum_unavailable','verification_failed','recovery_required')",
+            name="ck_wordpressbootstrapestablishmentaudit_status",
+        ),
+        UniqueConstraint("manual_handle_fingerprint", name="uq_bootstrapestablishment_manual_handle"),
+        UniqueConstraint("activation_handle_fingerprint", name="uq_bootstrapestablishment_activation_handle"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
+    wordpress_post_id: int = Field(index=True)
+    installation_audit_id: int = Field(foreign_key="wordpressdeploymentaudit.id", index=True)
+    activation_audit_id: int = Field(foreign_key="wordpressactivationaudit.id", index=True)
+    action_type: str = Field(default="establish_upgrade_bootstrap_0_3_0", max_length=80, index=True)
+    status: str = Field(default="awaiting_manual_bootstrap_installation", max_length=64, index=True)
+    operator: str = Field(max_length=200)
+    bootstrap_slug: str = Field(max_length=100)
+    bootstrap_directory: str = Field(max_length=160)
+    bootstrap_path: str = Field(max_length=255)
+    bootstrap_version: str = Field(max_length=32)
+    bootstrap_zip_filename: str = Field(max_length=180)
+    bootstrap_zip_sha256: str = Field(max_length=64)
+    bootstrap_entry_sha256: str = Field(max_length=64)
+    manual_phrase_hash: str = Field(max_length=64)
+    activation_phrase_hash: str = Field(max_length=64)
+    manual_handle_fingerprint: str = Field(max_length=64, index=True)
+    activation_handle_fingerprint: str | None = Field(default=None, max_length=64, index=True)
+    manual_binding_hash: str = Field(max_length=64, index=True)
+    activation_binding_hash: str | None = Field(default=None, max_length=64, index=True)
+    release_identity: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    backup_evidence: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    browser_evidence_id: str = Field(max_length=200)
+    pre_snapshot: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    upload_snapshot: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    final_snapshot: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    source_inventories: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    upload_inventories: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    final_inventories: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    protected_state: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    gate_results: list[dict[str, Any]] = Field(sa_column=Column(JSON, nullable=False))
+    inactive_checksum_verifiable: bool = Field(default=False)
+    approved_residual_risk: bool = Field(default=True)
+    checksum_verification_source: str | None = Field(default=None, max_length=160)
+    checksum_verification_result: str | None = Field(default=None, max_length=80)
+    wordpress_write_count: int = Field(default=0)
+    wordpress_write_scope: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    cache_write_count: int = Field(default=0)
+    atlas_write_count: int = Field(default=0)
+    atlas_write_scope: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    transition_history: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    recovery_recommendation: str | None = Field(default=None, max_length=80)
+    attempted_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    completed_at: datetime | None = None
+    error_code: str | None = Field(default=None, max_length=80)
+    error_message: str | None = Field(default=None, max_length=2000)
+
+
 class WordPressMetadataLifecycleAudit(SQLModel, table=True):
     """Durable record for one isolated Metadata Bridge lifecycle mutation."""
 

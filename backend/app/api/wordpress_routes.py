@@ -69,6 +69,13 @@ from app.schemas.wordpress import (
     WordPressPluginUpgradeRecoveryAssessment,
     WordPressPluginUpgradeRecoveryRequest,
     WordPressPluginUpgradeResult,
+    WordPressBootstrapManualInstallPreflightRequest,
+    WordPressBootstrapManualInstallAuthorizeRequest,
+    WordPressBootstrapManualInstallVerifyRequest,
+    WordPressBootstrapActivationApplyRequest,
+    WordPressBootstrapEstablishmentPreflight,
+    WordPressBootstrapEstablishmentResult,
+    WordPressBootstrapRecoveryAssessment,
     WordPressBootstrapCleanupApplyRequest,
     WordPressBootstrapCleanupPreflight,
     WordPressBootstrapCleanupPreflightRequest,
@@ -163,6 +170,14 @@ from app.services.wordpress_bootstrap_cleanup import (
     deactivate_bootstrap,
     delete_bootstrap,
     deletion_preflight,
+)
+from app.services.wordpress_bootstrap_establishment import (
+    activation_preflight as bootstrap_establishment_activation_preflight,
+    apply_activation as bootstrap_establishment_activation_apply,
+    assess_recovery as bootstrap_establishment_recovery_assess,
+    authorize_manual_install as bootstrap_manual_install_authorize,
+    manual_install_preflight as bootstrap_manual_install_preflight,
+    verify_manual_install as bootstrap_manual_install_verify,
 )
 from app.services.wordpress_metadata_lifecycle import (
     disable_apply,
@@ -318,6 +333,72 @@ def metadata_bridge_upgrade_recovery_assess(
     session: Session = Depends(get_session),
 ) -> WordPressPluginUpgradeRecoveryAssessment:
     return assess_plugin_upgrade_recovery(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/manual-install/preflight/{page_id}",
+    response_model=WordPressBootstrapEstablishmentPreflight,
+)
+def upgrade_bootstrap_manual_install_preflight(
+    page_id: int, payload: WordPressBootstrapManualInstallPreflightRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapEstablishmentPreflight:
+    return bootstrap_manual_install_preflight(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/manual-install/authorize/{page_id}",
+    response_model=WordPressBootstrapEstablishmentResult,
+)
+def upgrade_bootstrap_manual_install_authorize(
+    page_id: int, payload: WordPressBootstrapManualInstallAuthorizeRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapEstablishmentResult:
+    return bootstrap_manual_install_authorize(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/manual-install/verify/{page_id}",
+    response_model=WordPressBootstrapEstablishmentResult,
+)
+def upgrade_bootstrap_manual_install_verify(
+    page_id: int, payload: WordPressBootstrapManualInstallVerifyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapEstablishmentResult:
+    return bootstrap_manual_install_verify(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/activation/preflight/{page_id}",
+    response_model=WordPressBootstrapEstablishmentPreflight,
+)
+def upgrade_bootstrap_activation_preflight(
+    page_id: int, payload: WordPressBootstrapManualInstallVerifyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapEstablishmentPreflight:
+    return bootstrap_establishment_activation_preflight(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/activation/apply/{page_id}",
+    response_model=WordPressBootstrapEstablishmentResult,
+)
+def upgrade_bootstrap_activation_apply(
+    page_id: int, payload: WordPressBootstrapActivationApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapEstablishmentResult:
+    return bootstrap_establishment_activation_apply(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/recovery/assess/{page_id}",
+    response_model=WordPressBootstrapRecoveryAssessment,
+)
+def upgrade_bootstrap_establishment_recovery_assess(
+    page_id: int, payload: WordPressBootstrapManualInstallVerifyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapRecoveryAssessment:
+    return bootstrap_establishment_recovery_assess(session, page_id, payload)
 
 
 @router.post(

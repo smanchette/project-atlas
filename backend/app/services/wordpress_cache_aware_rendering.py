@@ -385,6 +385,8 @@ def rendering_preflight(
     bound_expiry: datetime | None = None,
 ) -> WordPressCacheAwareRenderingPreflight:
     """Inspect the exact disabled staged state. This function performs zero writes."""
+    from app.services.wordpress_bootstrap_establishment import assert_no_establishment_quarantine
+    assert_no_establishment_quarantine(session)
     _target(page_id)
     proof = _backup_proof(request)
     evidence_ok, evidence_reason = validate_manual_browser_evidence(
@@ -607,6 +609,8 @@ def cache_preflight(
     bound_expiry: datetime | None = None,
 ) -> WordPressCachePurgePreflight:
     """Prove origin correctness and public staleness without writing."""
+    from app.services.wordpress_bootstrap_establishment import assert_no_establishment_quarantine
+    assert_no_establishment_quarantine(session)
     _target(page_id)
     audit = session.get(WordPressCacheAwareRenderingAudit, request.cache_aware_audit_id)
     status = _read_plugin_status(session) if audit else {"_error": "audit_unavailable"}

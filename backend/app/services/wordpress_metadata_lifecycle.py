@@ -190,6 +190,8 @@ def lifecycle_preflight(
     bound_expiry: datetime | None = None,
 ) -> WordPressMetadataLifecyclePreflight:
     """Run the shared inspection. This function performs no Atlas or WordPress write."""
+    from app.services.wordpress_bootstrap_establishment import assert_no_establishment_quarantine
+    assert_no_establishment_quarantine(session)
     _target(page_id)
     proof = WordPressDeploymentBackupEvidence.model_validate(
         request.model_dump(mode="json", include=set(WordPressDeploymentBackupEvidence.model_fields))

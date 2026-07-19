@@ -1378,6 +1378,86 @@ class WordPressPluginUpgradeRecoveryAssessment(SQLModel):
     automatic_recovery_performed: Literal[False] = False
 
 
+class WordPressBootstrapManualInstallPreflightRequest(WordPressPluginUpgradePreflightRequest):
+    """The fixed 0.3.0 manual-upload proof; no artifact selector is accepted."""
+
+
+class WordPressBootstrapManualInstallAuthorizeRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    manual_install_handle: str = Field(min_length=32, max_length=200)
+    confirmation_phrase: str = Field(min_length=1, max_length=120)
+
+
+class WordPressBootstrapManualInstallVerifyRequest(WordPressPluginUpgradePreflightRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    establishment_audit_id: int = Field(gt=0)
+
+
+class WordPressBootstrapActivationApplyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    activation_handle: str = Field(min_length=32, max_length=200)
+    confirmation_phrase: str = Field(min_length=1, max_length=120)
+
+
+class WordPressBootstrapEstablishmentPreflight(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    stage: str
+    ready: bool
+    status: str
+    establishment_audit_id: int | None = None
+    handle: str | None = None
+    handle_fingerprint: str | None = None
+    binding_hash: str | None = None
+    confirmation_phrase: str | None = None
+    expires_at: datetime | None = None
+    backup_deadline: datetime | None = None
+    artifact: dict[str, Any]
+    inspected_state: dict[str, Any]
+    gate_results: list[WordPressDraftGateResult]
+    instructions: list[str] = Field(default_factory=list)
+    wordpress_write_count: Literal[0] = 0
+    cache_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+
+
+class WordPressBootstrapEstablishmentResult(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    establishment_audit_id: int
+    stage: str
+    status: str
+    state_history: list[str]
+    binding_hash: str
+    gate_results: list[WordPressDraftGateResult]
+    inspected_state: dict[str, Any]
+    wordpress_write_count: int
+    wordpress_write_scope: list[str]
+    cache_write_count: Literal[0] = 0
+    atlas_write_count: int
+    atlas_write_scope: list[str]
+    recovery_recommendation: str
+    further_action_required: bool
+
+
+class WordPressBootstrapRecoveryAssessment(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    establishment_audit_id: int
+    status: Literal["recovery_assessment_complete", "recovery_assessment_blocked"]
+    classification: str
+    recommendation: Literal["no_action", "proceed_to_bridge_upgrade", "guarded_bootstrap_recovery", "guarded_bootstrap_cleanup", "retry_from_fresh_backup", "siteground_restore"]
+    gate_results: list[WordPressDraftGateResult]
+    inspected_state: dict[str, Any]
+    wordpress_write_count: Literal[0] = 0
+    cache_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+    automatic_recovery_performed: Literal[False] = False
+
+
 class WordPressBootstrapCleanupPreflightRequest(WordPressDeploymentBackupEvidence):
     """Immutable proof for deactivating the fixed upgrade bootstrap."""
 
