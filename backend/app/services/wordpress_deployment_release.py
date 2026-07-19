@@ -58,15 +58,15 @@ class RuntimeReleaseIdentity:
 
 SOURCE_EXPECTATIONS = DeploymentSourceExpectations(
     manifest_schema_version=2,
-    source_compatibility_id="project-atlas-release-identity-v0.59.78",
-    plugin_version="0.57.6",
-    plugin_zip_filename="project-atlas-metadata-bridge-0.57.6.zip",
-    plugin_zip_sha256="3b2d0035f995c3006e0d3be02596bd2cf19ef7e4a97572168621beb7a9abf788",
-    plugin_source_sha256="efddfaec49b876f2db7ef3440484f3373ea67b9da1b9145e47bdb9bd630d65f5",
+    source_compatibility_id="project-atlas-release-identity-v0.59.79",
+    plugin_version="0.57.7",
+    plugin_zip_filename="project-atlas-metadata-bridge-0.57.7.zip",
+    plugin_zip_sha256="ada4d97ea627a148d07fda809c1776a91a87d7a7e4957de3bece423a9bb80a62",
+    plugin_source_sha256="3ee9c323103190e182970ee71631720814cc1d3590629fefb1f044cb6b1bcc5f",
     plugin_slug="project-atlas-metadata-bridge",
     plugin_entry_path="project-atlas-metadata-bridge/project-atlas-metadata-bridge.php",
-    artifact_relative_path="wordpress/dist/project-atlas-metadata-bridge-0.57.6.zip",
-    source_relative_path="wordpress/project-atlas-metadata-bridge-0.57.6",
+    artifact_relative_path="wordpress/dist/project-atlas-metadata-bridge-0.57.7.zip",
+    source_relative_path="wordpress/project-atlas-metadata-bridge-0.57.7",
 )
 MANIFEST_FIELDS = {
     "manifest_schema_version",

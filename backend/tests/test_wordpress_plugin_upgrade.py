@@ -631,7 +631,7 @@ def test_target_and_current_zip_contracts_are_locked():
     assert upgrade._target_entry_sha256()
     assert upgrade._target_artifact_disables_legacy_route()
     assert upgrade.ZIP_SHA256 == "09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7"
-    assert deployment.ZIP_SHA256 == "3b2d0035f995c3006e0d3be02596bd2cf19ef7e4a97572168621beb7a9abf788"
+    assert deployment.ZIP_SHA256 == "ada4d97ea627a148d07fda809c1776a91a87d7a7e4957de3bece423a9bb80a62"
 
 
 def test_upgrade_audit_is_in_data_backup_v036_contract():

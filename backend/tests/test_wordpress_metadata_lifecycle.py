@@ -45,7 +45,7 @@ ZIP_CHECKSUM = "09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7
 def optimistic_snapshot(**changes):
     value = {
         "plugin": "project-atlas-metadata-bridge",
-        "version": "0.57.6",
+        "version": "0.57.7",
         "checksum": EXECUTABLE_CHECKSUM,
         "active": True,
         "rendering_enabled": False,
@@ -733,7 +733,7 @@ def test_handle_rejects_wrong_action_and_restart():
 
 def test_plugin_contract_has_four_isolated_mutations_and_disables_legacy_apply():
     source = (resolve_program_root() / "wordpress/project-atlas-metadata-bridge/project-atlas-metadata-bridge.php").read_text(encoding="utf-8")
-    assert "Version: 0.57.5" in source
+    assert "Version: 0.57.7" in source
     assert "atlas_legacy_combined_apply_disabled" in source
     for callback in ("atlas_metadata_stage", "atlas_metadata_rendering_enable", "atlas_metadata_rendering_disable", "atlas_metadata_stage_rollback"):
         assert f"function {callback}" in source

@@ -1,4 +1,4 @@
-"""Strict Metadata Bridge 0.57.5 to 0.57.6 guarded upgrade profile."""
+"""Strict Metadata Bridge 0.57.6 to 0.57.7 guarded upgrade profile."""
 
 from __future__ import annotations
 
@@ -56,26 +56,23 @@ from app.services.wordpress_deployment import (
     _target,
     _verify_artifact,
 )
-from app.services.wordpress_deployment_release import resolve_program_root
+from app.services.wordpress_deployment_release import release_paths, resolve_program_root
 from app.services.wordpress_rendered_state import EXPECTED_H1, validate_manual_browser_evidence
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 
 
-CURRENT_VERSION = "0.57.5"
-CURRENT_ZIP_NAME = "project-atlas-metadata-bridge-0.57.5.zip"
-CURRENT_ZIP_SHA256 = "09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7"
-TARGET_VERSION = "0.57.6"
-ZIP_NAME = "project-atlas-metadata-bridge-0.57.6.zip"
-ZIP_SHA256 = "3b2d0035f995c3006e0d3be02596bd2cf19ef7e4a97572168621beb7a9abf788"
-SOURCE_SHA256 = "efddfaec49b876f2db7ef3440484f3373ea67b9da1b9145e47bdb9bd630d65f5"
-UPGRADE_PHRASE = "UPGRADE PROJECT ATLAS METADATA BRIDGE TO 0.57.6"
+CURRENT_VERSION = "0.57.6"
+CURRENT_ZIP_NAME = "project-atlas-metadata-bridge-0.57.6.zip"
+CURRENT_ZIP_SHA256 = "3b2d0035f995c3006e0d3be02596bd2cf19ef7e4a97572168621beb7a9abf788"
+TARGET_VERSION = "0.57.7"
+UPGRADE_PHRASE = "UPGRADE PROJECT ATLAS METADATA BRIDGE TO 0.57.7"
 UPGRADE_TTL = timedelta(minutes=10)
-BOOTSTRAP_VERSION = "0.2.0"
-BOOTSTRAP_STATUS_ROUTE = "/project-atlas-deployment/v1/metadata-bridge/upgrade-0576/status"
-BOOTSTRAP_UPGRADE_ROUTE = "/project-atlas-deployment/v1/metadata-bridge/upgrade-0576"
-BOOTSTRAP_ZIP_NAME = "project-atlas-upgrade-bootstrap-0.2.0.zip"
-BOOTSTRAP_ZIP_SHA256 = "873701da2ed42212e7d7c9b12816eeb0560d2751d7494c2b706008c0d5c1383a"
-BOOTSTRAP_ENTRY_SHA256 = "7a34d1ae07f61a63d242395cb8d1de22668b1ffb8a78c1c85a7c86d3ee92a2e4"
+BOOTSTRAP_VERSION = "0.3.0"
+BOOTSTRAP_STATUS_ROUTE = "/project-atlas-deployment/v1/metadata-bridge/upgrade-0577/status"
+BOOTSTRAP_UPGRADE_ROUTE = "/project-atlas-deployment/v1/metadata-bridge/upgrade-0577"
+BOOTSTRAP_ZIP_NAME = "project-atlas-upgrade-bootstrap-0.3.0.zip"
+BOOTSTRAP_ZIP_SHA256 = "de5bfb7875b6f84f2009ef2043c1c86c7f9d20f0f973a5cb16b478fe37e83bef"
+BOOTSTRAP_ENTRY_SHA256 = "a977c077573ab732213a06d17dcc317b09854564777ce9cb24c869383972cd53"
 UPGRADE_WORDPRESS_SCOPE = [
     f"POST /wp-json{BOOTSTRAP_UPGRADE_ROUTE}",
     f"multipart artifact fixed to {ZIP_NAME} and SHA-256 {ZIP_SHA256}",
@@ -343,21 +340,21 @@ def _upgrade_gates(request, installation, activation, prior_upgrades, cleanup_au
         _gate("no_post_backup_change", "No relevant WordPress change followed the SiteGround backup", request.no_relevant_wordpress_change_after_backup, "A post-backup WordPress change requires a fresh backup."),
         _gate("installation_audit", "Installation audit 1 is verified", bool(installation and installation.id == 1 and installation.status == "verified"), "Verified installation audit 1 required."),
         _gate("activation_audit", "Activation audit 1 is verified", bool(activation and activation.id == 1 and activation.status == "verified"), "Verified activation audit 1 required."),
-        _gate("previous_upgrade_audit", "The 0.57.4 to 0.57.5 upgrade audit is verified", bool(previous_upgrade and previous_upgrade.status == "verified" and previous_upgrade.previous_version == "0.57.4" and previous_upgrade.target_version == CURRENT_VERSION and previous_upgrade.recovery_recommendation == "no_action"), "Verified prior bridge-upgrade audit required."),
-        _gate("bootstrap_cleanup_audit", "The bootstrap 0.1.0 cleanup audit is verified", bool(cleanup and cleanup.status == "verified" and cleanup.bootstrap_version == "0.1.0" and cleanup.bridge_version == CURRENT_VERSION), "Verified prior bootstrap-cleanup audit required."),
+        _gate("previous_upgrade_audit", "The 0.57.5 to 0.57.6 upgrade audit is verified", bool(previous_upgrade and previous_upgrade.status == "verified" and previous_upgrade.previous_version == "0.57.5" and previous_upgrade.target_version == CURRENT_VERSION and previous_upgrade.recovery_recommendation == "no_action"), "Verified prior bridge-upgrade audit required."),
+        _gate("bootstrap_cleanup_audit", "The bootstrap 0.2.0 cleanup audit is verified", bool(cleanup and cleanup.status == "verified" and cleanup.bootstrap_version == "0.2.0" and cleanup.bridge_version == CURRENT_VERSION), "Verified prior bootstrap-cleanup audit required."),
         _gate("staging_audit", "Staging audit 2 is verified for the exact payload", bool(staging and staging.action_type == "stage_metadata_payload" and staging.status == "verified" and staging.payload_hash == request.expected_payload_hash == EXPECTED_PAYLOAD_HASH and str(staging.final_revision) == "1" and staging.final_rendering_enabled is False), "Verified staging audit for the approved payload required."),
-        _gate("recovery_disable_audit", "Recovery-disable audit 4 is verified", bool(recovery_disable and recovery_disable.action_type == "disable_metadata_rendering" and recovery_disable.status == "verified" and recovery_disable.payload_hash == EXPECTED_PAYLOAD_HASH and str(recovery_disable.final_revision) == "1" and recovery_disable.final_rendering_enabled is False), "Verified recovery-disable audit required."),
+        _gate("recovery_disable_audit", "Recovery-disable audit is verified", bool(recovery_disable and recovery_disable.action_type == "disable_metadata_rendering" and recovery_disable.status == "verified" and recovery_disable.payload_hash == EXPECTED_PAYLOAD_HASH and str(recovery_disable.final_revision) == "1" and recovery_disable.final_rendering_enabled is False), "Verified recovery-disable audit required."),
         _gate("upgrade_audit_clear", "No unresolved plugin upgrade exists", not unresolved, "An unresolved plugin upgrade already exists."),
         _gate("metadata_lifecycle_clear", "No metadata lifecycle action is pending", not pending_lifecycle, "A metadata lifecycle action is pending."),
         _gate("plugin_singleton", "Exactly one Metadata Bridge is installed", len(matches) == 1, "Plugin is missing, duplicated, wrapped, or malformed."),
         _gate("plugin_active", "Metadata Bridge is active", len(matches) == 1 and matches[0].get("status") in {"active", "network-active"}, "Plugin must be active before upgrade."),
-        _gate("current_version", "Installed version is exactly 0.57.5", len(matches) == 1 and matches[0].get("version") == request.current_plugin_version == CURRENT_VERSION and plugin_status.get("version") == CURRENT_VERSION, "Current plugin version differs."),
+        _gate("current_version", "Installed version is exactly 0.57.6", len(matches) == 1 and matches[0].get("version") == request.current_plugin_version == CURRENT_VERSION and plugin_status.get("version") == CURRENT_VERSION, "Current plugin version differs."),
         _gate("plugin_identity", "Slug and entry path are exact", len(matches) == 1 and request.current_plugin_slug == PLUGIN_SLUG and request.current_plugin_path == PLUGIN_FILE and _normalize_plugin_identifier(matches[0].get("plugin")).authorized_entry_path == PLUGIN_FILE, "Plugin identity differs."),
-        _gate("current_entry_checksum", "Remote executable entry matches the authorized 0.57.5 artifact", plugin_status.get("checksum") == current_artifact.get("entry_sha256"), "Installed executable checksum differs from 0.57.5."),
+        _gate("current_entry_checksum", "Remote executable entry matches the authorized 0.57.6 artifact", plugin_status.get("checksum") == current_artifact.get("entry_sha256"), "Installed executable checksum differs from 0.57.6."),
         _gate("current_artifact", "Current ZIP filename and checksum are exact", request.current_zip_filename == CURRENT_ZIP_NAME and request.current_zip_sha256 == CURRENT_ZIP_SHA256 == current_artifact.get("zip_sha256"), "Current artifact identity differs."),
         _gate("plugin_inventory", "Current full-plugin inventory hash is exact", observed.get("plugin_inventory_hash") == request.expected_plugin_inventory_hash, "Plugin inventory changed."),
         _gate("active_inventory", "Current active-plugin inventory hash is exact", observed.get("active_plugin_inventory_hash") == request.expected_active_plugin_inventory_hash, "Active-plugin inventory changed."),
-        _gate("target_version", "Upgrade is exactly 0.57.5 to 0.57.6", request.target_plugin_version == TARGET_VERSION == artifact.get("plugin_version"), "Target version differs."),
+        _gate("target_version", "Upgrade is exactly 0.57.6 to 0.57.7", request.target_plugin_version == TARGET_VERSION == artifact.get("plugin_version"), "Target version differs."),
         _gate("target_artifact", "Target filename and checksum are exact", request.target_zip_filename == ZIP_NAME and request.target_zip_sha256 == ZIP_SHA256 == artifact.get("zip_sha256"), "Target artifact differs."),
         _gate(
             "upgrade_bootstrap",
@@ -365,7 +362,7 @@ def _upgrade_gates(request, installation, activation, prior_upgrades, cleanup_au
             bootstrap_status.get("bootstrap") == "project-atlas-upgrade-bootstrap"
             and bootstrap_status.get("bootstrap_version") == BOOTSTRAP_VERSION
             and bootstrap_status.get("bootstrap_checksum") == bootstrap_artifact.get("entry_sha256") == BOOTSTRAP_ENTRY_SHA256
-            and bootstrap_status.get("operation") == "upgrade_metadata_bridge_0.57.5_to_0.57.6"
+            and bootstrap_status.get("operation") == "upgrade_metadata_bridge_0.57.6_to_0.57.7"
             and bootstrap_status.get("application_password_compatible") is True
             and bootstrap_status.get("target_plugin") == PLUGIN_FILE
             and bootstrap_status.get("current_version") == CURRENT_VERSION
@@ -408,8 +405,8 @@ def _post_upgrade_gates(request, before, after, plugin_status, bootstrap_status,
     expected = _expected_post_upgrade(before)
     return [
         _gate("plugin_singleton", "Exactly one Metadata Bridge remains installed", len(matches) == 1, "Plugin is missing or duplicated."),
-        _gate("target_version", "Installed version is exactly 0.57.6", len(matches) == 1 and matches[0].get("version") == TARGET_VERSION and plugin_status.get("version") == TARGET_VERSION, "Target version not observed."),
-        _gate("target_entry_checksum", "Remote executable entry matches the locked 0.57.6 artifact", plugin_status.get("checksum") == _target_entry_sha256(), "Installed executable differs from the target artifact."),
+        _gate("target_version", "Installed version is exactly 0.57.7", len(matches) == 1 and matches[0].get("version") == TARGET_VERSION and plugin_status.get("version") == TARGET_VERSION, "Target version not observed."),
+        _gate("target_entry_checksum", "Remote executable entry matches the locked 0.57.7 artifact", plugin_status.get("checksum") == _target_entry_sha256(), "Installed executable differs from the target artifact."),
         _gate("plugin_active", "Plugin active status is preserved", len(matches) == 1 and matches[0].get("status") in {"active", "network-active"} and plugin_status.get("active") is True, "Plugin became inactive."),
         _gate("plugin_inventory", "Only the bridge version changed in full inventory", after.get("plugin_inventory_hash") == expected.get("plugin_inventory_hash"), "Full plugin inventory delta differs."),
         _gate("active_inventory", "Active-plugin inventory is unchanged", after.get("active_plugin_inventory_hash") == expected.get("active_plugin_inventory_hash"), "Active plugin inventory changed."),
@@ -434,7 +431,7 @@ def _post_upgrade_gates(request, before, after, plugin_status, bootstrap_status,
         _gate("lifecycle_routes", "Separated lifecycle, preview, and cache routes are registered", (LIFECYCLE_ROUTES | {PREVIEW_ROUTE, CACHE_PURGE_ROUTE}) <= set(routes.get("routes", [])), "Required lifecycle, preview, or cache route is missing."),
         _gate("preview_disabled_contract", "Read-only preview fails closed with the approved HTTP 409 while rendering is disabled", preview.get("status_code") == 409 and preview.get("code") == "atlas_rendering_preview_unavailable" and preview.get("request_method") == "GET" and _target_artifact_preview_contract(), "Disabled preview contract changed or unexpectedly returned output."),
         _gate("preview_output_deferred", "Preview output verification is explicitly deferred to guarded cache-aware rendering preflight", preview.get("output_verification_deferred") is True, "Preview-output deferral was not recorded."),
-        _gate("legacy_route_disabled", "Locked 0.57.6 artifact keeps the legacy combined route disabled with HTTP 410", routes.get("legacy_route_registered") is True and _target_artifact_disables_legacy_route(), "Legacy route contract is not disabled."),
+        _gate("legacy_route_disabled", "Locked 0.57.7 artifact keeps the legacy combined route disabled with HTTP 410", routes.get("legacy_route_registered") is True and _target_artifact_disables_legacy_route(), "Legacy route contract is not disabled."),
         _gate(
             "bootstrap_fail_closed",
             "Upgrade bootstrap is no longer reusable after the fixed version transition",
@@ -454,7 +451,7 @@ def _send_fixed_upgrade(session: Session) -> dict[str, Any]:
     password = get_wordpress_application_password()
     if not (settings.site_url and settings.username and password):
         return {"_error": "credentials_unavailable"}
-    zip_path = resolve_program_root() / "wordpress" / "dist" / ZIP_NAME
+    zip_path, _ = release_paths(resolve_program_root())
     try:
         with httpx.Client(timeout=60, follow_redirects=False) as client:
             response = client.post(
@@ -468,7 +465,7 @@ def _send_fixed_upgrade(session: Session) -> dict[str, Any]:
             response.status_code == 200
             and isinstance(payload, dict)
             and payload.get("accepted") is True
-            and payload.get("operation") == "upgrade_metadata_bridge_0.57.5_to_0.57.6"
+            and payload.get("operation") == "upgrade_metadata_bridge_0.57.6_to_0.57.7"
             and payload.get("plugin") == PLUGIN_FILE
             and payload.get("previous_version") == CURRENT_VERSION
             and payload.get("target_version") == TARGET_VERSION
@@ -586,8 +583,8 @@ def _verify_current_artifact() -> tuple[dict[str, Any], list[WordPressDraftGateR
         "portable": valid,
     }
     return artifact, [
-        _gate("current_artifact_hash", "Authorized 0.57.4 ZIP checksum is exact", sha == CURRENT_ZIP_SHA256, "Current artifact checksum differs."),
-        _gate("current_artifact_portable", "Authorized 0.57.4 ZIP structure and version are valid", valid, "Current artifact is malformed."),
+        _gate("current_artifact_hash", "Authorized 0.57.6 ZIP checksum is exact", sha == CURRENT_ZIP_SHA256, "Current artifact checksum differs."),
+        _gate("current_artifact_portable", "Authorized 0.57.6 ZIP structure and version are valid", valid, "Current artifact is malformed."),
     ]
 
 
@@ -606,7 +603,7 @@ def _verify_bootstrap_artifact() -> tuple[dict[str, Any], list[WordPressDraftGat
                 len(names) == len(set(names)) == 2
                 and set(names) == {entry, readme}
                 and all("\\" not in name and ".." not in name.split("/") for name in names)
-                and b"Version: 0.2.0" in entry_raw
+                and b"Version: 0.3.0" in entry_raw
                 and b"ATLAS_UPGRADE_BOOTSTRAP_TARGET_ZIP_SHA256" in entry_raw
                 and b"current_user_can('update_plugins')" in entry_raw
             )
@@ -628,22 +625,26 @@ def _verify_bootstrap_artifact() -> tuple[dict[str, Any], list[WordPressDraftGat
 
 
 def _target_entry_sha256() -> str:
-    path = resolve_program_root() / "wordpress" / "dist" / ZIP_NAME
+    path, _ = release_paths(resolve_program_root())
     with zipfile.ZipFile(path) as archive:
         return hashlib.sha256(archive.read(PLUGIN_FILE)).hexdigest()
 
 
 def _target_artifact_disables_legacy_route() -> bool:
-    source = resolve_program_root() / "wordpress" / "project-atlas-metadata-bridge-0.57.6"
+    _, source = release_paths(resolve_program_root())
     text = (source / "project-atlas-metadata-bridge.php").read_text(encoding="utf-8")
     return "atlas_legacy_combined_apply_disabled" in text and "['status' => 410]" in text
 
 
 def _target_artifact_preview_contract() -> bool:
-    source = resolve_program_root() / "wordpress" / "project-atlas-metadata-bridge-0.57.6"
+    _, source = release_paths(resolve_program_root())
     text = (source / "project-atlas-metadata-bridge.php").read_text(encoding="utf-8")
     return all(fragment in text for fragment in (
         "register_rest_route('project-atlas/v3', '/pages/8/metadata/rendering/preview'",
+        "function atlas_metadata_head_markup_from_snapshot(array $snapshot): string",
+        "function atlas_metadata_public_request_is_page_8(): bool",
+        "return atlas_metadata_head_markup_from_snapshot(atlas_metadata_snapshot());",
+        "$markup = atlas_metadata_head_markup_from_snapshot($snapshot);",
         "if (!$snapshot['rendering_enabled'] || $markup === '')",
         "atlas_rendering_preview_unavailable",
         "['status' => 409]",
@@ -666,7 +667,7 @@ def _expected_post_upgrade(observed):
 def _binding(request, installation, activation, observed, plugin_status, bootstrap_status, artifact, current_artifact, expected_post, expires_at):
     evidence = request.manual_browser_evidence
     return {
-        "action": "upgrade_metadata_bridge_0.57.5_to_0.57.6",
+        "action": "upgrade_metadata_bridge_0.57.6_to_0.57.7",
         "targets": {"page_id": 41, "wordpress_post_id": 8, "installation_audit_id": request.installation_audit_id, "activation_audit_id": request.activation_audit_id},
         "audits": {"installation_status": installation.status if installation else None, "activation_status": activation.status if activation else None},
         "runtime": request.expected_runtime_identity.model_dump(mode="json"),

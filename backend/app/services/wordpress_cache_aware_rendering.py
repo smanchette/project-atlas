@@ -59,9 +59,9 @@ from app.services.wordpress_rendered_state import (
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 
 
-PLUGIN_VERSION = "0.57.6"
-PLUGIN_ZIP_NAME = "project-atlas-metadata-bridge-0.57.6.zip"
-PLUGIN_ZIP_SHA256 = "3b2d0035f995c3006e0d3be02596bd2cf19ef7e4a97572168621beb7a9abf788"
+PLUGIN_VERSION = "0.57.7"
+PLUGIN_ZIP_NAME = "project-atlas-metadata-bridge-0.57.7.zip"
+PLUGIN_ZIP_SHA256 = "ada4d97ea627a148d07fda809c1776a91a87d7a7e4957de3bece423a9bb80a62"
 PLUGIN_SLUG = "project-atlas-metadata-bridge"
 PLUGIN_ENTRY = f"{PLUGIN_SLUG}/project-atlas-metadata-bridge.php"
 CANONICAL_URL = "https://www.drywoodtenting.com/drywood-termite-tenting-orlando-fl/"
@@ -438,9 +438,9 @@ def rendering_preflight(
         _gate("evidence", "Fresh signed credential-free schema-v1 evidence is valid", evidence_ok, evidence_reason or "Fresh schema-v1 evidence required."),
         _gate("runtime", "Runtime identity and independently expected identity are verified", _runtime_matches(runtime, request), "Runtime identity is unavailable or differs."),
         _gate("repository", "Repository and protected-path attestations remain exact", request.repository_head == request.repository_origin_main == request.expected_runtime_identity.atlas_commit and request.repository_tag == request.expected_runtime_identity.atlas_tag and request.repository_working_tree_clean and request.protected_paths_unchanged, "Repository identity or cleanliness changed."),
-        _gate("artifact", "Metadata Bridge 0.57.6 source and ZIP are byte-equal and checksum-bound", artifact.get("valid") is True, artifact.get("error", "Artifact differs.")),
+        _gate("artifact", "Metadata Bridge 0.57.7 source and ZIP are byte-equal and checksum-bound", artifact.get("valid") is True, artifact.get("error", "Artifact differs.")),
         _gate("post_backup", "No relevant WordPress change followed backup creation", request.no_relevant_wordpress_change_after_backup, "Fresh backup required."),
-        _gate("plugin", "Metadata Bridge 0.57.6 is active exactly once", _plugin_exact(observed, status), "Required cache-aware bridge is absent, duplicated, inactive, or wrong version."),
+        _gate("plugin", "Metadata Bridge 0.57.7 is active exactly once", _plugin_exact(observed, status), "Required cache-aware bridge is absent, duplicated, inactive, or wrong version."),
         _gate("staged_payload", "Exact approved payload, hash, revision 1, and disabled rendering remain", snapshot.get("payload") == approved_payload().model_dump(mode="json") and snapshot.get("payload_hash") == expected_hash and str(snapshot.get("revision")) == "1" and snapshot.get("rendering_enabled") is False, "Staged metadata state drifted."),
         _gate("metadata_state", "Atlas metadata state remains staged at revision 1", bool(state and state.status == "staged" and state.payload_hash == expected_hash and str(state.wordpress_revision) == "1"), "Atlas metadata state differs."),
         _gate("staging_audit", "Staging audit ID 2 remains verified", bool(staging and staging.id == 2 and staging.action_type == "stage_metadata_payload" and staging.status == "verified"), "Verified staging audit ID 2 required."),
@@ -740,7 +740,7 @@ def _origin_gates(before: dict[str, Any], after: dict[str, Any], preview: dict[s
         _gate("origin_metadata_verified", "Plugin-owned public-head renderer returns exact approved metadata", _origin_exact(preview), "Authoritative origin metadata is missing or mismatched."),
         _gate("origin_read_only", "Origin preview is read-only", preview.get("read_only") is True, "Origin preview is not proven read-only."),
         _gate("state", "Only rendering changed; payload hash and revision remain exact", after.get("rendering_enabled") is True and after.get("payload_hash") == payload_sha256() and str(after.get("revision")) == "1" and after.get("payload") == approved_payload().model_dump(mode="json"), "Metadata state drifted."),
-        _gate("plugin", "Metadata Bridge 0.57.6 remains active", after.get("active") is True and after.get("version") == PLUGIN_VERSION, "Plugin state changed."),
+        _gate("plugin", "Metadata Bridge 0.57.7 remains active", after.get("active") is True and after.get("version") == PLUGIN_VERSION, "Plugin state changed."),
     ]
 
 
@@ -854,7 +854,7 @@ def _finish(session, audit, status, reason, recommendation, gates, *, complete=T
 
 def _artifact_identity():
     try:
-        root = resolve_program_root(); source = root / "wordpress" / f"{PLUGIN_SLUG}-0.57.6"; archive_path = root / "wordpress" / "dist" / PLUGIN_ZIP_NAME
+        root = resolve_program_root(); source = root / "wordpress" / f"{PLUGIN_SLUG}-0.57.7"; archive_path = root / "wordpress" / "dist" / PLUGIN_ZIP_NAME
         actual_sha = hashlib.sha256(archive_path.read_bytes()).hexdigest()
         with zipfile.ZipFile(archive_path) as archive:
             actual = {name: archive.read(name) for name in archive.namelist() if not name.endswith("/")}

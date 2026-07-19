@@ -21,7 +21,7 @@ from app.models import (
 from app.schemas.wordpress import WordPressPluginUpgradeApplyRequest, WordPressPluginUpgradePreflightRequest
 from app.services import wordpress_deployment as deployment
 from app.services import wordpress_metadata_lifecycle as lifecycle
-from app.services import wordpress_plugin_upgrade_0576 as upgrade
+from app.services import wordpress_plugin_upgrade_0577 as upgrade
 from test_wordpress_plugin_upgrade import (
     COMMIT,
     KEY,
@@ -35,8 +35,8 @@ from test_wordpress_plugin_upgrade import (
 )
 
 
-VERSION = "v0.59.78"
-SOURCE_COMPATIBILITY = "project-atlas-release-identity-v0.59.78"
+VERSION = "v0.59.79"
+SOURCE_COMPATIBILITY = "project-atlas-release-identity-v0.59.79"
 PAYLOAD = lifecycle.approved_payload().model_dump(mode="json")
 PAYLOAD_HASH = lifecycle.payload_sha256(PAYLOAD)
 
@@ -115,13 +115,13 @@ def bootstrap_status(*, available=True, plugin_version=upgrade.CURRENT_VERSION):
         "bootstrap": "project-atlas-upgrade-bootstrap",
         "bootstrap_version": upgrade.BOOTSTRAP_VERSION,
         "bootstrap_checksum": upgrade.BOOTSTRAP_ENTRY_SHA256,
-        "operation": "upgrade_metadata_bridge_0.57.5_to_0.57.6",
+        "operation": "upgrade_metadata_bridge_0.57.6_to_0.57.7",
         "application_password_compatible": True,
         "target_plugin": deployment.PLUGIN_FILE,
         "current_version": upgrade.CURRENT_VERSION,
         "target_version": upgrade.TARGET_VERSION,
-        "target_zip": upgrade.ZIP_NAME,
-        "target_zip_sha256": upgrade.ZIP_SHA256,
+        "target_zip": deployment.ZIP_NAME,
+        "target_zip_sha256": deployment.ZIP_SHA256,
         "available": available,
         "metadata": {"payload_present": True, "payload_hash": PAYLOAD_HASH, "revision": "1", "rendering_enabled": False},
         "plugin": {"installed": True, "active": True, "version": plugin_version},
@@ -141,9 +141,9 @@ def artifact():
         "release_manifest_integrity_verified": True,
         "release_expected_identity_matched": True,
         "plugin_version": upgrade.TARGET_VERSION,
-        "zip_file_name": upgrade.ZIP_NAME,
-        "zip_sha256": upgrade.ZIP_SHA256,
-        "plugin_source_sha256": upgrade.SOURCE_SHA256,
+        "zip_file_name": deployment.ZIP_NAME,
+        "zip_sha256": deployment.ZIP_SHA256,
+        "plugin_source_sha256": deployment.SOURCE_SHA256,
     }
 
 
@@ -154,10 +154,10 @@ def request(before=None, **changes):
         **proof(),
         "installation_audit_id": 1,
         "activation_audit_id": 1,
-        "previous_upgrade_audit_id": 1,
-        "bootstrap_cleanup_audit_id": 1,
+        "previous_upgrade_audit_id": 2,
+        "bootstrap_cleanup_audit_id": 2,
         "staging_audit_id": 2,
-        "recovery_disable_audit_id": 4,
+        "recovery_disable_audit_id": 5,
         "expected_payload_hash": PAYLOAD_HASH,
         "expected_revision": "1",
         "expected_metadata_state_status": "staged",
@@ -171,8 +171,8 @@ def request(before=None, **changes):
         "current_plugin_path": deployment.PLUGIN_FILE,
         "current_zip_filename": upgrade.CURRENT_ZIP_NAME,
         "current_zip_sha256": upgrade.CURRENT_ZIP_SHA256,
-        "target_zip_filename": upgrade.ZIP_NAME,
-        "target_zip_sha256": upgrade.ZIP_SHA256,
+        "target_zip_filename": deployment.ZIP_NAME,
+        "target_zip_sha256": deployment.ZIP_SHA256,
         "expected_plugin_inventory_hash": before["plugin_inventory_hash"],
         "expected_active_plugin_inventory_hash": before["active_plugin_inventory_hash"],
         "expected_post_plugin_inventory_hash": expected_post["plugin_inventory_hash"],
@@ -213,8 +213,19 @@ def seed(session):
         id=1, generated_page_id=41, wordpress_post_id=8, installation_audit_id=1, activation_audit_id=1,
         status="verified", operator="Shawn Manchette", confirmation_phrase_hash="a" * 64, handle_fingerprint="b" * 64,
         binding_hash="c" * 64, previous_version="0.57.4", target_version="0.57.5",
-        previous_artifact_sha256="9" * 64, target_artifact_sha256=upgrade.CURRENT_ZIP_SHA256,
+        previous_artifact_sha256="9" * 64, target_artifact_sha256="09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7",
         release_identity={}, backup_evidence={}, browser_evidence_id="prior-upgrade", browser_evidence_hashes={},
+        pre_snapshot={}, post_snapshot={}, previous_inventories={}, final_inventories={}, metadata_rendering_state={},
+        page_media_snapshots={}, gate_results=[], wordpress_write_count=1, atlas_write_count=2,
+        recovery_recommendation="no_action", transition_history=["pending", "verified"], completed_at=datetime.now(UTC),
+    ))
+    session.add(WordPressPluginUpgradeAudit(
+        id=2, generated_page_id=41, wordpress_post_id=8, installation_audit_id=1, activation_audit_id=1,
+        status="verified", operator="Shawn Manchette", confirmation_phrase_hash="4" * 64, handle_fingerprint="5" * 64,
+        binding_hash="6" * 64, previous_version="0.57.5", target_version="0.57.6",
+        previous_artifact_sha256="09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7",
+        target_artifact_sha256=upgrade.CURRENT_ZIP_SHA256,
+        release_identity={}, backup_evidence={}, browser_evidence_id="prior-upgrade-0576", browser_evidence_hashes={},
         pre_snapshot={}, post_snapshot={}, previous_inventories={}, final_inventories={}, metadata_rendering_state={},
         page_media_snapshots={}, gate_results=[], wordpress_write_count=1, atlas_write_count=2,
         recovery_recommendation="no_action", transition_history=["pending", "verified"], completed_at=datetime.now(UTC),
@@ -231,10 +242,23 @@ def seed(session):
         metadata_rendering_state={}, page_media_snapshots={}, gate_results=[], wordpress_write_count=2, atlas_write_count=4,
         recovery_recommendation="no_action", transition_history=["pending", "deactivated", "verified"], completed_at=datetime.now(UTC),
     ))
+    session.add(WordPressBootstrapCleanupAudit(
+        id=2, generated_page_id=41, wordpress_post_id=8, installation_audit_id=1, activation_audit_id=1, upgrade_audit_id=2,
+        status="verified", operator="Shawn Manchette", bootstrap_slug="project-atlas-upgrade-bootstrap",
+        bootstrap_path="project-atlas-upgrade-bootstrap/project-atlas-upgrade-bootstrap.php", bootstrap_version="0.2.0",
+        bootstrap_zip_sha256="873701da2ed42212e7d7c9b12816eeb0560d2751d7494c2b706008c0d5c1383a", bridge_version="0.57.6",
+        deactivation_phrase_hash="7" * 64, deletion_phrase_hash="8" * 64, deactivation_handle_fingerprint="9" * 64,
+        deletion_handle_fingerprint="a" * 64, deactivation_binding_hash="b" * 64, deletion_binding_hash="c" * 64,
+        release_identity={}, backup_evidence={}, browser_evidence_id="cleanup-0576", browser_evidence_hashes={}, pre_snapshot={},
+        deactivated_snapshot={}, final_snapshot={}, previous_inventories={}, deactivated_inventories={}, final_inventories={},
+        metadata_rendering_state={}, page_media_snapshots={}, gate_results=[], wordpress_write_count=2, atlas_write_count=4,
+        recovery_recommendation="no_action", transition_history=["pending", "deactivated", "verified"], completed_at=datetime.now(UTC),
+    ))
     session.add(lifecycle_audit(1, "stage_metadata_payload", "failed", False))
     session.add(lifecycle_audit(2, "stage_metadata_payload", "verified", False))
     session.add(lifecycle_audit(3, "enable_metadata_rendering", "verification_failed", True))
     session.add(lifecycle_audit(4, "disable_metadata_rendering", "verified", False))
+    session.add(lifecycle_audit(5, "disable_metadata_rendering", "verified", False))
     session.add(WordPressMetadataState(generated_page_id=41, wordpress_post_id=8, status="staged", payload=deepcopy(PAYLOAD), payload_hash=PAYLOAD_HASH, wordpress_revision="1"))
     session.commit()
 
@@ -255,7 +279,7 @@ def test_0576_preflight_is_zero_write_and_profile_is_exact(monkeypatch, db):
         seed(session)
         result = upgrade.plugin_upgrade_preflight(session, 41, request(before))
         assert result.plugin_upgrade_preflight_ready and result.upgrade_handle
-        assert result.current_version == "0.57.5" and result.target_version == "0.57.6"
+        assert result.current_version == "0.57.6" and result.target_version == "0.57.7"
         assert result.confirmation_phrase == upgrade.UPGRADE_PHRASE
         assert result.wordpress_write_count == result.atlas_write_count == 0
         assert session.exec(select(WordPressPluginUpgradeAudit)).all()[0].target_version == "0.57.5"
@@ -277,7 +301,7 @@ def test_0576_apply_preserves_staged_state_and_defers_preview_output(monkeypatch
         preflight = upgrade.plugin_upgrade_preflight(session, 41, request(before))
         result = upgrade.apply_plugin_upgrade(session, 41, WordPressPluginUpgradeApplyRequest(upgrade_handle=preflight.upgrade_handle, confirmation_phrase=upgrade.UPGRADE_PHRASE))
         assert result.status == "verified" and result.recovery_recommendation == "no_action"
-        assert result.previous_version == "0.57.5" and result.target_version == "0.57.6"
+        assert result.previous_version == "0.57.6" and result.target_version == "0.57.7"
         assert calls["write"] == 1 and result.wordpress_write_count == 1
         assert result.inspected_state["plugin_status"]["snapshot"]["payload_hash"] == PAYLOAD_HASH
         assert result.inspected_state["disabled_preview_contract"]["output_verification_deferred"] is True
@@ -298,7 +322,7 @@ def test_0576_profile_drift_blocks_without_audit(monkeypatch, db, change, gate):
         result = upgrade.plugin_upgrade_preflight(session, 41, request(before, **change))
         assert not result.plugin_upgrade_preflight_ready and result.upgrade_handle is None
         assert gate in {item.code for item in result.gate_results if not item.passed}
-        assert len(session.exec(select(WordPressPluginUpgradeAudit)).all()) == 1
+        assert len(session.exec(select(WordPressPluginUpgradeAudit)).all()) == 2
 
 
 def test_0576_handle_phrase_replay_and_preview_contract_fail_closed(monkeypatch, db):
@@ -407,7 +431,7 @@ def test_0576_bound_preflight_failures_issue_no_handle(monkeypatch, db, case, fa
         result = upgrade.plugin_upgrade_preflight(session, 41, request(before, **changes))
         assert not result.plugin_upgrade_preflight_ready and result.upgrade_handle is None
         assert failed_gate in {gate.code for gate in result.gate_results if not gate.passed}
-        assert len(session.exec(select(WordPressPluginUpgradeAudit)).all()) == 1
+        assert len(session.exec(select(WordPressPluginUpgradeAudit)).all()) == 2
 
 
 def test_bootstrap_020_and_target_artifacts_are_exact_and_portable():
@@ -417,11 +441,11 @@ def test_bootstrap_020_and_target_artifacts_are_exact_and_portable():
     current, current_gates = upgrade._verify_current_artifact()
     assert all(g.passed for g in current_gates)
     assert current["zip_sha256"] == upgrade.CURRENT_ZIP_SHA256
-    assert upgrade.ZIP_SHA256 == "3b2d0035f995c3006e0d3be02596bd2cf19ef7e4a97572168621beb7a9abf788"
+    assert deployment.ZIP_SHA256 == "ada4d97ea627a148d07fda809c1776a91a87d7a7e4957de3bece423a9bb80a62"
     with zipfile.ZipFile(upgrade.resolve_program_root() / "wordpress/dist" / upgrade.BOOTSTRAP_ZIP_NAME) as archive:
         assert len(archive.namelist()) == len(set(archive.namelist())) == 2
         php = archive.read("project-atlas-upgrade-bootstrap/project-atlas-upgrade-bootstrap.php").decode()
-    assert "0.57.5_to_0.57.6" in php and "ATLAS_UPGRADE_BOOTSTRAP_PAYLOAD_SHA256" in php
+    assert "0.57.6_to_0.57.7" in php and "ATLAS_UPGRADE_BOOTSTRAP_PAYLOAD_SHA256" in php
     assert "overwrite_package' => true" in php and "is_uploaded_file" in php
     for forbidden in ("wp_remote_get", "download_url", "ftp_", "ssh", "activate_plugin(", "deactivate_plugins("):
         assert forbidden not in php

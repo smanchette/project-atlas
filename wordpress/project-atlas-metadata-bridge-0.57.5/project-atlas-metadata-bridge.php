@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Project Atlas Metadata Bridge
  * Description: Guarded Orlando-only metadata rendering bridge for Project Atlas.
- * Version: 0.57.7
+ * Version: 0.57.5
  * Requires at least: 6.5
  * Requires PHP: 8.1
  * Author: Project Atlas
@@ -10,12 +10,11 @@
 
 if (!defined('ABSPATH')) { exit; }
 
-define('ATLAS_METADATA_BRIDGE_VERSION', '0.57.7');
+define('ATLAS_METADATA_BRIDGE_VERSION', '0.57.5');
 define('ATLAS_METADATA_POST_ID', 8);
 define('ATLAS_METADATA_MEDIA_ID', 31);
 define('ATLAS_METADATA_EXCLUDED_MEDIA_ID', 32);
 define('ATLAS_METADATA_SAFETY_OPTION', '_project_atlas_metadata_safety_v1');
-define('ATLAS_METADATA_CANONICAL_URL', 'https://www.drywoodtenting.com/drywood-termite-tenting-orlando-fl/');
 
 function atlas_metadata_plugin_checksum(): string { return hash_file('sha256', __FILE__); }
 
@@ -138,94 +137,7 @@ add_action('rest_api_init', function (): void {
         'methods' => 'PUT', 'permission_callback' => 'atlas_metadata_permission',
         'callback' => 'atlas_metadata_stage_rollback',
     ]);
-    register_rest_route('project-atlas/v3', '/pages/8/metadata/rendering/preview', [
-        'methods' => 'GET', 'permission_callback' => 'atlas_metadata_permission',
-        'callback' => 'atlas_metadata_rendering_preview',
-    ]);
-    register_rest_route('project-atlas/v3', '/pages/8/cache/siteground/purge', [
-        'methods' => 'POST', 'permission_callback' => 'atlas_metadata_permission',
-        'callback' => 'atlas_metadata_siteground_cache_purge',
-    ]);
 });
-
-function atlas_metadata_head_markup_from_snapshot(array $snapshot): string {
-    if (!$snapshot['rendering_enabled'] || !$snapshot['enabled_metadata_state']
-        || (string) $snapshot['revision'] !== '1' || !is_array($snapshot['payload'])
-        || atlas_metadata_validate_payload($snapshot['payload'])
-        || !hash_equals(atlas_metadata_hash($snapshot['payload']), $snapshot['payload_hash'])) { return ''; }
-    $p = $snapshot['payload'];
-    return "\n<!-- Project Atlas Metadata Bridge v" . esc_html(ATLAS_METADATA_BRIDGE_VERSION) . " -->\n"
-        . '<meta name="description" content="' . esc_attr($p['meta_description']) . '">' . "\n"
-        . '<script type="application/ld+json" data-project-atlas="metadata">'
-        . wp_json_encode($p['json_ld'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . '</script>' . "\n";
-}
-
-function atlas_metadata_public_request_is_page_8(): bool {
-    return !is_admin() && !wp_doing_ajax() && !wp_doing_cron()
-        && !(defined('REST_REQUEST') && REST_REQUEST)
-        && !(defined('WP_CLI') && WP_CLI)
-        && !is_feed() && !is_search() && !is_archive() && !is_preview()
-        && is_page(ATLAS_METADATA_POST_ID);
-}
-
-function atlas_metadata_head_markup(): string {
-    if (!atlas_metadata_public_request_is_page_8()) { return ''; }
-    return atlas_metadata_head_markup_from_snapshot(atlas_metadata_snapshot());
-}
-
-function atlas_metadata_rendering_preview() {
-    $post = get_post(ATLAS_METADATA_POST_ID);
-    if (!$post || $post->post_status !== 'publish' || $post->post_name !== 'drywood-termite-tenting-orlando-fl') {
-        return new WP_Error('atlas_post_changed', 'Orlando post identity changed.', ['status' => 409]);
-    }
-    $snapshot = atlas_metadata_snapshot();
-    $markup = atlas_metadata_head_markup_from_snapshot($snapshot);
-    if (!$snapshot['rendering_enabled'] || $markup === '') {
-        return new WP_Error('atlas_rendering_preview_unavailable', 'Exact enabled metadata rendering is required.', ['status' => 409]);
-    }
-    $payload = $snapshot['payload'];
-    return rest_ensure_response([
-        'source' => 'plugin_owned_public_head_renderer',
-        'read_only' => true,
-        'post_id' => 8,
-        'canonical_url' => ATLAS_METADATA_CANONICAL_URL,
-        'meta_descriptions' => [$payload['meta_description']],
-        'json_ld' => [$payload['json_ld']],
-        'json_ld_types' => ['Organization', 'Service'],
-        'ownership_marker' => 'Project Atlas Metadata Bridge v' . ATLAS_METADATA_BRIDGE_VERSION,
-        'head_sha256' => hash('sha256', $markup),
-        'cache_provider' => 'siteground_speed_optimizer',
-        'cache_purge_available' => function_exists('sg_cachepress_purge_cache'),
-        'cache_purge_scope' => 'single_canonical_url',
-        'snapshot' => $snapshot,
-    ]);
-}
-
-function atlas_metadata_siteground_cache_purge() {
-    $snapshot = atlas_metadata_snapshot();
-    if (!$snapshot['rendering_enabled'] || $snapshot['revision'] !== '1'
-        || !is_array($snapshot['payload']) || atlas_metadata_validate_payload($snapshot['payload'])
-        || !hash_equals(atlas_metadata_hash($snapshot['payload']), $snapshot['payload_hash'])) {
-        return new WP_Error('atlas_cache_purge_state_conflict', 'Exact enabled staged metadata is required.', ['status' => 409]);
-    }
-    if (!function_exists('sg_cachepress_purge_cache')) {
-        return new WP_Error('atlas_cache_provider_unavailable', 'SiteGround cache purge function is unavailable.', ['status' => 503]);
-    }
-    $result = sg_cachepress_purge_cache(ATLAS_METADATA_CANONICAL_URL);
-    if ($result === false) {
-        return new WP_Error('atlas_cache_purge_failed', 'SiteGround rejected the fixed URL purge.', ['status' => 502]);
-    }
-    return rest_ensure_response([
-        'status' => 'siteground_cache_purged',
-        'provider' => 'siteground_speed_optimizer',
-        'scope' => 'single_canonical_url',
-        'canonical_url' => ATLAS_METADATA_CANONICAL_URL,
-        'cache_write_count' => 1,
-        'payload_hash' => $snapshot['payload_hash'],
-        'revision' => $snapshot['revision'],
-        'rendering_enabled' => true,
-    ]);
-}
 
 function atlas_metadata_apply(WP_REST_Request $request) {
     return new WP_Error('atlas_legacy_combined_apply_disabled', 'The combined payload-and-rendering endpoint is deprecated and disabled. Use the separated v2 lifecycle.', ['status' => 410]);
@@ -311,5 +223,11 @@ function atlas_metadata_rollback(WP_REST_Request $request) {
 }
 
 add_action('wp_head', function (): void {
-    echo atlas_metadata_head_markup();
+    if (!is_page(8)) { return; }
+    $snapshot = atlas_metadata_snapshot(); if (!$snapshot['rendering_enabled'] || !is_array($snapshot['payload'])
+        || atlas_metadata_validate_payload($snapshot['payload'])
+        || !hash_equals(atlas_metadata_hash($snapshot['payload']), $snapshot['payload_hash'])) { return; }
+    $p = $snapshot['payload']; echo "\n<!-- Project Atlas Metadata Bridge v" . esc_html(ATLAS_METADATA_BRIDGE_VERSION) . " -->\n";
+    echo '<meta name="description" content="' . esc_attr($p['meta_description']) . '">' . "\n";
+    echo '<script type="application/ld+json" data-project-atlas="metadata">' . wp_json_encode($p['json_ld'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . '</script>' . "\n";
 }, 20);

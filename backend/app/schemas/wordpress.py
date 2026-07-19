@@ -1243,14 +1243,14 @@ class WordPressPluginUpgradePreflightRequest(WordPressDeploymentBackupEvidence):
     installation_audit_id: int = Field(gt=0)
     activation_audit_id: int = Field(gt=0)
     operator: str = Field(min_length=3, max_length=200)
-    current_plugin_version: Literal["0.57.4", "0.57.5"]
-    target_plugin_version: Literal["0.57.5", "0.57.6"]
+    current_plugin_version: Literal["0.57.4", "0.57.5", "0.57.6"]
+    target_plugin_version: Literal["0.57.5", "0.57.6", "0.57.7"]
     current_plugin_slug: Literal["project-atlas-metadata-bridge"]
     current_plugin_path: Literal["project-atlas-metadata-bridge/project-atlas-metadata-bridge.php"]
-    current_zip_filename: Literal["project-atlas-metadata-bridge-0.57.4.zip", "project-atlas-metadata-bridge-0.57.5.zip"]
-    current_zip_sha256: Literal["939412e6e80e8344d95274444fda65b6122fe0c8249a2ced0a8582a418c4e232", "09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7"]
-    target_zip_filename: Literal["project-atlas-metadata-bridge-0.57.5.zip", "project-atlas-metadata-bridge-0.57.6.zip"]
-    target_zip_sha256: Literal["09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7", "3b2d0035f995c3006e0d3be02596bd2cf19ef7e4a97572168621beb7a9abf788"]
+    current_zip_filename: Literal["project-atlas-metadata-bridge-0.57.4.zip", "project-atlas-metadata-bridge-0.57.5.zip", "project-atlas-metadata-bridge-0.57.6.zip"]
+    current_zip_sha256: Literal["939412e6e80e8344d95274444fda65b6122fe0c8249a2ced0a8582a418c4e232", "09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7", "3b2d0035f995c3006e0d3be02596bd2cf19ef7e4a97572168621beb7a9abf788"]
+    target_zip_filename: Literal["project-atlas-metadata-bridge-0.57.5.zip", "project-atlas-metadata-bridge-0.57.6.zip", "project-atlas-metadata-bridge-0.57.7.zip"]
+    target_zip_sha256: Literal["09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7", "3b2d0035f995c3006e0d3be02596bd2cf19ef7e4a97572168621beb7a9abf788", "ada4d97ea627a148d07fda809c1776a91a87d7a7e4957de3bece423a9bb80a62"]
     previous_upgrade_audit_id: int | None = Field(default=None, gt=0)
     bootstrap_cleanup_audit_id: int | None = Field(default=None, gt=0)
     staging_audit_id: int | None = Field(default=None, gt=0)
@@ -1313,8 +1313,8 @@ class WordPressPluginUpgradePreflight(SQLModel):
     binding_hash: str | None = None
     expires_at: datetime | None = None
     backup_deadline: datetime | None = None
-    current_version: Literal["0.57.4", "0.57.5"] = "0.57.4"
-    target_version: Literal["0.57.5", "0.57.6"] = "0.57.5"
+    current_version: Literal["0.57.4", "0.57.5", "0.57.6"] = "0.57.4"
+    target_version: Literal["0.57.5", "0.57.6", "0.57.7"] = "0.57.5"
     artifact: dict[str, Any]
     inspected_state: dict[str, Any]
     gate_results: list[WordPressDraftGateResult]
@@ -1344,8 +1344,8 @@ class WordPressPluginUpgradeResult(SQLModel):
     status: Literal["verified", "verification_failed", "failed"]
     binding_hash: str
     state_history: list[str]
-    previous_version: Literal["0.57.4", "0.57.5"] = "0.57.4"
-    target_version: Literal["0.57.5", "0.57.6"] = "0.57.5"
+    previous_version: Literal["0.57.4", "0.57.5", "0.57.6"] = "0.57.4"
+    target_version: Literal["0.57.5", "0.57.6", "0.57.7"] = "0.57.5"
     gate_results: list[WordPressDraftGateResult]
     inspected_state: dict[str, Any]
     wordpress_write_count: Literal[1] = 1
@@ -1389,12 +1389,12 @@ class WordPressBootstrapCleanupPreflightRequest(WordPressDeploymentBackupEvidenc
     operator: str = Field(min_length=3, max_length=200)
     expected_bridge_slug: Literal["project-atlas-metadata-bridge"]
     expected_bridge_path: Literal["project-atlas-metadata-bridge/project-atlas-metadata-bridge.php"]
-    expected_bridge_version: Literal["0.57.5", "0.57.6"]
-    expected_bridge_zip_sha256: Literal["09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7", "3b2d0035f995c3006e0d3be02596bd2cf19ef7e4a97572168621beb7a9abf788"]
+    expected_bridge_version: Literal["0.57.5", "0.57.6", "0.57.7"]
+    expected_bridge_zip_sha256: Literal["09ec2903cd8367fafef97a8999d816245e8865694010929c6aa498c6abbf12b7", "3b2d0035f995c3006e0d3be02596bd2cf19ef7e4a97572168621beb7a9abf788", "ada4d97ea627a148d07fda809c1776a91a87d7a7e4957de3bece423a9bb80a62"]
     expected_bootstrap_slug: Literal["project-atlas-upgrade-bootstrap"]
     expected_bootstrap_path: Literal["project-atlas-upgrade-bootstrap/project-atlas-upgrade-bootstrap.php"]
-    expected_bootstrap_version: Literal["0.1.0", "0.2.0"]
-    expected_bootstrap_zip_sha256: Literal["4c8b4b0c697b2b352a10f405950c7b6a750236be96aec81fcd45176ece1189bd", "873701da2ed42212e7d7c9b12816eeb0560d2751d7494c2b706008c0d5c1383a"]
+    expected_bootstrap_version: Literal["0.1.0", "0.2.0", "0.3.0"]
+    expected_bootstrap_zip_sha256: Literal["4c8b4b0c697b2b352a10f405950c7b6a750236be96aec81fcd45176ece1189bd", "873701da2ed42212e7d7c9b12816eeb0560d2751d7494c2b706008c0d5c1383a", "de5bfb7875b6f84f2009ef2043c1c86c7f9d20f0f973a5cb16b478fe37e83bef"]
     expected_payload_hash: str | None = Field(default=None, min_length=64, max_length=64)
     expected_revision: str | None = Field(default=None, max_length=40)
     expected_metadata_state_status: str | None = Field(default=None, max_length=40)

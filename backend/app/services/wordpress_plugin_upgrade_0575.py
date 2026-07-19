@@ -618,7 +618,7 @@ def _historical_target_paths():
     root = resolve_program_root()
     return (
         root / "wordpress/dist/project-atlas-metadata-bridge-0.57.5.zip",
-        root / "wordpress/project-atlas-metadata-bridge",
+        root / "wordpress/project-atlas-metadata-bridge-0.57.5",
     )
 
 

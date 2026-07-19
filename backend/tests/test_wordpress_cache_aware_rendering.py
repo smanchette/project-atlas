@@ -175,23 +175,24 @@ def test_cache_aware_audit_is_in_versioned_data_backup():
 def test_plugin_artifact_is_portable_byte_equal_and_checksum_locked():
     result = cache._artifact_identity()
     assert result == {
-        "valid": True, "version": "0.57.6", "zip_sha256": cache.PLUGIN_ZIP_SHA256,
+        "valid": True, "version": "0.57.7", "zip_sha256": cache.PLUGIN_ZIP_SHA256,
         "zip_name": cache.PLUGIN_ZIP_NAME, "byte_equal": True, "portable": True, "error": None,
     }
 
 
 def test_authoritative_preview_uses_same_renderer_and_is_read_only():
-    source = (resolve_program_root() / "wordpress/project-atlas-metadata-bridge-0.57.6/project-atlas-metadata-bridge.php").read_text(encoding="utf-8")
+    source = (resolve_program_root() / "wordpress/project-atlas-metadata-bridge-0.57.7/project-atlas-metadata-bridge.php").read_text(encoding="utf-8")
     assert "function atlas_metadata_head_markup(): string" in source
     assert "echo atlas_metadata_head_markup();" in source
     preview = source[source.index("function atlas_metadata_rendering_preview"):source.index("function atlas_metadata_siteground_cache_purge")]
-    assert "atlas_metadata_head_markup()" in preview
+    assert "atlas_metadata_head_markup_from_snapshot($snapshot)" in preview
+    assert "atlas_metadata_head_markup()" not in preview
     assert "'read_only' => true" in preview
     assert not any(term in preview for term in ("update_post_meta", "delete_post_meta", "update_option", "wp_update_post"))
 
 
 def test_siteground_purge_is_fixed_to_one_canonical_url():
-    source = (resolve_program_root() / "wordpress/project-atlas-metadata-bridge-0.57.6/project-atlas-metadata-bridge.php").read_text(encoding="utf-8")
+    source = (resolve_program_root() / "wordpress/project-atlas-metadata-bridge-0.57.7/project-atlas-metadata-bridge.php").read_text(encoding="utf-8")
     purge = source[source.index("function atlas_metadata_siteground_cache_purge"):source.index("function atlas_metadata_apply")]
     assert "sg_cachepress_purge_cache(ATLAS_METADATA_CANONICAL_URL)" in purge
     assert "'scope' => 'single_canonical_url'" in purge
@@ -276,9 +277,9 @@ def test_cache_provider_requires_siteground_headers():
     "project-atlas-metadata-bridge\\project-atlas-metadata-bridge",
 ])
 def test_cache_aware_plugin_identity_reuses_fail_closed_normalization(identifier):
-    plugins = [{"plugin": identifier, "version": "0.57.6", "status": "active"}]
+    plugins = [{"plugin": identifier, "version": "0.57.7", "status": "active"}]
     raw_hash = cache._hash(plugins)
-    status = {"plugin": cache.PLUGIN_SLUG, "version": "0.57.6", "active": True}
+    status = {"plugin": cache.PLUGIN_SLUG, "version": "0.57.7", "active": True}
     assert cache._plugin_exact({"plugins": plugins}, status)
     assert cache._hash(plugins) == raw_hash
     assert plugins[0]["plugin"] == identifier
@@ -295,16 +296,16 @@ def test_cache_aware_plugin_identity_reuses_fail_closed_normalization(identifier
     ["project-atlas-metadata-bridge/project-atlas-metadata-bridge\x00"],
 ])
 def test_cache_aware_plugin_identity_rejects_duplicate_ambiguous_or_malformed(identifiers):
-    plugins = [{"plugin": value, "version": "0.57.6", "status": "active"} for value in identifiers]
-    status = {"plugin": cache.PLUGIN_SLUG, "version": "0.57.6", "active": True}
+    plugins = [{"plugin": value, "version": "0.57.7", "status": "active"} for value in identifiers]
+    status = {"plugin": cache.PLUGIN_SLUG, "version": "0.57.7", "active": True}
     assert not cache._plugin_exact({"plugins": plugins}, status)
 
 
 def test_cache_aware_plugin_identity_rejects_version_or_activity_drift():
     plugin = {"plugin": "project-atlas-metadata-bridge/project-atlas-metadata-bridge", "version": "0.57.5", "status": "active"}
-    status = {"plugin": cache.PLUGIN_SLUG, "version": "0.57.6", "active": True}
+    status = {"plugin": cache.PLUGIN_SLUG, "version": "0.57.7", "active": True}
     assert not cache._plugin_exact({"plugins": [plugin]}, status)
-    plugin["version"] = "0.57.6"
+    plugin["version"] = "0.57.7"
     plugin["status"] = "inactive"
     assert not cache._plugin_exact({"plugins": [plugin]}, status)
 
@@ -521,7 +522,7 @@ def test_cache_aware_preflight_reaches_ready_with_normalized_plugin_and_bound_ca
         "featured_image_references": [], "media32_references": [], "unexpected_metadata_owners": [], "duplicates": [],
     }
     observed = {
-        "plugins": [{"plugin": "project-atlas-metadata-bridge/project-atlas-metadata-bridge", "version": "0.57.6", "status": "active"}],
+            "plugins": [{"plugin": "project-atlas-metadata-bridge/project-atlas-metadata-bridge", "version": "0.57.7", "status": "active"}],
         "page": {"id": 8, "status": "publish", "featured_media": 31},
         "page_snapshot_hash": "1" * 64, "page_body_hash": cache.EXPECTED_CORRECTED_BODY_HASH,
         "media31_snapshot_hash": "3" * 64, "media32_snapshot_hash": "4" * 64,
@@ -534,7 +535,7 @@ def test_cache_aware_preflight_reaches_ready_with_normalized_plugin_and_bound_ca
         "wordpress_request_methods": ["GET"],
     }
     disabled = {
-        "plugin": cache.PLUGIN_SLUG, "version": "0.57.6", "active": True,
+            "plugin": cache.PLUGIN_SLUG, "version": "0.57.7", "active": True,
         "rendering_enabled": False, "enabled_metadata_state": False,
         "payload_hash": cache.payload_sha256(), "revision": "1",
         "payload": cache.approved_payload().model_dump(mode="json"),
@@ -682,8 +683,8 @@ def test_audit_status_and_phrase_contracts_are_exact():
 
 
 def test_plugin_php_syntax_contract_and_routes():
-    source = (resolve_program_root() / "wordpress/project-atlas-metadata-bridge-0.57.6/project-atlas-metadata-bridge.php").read_text(encoding="utf-8")
-    assert "Version: 0.57.6" in source
+    source = (resolve_program_root() / "wordpress/project-atlas-metadata-bridge-0.57.7/project-atlas-metadata-bridge.php").read_text(encoding="utf-8")
+    assert "Version: 0.57.7" in source
     assert "'/pages/8/metadata/rendering/preview'" in source
     assert "'/pages/8/cache/siteground/purge'" in source
     assert "atlas_metadata_permission" in source

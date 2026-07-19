@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.79
+
+Corrected Metadata Bridge authoritative REST preview rendering by separating a deterministic query-context-independent serializer from the strict page-8 public wrapper. The public `wp_head` path still excludes admin, REST, AJAX, cron, CLI, feeds, search, archives, previews, and unrelated pages, while the authenticated read-only preview validates post identity and calls the same pure serializer directly. Added immutable Metadata Bridge 0.57.7 and bootstrap 0.3.0 artifacts plus separately locked 0.57.6-to-0.57.7 upgrade and cleanup profiles. The future upgrade preserves active status, disabled rendering, staged payload hash, revision 1, page/media/site state, and zero cache purges. Publication does not authorize any live upgrade, rendering, metadata, cache, page, or media action.
+
 ## v0.59.78
 
 Corrected cache-aware rendering and SiteGround cache-purge apply binding so a required second public observation may have a later timestamp and naturally advanced cache age without invalidating its one-time handle. Both phases now bind a deterministic stable public-observation fingerprint and an explicit temporal contract covering the original observation, evidence lifetime where applicable, handle lifetime, backup deadline, maximum two-minute interval, and one-second clock-reversal tolerance. URL, redirects, HTTP/provider classification, sanitized stable provider headers, browser/page identity, rendered hashes, metadata inventory, runtime, plugin, payload, revision, page/media snapshots, backup identity, and audit state remain fail-closed. Raw sanitized observations remain diagnostic-only. Final post-purge verification still requires two exact HTTP 200 public responses. Metadata Bridge remains version 0.57.6 with an unchanged ZIP.
