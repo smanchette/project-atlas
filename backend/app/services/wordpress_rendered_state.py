@@ -22,7 +22,7 @@ EXPECTED_BODY_H1 = "Drywood Termite Tenting in Orlando, Florida"
 EVIDENCE_SCHEMA = "project-atlas-manual-browser-evidence"
 EVIDENCE_SCHEMA_VERSION = 1
 EVIDENCE_SCHEMA_VERSION_DUPLICATE_H1 = 2
-CAPTURE_HELPER_VERSION = "0.59.15"
+CAPTURE_HELPER_VERSION = "0.59.80"
 EVIDENCE_LIFETIME = timedelta(minutes=15)
 CANONICAL_EVIDENCE_TIMESTAMP_PATTERN = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$"

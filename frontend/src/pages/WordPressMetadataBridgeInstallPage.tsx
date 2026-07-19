@@ -32,7 +32,7 @@ export default function WordPressMetadataBridgeInstallPage() {
       const text=await file.text();
       if(/authorization\s*:|cookie\s*:|set-cookie\s*:|password\s*[=:]|wp[_-]?nonce/i.test(text))throw new Error("Evidence file contains forbidden secret-bearing content.");
       const evidence=JSON.parse(text) as WordPressManualBrowserEvidence;
-      if(evidence.evidence_schema!=="project-atlas-manual-browser-evidence"||evidence.evidence_schema_version!==1||evidence.capture_helper_version!=="0.59.15")throw new Error("Evidence schema or helper version is unsupported.");
+      if(evidence.evidence_schema!=="project-atlas-manual-browser-evidence"||evidence.evidence_schema_version!==1||evidence.capture_helper_version!=="0.59.80")throw new Error("Evidence schema or helper version is unsupported.");
       setBrowserEvidence(evidence);
     }catch(value){setBrowserEvidence(null);setError(value instanceof Error?value.message:"Signed browser evidence could not be read.")}
   }
@@ -43,7 +43,7 @@ export default function WordPressMetadataBridgeInstallPage() {
       const text=await file.text();
       if(/authorization\s*:|cookie\s*:|set-cookie\s*:|password\s*[=:]|wp[_-]?nonce/i.test(text))throw new Error("Evidence file contains forbidden secret-bearing content.");
       const evidence=JSON.parse(text) as WordPressManualBrowserEvidence;
-      if(evidence.evidence_schema!=="project-atlas-manual-browser-evidence"||evidence.evidence_schema_version!==2||evidence.capture_helper_version!=="0.59.15"||evidence.h1_count!==2||evidence.h1_inventory?.length!==2)throw new Error("Schema-v2 duplicate-H1 evidence is required.");
+      if(evidence.evidence_schema!=="project-atlas-manual-browser-evidence"||evidence.evidence_schema_version!==2||evidence.capture_helper_version!=="0.59.80"||evidence.h1_count!==2||evidence.h1_inventory?.length!==2)throw new Error("Schema-v2 duplicate-H1 evidence is required.");
       setHeadingEvidence(evidence);
     }catch(value){setHeadingEvidence(null);setError(value instanceof Error?value.message:"Duplicate-H1 evidence could not be read.")}
   }

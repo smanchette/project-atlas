@@ -873,7 +873,7 @@ export type WordPressDeploymentGate = { code: string; label: string; passed: boo
 export type WordPressManualBrowserEvidence = {
   evidence_schema: "project-atlas-manual-browser-evidence";
   evidence_schema_version: 1 | 2;
-  capture_helper_version: "0.59.15";
+  capture_helper_version: "0.59.80";
   evidence_id: string; captured_at: string; expires_at: string; final_url: string;
   acquisition_source: "credential_free_public_browser";
   navigation_outcome: { status_code: 200; content_type: "text/html"; redirect_count: 0; outcome: "success" };

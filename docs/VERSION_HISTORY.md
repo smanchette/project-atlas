@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.80
+
+Replaced the browser-evidence helper's PowerShell/native standard-input text path with a byte-exact BOM-free UTF-8 file contract under ignored `.runtime`. Capture and helper independently hash the same raw bytes; invalid encoding, BOMs, replacement characters, stale or escaped inputs, symlinks, and hash drift fail closed. The helper always removes raw DOM, and the Windows-to-Linux Docker harness handles only binary paths/hashes and signed JSON without shell interpolation. Existing schema-v1/schema-v2 identity, metadata, privacy, signature, and downstream workflow gates remain strict. Metadata Bridge remains version 0.57.7 with an unchanged ZIP.
+
 ## v0.59.79
 
 Corrected Metadata Bridge authoritative REST preview rendering by separating a deterministic query-context-independent serializer from the strict page-8 public wrapper. The public `wp_head` path still excludes admin, REST, AJAX, cron, CLI, feeds, search, archives, previews, and unrelated pages, while the authenticated read-only preview validates post identity and calls the same pure serializer directly. Added immutable Metadata Bridge 0.57.7 and bootstrap 0.3.0 artifacts plus separately locked 0.57.6-to-0.57.7 upgrade and cleanup profiles. The future upgrade preserves active status, disabled rendering, staged payload hash, revision 1, page/media/site state, and zero cache purges. Publication does not authorize any live upgrade, rendering, metadata, cache, page, or media action.

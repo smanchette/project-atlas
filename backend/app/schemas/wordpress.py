@@ -914,7 +914,7 @@ class WordPressManualBrowserEvidence(SQLModel):
 
     evidence_schema: Literal["project-atlas-manual-browser-evidence"]
     evidence_schema_version: Literal[1, 2]
-    capture_helper_version: Literal["0.59.15"]
+    capture_helper_version: Literal["0.59.80"]
     evidence_id: str = Field(min_length=8, max_length=200)
     captured_at: str = Field(min_length=27, max_length=27)
     expires_at: str = Field(min_length=27, max_length=27)
