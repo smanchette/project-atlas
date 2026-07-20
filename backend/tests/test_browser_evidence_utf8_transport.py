@@ -234,10 +234,21 @@ def test_live_helper_consumes_exact_orlando_utf8_bytes_and_deletes_input(
         runpy.run_path(str(Path(__file__).parents[1] / "scripts/capture_manual_browser_evidence.py"), run_name="__main__")
     assert result.value.code == 0
     assert not staged.path.exists()
-    written = json.loads(output.read_text(encoding="utf-8"))
+    output_bytes = output.read_bytes()
+    assert output_bytes.isascii()
+    assert b"\\u2013" in output_bytes
+    written = json.loads(output_bytes.decode("ascii"))
     assert written["page_identity"]["document_title"] == EXPECTED_TITLE
     assert validate_manual_browser_evidence(written, KEY) == (True, "Verified.")
-    assert "<!doctype" not in output.read_text(encoding="utf-8").lower()
+    assert "<!doctype" not in output_bytes.decode("ascii").lower()
+
+    # Windows PowerShell 5.1 defaults BOM-free text reads to the active ANSI
+    # code page. The ASCII-only JSON envelope must survive that operator path
+    # without changing any signed Unicode value.
+    powershell_text = output_bytes.decode("cp1252")
+    powershell_round_trip = json.loads(json.dumps(json.loads(powershell_text)))
+    assert powershell_round_trip["page_identity"]["document_title"] == EXPECTED_TITLE
+    assert validate_manual_browser_evidence(powershell_round_trip, KEY) == (True, "Verified.")
 
 
 def test_live_helper_removes_input_when_locked_identity_fails(

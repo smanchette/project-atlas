@@ -152,14 +152,23 @@ def verify_manual_install(session: Session, page_id: int, request: WordPressBoot
         status = "installation_partial" if kind == "installation_partial" else "manual_installation_mismatch"
         recommendation = "siteground_restore" if not _protected_equal(audit, base.inspected_state) else "guarded_bootstrap_recovery"
         return _transition(session, audit, status, gates, base.inspected_state, recommendation)
-    audit.upload_snapshot = base.inspected_state
-    audit.upload_inventories = _inventories(base.inspected_state)
-    audit.status = "manual_installation_inventory_verified"
-    audit.transition_history = [*audit.transition_history, audit.status]
-    audit.atlas_write_count += 1
-    audit.recovery_recommendation = "proceed_to_guarded_activation"
-    audit.gate_results = [g.model_dump(mode="json") for g in gates]
-    session.add(audit); session.commit(); session.refresh(audit)
+    # Two read-only verification requests may finish their remote observations
+    # at the same time. Serialize the durable transition, refresh under the
+    # process lock, and make an already-recorded exact result idempotent.
+    with _lock:
+        session.refresh(audit)
+        if audit.status == "manual_installation_inventory_verified":
+            return _result(audit, "bootstrap_manual_install_verification", gates, {**base.inspected_state, "bootstrap_classification": classification, "inactive_checksum_verifiable": False}, "proceed_to_guarded_activation")
+        if audit.status != "awaiting_manual_bootstrap_installation":
+            raise HTTPException(409, "The establishment audit changed during manual-upload verification.")
+        audit.upload_snapshot = base.inspected_state
+        audit.upload_inventories = _inventories(base.inspected_state)
+        audit.status = "manual_installation_inventory_verified"
+        audit.transition_history = [*audit.transition_history, audit.status]
+        audit.atlas_write_count += 1
+        audit.recovery_recommendation = "proceed_to_guarded_activation"
+        audit.gate_results = [g.model_dump(mode="json") for g in gates]
+        session.add(audit); session.commit(); session.refresh(audit)
     return _result(audit, "bootstrap_manual_install_verification", gates, {**base.inspected_state, "bootstrap_classification": classification, "inactive_checksum_verifiable": False}, "proceed_to_guarded_activation")
 
 

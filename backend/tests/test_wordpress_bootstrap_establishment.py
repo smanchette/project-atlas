@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -114,6 +115,37 @@ def test_no_upload_remains_waiting(db, monkeypatch):
         result = establishment.verify_manual_install(session, 41, verify_proof(auth.establishment_audit_id))
         assert result.status == "awaiting_manual_bootstrap_installation"
         assert result.wordpress_write_count == result.cache_write_count == 0
+
+
+def test_two_manual_install_verifications_finalize_once(db, monkeypatch):
+    current = {"state": "absent"}
+    monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", lambda *args, **kwargs: base(current["state"]))
+    monkeypatch.setattr(establishment, "_expiry", lambda request: datetime.now(UTC) + timedelta(minutes=5))
+    with Session(db) as session:
+        preflight = establishment.manual_install_preflight(session, 41, proof())
+        authorization = establishment.authorize_manual_install(
+            session,
+            41,
+            WordPressBootstrapManualInstallAuthorizeRequest(
+                manual_install_handle=preflight.handle,
+                confirmation_phrase=establishment.MANUAL_PHRASE,
+            ),
+        )
+        audit_id = authorization.establishment_audit_id
+    current["state"] = "inactive"
+
+    def verify_once():
+        with Session(db) as session:
+            return establishment.verify_manual_install(session, 41, verify_proof(audit_id)).status
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        statuses = list(pool.map(lambda _: verify_once(), range(2)))
+
+    assert statuses == ["manual_installation_inventory_verified"] * 2
+    with Session(db) as session:
+        audit = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        assert audit.transition_history.count("manual_installation_inventory_verified") == 1
+        assert audit.atlas_write_count == 2
 
 
 def test_manual_activation_is_classified_without_an_automatic_write(db, monkeypatch):

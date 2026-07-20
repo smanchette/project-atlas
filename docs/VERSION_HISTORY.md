@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.82
+
+Made the signed manual-browser-evidence JSON envelope safe across Windows PowerShell 5.1 by emitting ASCII-only JSON with standard Unicode escapes. Parsed evidence, schema-v1/schema-v2 meaning, canonical HMAC input, signatures, privacy gates, and the byte-exact UTF-8 DOM input contract are unchanged. Added a regression that round-trips the locked Orlando en dash through the Windows ANSI-default operator path and verifies the signature remains valid. Concurrent successful manual-install verification is now idempotent under the existing process lock, preventing duplicate audit finalization. Publication does not authorize browser capture, bootstrap upload or activation, Metadata Bridge upgrade, metadata rendering, cache purge, or page/media mutation.
+
 ## v0.59.81
 
 - Added an audited manual handoff for the one locked upgrade-bootstrap 0.3.0 artifact, a separate fixed-entry activation, immediate authenticated executable-checksum quarantine, durable establishment audit, and read-only recovery classifications without introducing arbitrary upload or activation controls.

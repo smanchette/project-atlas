@@ -58,7 +58,12 @@ def main() -> int:
             schema_version=args.schema_version,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(evidence, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+        # Keep the signed JSON transport ASCII-only. Windows PowerShell 5.1
+        # otherwise treats BOM-free UTF-8 as the active ANSI code page when an
+        # operator reads and reserializes the file, corrupting Unicode fields
+        # (including the locked Orlando title) and invalidating the HMAC.
+        # JSON escapes preserve the parsed evidence and signature semantics.
+        args.output.write_text(json.dumps(evidence, indent=2, ensure_ascii=True) + "\n", encoding="ascii", newline="\n")
     except BrowserEvidenceTransportError as exc:
         parser.error(exc.reason)
     finally:
