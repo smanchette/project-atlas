@@ -33,6 +33,7 @@ from app.schemas.wordpress import (
     WordPressDraftGateResult,
 )
 from app.services import wordpress_plugin_upgrade_0577 as upgrade
+from app.services import wordpress_cache_aware_rendering as cache_binding
 from app.services.wordpress_deployment import _canonical_plugins, _gate
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 
@@ -47,6 +48,17 @@ BOOTSTRAP_ZIP_SHA256 = "de5bfb7875b6f84f2009ef2043c1c86c7f9d20f0f973a5cb16b478fe
 BOOTSTRAP_ENTRY_SHA256 = "a977c077573ab732213a06d17dcc317b09854564777ce9cb24c869383972cd53"
 MANUAL_PHRASE = "AUTHORIZE MANUAL UPLOAD OF PROJECT ATLAS UPGRADE BOOTSTRAP 0.3.0"
 ACTIVATION_PHRASE = "ACTIVATE PROJECT ATLAS UPGRADE BOOTSTRAP 0.3.0"
+MANUAL_BINDING_REASON_CODES = frozenset({
+    "manual_upload_stable_observation_mismatch",
+    "manual_upload_observation_expired",
+    "manual_upload_observation_before_preflight",
+    "manual_upload_observation_window_exceeded",
+    "manual_upload_public_identity_drift",
+    "manual_upload_rendered_hash_drift",
+    "manual_upload_runtime_drift",
+    "manual_upload_backup_drift",
+    "manual_upload_volatile_timestamp_change_allowed",
+})
 HANDLE_TTL = timedelta(minutes=10)
 ACTIVATION_SCOPE = [
     f"POST /wp-json/wp/v2/plugins/{BOOTSTRAP_REST_ID}",
@@ -67,6 +79,14 @@ class _Handle:
     binding_hash: str
     expires_at: datetime
     audit_id: int | None
+    stable_rendered_fingerprint: str
+    stable_rendered_observation: dict[str, Any]
+    preflight_observed_at: datetime
+    evidence_expires_at: datetime
+    backup_deadline: datetime
+    issued_at: datetime
+    maximum_interval: timedelta
+    clock_reversal_tolerance: timedelta
 
 
 _lock = Lock()
@@ -78,14 +98,31 @@ _timers: dict[tuple[str, str], Timer] = {}
 def manual_install_preflight(session: Session, page_id: int, request: WordPressBootstrapManualInstallPreflightRequest) -> WordPressBootstrapEstablishmentPreflight:
     base = upgrade.plugin_upgrade_preflight(session, page_id, request, issue_handle=False)
     classification = _classify(base.inspected_state.get("plugins", []))
+    temporal = _preflight_temporal_contract(request, base.inspected_state, base.backup_deadline)
     gates = _base_gates(base) + [
         _gate("bootstrap_absent", "No bootstrap is installed before manual upload", classification["classification"] == "no_upload_yet", "A bootstrap or conflicting installation already exists."),
         _gate("establishment_clear", "No unresolved bootstrap-establishment audit exists", not _unresolved(session), "An unresolved bootstrap-establishment audit already exists."),
+        *temporal["gates"],
     ]
     ready = all(g.passed for g in gates)
     expires_at = _expiry(request) if ready else None
-    binding = _binding(request, base.inspected_state, None, "manual_upload", expires_at)
-    handle = _store("manual", request, _hash(binding), expires_at, None) if ready and expires_at else None
+    stable = _stable_rendered_observation(base.inspected_state, request.manual_browser_evidence)
+    stable_fingerprint = _hash(stable)
+    binding = _binding(
+        request, base.inspected_state, None, "manual_upload", expires_at,
+        stable_rendered_fingerprint=stable_fingerprint,
+        preflight_observed_at=temporal["observed_at"],
+        evidence_expires_at=temporal["evidence_expires_at"],
+        backup_deadline=temporal["backup_deadline"],
+    )
+    handle = _store(
+        "manual", request, _hash(binding), expires_at, None,
+        stable_rendered_fingerprint=stable_fingerprint,
+        stable_rendered_observation=stable,
+        preflight_observed_at=temporal["observed_at"],
+        evidence_expires_at=temporal["evidence_expires_at"],
+        backup_deadline=temporal["backup_deadline"],
+    ) if ready and expires_at and temporal["complete"] else None
     return _preflight_response(
         "bootstrap_manual_install_preflight", ready, "manual_install_preflight_ready" if ready else "manual_install_preflight_blocked",
         base, gates, binding, handle, expires_at, classification,
@@ -110,9 +147,28 @@ def authorize_manual_install(session: Session, page_id: int, request: WordPressB
         _gate("bootstrap_absent", "No bootstrap is installed before manual upload", classification["classification"] == "no_upload_yet", "A bootstrap or conflicting installation already exists."),
         _gate("establishment_clear", "No unresolved bootstrap-establishment audit exists", not _unresolved(session), "An unresolved bootstrap-establishment audit already exists."),
     ]
-    rerun_binding = _hash(_binding(entry.request, base.inspected_state, None, "manual_upload", entry.expires_at))
-    if not all(g.passed for g in gates) or rerun_binding != entry.binding_hash:
-        raise HTTPException(409, "Manual-upload state changed. Run a new preflight.")
+    rerun_stable = _stable_rendered_observation(base.inspected_state, entry.request.manual_browser_evidence)
+    rerun_fingerprint = _hash(rerun_stable)
+    rerun_observed_at = _rendered_observed_at(base.inspected_state)
+    conflict = _stable_rendered_conflict(entry.stable_rendered_observation, rerun_stable)
+    if conflict:
+        _raise_manual_conflict(conflict, "Stable rendered-page identity changed after manual-upload preflight.")
+    temporal_conflict = _manual_temporal_conflict(entry, rerun_observed_at)
+    if temporal_conflict:
+        _raise_manual_conflict(temporal_conflict, "The authorization observation is outside the bound temporal contract.")
+    rerun_binding = _hash(_binding(
+        entry.request, base.inspected_state, None, "manual_upload", entry.expires_at,
+        stable_rendered_fingerprint=rerun_fingerprint,
+        preflight_observed_at=entry.preflight_observed_at,
+        evidence_expires_at=entry.evidence_expires_at,
+        backup_deadline=entry.backup_deadline,
+    ))
+    if not all(g.passed for g in gates):
+        _raise_manual_conflict(_manual_gate_conflict(gates), "A live authorization gate changed after preflight.")
+    if rerun_fingerprint != entry.stable_rendered_fingerprint or rerun_binding != entry.binding_hash:
+        _raise_manual_conflict("manual_upload_stable_observation_mismatch", "A stable runtime, backup, plugin, payload, page, media, audit, or rendered binding changed.")
+    if rerun_observed_at != entry.preflight_observed_at:
+        gates.append(_gate("manual_upload_volatile_timestamp_change_allowed", "Authorization observation timestamp advanced inside the bound window", True, ""))
     evidence = entry.request.manual_browser_evidence
     audit = WordPressBootstrapEstablishmentAudit(
         generated_page_id=41, wordpress_post_id=8,
@@ -221,10 +277,27 @@ def activation_preflight(session: Session, page_id: int, request: WordPressBoots
         _gate("audit_upload_verified", "The selected audit records exact inactive upload verification", audit.status == "manual_installation_inventory_verified", "Manual upload has not been verified."),
         _gate("upload_inventory_bound", "The complete inactive inventory matches the verified upload", audit.upload_inventories == _inventories(base.inspected_state), "Plugin inventory changed after upload verification."),
     ]
+    temporal = _preflight_temporal_contract(request, base.inspected_state, base.backup_deadline)
+    gates += temporal["gates"]
     ready = all(g.passed for g in gates)
     expires_at = _expiry(request) if ready else None
-    binding = _binding(request, base.inspected_state, audit, "activate_fixed_bootstrap", expires_at)
-    handle = _store("activation", request, _hash(binding), expires_at, audit.id) if ready and expires_at else None
+    stable = _stable_rendered_observation(base.inspected_state, request.manual_browser_evidence)
+    stable_fingerprint = _hash(stable)
+    binding = _binding(
+        request, base.inspected_state, audit, "activate_fixed_bootstrap", expires_at,
+        stable_rendered_fingerprint=stable_fingerprint,
+        preflight_observed_at=temporal["observed_at"],
+        evidence_expires_at=temporal["evidence_expires_at"],
+        backup_deadline=temporal["backup_deadline"],
+    )
+    handle = _store(
+        "activation", request, _hash(binding), expires_at, audit.id,
+        stable_rendered_fingerprint=stable_fingerprint,
+        stable_rendered_observation=stable,
+        preflight_observed_at=temporal["observed_at"],
+        evidence_expires_at=temporal["evidence_expires_at"],
+        backup_deadline=temporal["backup_deadline"],
+    ) if ready and expires_at and temporal["complete"] else None
     return _preflight_response(
         "bootstrap_activation_preflight", ready, "bootstrap_activation_preflight_ready" if ready else "bootstrap_activation_preflight_blocked",
         base, gates, binding, handle, expires_at, classification, audit_id=audit.id,
@@ -245,9 +318,28 @@ def apply_activation(session: Session, page_id: int, request: WordPressBootstrap
         _gate("audit_upload_verified", "The selected audit records exact inactive upload verification", audit.status == "manual_installation_inventory_verified", "Manual upload has not been verified."),
         _gate("upload_inventory_bound", "The complete inactive inventory matches the verified upload", audit.upload_inventories == _inventories(base.inspected_state), "Plugin inventory changed after upload verification."),
     ]
-    rerun_binding = _hash(_binding(entry.request, base.inspected_state, audit, "activate_fixed_bootstrap", entry.expires_at))
-    if not all(g.passed for g in gates) or rerun_binding != entry.binding_hash:
-        raise HTTPException(409, "Bootstrap activation state changed. Run a new activation preflight.")
+    rerun_stable = _stable_rendered_observation(base.inspected_state, entry.request.manual_browser_evidence)
+    rerun_fingerprint = _hash(rerun_stable)
+    rerun_observed_at = _rendered_observed_at(base.inspected_state)
+    conflict = _stable_rendered_conflict(entry.stable_rendered_observation, rerun_stable)
+    if conflict:
+        _raise_activation_conflict(_activation_stable_conflict(conflict), "Stable rendered-page identity changed after bootstrap activation preflight.")
+    temporal_conflict = _activation_temporal_conflict(entry, rerun_observed_at)
+    if temporal_conflict:
+        _raise_activation_conflict(temporal_conflict, "The activation observation is outside the bound temporal contract.")
+    rerun_binding = _hash(_binding(
+        entry.request, base.inspected_state, audit, "activate_fixed_bootstrap", entry.expires_at,
+        stable_rendered_fingerprint=rerun_fingerprint,
+        preflight_observed_at=entry.preflight_observed_at,
+        evidence_expires_at=entry.evidence_expires_at,
+        backup_deadline=entry.backup_deadline,
+    ))
+    if not all(g.passed for g in gates):
+        _raise_activation_conflict("bootstrap_activation_gate_drift", "A live activation gate changed after preflight.")
+    if rerun_fingerprint != entry.stable_rendered_fingerprint or rerun_binding != entry.binding_hash:
+        _raise_activation_conflict("bootstrap_activation_stable_observation_mismatch", "A stable activation binding changed after preflight.")
+    if rerun_observed_at != entry.preflight_observed_at:
+        gates.append(_gate("bootstrap_activation_volatile_timestamp_change_allowed", "Activation observation timestamp advanced inside the bound window", True, ""))
     audit.status = "activation_pending_checksum_verification"
     audit.activation_handle_fingerprint = _sha(request.activation_handle)
     audit.activation_binding_hash = entry.binding_hash
@@ -486,11 +578,35 @@ def _protected(snapshot):
     return {
         "page": snapshot.get("page_snapshot_hash"), "body": snapshot.get("page_body_hash"),
         "media31": snapshot.get("media31_snapshot_hash"), "media32": snapshot.get("media32_snapshot_hash"),
-        "site": snapshot.get("site"), "rendered": snapshot.get("rendered"),
-        "cache_headers": snapshot.get("cache_headers"), "cache_purge_count": snapshot.get("cache_purge_count", 0),
+        "site": snapshot.get("site"), "rendered": _protected_rendered(snapshot.get("rendered")),
+        "cache_headers": _stable_diagnostic_headers(snapshot.get("cache_headers")), "cache_purge_count": snapshot.get("cache_purge_count", 0),
         "rendering_enabled": status.get("rendering_enabled"), "payload_hash": status.get("payload_hash"),
         "revision": str(status.get("revision")), "payload": status.get("payload"),
     }
+
+
+def _stable_diagnostic_headers(headers):
+    if not isinstance(headers, dict):
+        return headers
+    volatile = {"age", "date", "expires", "last-modified"}
+    return {
+        str(key).lower(): value
+        for key, value in headers.items()
+        if str(key).lower() not in volatile
+    }
+
+
+def _protected_rendered(rendered):
+    if not isinstance(rendered, dict):
+        return rendered
+    value = json.loads(json.dumps(rendered, sort_keys=True, default=str))
+    public = value.get("public_http_observation")
+    if isinstance(public, dict):
+        public.pop("observed_at", None)
+        public.pop("observation_completed_at", None)
+        public["cache_headers"] = _stable_diagnostic_headers(public.get("cache_headers"))
+    value["cache_headers"] = _stable_diagnostic_headers(value.get("cache_headers"))
+    return value
 
 
 def _protected_equal(audit, snapshot):
@@ -562,14 +678,223 @@ def _without_bootstrap(plugins):
     return _canonical_plugins([item for item in plugins if not str(item.get("plugin", "")).replace("\\", "/").startswith(BOOTSTRAP_DIRECTORY)])
 
 
-def _binding(request, snapshot, audit, action, expires_at):
+def _evidence_value(evidence):
+    if hasattr(evidence, "model_dump"):
+        return evidence.model_dump(mode="json", exclude_none=True)
+    return evidence if isinstance(evidence, dict) else {}
+
+
+def _rendered_observation(snapshot):
+    rendered = snapshot.get("rendered", {}) if isinstance(snapshot, dict) else {}
+    return rendered if isinstance(rendered, dict) else {}
+
+
+def _public_observation(snapshot):
+    value = _rendered_observation(snapshot).get("public_http_observation", {})
+    return value if isinstance(value, dict) else {}
+
+
+def _rendered_observed_at(snapshot):
+    try:
+        return cache_binding._public_observed_at(_public_observation(snapshot))
+    except (HTTPException, TypeError, ValueError):
+        return None
+
+
+def _stable_rendered_observation(snapshot, evidence):
+    """Bind immutable rendered identity while retaining raw observations only for diagnostics."""
+
+    rendered = _rendered_observation(snapshot)
+    evidence_value = _evidence_value(evidence)
+    return {
+        "requested_url": cache_binding.CANONICAL_URL,
+        "final_url": rendered.get("final_url"),
+        "outcome": rendered.get("outcome"),
+        "verified": rendered.get("verified") is True,
+        "rendered_head_hash": rendered.get("head_hash"),
+        "visible_content_hash": rendered.get("visible_hash"),
+        "raw_dom_hash": rendered.get("raw_dom_hash") or _public_observation(snapshot).get("raw_dom_sha256"),
+        "document_title": rendered.get("document_title"),
+        "ordered_h1_inventory": rendered.get("h1"),
+        "canonical_inventory": rendered.get("canonical"),
+        "featured_image_url": rendered.get("featured_image_url"),
+        "featured_image_alt": rendered.get("featured_image_alt"),
+        "metadata_inventory_hash": rendered.get("metadata_inventory_hash"),
+        "privacy_attestations": rendered.get("privacy_attestations"),
+        "classifications": {
+            "signature_validated": rendered.get("signature_validated") is True,
+            "atlas_metadata_marker_present": bool(rendered.get("atlas_metadata_marker_present")),
+            "media32_reference_present": bool(rendered.get("media32_reference_present")),
+        },
+        "evidence_identity": {
+            "evidence_id": evidence_value.get("evidence_id"),
+            "schema": evidence_value.get("evidence_schema"),
+            "schema_version": evidence_value.get("evidence_schema_version"),
+            "capture_helper_version": evidence_value.get("capture_helper_version"),
+            "final_url": evidence_value.get("final_url"),
+            "acquisition_source": evidence_value.get("acquisition_source"),
+            "navigation_outcome": evidence_value.get("navigation_outcome"),
+            "page_identity": evidence_value.get("page_identity"),
+            "page_identity_hash": _hash(evidence_value.get("page_identity", {})),
+            "metadata_inventory_hash": evidence_value.get("metadata_inventory_hash"),
+            "rendered_head_hash": evidence_value.get("rendered_head_hash"),
+            "visible_content_hash": evidence_value.get("visible_content_hash"),
+            "absence_findings": evidence_value.get("absence_findings"),
+            "privacy_attestations": evidence_value.get("privacy_attestations"),
+            "signature": evidence_value.get("helper_signature"),
+        },
+        "public_transport": cache_binding._stable_public_observation(
+            _public_observation(snapshot), evidence
+        ),
+    }
+
+
+def _stable_rendered_conflict(before, after):
+    if before.get("final_url") != after.get("final_url") or after.get("final_url") != cache_binding.CANONICAL_URL:
+        return "manual_upload_public_identity_drift"
+    before_transport = before.get("public_transport", {})
+    after_transport = after.get("public_transport", {})
+    if (
+        before_transport.get("final_url") != after_transport.get("final_url")
+        or before_transport.get("redirect_count") != after_transport.get("redirect_count")
+        or before_transport.get("status_code") != after_transport.get("status_code")
+        or before_transport.get("response_classification") != after_transport.get("response_classification")
+    ):
+        return "manual_upload_public_identity_drift"
+    if (
+        before.get("rendered_head_hash") != after.get("rendered_head_hash")
+        or before.get("visible_content_hash") != after.get("visible_content_hash")
+        or before.get("raw_dom_hash") != after.get("raw_dom_hash")
+        or before_transport.get("body_sha256") != after_transport.get("body_sha256")
+        or before_transport.get("public_rendered_hashes") != after_transport.get("public_rendered_hashes")
+    ):
+        return "manual_upload_rendered_hash_drift"
+    if before != after:
+        return "manual_upload_stable_observation_mismatch"
+    return None
+
+
+def _preflight_temporal_contract(request, snapshot, backup_deadline):
+    observed_at = _rendered_observed_at(snapshot)
+    try:
+        evidence_value = _evidence_value(request.manual_browser_evidence)
+        captured_at = cache_binding._timestamp(evidence_value.get("captured_at"))
+        evidence_expires_at = cache_binding._timestamp(evidence_value.get("expires_at"))
+        backup = cache_binding._timestamp(backup_deadline)
+    except (TypeError, ValueError):
+        captured_at = evidence_expires_at = backup = None
+    now = datetime.now(UTC)
+    aware = all(value is not None and value.tzinfo is not None for value in (observed_at, captured_at, evidence_expires_at, backup))
+    fresh = bool(
+        aware
+        and captured_at <= observed_at <= evidence_expires_at
+        and observed_at <= backup
+        and observed_at <= now + cache_binding.CLOCK_REVERSAL_TOLERANCE
+        and now <= evidence_expires_at
+        and now <= backup
+    )
+    gates = [
+        _gate("manual_upload_observation_timestamp", "Rendered observation timestamps are timezone-aware and available", aware, "Rendered observation temporal identity is unavailable."),
+        _gate("manual_upload_observation_fresh", "Rendered observation is inside the evidence and backup windows", fresh, "Rendered observation is expired, future-dated, or outside a bound window."),
+    ]
+    return {
+        "gates": gates,
+        "complete": bool(aware and fresh),
+        "observed_at": observed_at,
+        "evidence_expires_at": evidence_expires_at,
+        "backup_deadline": backup,
+    }
+
+
+def _manual_temporal_conflict(entry, observed_at, *, now=None):
+    if observed_at is None:
+        return "manual_upload_observation_expired"
+    if (
+        entry.maximum_interval != cache_binding.MAX_OBSERVATION_INTERVAL
+        or entry.clock_reversal_tolerance != cache_binding.CLOCK_REVERSAL_TOLERANCE
+    ):
+        return "manual_upload_stable_observation_mismatch"
+    code = cache_binding._temporal_conflict(
+        preflight_observed_at=entry.preflight_observed_at,
+        apply_observed_at=observed_at,
+        evidence_expires_at=entry.evidence_expires_at,
+        handle_expires_at=entry.expires_at,
+        backup_deadline=entry.backup_deadline,
+        now=now,
+    )
+    return {
+        "public_observation_expired": "manual_upload_observation_expired",
+        "apply_observation_before_preflight": "manual_upload_observation_before_preflight",
+        "observation_window_exceeded": "manual_upload_observation_window_exceeded",
+    }.get(code, code)
+
+
+def _activation_temporal_conflict(entry, observed_at):
+    code = _manual_temporal_conflict(entry, observed_at)
+    return {
+        "manual_upload_observation_expired": "bootstrap_activation_observation_expired",
+        "manual_upload_observation_before_preflight": "bootstrap_activation_observation_before_preflight",
+        "manual_upload_observation_window_exceeded": "bootstrap_activation_observation_window_exceeded",
+    }.get(code, code)
+
+
+def _activation_stable_conflict(code):
+    return {
+        "manual_upload_public_identity_drift": "bootstrap_activation_public_identity_drift",
+        "manual_upload_rendered_hash_drift": "bootstrap_activation_rendered_hash_drift",
+        "manual_upload_stable_observation_mismatch": "bootstrap_activation_stable_observation_mismatch",
+    }.get(code, code)
+
+
+def _manual_gate_conflict(gates):
+    failed = {gate.code for gate in gates if not gate.passed}
+    if failed & {
+        "release_identity", "expected_runtime", "repository_identity", "repository_clean",
+        "protected_paths",
+    }:
+        return "manual_upload_runtime_drift"
+    if failed & {
+        "atlas_data_backup", "atlas_media_backup", "atlas_program_backup", "backup_method",
+        "backup_reference", "backup_timezone", "backup_window", "database_attestation",
+        "plugins_attestation", "restore_attestation", "confirmer", "no_post_backup_change",
+    }:
+        return "manual_upload_backup_drift"
+    if failed & {"evidence_contract", "rendered_state", "page_snapshot", "page_identity", "body_hash", "media31", "media32", "site_identity"}:
+        return "manual_upload_public_identity_drift"
+    return "manual_upload_stable_observation_mismatch"
+
+
+def _raise_manual_conflict(code, message):
+    raise HTTPException(409, detail={"reason_code": code, "message": message})
+
+
+def _raise_activation_conflict(code, message):
+    raise HTTPException(409, detail={"reason_code": code, "message": message})
+
+
+def _binding(
+    request, snapshot, audit, action, expires_at, *, stable_rendered_fingerprint,
+    preflight_observed_at, evidence_expires_at, backup_deadline,
+):
     return {
         "action": action, "targets": {"page_id": 41, "wordpress_post_id": 8, "entry": BOOTSTRAP_ENTRY},
         "artifact": {"version": BOOTSTRAP_VERSION, "zip": BOOTSTRAP_ZIP, "zip_sha256": BOOTSTRAP_ZIP_SHA256, "entry_sha256": BOOTSTRAP_ENTRY_SHA256},
         "runtime": request.expected_runtime_identity.model_dump(mode="json"), "backup": _backup(request),
-        "inventory": _inventories(snapshot), "protected": _protected(snapshot),
+        "inventory": _inventories(snapshot),
+        "protected": {
+            **{key: value for key, value in _protected(snapshot).items() if key != "rendered"},
+            "stable_rendered_fingerprint": stable_rendered_fingerprint,
+        },
         "audit": {"id": audit.id, "status": audit.status} if audit else None,
         "expires_at": expires_at.isoformat() if expires_at else None,
+        "temporal_contract": {
+            "preflight_observed_at": preflight_observed_at.isoformat() if preflight_observed_at else None,
+            "evidence_expires_at": evidence_expires_at.isoformat() if evidence_expires_at else None,
+            "handle_expires_at": expires_at.isoformat() if expires_at else None,
+            "backup_deadline": backup_deadline.isoformat() if backup_deadline else None,
+            "maximum_interval_seconds": int(cache_binding.MAX_OBSERVATION_INTERVAL.total_seconds()),
+            "clock_reversal_tolerance_seconds": int(cache_binding.CLOCK_REVERSAL_TOLERANCE.total_seconds()),
+        },
     }
 
 
@@ -590,11 +915,29 @@ def _expired(request):
     return upgrade._backup_deadline(upgrade._proof(request).wordpress_backup_completed_at) <= datetime.now(UTC)
 
 
-def _store(kind, request, binding_hash, expires_at, audit_id):
+def _store(
+    kind, request, binding_hash, expires_at, audit_id, *,
+    stable_rendered_fingerprint="", stable_rendered_observation=None,
+    preflight_observed_at=None, evidence_expires_at=None, backup_deadline=None,
+):
     if not expires_at:
         return None
+    now = datetime.now(UTC)
     handle = secrets.token_urlsafe(32)
-    entry = _Handle(request, binding_hash, expires_at, audit_id)
+    entry = _Handle(
+        request=request,
+        binding_hash=binding_hash,
+        expires_at=expires_at,
+        audit_id=audit_id,
+        stable_rendered_fingerprint=stable_rendered_fingerprint,
+        stable_rendered_observation=stable_rendered_observation or {},
+        preflight_observed_at=preflight_observed_at or now,
+        evidence_expires_at=evidence_expires_at or expires_at,
+        backup_deadline=backup_deadline or expires_at,
+        issued_at=now,
+        maximum_interval=cache_binding.MAX_OBSERVATION_INTERVAL,
+        clock_reversal_tolerance=cache_binding.CLOCK_REVERSAL_TOLERANCE,
+    )
     table = _manual_handles if kind == "manual" else _activation_handles
     with _lock:
         table[handle] = entry

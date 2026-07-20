@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from types import SimpleNamespace
@@ -84,6 +85,43 @@ def authorized_audit(db, monkeypatch):
 
 def snapshot(state="absent"):
     value = observation()
+    evidence = proof().manual_browser_evidence
+    identity = evidence.page_identity
+    value["rendered"].update({
+        "final_url": evidence.final_url,
+        "outcome": "signed_browser_evidence_after_public_403",
+        "head_hash": evidence.rendered_head_hash,
+        "visible_hash": evidence.visible_content_hash,
+        "document_title": identity["document_title"],
+        "canonical": [identity["canonical_url"]],
+        "featured_image_url": identity["featured_image_url"],
+        "featured_image_alt": identity["featured_image_alt"],
+        "metadata_inventory_hash": evidence.metadata_inventory_hash,
+        "privacy_attestations": evidence.privacy_attestations,
+    })
+    observed_at = datetime.now(UTC).isoformat()
+    value["rendered"]["public_http_observation"] = {
+        "source": "credential_free_public_http",
+        "outcome": "public_html_verified",
+        "final_url": "https://www.drywoodtenting.com/drywood-termite-tenting-orlando-fl/",
+        "status_code": 200,
+        "observed_at": observed_at,
+        "redirect_count": 0,
+        "content_type": "text/html; charset=UTF-8",
+        "cache_headers": {},
+        "body_sha256": "f" * 64,
+        "verified": True,
+        "head_hash": value["rendered"]["head_hash"],
+        "visible_hash": value["rendered"]["visible_hash"],
+        "document_title": value["rendered"].get("document_title", ["Drywood Termite Tenting in Orlando, FL – My WordPress"]),
+        "h1": value["rendered"]["h1"],
+        "canonical": ["https://www.drywoodtenting.com/drywood-termite-tenting-orlando-fl/"],
+        "admin_page_detected": False,
+        "login_page_detected": False,
+        "authenticated_context_detected": False,
+        "challenge_page_detected": False,
+        "error_page_detected": False,
+    }
     value["plugins"] = [item for item in value["plugins"] if not item["plugin"].startswith(establishment.BOOTSTRAP_DIRECTORY)]
     value["active_plugins"] = sorted(item["plugin"] for item in value["plugins"] if item["status"] == "active")
     if state in {"inactive", "active"}:
@@ -99,8 +137,12 @@ def snapshot(state="absent"):
 
 
 def base(state="absent"):
+    return base_snapshot(snapshot(state), state)
+
+
+def base_snapshot(value, state="absent"):
     return SimpleNamespace(
-        inspected_state=snapshot(state), artifact={}, backup_deadline=datetime.now(UTC) + timedelta(hours=3),
+        inspected_state=value, artifact={}, backup_deadline=datetime.now(UTC) + timedelta(hours=3),
         gate_results=[
             establishment._gate("release_identity", "Release", True, ""),
             establishment._gate("upgrade_bootstrap", "Bootstrap", False, "absent"),
@@ -491,6 +533,140 @@ def test_handle_is_single_use_and_restart_invalidates(monkeypatch):
     handle = establishment._store("manual", proof(), "b" * 64, expiry, None)
     establishment._clear_establishment_handles()
     with pytest.raises(HTTPException): establishment._consume("manual", handle)
+
+
+def test_manual_authorization_allows_bounded_volatile_observation_drift(db, monkeypatch):
+    request = proof()
+    first = snapshot("absent")
+    first_time = datetime.now(UTC)
+    first["rendered"]["public_http_observation"].update({
+        "observed_at": first_time.isoformat(),
+        "cache_headers": {"x-cache-enabled": "true", "age": "1", "date": "first"},
+    })
+    second = deepcopy(first)
+    second["rendered"]["public_http_observation"].update({
+        "observed_at": (first_time + timedelta(milliseconds=500)).isoformat(),
+        "cache_headers": {"x-cache-enabled": "true", "age": "8", "date": "second"},
+    })
+    observations = iter((first, second))
+    monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", lambda *args, **kwargs: base_snapshot(next(observations)))
+    monkeypatch.setattr(establishment, "_expiry", lambda value: first_time + timedelta(minutes=5))
+
+    with Session(db) as session:
+        preflight = establishment.manual_install_preflight(session, 41, request)
+        assert preflight.ready and preflight.handle
+        result = establishment.authorize_manual_install(
+            session,
+            41,
+            WordPressBootstrapManualInstallAuthorizeRequest(
+                manual_install_handle=preflight.handle,
+                confirmation_phrase=establishment.MANUAL_PHRASE,
+            ),
+        )
+        audits = list(session.exec(select(WordPressBootstrapEstablishmentAudit)))
+
+    assert result.status == "awaiting_manual_bootstrap_installation"
+    assert result.wordpress_write_count == 0
+    assert result.cache_write_count == 0
+    assert result.atlas_write_count == 1
+    assert len(audits) == 1
+    assert audits[0].transition_history == ["awaiting_manual_bootstrap_installation"]
+    assert any(g.code == "manual_upload_volatile_timestamp_change_allowed" and g.passed for g in result.gate_results)
+    assert audits[0].pre_snapshot["rendered"]["public_http_observation"]["observed_at"] == second["rendered"]["public_http_observation"]["observed_at"]
+
+
+@pytest.mark.parametrize(("mutation", "reason"), [
+    ("final_url", "manual_upload_public_identity_drift"),
+    ("redirect_count", "manual_upload_public_identity_drift"),
+    ("status_code", "manual_upload_public_identity_drift"),
+    ("document_title", "manual_upload_stable_observation_mismatch"),
+    ("h1", "manual_upload_stable_observation_mismatch"),
+    ("canonical", "manual_upload_stable_observation_mismatch"),
+    ("head_hash", "manual_upload_rendered_hash_drift"),
+    ("visible_hash", "manual_upload_rendered_hash_drift"),
+    ("raw_dom_sha256", "manual_upload_rendered_hash_drift"),
+    ("authenticated_context_detected", "manual_upload_stable_observation_mismatch"),
+    ("challenge_page_detected", "manual_upload_stable_observation_mismatch"),
+])
+def test_manual_authorization_rejects_stable_rendered_drift_without_audit(db, monkeypatch, mutation, reason):
+    request = proof()
+    first = snapshot("absent")
+    first_time = datetime.now(UTC)
+    first["rendered"]["public_http_observation"]["observed_at"] = first_time.isoformat()
+    second = deepcopy(first)
+    second["rendered"]["public_http_observation"]["observed_at"] = (first_time + timedelta(milliseconds=500)).isoformat()
+    if mutation == "final_url":
+        second["rendered"]["public_http_observation"][mutation] = "https://example.invalid/"
+    elif mutation == "redirect_count":
+        second["rendered"]["public_http_observation"][mutation] = 1
+    elif mutation == "status_code":
+        second["rendered"]["public_http_observation"][mutation] = 403
+    elif mutation in {"document_title", "h1", "canonical", "head_hash", "visible_hash"}:
+        second["rendered"][mutation] = "changed" if mutation not in {"h1", "canonical"} else ["changed"]
+    elif mutation == "raw_dom_sha256":
+        first["rendered"]["public_http_observation"][mutation] = "a" * 64
+        second["rendered"]["public_http_observation"][mutation] = "b" * 64
+    else:
+        second["rendered"]["public_http_observation"][mutation] = True
+    observations = iter((first, second))
+    monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", lambda *args, **kwargs: base_snapshot(next(observations)))
+    monkeypatch.setattr(establishment, "_expiry", lambda value: first_time + timedelta(minutes=5))
+
+    with Session(db) as session:
+        preflight = establishment.manual_install_preflight(session, 41, request)
+        with pytest.raises(HTTPException) as caught:
+            establishment.authorize_manual_install(
+                session,
+                41,
+                WordPressBootstrapManualInstallAuthorizeRequest(
+                    manual_install_handle=preflight.handle,
+                    confirmation_phrase=establishment.MANUAL_PHRASE,
+                ),
+            )
+        assert caught.value.status_code == 409
+        assert caught.value.detail["reason_code"] == reason
+        assert session.exec(select(WordPressBootstrapEstablishmentAudit)).first() is None
+
+
+@pytest.mark.parametrize(("apply_delta", "now_delta", "reason"), [
+    (timedelta(seconds=-2), timedelta(seconds=0), "manual_upload_observation_before_preflight"),
+    (timedelta(minutes=3), timedelta(minutes=3), "manual_upload_observation_window_exceeded"),
+    (timedelta(seconds=10), timedelta(minutes=6), "manual_upload_observation_expired"),
+])
+def test_manual_temporal_contract_fails_closed(apply_delta, now_delta, reason):
+    start = datetime.now(UTC)
+    handle = establishment._Handle(
+        request=proof(), binding_hash="a" * 64, expires_at=start + timedelta(minutes=5), audit_id=None,
+        stable_rendered_fingerprint="b" * 64, stable_rendered_observation={}, preflight_observed_at=start,
+        evidence_expires_at=start + timedelta(minutes=5), backup_deadline=start + timedelta(hours=1),
+        issued_at=start, maximum_interval=establishment.cache_binding.MAX_OBSERVATION_INTERVAL,
+        clock_reversal_tolerance=establishment.cache_binding.CLOCK_REVERSAL_TOLERANCE,
+    )
+    assert establishment._manual_temporal_conflict(
+        handle, start + apply_delta, now=start + now_delta
+    ) == reason
+
+
+def test_manual_request_rejects_caller_supplied_timestamp_or_fingerprint():
+    value = proof().model_dump(mode="json")
+    for injected in ({"observed_at": datetime.now(UTC).isoformat()}, {"stable_rendered_fingerprint": "f" * 64}):
+        with pytest.raises(Exception):
+            WordPressBootstrapManualInstallPreflightRequest.model_validate({**value, **injected})
+
+
+def test_duplicate_manual_authorization_consumes_handle_once_and_creates_one_audit(db, monkeypatch):
+    monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", lambda *args, **kwargs: base("absent"))
+    monkeypatch.setattr(establishment, "_expiry", lambda value: datetime.now(UTC) + timedelta(minutes=5))
+    with Session(db) as session:
+        preflight = establishment.manual_install_preflight(session, 41, proof())
+        apply = WordPressBootstrapManualInstallAuthorizeRequest(
+            manual_install_handle=preflight.handle,
+            confirmation_phrase=establishment.MANUAL_PHRASE,
+        )
+        establishment.authorize_manual_install(session, 41, apply)
+        with pytest.raises(HTTPException):
+            establishment.authorize_manual_install(session, 41, apply)
+        assert len(list(session.exec(select(WordPressBootstrapEstablishmentAudit)))) == 1
 
 
 def test_wrong_phrases_fail_before_audit_or_write(db):

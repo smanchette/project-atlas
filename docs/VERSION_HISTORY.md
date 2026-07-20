@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.84
+
+Corrected the audited bootstrap manual-upload and fixed-entry activation handoffs so rerun observations bind deterministic rendered identity rather than volatile acquisition timestamps. The stable fingerprint covers the exact URL/redirect/HTTP/content classification, signed browser identity, title, ordered H1 and canonical inventories, image identity, rendered/head/visible/raw-DOM hashes where present, metadata and privacy evidence, authentication/challenge classifications, and normalized SiteGround provider identity. Raw sanitized observations remain diagnostic. A reused v0.59.78 temporal contract permits only later observations within the signed-evidence, one-time-handle, SiteGround-backup, two-minute, and one-second clock-tolerance bounds. Stable drift fails with deterministic non-secret reason codes before any audit or write. Manual-install verification remains monotonic, and post-activation verification and recovery stay unchanged because they do not compare rerun observation timestamps. Metadata Bridge 0.57.7 and bootstrap 0.3.0 artifacts are unchanged. Publication does not authorize any live action.
+
 ## v0.59.83
 
 Made the durable `manual_installation_inventory_verified` bootstrap checkpoint monotonic. Equivalent current retries now return idempotent success with zero request writes, while stale, expired, drifted, or conflicting retries return deterministic HTTP 409 conflicts without changing status, transition history, cumulative audit writes, or activation eligibility. A sanitized canonical proof and SHA-256 fingerprint bind the committed result; process serialization plus `SELECT ... FOR UPDATE` prevents concurrency losers from overwriting it. Pre-success failure behavior, activation revalidation, read-only recovery, Metadata Bridge 0.57.7, and bootstrap 0.3.0 remain unchanged. Publication does not authorize any live action.
