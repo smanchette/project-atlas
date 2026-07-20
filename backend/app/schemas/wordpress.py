@@ -1439,6 +1439,9 @@ class WordPressBootstrapEstablishmentResult(SQLModel):
     cache_write_count: Literal[0] = 0
     atlas_write_count: int
     atlas_write_scope: list[str]
+    request_atlas_write_count: int = Field(default=0, ge=0)
+    idempotent_replay: bool = False
+    reason_code: str = "bootstrap_establishment_result"
     recovery_recommendation: str
     further_action_required: bool
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -41,6 +42,44 @@ def proof():
 
 def verify_proof(audit_id):
     return WordPressBootstrapManualInstallVerifyRequest(**proof().model_dump(), establishment_audit_id=audit_id)
+
+
+def verified_audit(db, monkeypatch):
+    current = {"state": "absent"}
+    monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", lambda *args, **kwargs: base(current["state"]))
+    monkeypatch.setattr(establishment, "_expiry", lambda request: datetime.now(UTC) + timedelta(minutes=5))
+    with Session(db) as session:
+        preflight = establishment.manual_install_preflight(session, 41, proof())
+        authorization = establishment.authorize_manual_install(
+            session,
+            41,
+            WordPressBootstrapManualInstallAuthorizeRequest(
+                manual_install_handle=preflight.handle,
+                confirmation_phrase=establishment.MANUAL_PHRASE,
+            ),
+        )
+        audit_id = authorization.establishment_audit_id
+    current["state"] = "inactive"
+    request = verify_proof(audit_id)
+    with Session(db) as session:
+        first = establishment.verify_manual_install(session, 41, request)
+    return current, audit_id, request, first
+
+
+def authorized_audit(db, monkeypatch):
+    monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", lambda *args, **kwargs: base("absent"))
+    monkeypatch.setattr(establishment, "_expiry", lambda request: datetime.now(UTC) + timedelta(minutes=5))
+    with Session(db) as session:
+        preflight = establishment.manual_install_preflight(session, 41, proof())
+        authorization = establishment.authorize_manual_install(
+            session,
+            41,
+            WordPressBootstrapManualInstallAuthorizeRequest(
+                manual_install_handle=preflight.handle,
+                confirmation_phrase=establishment.MANUAL_PHRASE,
+            ),
+        )
+    return authorization.establishment_audit_id, verify_proof(authorization.establishment_audit_id)
 
 
 def snapshot(state="absent"):
@@ -92,13 +131,16 @@ def test_manual_handoff_and_fixed_activation_success(db, monkeypatch):
         authorization = establishment.authorize_manual_install(session, 41, WordPressBootstrapManualInstallAuthorizeRequest(manual_install_handle=preflight.handle, confirmation_phrase=establishment.MANUAL_PHRASE))
         assert authorization.status == "awaiting_manual_bootstrap_installation"
         assert authorization.wordpress_write_count == 0
+        assert authorization.request_atlas_write_count == 1
         current["state"] = "inactive"
         verified = establishment.verify_manual_install(session, 41, verify_proof(authorization.establishment_audit_id))
         assert verified.status == "manual_installation_inventory_verified"
+        assert verified.request_atlas_write_count == 1
         activation = establishment.activation_preflight(session, 41, verify_proof(authorization.establishment_audit_id))
         assert activation.ready and activation.handle and activation.handle != preflight.handle
         result = establishment.apply_activation(session, 41, WordPressBootstrapActivationApplyRequest(activation_handle=activation.handle, confirmation_phrase=establishment.ACTIVATION_PHRASE))
         assert result.status == "verified"
+        assert result.request_atlas_write_count == 2
         assert result.wordpress_write_count == 1
         assert result.wordpress_write_scope == establishment.ACTIVATION_SCOPE
         audit = session.exec(select(WordPressBootstrapEstablishmentAudit)).one()
@@ -133,10 +175,11 @@ def test_two_manual_install_verifications_finalize_once(db, monkeypatch):
         )
         audit_id = authorization.establishment_audit_id
     current["state"] = "inactive"
+    request = verify_proof(audit_id)
 
     def verify_once():
         with Session(db) as session:
-            return establishment.verify_manual_install(session, 41, verify_proof(audit_id)).status
+            return establishment.verify_manual_install(session, 41, request.model_copy(deep=True)).status
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         statuses = list(pool.map(lambda _: verify_once(), range(2)))
@@ -146,6 +189,240 @@ def test_two_manual_install_verifications_finalize_once(db, monkeypatch):
         audit = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
         assert audit.transition_history.count("manual_installation_inventory_verified") == 1
         assert audit.atlas_write_count == 2
+
+
+def test_second_and_third_equivalent_retries_are_zero_write(db, monkeypatch):
+    _, audit_id, request, first = verified_audit(db, monkeypatch)
+    assert first.request_atlas_write_count == 1 and first.idempotent_replay is False
+    for _ in range(2):
+        with Session(db) as session:
+            replay = establishment.verify_manual_install(session, 41, request)
+            assert replay.status == "manual_installation_inventory_verified"
+            assert replay.idempotent_replay is True
+            assert replay.request_atlas_write_count == 0
+            assert replay.reason_code == "manual_install_verification_idempotent_replay"
+    with Session(db) as session:
+        audit = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        assert audit.transition_history.count("manual_installation_inventory_verified") == 1
+        assert audit.atlas_write_count == 2
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("protected", "manual_install_protected_state_drift"),
+        ("inventory", "manual_install_inventory_drift"),
+        ("backup", "manual_install_backup_identity_drift"),
+        ("evidence", "manual_install_evidence_mismatch"),
+        ("backup_expired", "manual_install_request_stale"),
+        ("evidence_expired", "manual_install_request_stale"),
+        ("runtime", "manual_install_retry_not_equivalent"),
+    ],
+)
+def test_non_equivalent_retry_after_success_is_zero_write_conflict(db, monkeypatch, change, reason):
+    _, audit_id, request, _ = verified_audit(db, monkeypatch)
+    retry = request.model_copy(deep=True)
+    observed = base("inactive")
+    if change == "protected":
+        observed.inspected_state["page_body_hash"] = "f" * 64
+    elif change == "inventory":
+        observed.inspected_state["plugins"].append({"plugin": "unrelated/drift", "version": "1.0", "status": "inactive"})
+        observed.inspected_state["plugin_inventory_hash"] = upgrade._hash(observed.inspected_state["plugins"])
+    elif change == "backup":
+        retry.wordpress_backup_reference = "different-backup-reference"
+    elif change == "evidence":
+        retry.manual_browser_evidence.evidence_id = "orlando-different-evidence"
+    elif change == "backup_expired":
+        monkeypatch.setattr(establishment, "_expired", lambda value: True)
+    elif change == "evidence_expired":
+        retry.manual_browser_evidence.expires_at = (datetime.now(UTC) - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    elif change == "runtime":
+        retry.expected_runtime_identity.atlas_commit = "f" * 40
+    monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", lambda *args, **kwargs: observed)
+
+    with Session(db) as session:
+        with pytest.raises(HTTPException) as caught:
+            establishment.verify_manual_install(session, 41, retry)
+        assert caught.value.status_code == 409
+        assert caught.value.detail["reason_code"] == reason
+    with Session(db) as session:
+        audit = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        assert audit.status == "manual_installation_inventory_verified"
+        assert audit.transition_history.count("manual_installation_inventory_verified") == 1
+        assert audit.atlas_write_count == 2
+
+
+def test_three_simultaneous_equivalent_verifications_commit_once(db, monkeypatch):
+    current = {"state": "absent"}
+    monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", lambda *args, **kwargs: base(current["state"]))
+    monkeypatch.setattr(establishment, "_expiry", lambda request: datetime.now(UTC) + timedelta(minutes=5))
+    with Session(db) as session:
+        preflight = establishment.manual_install_preflight(session, 41, proof())
+        authorization = establishment.authorize_manual_install(
+            session, 41,
+            WordPressBootstrapManualInstallAuthorizeRequest(
+                manual_install_handle=preflight.handle, confirmation_phrase=establishment.MANUAL_PHRASE,
+            ),
+        )
+        audit_id = authorization.establishment_audit_id
+    current["state"] = "inactive"
+    request = verify_proof(audit_id)
+
+    def verify_once():
+        with Session(db) as session:
+            return establishment.verify_manual_install(session, 41, request.model_copy(deep=True))
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(pool.map(lambda _: verify_once(), range(3)))
+    assert sum(result.request_atlas_write_count for result in results) == 1
+    assert sum(result.idempotent_replay for result in results) == 2
+    with Session(db) as session:
+        audit = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        assert audit.status == "manual_installation_inventory_verified"
+        assert audit.transition_history.count("manual_installation_inventory_verified") == 1
+        assert audit.atlas_write_count == 2
+
+
+@pytest.mark.parametrize("loser", ["protected_drift", "expired_backup"])
+def test_valid_verification_racing_with_conflict_cannot_be_overwritten(db, monkeypatch, loser):
+    audit_id, valid = authorized_audit(db, monkeypatch)
+    conflicting = valid.model_copy(deep=True)
+    conflicting.browser_console_findings = loser
+    valid_entered = Event()
+    release_valid = Event()
+
+    def inspect(*args, **kwargs):
+        request = args[2]
+        if request.browser_console_findings != loser:
+            valid_entered.set()
+            assert release_valid.wait(timeout=5)
+            return base("inactive")
+        observed = base("inactive")
+        if loser == "protected_drift":
+            observed.inspected_state["page_body_hash"] = "f" * 64
+        return observed
+
+    monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", inspect)
+    original_expired = establishment._expired
+    if loser == "expired_backup":
+        monkeypatch.setattr(
+            establishment,
+            "_expired",
+            lambda request: request.browser_console_findings == loser or original_expired(request),
+        )
+
+    def verify(request):
+        with Session(db) as session:
+            try:
+                return establishment.verify_manual_install(session, 41, request)
+            except HTTPException as exc:
+                return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        winner = pool.submit(verify, valid)
+        assert valid_entered.wait(timeout=5)
+        conflict = pool.submit(verify, conflicting)
+        release_valid.set()
+        winner_result = winner.result(timeout=10)
+        conflict_result = conflict.result(timeout=10)
+
+    assert winner_result.status == "manual_installation_inventory_verified"
+    assert winner_result.request_atlas_write_count == 1
+    assert isinstance(conflict_result, HTTPException) and conflict_result.status_code == 409
+    expected_reason = "manual_install_protected_state_drift" if loser == "protected_drift" else "manual_install_request_stale"
+    assert conflict_result.detail["reason_code"] == expected_reason
+    with Session(db) as session:
+        audit = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        assert audit.status == "manual_installation_inventory_verified"
+        assert audit.transition_history.count("manual_installation_inventory_verified") == 1
+        assert audit.atlas_write_count == 2
+
+
+def test_restart_timeout_and_transaction_retry_preserve_idempotent_success(db, monkeypatch):
+    _, audit_id, request, _ = verified_audit(db, monkeypatch)
+    establishment._clear_establishment_handles()
+    for _ in range(3):
+        with Session(db) as session:
+            replay = establishment.verify_manual_install(session, 41, request)
+            assert replay.idempotent_replay and replay.request_atlas_write_count == 0
+    with Session(db) as session:
+        audit = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        assert audit.status == "manual_installation_inventory_verified"
+        assert audit.atlas_write_count == 2
+
+
+def test_conflicting_retry_does_not_erase_activation_eligibility(db, monkeypatch):
+    _, audit_id, request, _ = verified_audit(db, monkeypatch)
+    drift = base("inactive")
+    drift.inspected_state["page_body_hash"] = "f" * 64
+    monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", lambda *args, **kwargs: drift)
+    with Session(db) as session:
+        with pytest.raises(HTTPException):
+            establishment.verify_manual_install(session, 41, request)
+    monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", lambda *args, **kwargs: base("inactive"))
+    with Session(db) as session:
+        activation = establishment.activation_preflight(session, 41, request)
+        assert activation.ready
+
+
+def test_recovery_assessment_reports_drift_without_mutating_verified_checkpoint(db, monkeypatch):
+    _, audit_id, request, _ = verified_audit(db, monkeypatch)
+    drift = base("inactive")
+    drift.inspected_state["page_body_hash"] = "f" * 64
+    monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", lambda *args, **kwargs: drift)
+    with Session(db) as session:
+        before = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        before_history = list(before.transition_history)
+        before_writes = before.atlas_write_count
+        result = establishment.assess_recovery(session, 41, request)
+        assert result.recommendation == "siteground_restore"
+    with Session(db) as session:
+        after = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        assert after.status == "manual_installation_inventory_verified"
+        assert after.transition_history == before_history
+        assert after.atlas_write_count == before_writes
+
+
+def test_pre_success_failure_still_records_approved_transition(db, monkeypatch):
+    current = {"state": "absent"}
+    monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", lambda *args, **kwargs: base(current["state"]))
+    monkeypatch.setattr(establishment, "_expiry", lambda request: datetime.now(UTC) + timedelta(minutes=5))
+    with Session(db) as session:
+        preflight = establishment.manual_install_preflight(session, 41, proof())
+        authorization = establishment.authorize_manual_install(session, 41, WordPressBootstrapManualInstallAuthorizeRequest(manual_install_handle=preflight.handle, confirmation_phrase=establishment.MANUAL_PHRASE))
+        current["state"] = "active"
+        result = establishment.verify_manual_install(session, 41, verify_proof(authorization.establishment_audit_id))
+        assert result.status == "manual_activation_detected"
+        assert result.request_atlas_write_count == 1
+
+
+@pytest.mark.parametrize("field", ["verification_fingerprint", "status", "transition_history", "atlas_write_count"])
+def test_verify_request_rejects_caller_controlled_audit_fields(field):
+    with pytest.raises(Exception):
+        WordPressBootstrapManualInstallVerifyRequest(**proof().model_dump(), establishment_audit_id=1, **{field: "attacker"})
+
+
+def test_rollback_before_verification_commit_does_not_create_false_success(db, monkeypatch):
+    current = {"state": "absent"}
+    monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", lambda *args, **kwargs: base(current["state"]))
+    monkeypatch.setattr(establishment, "_expiry", lambda request: datetime.now(UTC) + timedelta(minutes=5))
+    with Session(db) as session:
+        preflight = establishment.manual_install_preflight(session, 41, proof())
+        authorization = establishment.authorize_manual_install(session, 41, WordPressBootstrapManualInstallAuthorizeRequest(manual_install_handle=preflight.handle, confirmation_phrase=establishment.MANUAL_PHRASE))
+        audit_id = authorization.establishment_audit_id
+    current["state"] = "inactive"
+    with Session(db) as session:
+        real_commit = session.commit
+        session.commit = lambda: (_ for _ in ()).throw(RuntimeError("synthetic commit failure"))
+        with pytest.raises(RuntimeError, match="synthetic commit failure"):
+            establishment.verify_manual_install(session, 41, verify_proof(audit_id))
+        session.rollback()
+        session.commit = real_commit
+    with Session(db) as session:
+        audit = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        assert audit.status == "awaiting_manual_bootstrap_installation"
+        assert "manual_installation_inventory_verified" not in audit.transition_history
+        assert audit.atlas_write_count == 1
 
 
 def test_manual_activation_is_classified_without_an_automatic_write(db, monkeypatch):

@@ -57,6 +57,8 @@ ATLAS_SCOPE = [
     "record state transitions and read-only verification findings",
 ]
 _BASE_IGNORED_GATE_CODES = {"upgrade_bootstrap", "bootstrap_establishment_audit", "plugin_inventory", "expected_post_inventory"}
+_VERIFICATION_FINGERPRINT_KEY = "_atlas_manual_install_verification_fingerprint"
+_VERIFICATION_PROOF_KEY = "_atlas_manual_install_verification_proof"
 
 
 @dataclass(frozen=True)
@@ -135,33 +137,68 @@ def authorize_manual_install(session: Session, page_id: int, request: WordPressB
         recovery_recommendation="continue_manual_upload",
     )
     session.add(audit); session.commit(); session.refresh(audit)
-    return _result(audit, "manual_upload_authorized", gates, base.inspected_state, "continue_manual_upload")
+    return _result(
+        audit, "manual_upload_authorized", gates, base.inspected_state, "continue_manual_upload",
+        request_atlas_write_count=1, reason_code="manual_upload_authorization_committed",
+    )
 
 
 def verify_manual_install(session: Session, page_id: int, request: WordPressBootstrapManualInstallVerifyRequest) -> WordPressBootstrapEstablishmentResult:
-    audit = _audit(session, request.establishment_audit_id)
-    if audit.status not in {"awaiting_manual_bootstrap_installation", "manual_installation_inventory_verified"}:
-        raise HTTPException(409, "The establishment audit is not awaiting manual-upload verification.")
-    base, gates, classification = _inspect_against_audit(session, page_id, request, audit, require_inactive=True)
-    kind = classification["classification"]
-    if kind == "no_upload_yet":
-        return _result(audit, "bootstrap_manual_install_verification", gates, {**base.inspected_state, "bootstrap_classification": classification}, "continue_manual_upload")
-    if kind == "exact_active":
-        return _transition(session, audit, "manual_activation_detected", gates, base.inspected_state, "reconcile_manual_activation")
-    if not all(g.passed for g in gates):
-        status = "installation_partial" if kind == "installation_partial" else "manual_installation_mismatch"
-        recommendation = "siteground_restore" if not _protected_equal(audit, base.inspected_state) else "guarded_bootstrap_recovery"
-        return _transition(session, audit, status, gates, base.inspected_state, recommendation)
-    # Two read-only verification requests may finish their remote observations
-    # at the same time. Serialize the durable transition, refresh under the
-    # process lock, and make an already-recorded exact result idempotent.
+    if page_id != 41:
+        raise HTTPException(404, "Bootstrap establishment is limited to Atlas page 41.")
+    # Serialize the complete decision and durable transition in this backend
+    # process, while SELECT ... FOR UPDATE provides the corresponding database
+    # row lock on PostgreSQL. SQLite ignores the row-lock clause in tests, so
+    # the process lock supplies the equivalent serialization there.
     with _lock:
-        session.refresh(audit)
+        audit = _audit_for_update(session, request.establishment_audit_id)
+        if audit.status not in {"awaiting_manual_bootstrap_installation", "manual_installation_inventory_verified"}:
+            raise HTTPException(409, "The establishment audit is not awaiting manual-upload verification.")
+        base, gates, classification = _inspect_against_audit(session, page_id, request, audit, require_inactive=True)
+        kind = classification["classification"]
+
         if audit.status == "manual_installation_inventory_verified":
-            return _result(audit, "bootstrap_manual_install_verification", gates, {**base.inspected_state, "bootstrap_classification": classification, "inactive_checksum_verifiable": False}, "proceed_to_guarded_activation")
-        if audit.status != "awaiting_manual_bootstrap_installation":
-            raise HTTPException(409, "The establishment audit changed during manual-upload verification.")
-        audit.upload_snapshot = base.inspected_state
+            retry_fingerprint = _verification_fingerprint(request, base.inspected_state, classification, audit)
+            committed_fingerprint = _committed_verification_fingerprint(audit)
+            if (
+                all(g.passed for g in gates)
+                and kind == "exact_inactive"
+                and not _retry_stale(request)
+                and hmac.compare_digest(retry_fingerprint, committed_fingerprint)
+            ):
+                return _result(
+                    audit, "bootstrap_manual_install_verification", gates,
+                    {**base.inspected_state, "bootstrap_classification": classification, "inactive_checksum_verifiable": False},
+                    "proceed_to_guarded_activation", idempotent_replay=True,
+                    reason_code="manual_install_verification_idempotent_replay",
+                )
+            reason = _retry_conflict_reason(request, base.inspected_state, classification, audit, gates)
+            raise HTTPException(
+                409,
+                detail={
+                    "reason_code": reason,
+                    "message": "Manual-install verification already finalized; the retry is not equivalent and made no durable change.",
+                },
+            )
+
+        # Before the monotonic success checkpoint, retain the established
+        # fail-closed state transitions for genuine upload failures.
+        if kind == "no_upload_yet":
+            return _result(audit, "bootstrap_manual_install_verification", gates, {**base.inspected_state, "bootstrap_classification": classification}, "continue_manual_upload", reason_code="manual_install_upload_not_observed")
+        if kind == "exact_active":
+            return _transition(session, audit, "manual_activation_detected", gates, base.inspected_state, "reconcile_manual_activation")
+        if not all(g.passed for g in gates):
+            status = "installation_partial" if kind == "installation_partial" else "manual_installation_mismatch"
+            recommendation = "siteground_restore" if not _protected_equal(audit, base.inspected_state) else "guarded_bootstrap_recovery"
+            return _transition(session, audit, status, gates, base.inspected_state, recommendation)
+
+        proof = _verification_proof(request, base.inspected_state, classification, audit)
+        fingerprint = _hash(proof)
+        audit.upload_snapshot = {
+            **base.inspected_state,
+            _VERIFICATION_PROOF_KEY: proof,
+            _VERIFICATION_FINGERPRINT_KEY: fingerprint,
+        }
         audit.upload_inventories = _inventories(base.inspected_state)
         audit.status = "manual_installation_inventory_verified"
         audit.transition_history = [*audit.transition_history, audit.status]
@@ -169,7 +206,12 @@ def verify_manual_install(session: Session, page_id: int, request: WordPressBoot
         audit.recovery_recommendation = "proceed_to_guarded_activation"
         audit.gate_results = [g.model_dump(mode="json") for g in gates]
         session.add(audit); session.commit(); session.refresh(audit)
-    return _result(audit, "bootstrap_manual_install_verification", gates, {**base.inspected_state, "bootstrap_classification": classification, "inactive_checksum_verifiable": False}, "proceed_to_guarded_activation")
+        return _result(
+            audit, "bootstrap_manual_install_verification", gates,
+            {**base.inspected_state, "bootstrap_classification": classification, "inactive_checksum_verifiable": False},
+            "proceed_to_guarded_activation", request_atlas_write_count=1,
+            reason_code="manual_install_verification_committed",
+        )
 
 
 def activation_preflight(session: Session, page_id: int, request: WordPressBootstrapManualInstallVerifyRequest) -> WordPressBootstrapEstablishmentPreflight:
@@ -222,7 +264,10 @@ def apply_activation(session: Session, page_id: int, request: WordPressBootstrap
     if not outcome.get("accepted"):
         audit.error_code = "activation_unconfirmed"
         audit.error_message = "The one fixed activation request was not conclusively accepted."
-        return _transition(session, audit, "recovery_required", gates, base.inspected_state, "guarded_bootstrap_recovery")
+        return _transition(
+            session, audit, "recovery_required", gates, base.inspected_state,
+            "guarded_bootstrap_recovery", request_atlas_write_count=2,
+        )
     base, post_gates, classification = _inspect_against_audit(session, page_id, entry.request, audit, require_inactive=False)
     status = upgrade._read_bootstrap_status(session)
     checksum = status.get("bootstrap_checksum")
@@ -238,13 +283,21 @@ def apply_activation(session: Session, page_id: int, request: WordPressBootstrap
     audit.checksum_verification_source = upgrade.BOOTSTRAP_STATUS_ROUTE
     audit.checksum_verification_result = "matched" if status_gates[3].passed else ("mismatch" if checksum_well_formed else "unavailable")
     if all(g.passed for g in all_gates):
-        return _transition(session, audit, "verified", all_gates, {**base.inspected_state, "bootstrap_status": upgrade._safe_bootstrap_status(status)}, "proceed_to_bridge_upgrade", completed=True)
+        return _transition(
+            session, audit, "verified", all_gates,
+            {**base.inspected_state, "bootstrap_status": upgrade._safe_bootstrap_status(status)},
+            "proceed_to_bridge_upgrade", completed=True, request_atlas_write_count=2,
+        )
     intermediate = "checksum_mismatch" if checksum_well_formed and checksum != BOOTSTRAP_ENTRY_SHA256 else "checksum_unavailable" if not status_gates[1].passed or not checksum_well_formed else "verification_failed"
     audit.status = intermediate
     audit.transition_history = [*audit.transition_history, intermediate]
     session.add(audit); session.commit(); session.refresh(audit)
     recommendation = "siteground_restore" if not _protected_equal(audit, base.inspected_state) else "guarded_bootstrap_recovery"
-    return _transition(session, audit, "recovery_required", all_gates, {**base.inspected_state, "bootstrap_status": upgrade._safe_bootstrap_status(status)}, recommendation)
+    return _transition(
+        session, audit, "recovery_required", all_gates,
+        {**base.inspected_state, "bootstrap_status": upgrade._safe_bootstrap_status(status)},
+        recommendation, request_atlas_write_count=3,
+    )
 
 
 def assess_recovery(session: Session, page_id: int, request: WordPressBootstrapManualInstallVerifyRequest) -> WordPressBootstrapRecoveryAssessment:
@@ -370,18 +423,20 @@ def _preflight_response(stage, ready, status, base, gates, binding, handle, expi
     )
 
 
-def _result(audit, stage, gates, snapshot, recommendation):
+def _result(audit, stage, gates, snapshot, recommendation, *, request_atlas_write_count=0, idempotent_replay=False, reason_code="bootstrap_establishment_result"):
     return WordPressBootstrapEstablishmentResult(
         establishment_audit_id=audit.id or 0, stage=stage, status=audit.status,
         state_history=audit.transition_history, binding_hash=audit.activation_binding_hash or audit.manual_binding_hash,
         gate_results=gates, inspected_state=snapshot,
         wordpress_write_count=audit.wordpress_write_count, wordpress_write_scope=audit.wordpress_write_scope,
         atlas_write_count=audit.atlas_write_count, atlas_write_scope=audit.atlas_write_scope,
+        request_atlas_write_count=request_atlas_write_count, idempotent_replay=idempotent_replay,
+        reason_code=reason_code,
         recovery_recommendation=recommendation, further_action_required=audit.status != "verified",
     )
 
 
-def _transition(session, audit, status, gates, snapshot, recommendation, *, completed=False):
+def _transition(session, audit, status, gates, snapshot, recommendation, *, completed=False, request_atlas_write_count=1):
     audit.status = status
     audit.transition_history = [*audit.transition_history, status]
     audit.final_snapshot = snapshot
@@ -393,11 +448,26 @@ def _transition(session, audit, status, gates, snapshot, recommendation, *, comp
     audit.error_code = None if status == "verified" else status
     audit.error_message = None if status == "verified" else "; ".join(g.message for g in gates if not g.passed)[:2000]
     session.add(audit); session.commit(); session.refresh(audit)
-    return _result(audit, "bootstrap_post_activation_verification", gates, snapshot, recommendation)
+    return _result(
+        audit, "bootstrap_post_activation_verification", gates, snapshot, recommendation,
+        request_atlas_write_count=request_atlas_write_count, reason_code=status,
+    )
 
 
 def _audit(session, audit_id):
     audit = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+    if not audit or audit.generated_page_id != 41 or audit.wordpress_post_id != 8:
+        raise HTTPException(404, "Bootstrap-establishment audit not found.")
+    return audit
+
+
+def _audit_for_update(session, audit_id):
+    audit = session.exec(
+        select(WordPressBootstrapEstablishmentAudit)
+        .where(WordPressBootstrapEstablishmentAudit.id == audit_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).one_or_none()
     if not audit or audit.generated_page_id != 41 or audit.wordpress_post_id != 8:
         raise HTTPException(404, "Bootstrap-establishment audit not found.")
     return audit
@@ -425,6 +495,67 @@ def _protected(snapshot):
 
 def _protected_equal(audit, snapshot):
     return _protected(snapshot) == audit.protected_state
+
+
+def _verification_fingerprint(request, snapshot, classification, audit):
+    return _hash(_verification_proof(request, snapshot, classification, audit))
+
+
+def _verification_proof(request, snapshot, classification, audit):
+    evidence = request.manual_browser_evidence
+    return {
+        "audit": {"id": audit.id, "page_id": audit.generated_page_id, "wordpress_post_id": audit.wordpress_post_id},
+        "artifact": {
+            "slug": BOOTSTRAP_SLUG, "directory": BOOTSTRAP_DIRECTORY, "entry": BOOTSTRAP_ENTRY,
+            "version": BOOTSTRAP_VERSION, "zip_sha256": BOOTSTRAP_ZIP_SHA256,
+            "entry_sha256": BOOTSTRAP_ENTRY_SHA256, "status": "inactive",
+        },
+        "runtime": request.expected_runtime_identity.model_dump(mode="json"),
+        "backup": _backup(request),
+        "evidence_id": evidence.evidence_id if evidence else "",
+        "classification": classification,
+        "inventories": _inventories(snapshot),
+        "protected": _protected(snapshot),
+    }
+
+
+def _committed_verification_fingerprint(audit):
+    snapshot = audit.upload_snapshot or {}
+    value = snapshot.get(_VERIFICATION_FINGERPRINT_KEY)
+    return value if isinstance(value, str) and len(value) == 64 else ""
+
+
+def _committed_verification_proof(audit):
+    snapshot = audit.upload_snapshot or {}
+    value = snapshot.get(_VERIFICATION_PROOF_KEY)
+    return value if isinstance(value, dict) else {}
+
+
+def _retry_conflict_reason(request, snapshot, classification, audit, gates):
+    committed = _committed_verification_proof(audit)
+    if _protected(snapshot) != audit.protected_state:
+        return "manual_install_protected_state_drift"
+    if classification.get("classification") != "exact_inactive" or _inventories(snapshot) != audit.upload_inventories:
+        return "manual_install_inventory_drift"
+    if _backup(request) != committed.get("backup"):
+        return "manual_install_backup_identity_drift"
+    evidence = request.manual_browser_evidence
+    if (evidence.evidence_id if evidence else "") != committed.get("evidence_id"):
+        return "manual_install_evidence_mismatch"
+    if _retry_stale(request):
+        return "manual_install_request_stale"
+    if any(not gate.passed for gate in gates):
+        return "manual_install_conflicting_retry"
+    return "manual_install_retry_not_equivalent"
+
+
+def _retry_stale(request):
+    evidence = request.manual_browser_evidence
+    try:
+        evidence_expired = not evidence or upgrade._evidence_expiry(evidence.expires_at) <= datetime.now(UTC)
+    except (TypeError, ValueError):
+        evidence_expired = True
+    return _expired(request) or evidence_expired
 
 
 def _without_bootstrap(plugins):

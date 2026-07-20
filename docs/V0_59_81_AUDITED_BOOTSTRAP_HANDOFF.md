@@ -19,6 +19,8 @@ The zero-write manual-install preflight binds release/runtime identity, credenti
 
 Read-only upload verification distinguishes no upload, exact inactive upload, manual activation, wrong version/path/entry, duplicate, partial/conflicting installation, unrelated plugin drift, and protected-state drift. Exact inactive verification transitions to `manual_installation_inventory_verified` and permits a separate activation preflight and handle.
 
+As of v0.59.83, that successful verification is monotonic. A current retry bound to the same sanitized proof returns an idempotent zero-write success; a stale, expired, drifted, or conflicting retry returns a zero-write HTTP 409 and cannot downgrade the audit or erase activation eligibility. The decision is serialized by the backend process lock plus a database `SELECT ... FOR UPDATE`. Pre-success failure transitions remain unchanged.
+
 Activation changes only the fixed WordPress plugin status to `active` using a request whose JSON keys are exactly `status`. Before that write the audit transitions to `activation_pending_checksum_verification`.
 
 ## Approved residual risk and quarantine

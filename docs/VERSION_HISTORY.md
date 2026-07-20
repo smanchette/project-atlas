@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.83
+
+Made the durable `manual_installation_inventory_verified` bootstrap checkpoint monotonic. Equivalent current retries now return idempotent success with zero request writes, while stale, expired, drifted, or conflicting retries return deterministic HTTP 409 conflicts without changing status, transition history, cumulative audit writes, or activation eligibility. A sanitized canonical proof and SHA-256 fingerprint bind the committed result; process serialization plus `SELECT ... FOR UPDATE` prevents concurrency losers from overwriting it. Pre-success failure behavior, activation revalidation, read-only recovery, Metadata Bridge 0.57.7, and bootstrap 0.3.0 remain unchanged. Publication does not authorize any live action.
+
 ## v0.59.82
 
 Made the signed manual-browser-evidence JSON envelope safe across Windows PowerShell 5.1 by emitting ASCII-only JSON with standard Unicode escapes. Parsed evidence, schema-v1/schema-v2 meaning, canonical HMAC input, signatures, privacy gates, and the byte-exact UTF-8 DOM input contract are unchanged. Added a regression that round-trips the locked Orlando en dash through the Windows ANSI-default operator path and verifies the signature remains valid. Concurrent successful manual-install verification is now idempotent under the existing process lock, preventing duplicate audit finalization. Publication does not authorize browser capture, bootstrap upload or activation, Metadata Bridge upgrade, metadata rendering, cache purge, or page/media mutation.
