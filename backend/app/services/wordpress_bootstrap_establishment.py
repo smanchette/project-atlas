@@ -406,33 +406,123 @@ def assess_backup_renewal_recovery(
     if page_id != 41:
         raise HTTPException(404, "Bootstrap backup renewal is limited to Atlas page 41.")
     audit = _audit(session, request.establishment_audit_id)
-    original = _original_backup(audit)
-    active = _active_backup(audit)
-    active_expired = _timestamp(active.get("deadline")) <= datetime.now(UTC)
+    now = datetime.now(UTC)
+    original = _original_backup_for_recovery(audit)
+    active = _active_backup_for_recovery(audit, original)
+    original_expiration = _backup_expiration(original, now)
+    active_expiration = _backup_expiration(active, now)
+    renewals = audit.backup_renewals or []
+    renewal_count = len(renewals)
+    source = _active_backup_source(audit, original, active)
+    active_sequence = _active_renewal_sequence(renewals, source)
+    verification_present = _verification_evidence_record(audit) is not None
+    activation_started = bool(
+        audit.activation_handle_fingerprint
+        or audit.activation_binding_hash
+        or audit.status == "activation_pending_checksum_verification"
+    )
+    checksum_quarantine = bool(
+        audit.checksum_verification_result
+        or audit.checksum_verification_source
+        or audit.status in {"checksum_mismatch", "checksum_unavailable"}
+    )
+    pending_operation = _pending_operation_exists(session)
     protected = _protected(audit.pre_snapshot or {}) == audit.protected_state
     if not protected:
-        classification, recommendation = "protected_state_drift", "siteground_restore"
-    elif audit.status == "manual_installation_inventory_verified":
-        classification, recommendation = "manual_verification_completed", "no_action"
+        classification, reason, recommendation, next_action = (
+            "protected_state_drift", "bootstrap_backup_renewal_protected_state_drift",
+            "siteground_restore", "request_separately_approved_guarded_recovery",
+        )
+    elif audit.status == "manual_installation_inventory_verified" or verification_present:
+        classification, reason, recommendation, next_action = (
+            "manual_verification_completed", "bootstrap_backup_renewal_verification_complete",
+            "no_action", "proceed_to_guarded_activation_when_separately_approved",
+        )
+    elif checksum_quarantine:
+        classification, reason, recommendation, next_action = (
+            "checksum_quarantine_active", "bootstrap_backup_renewal_checksum_quarantine_active",
+            "guarded_bootstrap_recovery", "resolve_checksum_quarantine_through_guarded_recovery",
+        )
+    elif activation_started:
+        classification, reason, recommendation, next_action = (
+            "activation_started", "bootstrap_backup_renewal_activation_started",
+            "guarded_bootstrap_recovery", "complete_or_reconcile_guarded_activation",
+        )
+    elif pending_operation:
+        classification, reason, recommendation, next_action = (
+            "pending_operation", "bootstrap_backup_renewal_pending_operation",
+            "guarded_bootstrap_recovery", "resolve_pending_operation_before_renewal",
+        )
     elif audit.status != "awaiting_manual_bootstrap_installation":
-        classification, recommendation = "audit_state_no_longer_eligible", "guarded_bootstrap_recovery"
-    elif audit.activation_handle_fingerprint or audit.checksum_verification_result:
-        classification, recommendation = "activation_or_quarantine_started", "guarded_bootstrap_recovery"
-    elif audit.backup_renewals and active_expired:
-        classification, recommendation = "replacement_backup_expired", "renew_backup_again"
-    elif audit.backup_renewals:
-        classification, recommendation = "valid_renewal_recorded", "proceed_to_manual_verification"
-    elif active_expired:
-        classification, recommendation = "renewal_required", "create_fresh_siteground_backup"
+        classification, reason, recommendation, next_action = (
+            "audit_state_no_longer_eligible", "bootstrap_backup_renewal_audit_ineligible",
+            "guarded_bootstrap_recovery", "review_durable_audit_state_before_any_action",
+        )
+    elif renewal_count >= MAX_BACKUP_RENEWALS:
+        classification, reason, recommendation, next_action = (
+            "renewal_limit_reached", "bootstrap_backup_renewal_limit_reached",
+            "guarded_bootstrap_recovery", "request_separately_approved_guarded_recovery",
+        )
+    elif source == "replacement" and active_expiration["expired"] is True:
+        classification, reason, recommendation, next_action = (
+            "replacement_backup_expired", "bootstrap_backup_renewal_replacement_required",
+            "renew_backup_again", "create_fresh_siteground_backup_then_run_guarded_backup_renewal",
+        )
+    elif source == "replacement" and active_expiration["expired"] is False:
+        classification, reason, recommendation, next_action = (
+            "valid_renewal_recorded", "bootstrap_backup_renewal_active_replacement_valid",
+            "proceed_to_manual_verification", "capture_fresh_evidence_and_run_manual_install_verification",
+        )
+    elif source == "none":
+        classification, reason, recommendation, next_action = (
+            "backup_identity_unavailable", "bootstrap_backup_renewal_backup_identity_unavailable",
+            "guarded_bootstrap_recovery", "review_audit_backup_identity_before_any_action",
+        )
+    elif active_expiration["expired"] is True:
+        classification, reason, recommendation, next_action = (
+            "renewal_required", "bootstrap_backup_renewal_replacement_required",
+            "create_fresh_siteground_backup", "create_fresh_siteground_backup_then_run_guarded_backup_renewal",
+        )
+    elif active_expiration["expired"] is False:
+        classification, reason, recommendation, next_action = (
+            "no_renewal_required", "bootstrap_backup_renewal_original_still_valid",
+            "no_action", "complete_manual_install_verification_before_backup_deadline",
+        )
     else:
-        classification, recommendation = "no_renewal_required", "no_action"
+        classification, reason, recommendation, next_action = (
+            "backup_expiration_unavailable", "bootstrap_backup_renewal_backup_expiration_unavailable",
+            "guarded_bootstrap_recovery", "review_backup_timestamp_evidence_before_any_action",
+        )
+    renewal_eligible = classification in {"renewal_required", "replacement_backup_expired"}
     return WordPressBootstrapBackupRenewalRecovery(
         establishment_audit_id=audit.id or 0,
+        audit_status=audit.status,
         classification=classification,
+        reason_code=reason,
         recommendation=recommendation,
+        next_required_action=next_action,
+        renewal_eligible=renewal_eligible,
+        renewal_blocked=not renewal_eligible,
         original_backup=original,
+        original_backup_expired=original_expiration["expired"],
+        original_backup_expiration_status=original_expiration["status"],
+        original_backup_remaining_seconds=original_expiration["remaining_seconds"],
         active_backup=active,
-        renewal_history=audit.backup_renewals or [],
+        active_backup_source=source,
+        active_backup_expired=active_expiration["expired"],
+        active_backup_expiration_status=active_expiration["status"],
+        active_backup_remaining_seconds=active_expiration["remaining_seconds"],
+        active_renewal_sequence=active_sequence,
+        renewal_history=_renewal_history_for_recovery(renewals, now, active_sequence),
+        renewal_count=renewal_count,
+        maximum_renewals=MAX_BACKUP_RENEWALS,
+        renewals_remaining=max(0, MAX_BACKUP_RENEWALS - renewal_count),
+        renewal_limit_reached=renewal_count >= MAX_BACKUP_RENEWALS,
+        bootstrap_manually_uploaded=True if audit.upload_snapshot is not None else None,
+        verification_evidence_present=verification_present,
+        activation_started=activation_started,
+        checksum_quarantine_active=checksum_quarantine,
+        pending_operation=pending_operation,
     )
 
 
@@ -1266,6 +1356,82 @@ def _timestamp(value: Any) -> datetime:
     if parsed is None or parsed.tzinfo is None:
         raise ValueError("A timezone-aware timestamp is required.")
     return parsed.astimezone(UTC)
+
+
+def _backup_expiration(backup: dict[str, Any], now: datetime) -> dict[str, Any]:
+    value = backup.get("deadline")
+    if value in {None, ""}:
+        return {"status": "missing", "expired": None, "remaining_seconds": None}
+    try:
+        deadline = _timestamp(value)
+    except (TypeError, ValueError):
+        return {"status": "invalid", "expired": None, "remaining_seconds": None}
+    remaining = int((deadline - now).total_seconds())
+    expired = remaining <= 0
+    return {
+        "status": "expired" if expired else "valid",
+        "expired": expired,
+        "remaining_seconds": 0 if expired else remaining,
+    }
+
+
+def _original_backup_for_recovery(audit: WordPressBootstrapEstablishmentAudit) -> dict[str, Any]:
+    try:
+        return _original_backup(audit)
+    except (TypeError, ValueError):
+        return json.loads(json.dumps(audit.backup_evidence or {}, sort_keys=True, default=str))
+
+
+def _active_backup_for_recovery(
+    audit: WordPressBootstrapEstablishmentAudit,
+    original: dict[str, Any],
+) -> dict[str, Any]:
+    value = audit.active_backup_evidence if audit.active_backup_evidence is not None else original
+    return json.loads(json.dumps(value or {}, sort_keys=True, default=str))
+
+
+def _usable_backup_identity(value: dict[str, Any]) -> bool:
+    return bool(
+        value.get("wordpress_backup_reference")
+        and value.get("wordpress_backup_completed_at")
+        and value.get("deadline")
+    )
+
+
+def _active_backup_source(
+    audit: WordPressBootstrapEstablishmentAudit,
+    original: dict[str, Any],
+    active: dict[str, Any],
+) -> str:
+    if audit.active_backup_evidence is not None and _usable_backup_identity(active):
+        return "replacement"
+    if _usable_backup_identity(original):
+        return "original"
+    return "none"
+
+
+def _active_renewal_sequence(renewals: list[dict[str, Any]], source: str) -> int | None:
+    if source != "replacement" or not renewals:
+        return None
+    value = renewals[-1].get("sequence")
+    return value if isinstance(value, int) and value >= 1 else None
+
+
+def _renewal_history_for_recovery(
+    renewals: list[dict[str, Any]],
+    now: datetime,
+    active_sequence: int | None,
+) -> list[dict[str, Any]]:
+    values: list[dict[str, Any]] = []
+    for item in renewals:
+        record = json.loads(json.dumps(item, sort_keys=True, default=str))
+        expiration = _backup_expiration(record.get("replacement") or {}, now)
+        record["replacement_expired"] = expiration["expired"]
+        record["replacement_expiration_status"] = expiration["status"]
+        record["replacement_remaining_seconds"] = expiration["remaining_seconds"]
+        record["active"] = record.get("sequence") == active_sequence
+        values.append(record)
+    return values
 
 
 def _original_backup(audit: WordPressBootstrapEstablishmentAudit) -> dict[str, Any]:

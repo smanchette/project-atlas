@@ -9,6 +9,7 @@ import type {
 } from "../types";
 
 export const BOOTSTRAP_AUDIT_ID = 1;
+// Non-authoritative fallback used only before the recovery response loads.
 export const MAX_BACKUP_RENEWALS = 3;
 export const BACKUP_RENEWAL_PHRASE = "RENEW PROJECT ATLAS BOOTSTRAP HANDOFF BACKUP FOR AUDIT 1";
 
@@ -71,13 +72,8 @@ export function validateRenewalForm(
   if (!form.pluginsIncluded) errors.pluginsIncluded = "Confirm that wp-content/plugins is included.";
   if (!form.restoreConfirmed) errors.restoreConfirmed = "Confirm restore capability.";
   if (!form.noRelevantChange) errors.noRelevantChange = "Explicitly confirm that no relevant WordPress change followed the backup.";
-  const count = recovery?.renewal_history.length ?? 0;
-  if (count >= MAX_BACKUP_RENEWALS) errors.renewalLimit = "The maximum of three guarded renewals has been reached.";
-  if (recovery && !["renewal_required", "replacement_backup_expired"].includes(recovery.classification)) {
-    errors.auditEligibility = `Audit is not eligible: ${recovery.classification}.`;
-  }
-  const activeDeadline = Date.parse(recovery?.active_backup.deadline ?? "");
-  if (recovery && Number.isFinite(activeDeadline) && activeDeadline > now) errors.activeBackup = "The current active backup has not expired.";
+  if (recovery?.renewal_limit_reached) errors.renewalLimit = `The maximum of ${recovery.maximum_renewals} guarded renewals has been reached.`;
+  if (recovery && !recovery.renewal_eligible) errors.auditEligibility = `Audit is not eligible: ${recovery.reason_code}.`;
   return errors;
 }
 
@@ -99,35 +95,58 @@ export function buildRenewalPayload(form: RenewalForm) {
   };
 }
 
-function expired(deadline: unknown, now: number): boolean {
-  const value = typeof deadline === "string" ? Date.parse(deadline) : Number.NaN;
-  return Number.isFinite(value) && value <= now;
-}
-
 function flag(value: unknown): string {
   return value === true ? "yes" : value === false ? "no" : "not recorded";
 }
 
-export function BackupDetails({ backup, now }: { backup: WordPressBootstrapBackupEvidence; now: number }) {
+export function BackupDetails({ backup, expirationStatus }: { backup: WordPressBootstrapBackupEvidence; expirationStatus?: string }) {
   return <dl className="wordpressSettingsGrid">
     <div><dt>Reference</dt><dd>{backup.wordpress_backup_reference ?? "not recorded"}</dd></div>
     <div><dt>Completion</dt><dd>{backup.wordpress_backup_completed_at ?? "not recorded"}</dd></div>
     <div><dt>Deadline</dt><dd>{backup.deadline ?? "not recorded"}</dd></div>
-    <div><dt>Status</dt><dd>{expired(backup.deadline, now) ? "expired" : "active"}</dd></div>
+    <div><dt>Expiration status</dt><dd>{expirationStatus ?? "not provided"}</dd></div>
     <div><dt>Database included</dt><dd>{flag(backup.wordpress_database_included_attestation)}</dd></div>
     <div><dt>wp-content/plugins included</dt><dd>{flag(backup.wordpress_plugins_included_attestation)}</dd></div>
     <div><dt>Restore capability</dt><dd>{flag(backup.wordpress_restore_capability_attestation)}</dd></div>
   </dl>;
 }
 
-export function RenewalHistoryList({ renewals, now }: { renewals: WordPressBootstrapBackupRenewalResult["renewal_history"]; now: number }) {
+export function RenewalHistoryList({ renewals }: { renewals: WordPressBootstrapBackupRenewalResult["renewal_history"] }) {
   const ordered = [...renewals].sort((a, b) => a.sequence - b.sequence);
   if (ordered.length === 0) return <p>No replacement backup renewal has been recorded.</p>;
-  return <ol>{ordered.map((renewal, index) => <li key={renewal.sequence} data-testid={`renewal-${renewal.sequence}`}>
-    <strong>Renewal {renewal.sequence} — {index === ordered.length - 1 ? "active" : "historical"}</strong>
-    <BackupDetails backup={renewal.replacement} now={now}/>
+  return <ol>{ordered.map(renewal => <li key={renewal.sequence} data-testid={`renewal-${renewal.sequence}`}>
+    <strong>Renewal {renewal.sequence} — {renewal.active ? "active" : "historical"}</strong>
+    <BackupDetails backup={renewal.replacement} expirationStatus={renewal.replacement_expiration_status}/>
     <p>Committed: {renewal.approved_at ?? "not recorded"} · status: {renewal.status}</p>
   </li>)}</ol>;
+}
+
+export function RenewalStateSummary({ recovery }: { recovery: WordPressBootstrapBackupRenewalRecovery }) {
+  return <>
+    <section aria-labelledby="renewal-lifecycle-heading">
+      <h3 id="renewal-lifecycle-heading">Durable lifecycle</h3>
+      <dl className="wordpressSettingsGrid">
+        <div><dt>Audit ID</dt><dd>{recovery.establishment_audit_id}</dd></div>
+        <div><dt>Audit status</dt><dd>{recovery.audit_status}</dd></div>
+        <div><dt>Assessment operation</dt><dd>{recovery.status}</dd></div>
+        <div><dt>Classification</dt><dd>{recovery.classification}</dd></div>
+        <div><dt>Reason code</dt><dd><code>{recovery.reason_code}</code></dd></div>
+        <div><dt>Recommendation</dt><dd>{recovery.recommendation}</dd></div>
+        <div><dt>Next required action</dt><dd>{recovery.next_required_action}</dd></div>
+      </dl>
+    </section>
+    <section aria-labelledby="renewal-workflow-heading">
+      <h3 id="renewal-workflow-heading">Workflow state</h3>
+      <dl className="wordpressSettingsGrid">
+        <div><dt>Renewal eligible</dt><dd>{flag(recovery.renewal_eligible)}</dd></div>
+        <div><dt>Bootstrap already uploaded</dt><dd>{flag(recovery.bootstrap_manually_uploaded)}</dd></div>
+        <div><dt>Verification evidence</dt><dd>{recovery.verification_evidence_present ? "present" : "absent"}</dd></div>
+        <div><dt>Activation</dt><dd>{recovery.activation_started ? "started" : "not started"}</dd></div>
+        <div><dt>Checksum quarantine</dt><dd>{recovery.checksum_quarantine_active ? "active" : "inactive"}</dd></div>
+        <div><dt>Pending operation</dt><dd>{recovery.pending_operation ? "present" : "none"}</dd></div>
+      </dl>
+    </section>
+  </>;
 }
 
 export function errorText(error: unknown): string {
@@ -174,10 +193,11 @@ export default function BootstrapBackupRenewalPanel() {
   };
   const errors = useMemo(() => validateRenewalForm(form, recovery, now), [form, recovery, now]);
   const canPreflight = recovery !== null && Object.keys(errors).length === 0 && !busy;
-  const renewals = [...(result?.renewal_history ?? recovery?.renewal_history ?? [])].sort((a, b) => a.sequence - b.sequence);
-  const original = result?.original_backup ?? recovery?.original_backup;
-  const active = result?.active_backup ?? recovery?.active_backup;
-  const renewalCount = renewals.length;
+  const renewals = [...(recovery?.renewal_history ?? result?.renewal_history ?? [])].sort((a, b) => a.sequence - b.sequence);
+  const original = recovery?.original_backup ?? result?.original_backup;
+  const active = recovery?.active_backup ?? result?.active_backup;
+  const renewalCount = recovery?.renewal_count ?? renewals.length;
+  const maximumRenewals = recovery?.maximum_renewals ?? MAX_BACKUP_RENEWALS;
   const preflightExpiresAt = preflight?.expires_at ? Date.parse(preflight.expires_at) : Number.NaN;
   const preflightHandleFresh = Boolean(preflight?.renewal_handle_fingerprint && Number.isFinite(preflightExpiresAt) && preflightExpiresAt > now);
 
@@ -220,22 +240,26 @@ export default function BootstrapBackupRenewalPanel() {
       <li>Renewal modifies no WordPress state, performs no cache purge, and does not activate the bootstrap.</li>
       <li>Renewal advances only the audit-bound active backup after guarded approval.</li>
       <li>The replacement expires at its recorded deadline; complete manual verification before then or renew again.</li>
-      <li>Maximum renewal count: {MAX_BACKUP_RENEWALS}.</li>
+      <li>Maximum renewal count: {maximumRenewals}.</li>
     </ul></div></div>
     {error && <div className="errorBanner" role="alert"><AlertTriangle size={18}/>{error}</div>}
 
-    <h3>Original authorization backup — expired and preserved as audit history</h3>
-    {original ? <BackupDetails backup={original} now={now}/> : <p>Loading immutable original backup…</p>}
+    {recovery && <RenewalStateSummary recovery={recovery}/>}
+
+    <h3>Original authorization backup — immutable historical record</h3>
+    {original ? <BackupDetails backup={original} expirationStatus={recovery?.original_backup_expiration_status}/> : <p>Loading immutable original backup…</p>}
 
     <h3>Current effective active backup</h3>
-    <p>{renewalCount ? "Active replacement backup" : "Original authorization backup (no replacement recorded)"}</p>
-    {active && <BackupDetails backup={active} now={now}/>}
-    <p>Renewal count: <strong>{renewalCount} of {MAX_BACKUP_RENEWALS}</strong></p>
+    <p>Source: <strong>{recovery?.active_backup_source ?? "loading"}</strong>{recovery?.active_renewal_sequence ? ` · renewal ${recovery.active_renewal_sequence}` : ""}</p>
+    {active && <BackupDetails backup={active} expirationStatus={recovery?.active_backup_expiration_status}/>}
+
+    <h3>Renewal capacity</h3>
+    <p aria-live="polite">Renewal count: <strong>{renewalCount} of {maximumRenewals}</strong> · remaining: <strong>{recovery?.renewals_remaining ?? Math.max(0, maximumRenewals - renewalCount)}</strong> · limit reached: <strong>{recovery ? flag(recovery.renewal_limit_reached) : "loading"}</strong></p>
 
     <h3>Renewal history</h3>
-    <RenewalHistoryList renewals={renewals} now={now}/>
+    <RenewalHistoryList renewals={renewals}/>
 
-    <fieldset disabled={busy || renewalCount >= MAX_BACKUP_RENEWALS}>
+    <fieldset disabled={busy || recovery?.renewal_limit_reached === true}>
       <legend>Enter replacement backup information</legend>
       <label>Atlas Data Backup identity<input value={form.atlasDataBackupFile} onChange={event=>update("atlasDataBackupFile",event.target.value)}/></label>
       <label>Atlas Media Backup identity<input value={form.atlasMediaBackupFile} onChange={event=>update("atlasMediaBackupFile",event.target.value)}/></label>
@@ -254,7 +278,7 @@ export default function BootstrapBackupRenewalPanel() {
       <label><input type="checkbox" checked={form.noRelevantChange} onChange={event=>update("noRelevantChange",event.target.checked)}/> I confirm that no relevant WordPress change occurred after this replacement SiteGround backup completed.</label>
     </fieldset>
     {Object.values(errors).map(message => <p className="helperText" key={message}>{message}</p>)}
-    <button className="primaryButton" disabled={!canPreflight} onClick={()=>void runPreflight()}>Run zero-write renewal preflight</button>
+    <button className="primaryButton" disabled={!canPreflight} onClick={()=>void runPreflight()}>Run renewal preflight</button>
 
     {preflight && <section aria-label="Renewal preflight review">
       <h3>Review preflight</h3>
@@ -265,7 +289,7 @@ export default function BootstrapBackupRenewalPanel() {
       <ul>{preflight.gate_results.map(gate=><li key={gate.code}>{gate.passed?"Passed":"Failed"}: {gate.label}{!gate.passed&&gate.message?` — ${gate.message}`:""}</li>)}</ul>
       {preflight.ready && <><label>Exact approval phrase<input aria-label="Exact approval phrase" value={phrase} onChange={event=>setPhrase(event.target.value)} autoComplete="off"/></label>
         <p><code>{BACKUP_RENEWAL_PHRASE}</code></p>
-        <button className="primaryButton" disabled={busy || !preflightHandleFresh || phrase !== BACKUP_RENEWAL_PHRASE} onClick={()=>void applyRenewal()}>Commit active backup renewal</button></>}
+        <button className="primaryButton" disabled={busy || !preflightHandleFresh || phrase !== BACKUP_RENEWAL_PHRASE} onClick={()=>void applyRenewal()}>Apply guarded renewal</button></>}
     </section>}
 
     {result && <div className="wordpressSafetyNotice" role="status"><CheckCircle2 size={20}/><div>
@@ -274,6 +298,6 @@ export default function BootstrapBackupRenewalPanel() {
       <p>WordPress writes {result.wordpress_write_count} · cache writes {result.cache_write_count} · Atlas audit writes {result.request_atlas_write_count}.</p>
       <p>Next required step: capture fresh browser evidence and run manual-install verification. Evidence capture and verification were not started automatically.</p>
     </div></div>}
-    {renewalCount >= MAX_BACKUP_RENEWALS && <p role="alert">Renewal limit reached. Renewal is disabled. Recovery recommendation: {recovery?.recommendation ?? result?.recovery_recommendation ?? "separately approved recovery required"}.</p>}
+    {recovery?.renewal_limit_reached && <p role="alert">Renewal limit reached. Renewal is disabled. Recovery recommendation: {recovery.recommendation}.</p>}
   </section>;
 }

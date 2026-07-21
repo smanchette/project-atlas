@@ -1479,16 +1479,38 @@ class WordPressBootstrapBackupRenewalRecovery(SQLModel):
     wordpress_post_id: Literal[8] = 8
     establishment_audit_id: int
     status: Literal["recovery_assessment_complete"] = "recovery_assessment_complete"
+    audit_status: str
     classification: str
+    reason_code: str
     recommendation: Literal[
         "create_fresh_siteground_backup", "run_guarded_backup_renewal",
         "proceed_to_manual_verification", "renew_backup_again",
         "new_manual_authorization_required", "guarded_bootstrap_recovery",
         "siteground_restore", "no_action",
     ]
+    next_required_action: str
+    renewal_eligible: bool
+    renewal_blocked: bool
     original_backup: dict[str, Any]
+    original_backup_expired: bool | None
+    original_backup_expiration_status: Literal["valid", "expired", "missing", "invalid"]
+    original_backup_remaining_seconds: int | None = Field(default=None, ge=0)
     active_backup: dict[str, Any]
+    active_backup_source: Literal["original", "replacement", "none"]
+    active_backup_expired: bool | None
+    active_backup_expiration_status: Literal["valid", "expired", "missing", "invalid"]
+    active_backup_remaining_seconds: int | None = Field(default=None, ge=0)
+    active_renewal_sequence: int | None = Field(default=None, ge=1)
     renewal_history: list[dict[str, Any]]
+    renewal_count: int = Field(ge=0)
+    maximum_renewals: int = Field(ge=1)
+    renewals_remaining: int = Field(ge=0)
+    renewal_limit_reached: bool
+    bootstrap_manually_uploaded: bool | None
+    verification_evidence_present: bool
+    activation_started: bool
+    checksum_quarantine_active: bool
+    pending_operation: bool
     wordpress_write_count: Literal[0] = 0
     cache_write_count: Literal[0] = 0
     atlas_write_count: Literal[0] = 0

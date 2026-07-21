@@ -1015,6 +1015,8 @@ export type WordPressBootstrapBackupEvidence = {
 };
 export type WordPressBootstrapBackupRenewalRecord = {
   sequence:number; replacement:WordPressBootstrapBackupEvidence; approved_at?:string; status:string;
+  replacement_expired?:boolean|null; replacement_expiration_status?:"valid"|"expired"|"missing"|"invalid";
+  replacement_remaining_seconds?:number|null; active?:boolean;
 };
 export type WordPressBootstrapBackupRenewalResult = {
   page_id:41; wordpress_post_id:8; establishment_audit_id:number; status:string; reason_code:string; renewal_sequence:number;
@@ -1024,9 +1026,18 @@ export type WordPressBootstrapBackupRenewalResult = {
 };
 export type WordPressBootstrapBackupRenewalRecovery = {
   page_id:41; wordpress_post_id:8; establishment_audit_id:number;
-  status:"recovery_assessment_complete"; classification:string; recommendation:string;
+  status:"recovery_assessment_complete"; audit_status:string; classification:string; reason_code:string;
+  recommendation:string; next_required_action:string; renewal_eligible:boolean; renewal_blocked:boolean;
   original_backup:WordPressBootstrapBackupEvidence; active_backup:WordPressBootstrapBackupEvidence;
+  original_backup_expired:boolean|null; original_backup_expiration_status:"valid"|"expired"|"missing"|"invalid";
+  original_backup_remaining_seconds?:number|null;
+  active_backup_source:"original"|"replacement"|"none"; active_backup_expired:boolean|null;
+  active_backup_expiration_status:"valid"|"expired"|"missing"|"invalid"; active_backup_remaining_seconds?:number|null;
+  active_renewal_sequence?:number|null;
   renewal_history:WordPressBootstrapBackupRenewalRecord[];
+  renewal_count:number; maximum_renewals:number; renewals_remaining:number; renewal_limit_reached:boolean;
+  bootstrap_manually_uploaded:boolean|null; verification_evidence_present:boolean; activation_started:boolean;
+  checksum_quarantine_active:boolean; pending_operation:boolean;
   wordpress_write_count:0; cache_write_count:0; atlas_write_count:0;
 };
 export type WordPressMetadataVerification = { status: "verified" | "failed" | "not_applied"; metadata_correct: boolean; apply_needed: boolean; payload_hash: string; live_payload_hash?: string | null; gate_results: WordPressMetadataGate[]; read_only: true };

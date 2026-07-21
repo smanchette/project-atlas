@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.88
+
+Completed the guarded bootstrap backup-renewal recovery contract with authoritative durable lifecycle fields. The read-only response now separates operation completion from audit status and explicitly reports backup source, server-computed expiration state, renewal capacity, eligibility, deterministic reason code, recommendation, next action, upload/verification/activation/quarantine state, and pending-operation state. The operator UI renders these fields without inferring protected lifecycle state, preserves the narrow request contract, and uses the exact actions **Run renewal preflight** and **Apply guarded renewal**. Metadata Bridge 0.57.7 and Bootstrap 0.3.0 artifacts remain unchanged, and publication does not authorize live renewal or any WordPress/cache mutation.
+
 ## v0.59.87
 
 Corrected the guarded bootstrap backup-renewal operator interface so every replacement-backup value and safety attestation is explicit. The UI now loads audit 1 through the read-only recovery assessment, displays the immutable original backup, effective active backup, ordered renewal history, expiration and renewal-limit state, and keeps preflight and apply visibly separate. Completion and deadline require timezone-aware ISO-8601 values; the optional four-hour calculation is a deliberate reviewable action. The no-relevant-WordPress-change attestation defaults false and is never synthesized. Focused component, validation, request-contract, refresh, warning, and post-renewal tests lock the corrected behavior.

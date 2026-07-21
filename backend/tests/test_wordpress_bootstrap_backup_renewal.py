@@ -232,6 +232,136 @@ def test_recovery_classifies_required_recorded_and_expired(db, monkeypatch):
         assert after.recommendation == "proceed_to_manual_verification"
 
 
+def test_current_audit_recovery_contract_is_explicit_and_authoritative(db, monkeypatch):
+    audit_id, _, _ = expired_authorized_audit(db, monkeypatch)
+    with Session(db) as session:
+        audit = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        audit.upload_snapshot = {"manual_upload_observed": True}
+        session.add(audit); session.commit()
+        state = establishment.assess_backup_renewal_recovery(
+            session, 41, WordPressBootstrapBackupRenewalRecoveryRequest(establishment_audit_id=audit_id)
+        )
+    assert state.status == "recovery_assessment_complete"
+    assert state.audit_status == "awaiting_manual_bootstrap_installation"
+    assert state.classification == "renewal_required"
+    assert state.reason_code == "bootstrap_backup_renewal_replacement_required"
+    assert state.recommendation == "create_fresh_siteground_backup"
+    assert state.next_required_action == "create_fresh_siteground_backup_then_run_guarded_backup_renewal"
+    assert state.renewal_eligible and not state.renewal_blocked
+    assert state.original_backup_expired is True
+    assert state.original_backup_expiration_status == "expired"
+    assert state.active_backup_source == "original"
+    assert state.active_backup_expired is True
+    assert state.active_renewal_sequence is None
+    assert state.renewal_count == 0 and state.maximum_renewals == 3
+    assert state.renewals_remaining == 3 and not state.renewal_limit_reached
+    assert state.bootstrap_manually_uploaded is True
+    assert not state.verification_evidence_present
+    assert not state.activation_started and not state.checksum_quarantine_active
+    assert not state.pending_operation
+    assert state.wordpress_write_count == state.cache_write_count == state.atlas_write_count == 0
+
+
+def test_recovery_active_replacement_fields_are_server_computed(db, monkeypatch):
+    audit_id, _, _, _, _ = apply_once(db, monkeypatch)
+    with Session(db) as session:
+        state = establishment.assess_backup_renewal_recovery(
+            session, 41, WordPressBootstrapBackupRenewalRecoveryRequest(establishment_audit_id=audit_id)
+        )
+    assert state.active_backup_source == "replacement"
+    assert state.active_renewal_sequence == 1
+    assert state.active_backup_expiration_status == "valid"
+    assert state.active_backup_expired is False
+    assert state.renewal_count == 1 and state.renewals_remaining == 2
+    assert state.classification == "valid_renewal_recorded"
+    assert not state.renewal_eligible and state.renewal_blocked
+    assert state.renewal_history[0]["active"] is True
+    assert state.renewal_history[0]["replacement_expiration_status"] == "valid"
+
+
+def test_recovery_expired_replacement_is_eligible(db, monkeypatch):
+    audit_id, _, _, _, _ = apply_once(db, monkeypatch)
+    with Session(db) as session:
+        audit = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        active = dict(audit.active_backup_evidence)
+        completed = datetime.now(UTC) - timedelta(hours=6)
+        active["wordpress_backup_completed_at"] = completed.isoformat()
+        active["deadline"] = (completed + timedelta(hours=4)).isoformat()
+        audit.active_backup_evidence = active
+        audit.backup_renewals[-1]["replacement"] = active
+        session.add(audit); session.commit()
+        state = establishment.assess_backup_renewal_recovery(
+            session, 41, WordPressBootstrapBackupRenewalRecoveryRequest(establishment_audit_id=audit_id)
+        )
+    assert state.classification == "replacement_backup_expired"
+    assert state.reason_code == "bootstrap_backup_renewal_replacement_required"
+    assert state.active_backup_expired is True and state.renewal_eligible
+
+
+def test_recovery_active_source_none_and_invalid_expiration_are_explicit(db, monkeypatch):
+    audit_id, _, _ = expired_authorized_audit(db, monkeypatch)
+    with Session(db) as session:
+        audit = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        audit.backup_evidence = {}
+        audit.active_backup_evidence = None
+        session.add(audit); session.commit()
+        state = establishment.assess_backup_renewal_recovery(
+            session, 41, WordPressBootstrapBackupRenewalRecoveryRequest(establishment_audit_id=audit_id)
+        )
+    assert state.active_backup_source == "none"
+    assert state.active_backup_expiration_status == "missing"
+    assert state.active_backup_expired is None
+    assert state.classification == "backup_identity_unavailable"
+    assert not state.renewal_eligible
+
+
+@pytest.mark.parametrize(
+    ("audit_changes", "pending", "classification", "reason"),
+    [
+        ({"status": "manual_installation_inventory_verified"}, False, "manual_verification_completed", "bootstrap_backup_renewal_verification_complete"),
+        ({"activation_handle_fingerprint": "a" * 64}, False, "activation_started", "bootstrap_backup_renewal_activation_started"),
+        ({"checksum_verification_result": "mismatch"}, False, "checksum_quarantine_active", "bootstrap_backup_renewal_checksum_quarantine_active"),
+        ({}, True, "pending_operation", "bootstrap_backup_renewal_pending_operation"),
+    ],
+)
+def test_recovery_blocked_state_reason_mapping(db, monkeypatch, audit_changes, pending, classification, reason):
+    audit_id, _, _ = expired_authorized_audit(db, monkeypatch)
+    monkeypatch.setattr(establishment, "_pending_operation_exists", lambda session: pending)
+    with Session(db) as session:
+        audit = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        for key, value in audit_changes.items():
+            setattr(audit, key, value)
+        session.add(audit); session.commit()
+        state = establishment.assess_backup_renewal_recovery(
+            session, 41, WordPressBootstrapBackupRenewalRecoveryRequest(establishment_audit_id=audit_id)
+        )
+    assert state.classification == classification
+    assert state.reason_code == reason
+    assert not state.renewal_eligible and state.renewal_blocked
+
+
+def test_recovery_limit_and_remaining_are_authoritative(db, monkeypatch):
+    audit_id, _, _ = expired_authorized_audit(db, monkeypatch)
+    completed = datetime.now(UTC) - timedelta(hours=6)
+    replacement = establishment._replacement_backup(request(audit_id, completed=completed))
+    with Session(db) as session:
+        audit = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        audit.backup_renewals = [
+            {"sequence": sequence, "replacement": replacement, "approved_at": datetime.now(UTC).isoformat(), "status": "committed"}
+            for sequence in range(1, 4)
+        ]
+        audit.active_backup_evidence = replacement
+        session.add(audit); session.commit()
+        state = establishment.assess_backup_renewal_recovery(
+            session, 41, WordPressBootstrapBackupRenewalRecoveryRequest(establishment_audit_id=audit_id)
+        )
+    assert state.renewal_count == state.maximum_renewals == 3
+    assert state.renewals_remaining == 0 and state.renewal_limit_reached
+    assert state.classification == "renewal_limit_reached"
+    assert state.reason_code == "bootstrap_backup_renewal_limit_reached"
+    assert state.active_renewal_sequence == 3
+
+
 def test_caller_cannot_inject_original_backup_pointer_or_sequence():
     payload = request(1).model_dump()
     for field in ("original_backup", "active_backup", "renewal_sequence", "protected_state_hash"):
