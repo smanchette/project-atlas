@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 import hashlib
 import hmac
 import json
+import os
 import secrets
 from threading import Lock, Timer
 from typing import Any
@@ -71,6 +72,8 @@ ATLAS_SCOPE = [
 _BASE_IGNORED_GATE_CODES = {"upgrade_bootstrap", "bootstrap_establishment_audit", "plugin_inventory", "expected_post_inventory"}
 _VERIFICATION_FINGERPRINT_KEY = "_atlas_manual_install_verification_fingerprint"
 _VERIFICATION_PROOF_KEY = "_atlas_manual_install_verification_proof"
+_AUTHORIZATION_EVIDENCE_KEY = "_atlas_authorization_evidence"
+_VERIFICATION_EVIDENCE_KEY = "_atlas_verification_evidence"
 
 
 @dataclass(frozen=True)
@@ -183,7 +186,12 @@ def authorize_manual_install(session: Session, page_id: int, request: WordPressB
         manual_handle_fingerprint=_sha(request.manual_install_handle), manual_binding_hash=entry.binding_hash,
         release_identity=entry.request.expected_runtime_identity.model_dump(mode="json"),
         backup_evidence=_backup(entry.request), browser_evidence_id=evidence.evidence_id if evidence else "",
-        pre_snapshot=base.inspected_state,
+        pre_snapshot={
+            **base.inspected_state,
+            _AUTHORIZATION_EVIDENCE_KEY: _evidence_record(
+                evidence, base.inspected_state, result="authorization_committed"
+            ),
+        },
         source_inventories=_inventories(base.inspected_state),
         protected_state=_protected(base.inspected_state),
         gate_results=[g.model_dump(mode="json") for g in gates],
@@ -210,6 +218,7 @@ def verify_manual_install(session: Session, page_id: int, request: WordPressBoot
         audit = _audit_for_update(session, request.establishment_audit_id)
         if audit.status not in {"awaiting_manual_bootstrap_installation", "manual_installation_inventory_verified"}:
             raise HTTPException(409, "The establishment audit is not awaiting manual-upload verification.")
+        _require_fresh_verification_evidence(audit, request)
         base, gates, classification = _inspect_against_audit(session, page_id, request, audit, require_inactive=True)
         kind = classification["classification"]
 
@@ -244,16 +253,27 @@ def verify_manual_install(session: Session, page_id: int, request: WordPressBoot
         if kind == "exact_active":
             return _transition(session, audit, "manual_activation_detected", gates, base.inspected_state, "reconcile_manual_activation")
         if not all(g.passed for g in gates):
+            if kind == "exact_inactive":
+                _raise_verification_conflict(
+                    _verification_gate_reason(gates),
+                    "Fresh manual-install verification did not match the authorized stable state.",
+                )
             status = "installation_partial" if kind == "installation_partial" else "manual_installation_mismatch"
             recommendation = "siteground_restore" if not _protected_equal(audit, base.inspected_state) else "guarded_bootstrap_recovery"
             return _transition(session, audit, status, gates, base.inspected_state, recommendation)
 
         proof = _verification_proof(request, base.inspected_state, classification, audit)
         fingerprint = _hash(proof)
+        verification_evidence = _evidence_record(
+            request.manual_browser_evidence,
+            base.inspected_state,
+            result="stable_identity_matched",
+        )
         audit.upload_snapshot = {
             **base.inspected_state,
             _VERIFICATION_PROOF_KEY: proof,
             _VERIFICATION_FINGERPRINT_KEY: fingerprint,
+            _VERIFICATION_EVIDENCE_KEY: verification_evidence,
         }
         audit.upload_inventories = _inventories(base.inspected_state)
         audit.status = "manual_installation_inventory_verified"
@@ -272,6 +292,7 @@ def verify_manual_install(session: Session, page_id: int, request: WordPressBoot
 
 def activation_preflight(session: Session, page_id: int, request: WordPressBootstrapManualInstallVerifyRequest) -> WordPressBootstrapEstablishmentPreflight:
     audit = _audit(session, request.establishment_audit_id)
+    _require_fresh_verification_evidence(audit, request)
     base, gates, classification = _inspect_against_audit(session, page_id, request, audit, require_inactive=True)
     gates += [
         _gate("audit_upload_verified", "The selected audit records exact inactive upload verification", audit.status == "manual_installation_inventory_verified", "Manual upload has not been verified."),
@@ -443,10 +464,14 @@ def _inspect_against_audit(session, page_id, request, audit, *, require_inactive
     base = upgrade.plugin_upgrade_preflight(session, page_id, request, issue_handle=False)
     classification = _classify(base.inspected_state.get("plugins", []))
     expected_kind = "exact_inactive" if require_inactive else "exact_active"
+    verification_drift = _verification_stable_drift_reason(audit, base.inspected_state)
     gates = _base_gates(base) + [
         _gate("bootstrap_inventory_shape", f"Bootstrap inventory is {expected_kind.replace('_', ' ')}", classification["classification"] == expected_kind, "Bootstrap path, version, status, count, or inventory is not exact."),
         _gate("unrelated_plugin_drift", "No unrelated plugin changed", _without_bootstrap(base.inspected_state.get("plugins", [])) == _without_bootstrap(audit.pre_snapshot.get("plugins", [])), "An unrelated plugin changed."),
-        _gate("protected_state", "Page, body, media, settings, rendering, payload, revision, and cache remain bound", _protected_equal(audit, base.inspected_state), "Protected state changed."),
+        _gate("protected_state", "Page, body, media, settings, rendering, payload, revision, and cache remain bound", _protected_non_rendered(base.inspected_state) == _protected_non_rendered(audit.protected_state, already_protected=True), "Protected state changed."),
+        _gate("verification_stable_identity", "Fresh evidence matches the authorized stable public identity", verification_drift is None, "Fresh rendered evidence changed stable public identity."),
+        _gate("verification_rendered_hashes", "Fresh rendered hashes match authorization", verification_drift != "manual_install_verification_rendered_hash_drift", "Rendered-head, visible-content, or raw-DOM identity changed."),
+        _gate("verification_privacy", "Fresh evidence preserves the credential-free privacy classification", verification_drift != "manual_install_verification_privacy_drift", "Cookie, authentication, admin, login, challenge, or error classification changed."),
         _gate("active_inventory", "Active inventory matches the required lifecycle state", (base.inspected_state.get("active_plugin_inventory_hash") == audit.source_inventories.get("active")) if require_inactive else True, "Active inventory changed before guarded activation."),
     ]
     return base, gates, classification
@@ -516,6 +541,8 @@ def _preflight_response(stage, ready, status, base, gates, binding, handle, expi
 
 
 def _result(audit, stage, gates, snapshot, recommendation, *, request_atlas_write_count=0, idempotent_replay=False, reason_code="bootstrap_establishment_result"):
+    authorization_evidence = _authorization_evidence_record(audit)
+    verification_evidence = _verification_evidence_record(audit)
     return WordPressBootstrapEstablishmentResult(
         establishment_audit_id=audit.id or 0, stage=stage, status=audit.status,
         state_history=audit.transition_history, binding_hash=audit.activation_binding_hash or audit.manual_binding_hash,
@@ -524,6 +551,15 @@ def _result(audit, stage, gates, snapshot, recommendation, *, request_atlas_writ
         atlas_write_count=audit.atlas_write_count, atlas_write_scope=audit.atlas_write_scope,
         request_atlas_write_count=request_atlas_write_count, idempotent_replay=idempotent_replay,
         reason_code=reason_code,
+        authorization_evidence=authorization_evidence,
+        verification_evidence=verification_evidence,
+        stable_evidence_match=bool(
+            verification_evidence
+            and authorization_evidence.get("stable_fingerprint")
+            == verification_evidence.get("stable_fingerprint")
+        ),
+        fresh_evidence_required=audit.status == "awaiting_manual_bootstrap_installation",
+        backup_deadline_valid=_audit_backup_deadline_valid(audit),
         recovery_recommendation=recommendation, further_action_required=audit.status != "verified",
     )
 
@@ -585,6 +621,176 @@ def _protected(snapshot):
     }
 
 
+def _protected_non_rendered(value, *, already_protected=False):
+    protected = value if already_protected else _protected(value)
+    return {
+        key: item
+        for key, item in protected.items()
+        if key != "rendered"
+    }
+
+
+def _stable_verification_observation(snapshot):
+    """Cross-phase public identity with evidence IDs and acquisition timing removed."""
+
+    rendered = _rendered_observation(snapshot)
+    public = cache_binding._stable_public_observation(_public_observation(snapshot), None)
+    return {
+        "requested_url": cache_binding.CANONICAL_URL,
+        "final_url": rendered.get("final_url"),
+        "outcome": rendered.get("outcome"),
+        "verified": rendered.get("verified") is True,
+        "schema": rendered.get("evidence_schema"),
+        "schema_version": rendered.get("evidence_schema_version"),
+        "capture_helper_version": rendered.get("capture_helper_version"),
+        "rendered_head_hash": rendered.get("head_hash"),
+        "visible_content_hash": rendered.get("visible_hash"),
+        "raw_dom_hash": rendered.get("raw_dom_hash"),
+        "document_title": rendered.get("document_title"),
+        "ordered_h1_inventory": rendered.get("h1"),
+        "canonical_inventory": rendered.get("canonical"),
+        "featured_image_url": rendered.get("featured_image_url"),
+        "featured_image_alt": rendered.get("featured_image_alt"),
+        "metadata_inventory_hash": rendered.get("metadata_inventory_hash"),
+        "privacy_attestations": rendered.get("privacy_attestations"),
+        "classifications": {
+            "signature_validated": rendered.get("signature_validated") is True,
+            "atlas_metadata_marker_present": bool(rendered.get("atlas_metadata_marker_present")),
+            "media32_reference_present": bool(rendered.get("media32_reference_present")),
+        },
+        "public_transport": public,
+    }
+
+
+def _stable_verification_fingerprint(snapshot):
+    return _hash(_stable_verification_observation(snapshot))
+
+
+def _evidence_record(evidence, snapshot, *, result):
+    value = _evidence_value(evidence)
+    return {
+        "evidence_id": value.get("evidence_id"),
+        "captured_at": value.get("captured_at"),
+        "expires_at": value.get("expires_at"),
+        "schema": value.get("evidence_schema"),
+        "schema_version": value.get("evidence_schema_version"),
+        "capture_helper_version": value.get("capture_helper_version"),
+        "stable_fingerprint": _stable_verification_fingerprint(snapshot),
+        "result": result,
+    }
+
+
+def _authorization_evidence_record(audit):
+    stored = (audit.pre_snapshot or {}).get(_AUTHORIZATION_EVIDENCE_KEY)
+    if isinstance(stored, dict):
+        return stored
+    rendered = _rendered_observation(audit.pre_snapshot or {})
+    return {
+        "evidence_id": audit.browser_evidence_id,
+        "captured_at": rendered.get("evidence_timestamp"),
+        "expires_at": rendered.get("evidence_expires_at"),
+        "schema": rendered.get("evidence_schema"),
+        "schema_version": rendered.get("evidence_schema_version"),
+        "capture_helper_version": rendered.get("capture_helper_version"),
+        "stable_fingerprint": _stable_verification_fingerprint(audit.pre_snapshot or {}),
+        "result": "authorization_committed",
+    }
+
+
+def _verification_evidence_record(audit):
+    stored = (audit.upload_snapshot or {}).get(_VERIFICATION_EVIDENCE_KEY)
+    return stored if isinstance(stored, dict) else None
+
+
+def _authorization_stable_fingerprint(audit):
+    return str(_authorization_evidence_record(audit).get("stable_fingerprint") or "")
+
+
+def _verification_stable_drift_reason(audit, snapshot):
+    before = _stable_verification_observation(audit.pre_snapshot or {})
+    after = _stable_verification_observation(snapshot)
+    hash_keys = ("rendered_head_hash", "visible_content_hash", "raw_dom_hash")
+    if any(before.get(key) != after.get(key) for key in hash_keys):
+        return "manual_install_verification_rendered_hash_drift"
+    if (
+        before.get("privacy_attestations") != after.get("privacy_attestations")
+        or before.get("classifications") != after.get("classifications")
+        or before.get("public_transport", {}).get("challenge_error")
+        != after.get("public_transport", {}).get("challenge_error")
+    ):
+        return "manual_install_verification_privacy_drift"
+    if before != after:
+        return "manual_install_verification_stable_identity_mismatch"
+    return None
+
+
+def _audit_backup_deadline_valid(audit):
+    try:
+        completed = (audit.backup_evidence or {}).get("wordpress_backup_completed_at")
+        parsed = cache_binding._timestamp(completed) if completed else None
+        return bool(parsed and upgrade._backup_deadline(parsed) > datetime.now(UTC))
+    except (TypeError, ValueError):
+        return False
+
+
+def _require_fresh_verification_evidence(audit, request):
+    evidence = request.manual_browser_evidence
+    value = _evidence_value(evidence)
+    evidence_id = str(value.get("evidence_id") or "")
+    if evidence_id and hmac.compare_digest(evidence_id, audit.browser_evidence_id):
+        _raise_verification_conflict(
+            "manual_install_verification_evidence_reused",
+            "Manual-install verification requires evidence captured after authorization.",
+        )
+    valid, reason = upgrade.validate_manual_browser_evidence(
+        evidence,
+        os.environ.get("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", ""),
+    )
+    if not valid or not evidence or value.get("evidence_schema_version") != 1:
+        text = str(reason or "").lower()
+        if "signature" in text:
+            code = "manual_install_verification_signature_invalid"
+        elif "expired" in text or "future-dated" in text or "timestamp" in text:
+            code = "manual_install_verification_evidence_expired"
+        else:
+            code = "manual_install_verification_evidence_invalid"
+        _raise_verification_conflict(code, reason or "Fresh signed schema-v1 evidence is invalid.")
+    if _expired(request):
+        _raise_verification_conflict(
+            "manual_install_verification_backup_drift",
+            "The bound SiteGround backup deadline expired; renewal is not supported by this release.",
+        )
+
+
+def _verification_gate_reason(gates):
+    failed = {gate.code for gate in gates if not gate.passed}
+    if "verification_rendered_hashes" in failed:
+        return "manual_install_verification_rendered_hash_drift"
+    if "verification_privacy" in failed:
+        return "manual_install_verification_privacy_drift"
+    if "verification_stable_identity" in failed:
+        return "manual_install_verification_stable_identity_mismatch"
+    if failed & {"rendered_state", "page_snapshot", "page_identity", "body_hash", "media31", "media32", "site_identity"}:
+        return "manual_install_verification_protected_state_drift"
+    if failed & {"plugin_inventory", "active_inventory", "unrelated_plugin_drift", "bootstrap_inventory_shape"}:
+        return "manual_install_verification_plugin_inventory_drift"
+    if failed & {"release_identity", "expected_runtime", "repository_identity", "repository_clean", "protected_paths"}:
+        return "manual_install_verification_runtime_drift"
+    if failed & {
+        "atlas_data_backup", "atlas_media_backup", "atlas_program_backup", "backup_method",
+        "backup_reference", "backup_timezone", "backup_window", "database_attestation",
+        "plugins_attestation", "restore_attestation", "confirmer", "no_post_backup_change",
+    }:
+        return "manual_install_verification_backup_drift"
+    if "evidence_contract" in failed:
+        return "manual_install_verification_signature_invalid"
+    return "manual_install_verification_protected_state_drift"
+
+
+def _raise_verification_conflict(code, message):
+    raise HTTPException(409, detail={"reason_code": code, "message": message})
+
+
 def _stable_diagnostic_headers(headers):
     if not isinstance(headers, dict):
         return headers
@@ -610,7 +816,12 @@ def _protected_rendered(rendered):
 
 
 def _protected_equal(audit, snapshot):
-    return _protected(snapshot) == audit.protected_state
+    return (
+        _protected_non_rendered(snapshot)
+        == _protected_non_rendered(audit.protected_state, already_protected=True)
+        and _stable_verification_fingerprint(snapshot)
+        == _authorization_stable_fingerprint(audit)
+    )
 
 
 def _verification_fingerprint(request, snapshot, classification, audit):
@@ -618,7 +829,6 @@ def _verification_fingerprint(request, snapshot, classification, audit):
 
 
 def _verification_proof(request, snapshot, classification, audit):
-    evidence = request.manual_browser_evidence
     return {
         "audit": {"id": audit.id, "page_id": audit.generated_page_id, "wordpress_post_id": audit.wordpress_post_id},
         "artifact": {
@@ -628,7 +838,7 @@ def _verification_proof(request, snapshot, classification, audit):
         },
         "runtime": request.expected_runtime_identity.model_dump(mode="json"),
         "backup": _backup(request),
-        "evidence_id": evidence.evidence_id if evidence else "",
+        "evidence_stable_fingerprint": _stable_verification_fingerprint(snapshot),
         "classification": classification,
         "inventories": _inventories(snapshot),
         "protected": _protected(snapshot),
@@ -655,9 +865,8 @@ def _retry_conflict_reason(request, snapshot, classification, audit, gates):
         return "manual_install_inventory_drift"
     if _backup(request) != committed.get("backup"):
         return "manual_install_backup_identity_drift"
-    evidence = request.manual_browser_evidence
-    if (evidence.evidence_id if evidence else "") != committed.get("evidence_id"):
-        return "manual_install_evidence_mismatch"
+    if _stable_verification_fingerprint(snapshot) != committed.get("evidence_stable_fingerprint"):
+        return "manual_install_verification_stable_identity_mismatch"
     if _retry_stale(request):
         return "manual_install_request_stale"
     if any(not gate.passed for gate in gates):

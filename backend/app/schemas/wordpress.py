@@ -1442,6 +1442,11 @@ class WordPressBootstrapEstablishmentResult(SQLModel):
     request_atlas_write_count: int = Field(default=0, ge=0)
     idempotent_replay: bool = False
     reason_code: str = "bootstrap_establishment_result"
+    authorization_evidence: dict[str, Any] = Field(default_factory=dict)
+    verification_evidence: dict[str, Any] | None = None
+    stable_evidence_match: bool = False
+    fresh_evidence_required: bool = False
+    backup_deadline_valid: bool = False
     recovery_recommendation: str
     further_action_required: bool
 

@@ -995,6 +995,8 @@ export type WordPressBootstrapEstablishmentResult = {
   state_history:string[]; binding_hash:string; gate_results:WordPressDeploymentGate[];
   inspected_state:Record<string,unknown>; wordpress_write_count:number; wordpress_write_scope:string[];
   cache_write_count:0; atlas_write_count:number; atlas_write_scope:string[];
+  authorization_evidence:Record<string,unknown>; verification_evidence?:Record<string,unknown>|null;
+  stable_evidence_match:boolean; fresh_evidence_required:boolean; backup_deadline_valid:boolean;
   recovery_recommendation:string; further_action_required:boolean;
 };
 export type WordPressMetadataVerification = { status: "verified" | "failed" | "not_applied"; metadata_correct: boolean; apply_needed: boolean; payload_hash: string; live_payload_hash?: string | null; gate_results: WordPressMetadataGate[]; read_only: true };
