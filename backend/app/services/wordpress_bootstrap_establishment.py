@@ -22,9 +22,22 @@ import httpx
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from app.models import WordPressBootstrapEstablishmentAudit
+from app.models import (
+    WordPressActivationAudit,
+    WordPressBootstrapCleanupAudit,
+    WordPressBootstrapEstablishmentAudit,
+    WordPressCacheAwareRenderingAudit,
+    WordPressMetadataLifecycleAudit,
+    WordPressPluginUpgradeAudit,
+)
 from app.schemas.wordpress import (
     WordPressBootstrapActivationApplyRequest,
+    WordPressBootstrapBackupRenewalApplyRequest,
+    WordPressBootstrapBackupRenewalPreflight,
+    WordPressBootstrapBackupRenewalRecovery,
+    WordPressBootstrapBackupRenewalRecoveryRequest,
+    WordPressBootstrapBackupRenewalRequest,
+    WordPressBootstrapBackupRenewalResult,
     WordPressBootstrapEstablishmentPreflight,
     WordPressBootstrapEstablishmentResult,
     WordPressBootstrapManualInstallAuthorizeRequest,
@@ -49,6 +62,7 @@ BOOTSTRAP_ZIP_SHA256 = "de5bfb7875b6f84f2009ef2043c1c86c7f9d20f0f973a5cb16b478fe
 BOOTSTRAP_ENTRY_SHA256 = "a977c077573ab732213a06d17dcc317b09854564777ce9cb24c869383972cd53"
 MANUAL_PHRASE = "AUTHORIZE MANUAL UPLOAD OF PROJECT ATLAS UPGRADE BOOTSTRAP 0.3.0"
 ACTIVATION_PHRASE = "ACTIVATE PROJECT ATLAS UPGRADE BOOTSTRAP 0.3.0"
+BACKUP_RENEWAL_PHRASE_PREFIX = "RENEW PROJECT ATLAS BOOTSTRAP HANDOFF BACKUP FOR AUDIT"
 MANUAL_BINDING_REASON_CODES = frozenset({
     "manual_upload_stable_observation_mismatch",
     "manual_upload_observation_expired",
@@ -61,6 +75,8 @@ MANUAL_BINDING_REASON_CODES = frozenset({
     "manual_upload_volatile_timestamp_change_allowed",
 })
 HANDLE_TTL = timedelta(minutes=10)
+BACKUP_WINDOW = timedelta(hours=4)
+MAX_BACKUP_RENEWALS = 3
 ACTIVATION_SCOPE = [
     f"POST /wp-json/wp/v2/plugins/{BOOTSTRAP_REST_ID}",
     'request JSON keys exactly ["status"] with value "active"',
@@ -92,9 +108,19 @@ class _Handle:
     clock_reversal_tolerance: timedelta
 
 
+@dataclass(frozen=True)
+class _RenewalHandle:
+    request: WordPressBootstrapBackupRenewalRequest
+    audit_id: int
+    binding_hash: str
+    expires_at: datetime
+    fingerprint: str
+
+
 _lock = Lock()
 _manual_handles: dict[str, _Handle] = {}
 _activation_handles: dict[str, _Handle] = {}
+_renewal_handles: dict[str, _RenewalHandle] = {}
 _timers: dict[tuple[str, str], Timer] = {}
 
 
@@ -290,6 +316,126 @@ def verify_manual_install(session: Session, page_id: int, request: WordPressBoot
         )
 
 
+def backup_renewal_preflight(
+    session: Session,
+    page_id: int,
+    request: WordPressBootstrapBackupRenewalRequest,
+) -> WordPressBootstrapBackupRenewalPreflight:
+    if page_id != 41:
+        raise HTTPException(404, "Bootstrap backup renewal is limited to Atlas page 41.")
+    audit = _audit(session, request.establishment_audit_id)
+    replacement = _replacement_backup(request)
+    duplicate = _latest_renewal_matches(audit, replacement)
+    gates = _backup_renewal_gates(session, audit, request, duplicate=duplicate)
+    ready = all(gate.passed for gate in gates)
+    expires_at = min(datetime.now(UTC) + HANDLE_TTL, _timestamp(replacement["deadline"])) if ready else None
+    fingerprint = _store_renewal(request, audit, expires_at) if ready and expires_at else None
+    reason = (
+        "bootstrap_backup_renewal_already_finalized"
+        if ready and duplicate
+        else "bootstrap_backup_renewal_ready"
+        if ready
+        else _backup_renewal_failure_reason(gates)
+    )
+    return WordPressBootstrapBackupRenewalPreflight(
+        establishment_audit_id=audit.id or 0,
+        status="bootstrap_backup_renewal_preflight_ready" if ready else "bootstrap_backup_renewal_preflight_blocked",
+        ready=ready,
+        reason_code=reason,
+        renewal_handle_fingerprint=fingerprint,
+        expires_at=expires_at,
+        confirmation_phrase=_backup_renewal_phrase(audit.id or 0) if ready else None,
+        original_backup=_original_backup(audit),
+        active_backup=_active_backup(audit),
+        proposed_replacement=replacement,
+        renewal_sequence=len(audit.backup_renewals or []) + (0 if duplicate else 1),
+        gate_results=gates,
+    )
+
+
+def apply_backup_renewal(
+    session: Session,
+    page_id: int,
+    request: WordPressBootstrapBackupRenewalApplyRequest,
+) -> WordPressBootstrapBackupRenewalResult:
+    if page_id != 41:
+        raise HTTPException(404, "Bootstrap backup renewal is limited to Atlas page 41.")
+    entry = _consume_renewal(request.renewal_handle_fingerprint)
+    phrase = _backup_renewal_phrase(entry.audit_id)
+    if not hmac.compare_digest(request.confirmation_phrase, phrase):
+        raise HTTPException(422, detail={"reason_code": "bootstrap_backup_renewal_conflict", "message": "The backup-renewal phrase is incorrect."})
+    with _lock:
+        audit = _audit_for_update(session, entry.audit_id)
+        replacement = _replacement_backup(entry.request)
+        duplicate = _latest_renewal_matches(audit, replacement)
+        gates = _backup_renewal_gates(session, audit, entry.request, duplicate=duplicate)
+        if not all(gate.passed for gate in gates):
+            raise HTTPException(409, detail={"reason_code": _backup_renewal_failure_reason(gates), "message": "Backup-renewal state changed after preflight; no durable mutation occurred."})
+        if duplicate:
+            return _backup_renewal_result(audit, idempotent=True)
+        binding = _backup_renewal_binding(audit, replacement)
+        if not hmac.compare_digest(_hash(binding), entry.binding_hash):
+            raise HTTPException(409, detail={"reason_code": "bootstrap_backup_renewal_state_drift", "message": "The renewal binding changed after preflight."})
+        sequence = len(audit.backup_renewals or []) + 1
+        record = {
+            "sequence": sequence,
+            "replacement": replacement,
+            "previous_active_identity": _hash(_active_backup(audit)),
+            "current_active_identity": _hash(replacement),
+            "renewal_handle_fingerprint": entry.fingerprint,
+            "approved_at": datetime.now(UTC).isoformat(),
+            "status": "committed",
+        }
+        audit.backup_renewals = [*(audit.backup_renewals or []), record]
+        audit.active_backup_evidence = replacement
+        audit.transition_history = [*audit.transition_history, f"backup_renewal_{sequence}_committed"]
+        audit.atlas_write_count += 1
+        audit.atlas_write_scope = ["append one immutable bootstrap backup-renewal event", "advance only the active backup pointer"]
+        audit.recovery_recommendation = "proceed_to_manual_verification"
+        session.add(audit)
+        session.commit()
+        session.refresh(audit)
+        return _backup_renewal_result(audit, request_atlas_write_count=1)
+
+
+def assess_backup_renewal_recovery(
+    session: Session,
+    page_id: int,
+    request: WordPressBootstrapBackupRenewalRecoveryRequest,
+) -> WordPressBootstrapBackupRenewalRecovery:
+    if page_id != 41:
+        raise HTTPException(404, "Bootstrap backup renewal is limited to Atlas page 41.")
+    audit = _audit(session, request.establishment_audit_id)
+    original = _original_backup(audit)
+    active = _active_backup(audit)
+    active_expired = _timestamp(active.get("deadline")) <= datetime.now(UTC)
+    protected = _protected(audit.pre_snapshot or {}) == audit.protected_state
+    if not protected:
+        classification, recommendation = "protected_state_drift", "siteground_restore"
+    elif audit.status == "manual_installation_inventory_verified":
+        classification, recommendation = "manual_verification_completed", "no_action"
+    elif audit.status != "awaiting_manual_bootstrap_installation":
+        classification, recommendation = "audit_state_no_longer_eligible", "guarded_bootstrap_recovery"
+    elif audit.activation_handle_fingerprint or audit.checksum_verification_result:
+        classification, recommendation = "activation_or_quarantine_started", "guarded_bootstrap_recovery"
+    elif audit.backup_renewals and active_expired:
+        classification, recommendation = "replacement_backup_expired", "renew_backup_again"
+    elif audit.backup_renewals:
+        classification, recommendation = "valid_renewal_recorded", "proceed_to_manual_verification"
+    elif active_expired:
+        classification, recommendation = "renewal_required", "create_fresh_siteground_backup"
+    else:
+        classification, recommendation = "no_renewal_required", "no_action"
+    return WordPressBootstrapBackupRenewalRecovery(
+        establishment_audit_id=audit.id or 0,
+        classification=classification,
+        recommendation=recommendation,
+        original_backup=original,
+        active_backup=active,
+        renewal_history=audit.backup_renewals or [],
+    )
+
+
 def activation_preflight(session: Session, page_id: int, request: WordPressBootstrapManualInstallVerifyRequest) -> WordPressBootstrapEstablishmentPreflight:
     audit = _audit(session, request.establishment_audit_id)
     _require_fresh_verification_evidence(audit, request)
@@ -472,6 +618,7 @@ def _inspect_against_audit(session, page_id, request, audit, *, require_inactive
         _gate("verification_stable_identity", "Fresh evidence matches the authorized stable public identity", verification_drift is None, "Fresh rendered evidence changed stable public identity."),
         _gate("verification_rendered_hashes", "Fresh rendered hashes match authorization", verification_drift != "manual_install_verification_rendered_hash_drift", "Rendered-head, visible-content, or raw-DOM identity changed."),
         _gate("verification_privacy", "Fresh evidence preserves the credential-free privacy classification", verification_drift != "manual_install_verification_privacy_drift", "Cookie, authentication, admin, login, challenge, or error classification changed."),
+        _gate("active_backup_binding", "The request uses the current audit-bound replacement backup", not (audit.backup_renewals or []) or _normalized_backup(_backup(request)) == _normalized_backup(_active_backup(audit, include_deadline=False)), "The request does not use the current guarded replacement backup identity."),
         _gate("active_inventory", "Active inventory matches the required lifecycle state", (base.inspected_state.get("active_plugin_inventory_hash") == audit.source_inventories.get("active")) if require_inactive else True, "Active inventory changed before guarded activation."),
     ]
     return base, gates, classification
@@ -560,6 +707,9 @@ def _result(audit, stage, gates, snapshot, recommendation, *, request_atlas_writ
         ),
         fresh_evidence_required=audit.status == "awaiting_manual_bootstrap_installation",
         backup_deadline_valid=_audit_backup_deadline_valid(audit),
+        original_backup=_original_backup(audit),
+        active_backup=_active_backup(audit),
+        backup_renewals=audit.backup_renewals or [],
         recovery_recommendation=recommendation, further_action_required=audit.status != "verified",
     )
 
@@ -726,9 +876,8 @@ def _verification_stable_drift_reason(audit, snapshot):
 
 def _audit_backup_deadline_valid(audit):
     try:
-        completed = (audit.backup_evidence or {}).get("wordpress_backup_completed_at")
-        parsed = cache_binding._timestamp(completed) if completed else None
-        return bool(parsed and upgrade._backup_deadline(parsed) > datetime.now(UTC))
+        deadline = _timestamp(_active_backup(audit).get("deadline"))
+        return deadline > datetime.now(UTC)
     except (TypeError, ValueError):
         return False
 
@@ -1112,6 +1261,215 @@ def _backup(request):
     return request.model_dump(mode="json", include=set(names), exclude={"manual_browser_evidence"})
 
 
+def _timestamp(value: Any) -> datetime:
+    parsed = cache_binding._timestamp(value)
+    if parsed is None or parsed.tzinfo is None:
+        raise ValueError("A timezone-aware timestamp is required.")
+    return parsed.astimezone(UTC)
+
+
+def _original_backup(audit: WordPressBootstrapEstablishmentAudit) -> dict[str, Any]:
+    value = json.loads(json.dumps(audit.backup_evidence or {}, sort_keys=True, default=str))
+    completed = value.get("wordpress_backup_completed_at")
+    if completed:
+        value["deadline"] = upgrade._backup_deadline(_timestamp(completed)).isoformat()
+    return value
+
+
+def _normalized_backup(value: dict[str, Any]) -> dict[str, Any]:
+    normalized = json.loads(json.dumps(value, sort_keys=True, default=str))
+    completed = normalized.get("wordpress_backup_completed_at")
+    if completed:
+        normalized["wordpress_backup_completed_at"] = _timestamp(completed).isoformat()
+    return normalized
+
+
+def _active_backup(audit: WordPressBootstrapEstablishmentAudit, *, include_deadline: bool = True) -> dict[str, Any]:
+    value = audit.active_backup_evidence or _original_backup(audit)
+    value = json.loads(json.dumps(value, sort_keys=True, default=str))
+    if not include_deadline:
+        value.pop("deadline", None)
+        value.pop("no_relevant_wordpress_change_after_backup", None)
+    return value
+
+
+def _replacement_backup(request: WordPressBootstrapBackupRenewalRequest) -> dict[str, Any]:
+    return {
+        "atlas_data_backup_file": request.atlas_data_backup_file,
+        "atlas_media_backup_file": request.atlas_media_backup_file,
+        "atlas_program_backup_file": request.atlas_program_backup_file,
+        "wordpress_backup_method": request.replacement_backup_method,
+        "wordpress_backup_reference": request.replacement_backup_reference,
+        "wordpress_backup_completed_at": request.replacement_backup_completed_at.astimezone(UTC).isoformat(),
+        "wordpress_database_included_attestation": request.database_included_attestation,
+        "wordpress_plugins_included_attestation": request.plugins_included_attestation,
+        "wordpress_restore_capability_attestation": request.restore_capability_attestation,
+        "confirmer_identity": request.confirmer_identity,
+        "no_relevant_wordpress_change_after_backup": request.no_relevant_wordpress_change_after_backup,
+        "deadline": request.replacement_backup_deadline.astimezone(UTC).isoformat(),
+    }
+
+
+def _backup_renewal_phrase(audit_id: int) -> str:
+    return f"{BACKUP_RENEWAL_PHRASE_PREFIX} {audit_id}"
+
+
+def _backup_renewal_binding(audit: WordPressBootstrapEstablishmentAudit, replacement: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "audit_id": audit.id,
+        "status": audit.status,
+        "transition_history": audit.transition_history,
+        "original_backup_identity": _hash(_original_backup(audit)),
+        "active_backup_identity": _hash(_active_backup(audit)),
+        "replacement_identity": _hash(replacement),
+        "renewal_count": len(audit.backup_renewals or []),
+        "authorization_evidence_id": audit.browser_evidence_id,
+        "protected_state_identity": _hash(audit.protected_state),
+    }
+
+
+def _latest_renewal_matches(audit: WordPressBootstrapEstablishmentAudit, replacement: dict[str, Any]) -> bool:
+    renewals = audit.backup_renewals or []
+    return bool(renewals and _hash(renewals[-1].get("replacement", {})) == _hash(replacement))
+
+
+def _pending_operation_exists(session: Session) -> bool:
+    models = (
+        WordPressActivationAudit,
+        WordPressPluginUpgradeAudit,
+        WordPressBootstrapCleanupAudit,
+        WordPressMetadataLifecycleAudit,
+        WordPressCacheAwareRenderingAudit,
+    )
+    return any(session.exec(select(model).where(model.status == "pending")).first() is not None for model in models)
+
+
+def _runtime_verified() -> bool:
+    try:
+        from app.services.wordpress_deployment import deployment_readiness
+
+        value = deployment_readiness()
+        release = value.get("release") or {}
+        return bool(
+            value.get("release_status") == "verified"
+            and release.get("runtime_identity_verified") is True
+            and release.get("manifest_integrity_verified") is True
+            and release.get("expected_release_matched") is True
+        )
+    except (HTTPException, TypeError, ValueError):
+        return False
+
+
+def _backup_renewal_gates(session, audit, request, *, duplicate: bool):
+    replacement = _replacement_backup(request)
+    active = _active_backup(audit)
+    completed = _timestamp(replacement["wordpress_backup_completed_at"])
+    deadline = _timestamp(replacement["deadline"])
+    active_completed = _timestamp(active["wordpress_backup_completed_at"])
+    active_deadline = _timestamp(active["deadline"])
+    method = replacement["wordpress_backup_method"].lower()
+    renewals = audit.backup_renewals or []
+    other_unresolved = list(session.exec(select(WordPressBootstrapEstablishmentAudit).where(WordPressBootstrapEstablishmentAudit.id != audit.id)))
+    other_unresolved = [item for item in other_unresolved if item.status not in {"verified", "recovery_required"}]
+    return [
+        _gate("runtime_identity", "The running Atlas runtime identity is verified", _runtime_verified(), "Runtime identity is unavailable or mismatched."),
+        _gate("audit_eligible", "The selected audit awaits manual bootstrap verification", audit.status == "awaiting_manual_bootstrap_installation", "The selected audit state is ineligible."),
+        _gate("authorization_preserved", "Original authorization evidence and transition are preserved", bool(audit.browser_evidence_id) and audit.transition_history and audit.transition_history[0] == "awaiting_manual_bootstrap_installation", "Authorization history is incomplete."),
+        _gate("verification_absent", "No manual-install verification evidence is recorded", not _verification_evidence_record(audit), "Manual verification already completed."),
+        _gate("activation_absent", "Activation and checksum quarantine have not started", not audit.activation_handle_fingerprint and not audit.checksum_verification_result, "Activation or checksum quarantine already started."),
+        _gate("conflicting_audit", "No conflicting establishment audit exists", not other_unresolved, "Another unresolved establishment audit exists."),
+        _gate("pending_operation", "No other Atlas mutation is pending", not _pending_operation_exists(session), "Another Atlas mutation is pending."),
+        _gate("protected_state", "The immutable authorization baseline is internally consistent", _protected(audit.pre_snapshot or {}) == audit.protected_state, "Stored protected state drifted."),
+        _gate("renewal_limit", f"Fewer than {MAX_BACKUP_RENEWALS} renewals are recorded", duplicate or len(renewals) < MAX_BACKUP_RENEWALS, "The conservative renewal-chain limit was reached."),
+        _gate("original_or_active_expired", "The active backup requires renewal", duplicate or active_deadline <= datetime.now(UTC), "The active backup is still valid."),
+        _gate("replacement_method", "Replacement is a SiteGround on-demand full-site backup", "siteground" in method and "on-demand" in method and "full-site" in method, "Replacement backup method is not exact."),
+        _gate("replacement_newer", "Replacement backup is newer than the active backup", duplicate or completed > active_completed, "Replacement backup is not newer."),
+        _gate("replacement_not_expired", "Replacement deadline is still in the future", deadline > datetime.now(UTC), "Replacement backup expired."),
+        _gate("replacement_deadline", "Replacement deadline is exactly four hours after completion", deadline == completed + BACKUP_WINDOW, "Replacement backup deadline is invalid."),
+        _gate("database_included", "Replacement includes the database", replacement["wordpress_database_included_attestation"] is True, "Database inclusion is missing."),
+        _gate("plugins_included", "Replacement includes wp-content/plugins", replacement["wordpress_plugins_included_attestation"] is True, "Plugin inclusion is missing."),
+        _gate("restore_confirmed", "Replacement restore capability is confirmed", replacement["wordpress_restore_capability_attestation"] is True, "Restore capability is unconfirmed."),
+        _gate("no_post_backup_change", "No relevant WordPress change followed replacement backup", replacement["no_relevant_wordpress_change_after_backup"] is True, "Post-backup state attestation is missing."),
+        _gate("atlas_backups", "Atlas Data, Media, and Program backup identities are supplied", all(replacement[key] for key in ("atlas_data_backup_file", "atlas_media_backup_file", "atlas_program_backup_file")), "Atlas backup identity is missing."),
+    ]
+
+
+def _backup_renewal_failure_reason(gates) -> str:
+    failed = {gate.code for gate in gates if not gate.passed}
+    mapping = (
+        ({"audit_eligible", "authorization_preserved", "verification_absent", "activation_absent", "conflicting_audit", "pending_operation", "renewal_limit"}, "bootstrap_backup_renewal_audit_ineligible"),
+        ({"original_or_active_expired"}, "bootstrap_backup_renewal_original_not_expired"),
+        ({"replacement_not_expired"}, "bootstrap_backup_renewal_replacement_expired"),
+        ({"replacement_newer"}, "bootstrap_backup_renewal_replacement_not_newer"),
+        ({"replacement_deadline"}, "bootstrap_backup_renewal_deadline_invalid"),
+        ({"restore_confirmed"}, "bootstrap_backup_renewal_restore_unconfirmed"),
+        ({"plugins_included"}, "bootstrap_backup_renewal_plugins_missing"),
+        ({"database_included"}, "bootstrap_backup_renewal_database_missing"),
+        ({"protected_state", "runtime_identity"}, "bootstrap_backup_renewal_state_drift"),
+    )
+    for codes, reason in mapping:
+        if failed & codes:
+            return reason
+    return "bootstrap_backup_renewal_conflict"
+
+
+def _store_renewal(request, audit, expires_at):
+    raw = secrets.token_urlsafe(32)
+    fingerprint = _sha(raw)
+    replacement = _replacement_backup(request)
+    entry = _RenewalHandle(
+        request=request.model_copy(deep=True),
+        audit_id=audit.id or 0,
+        binding_hash=_hash(_backup_renewal_binding(audit, replacement)),
+        expires_at=expires_at,
+        fingerprint=fingerprint,
+    )
+    with _lock:
+        _renewal_handles[fingerprint] = entry
+        timer = Timer(max(0.0, (expires_at - datetime.now(UTC)).total_seconds()), lambda: _expire_renewal(fingerprint))
+        timer.daemon = True
+        _timers[("renewal", fingerprint)] = timer
+        timer.start()
+    return fingerprint
+
+
+def _expire_renewal(fingerprint):
+    with _lock:
+        _renewal_handles.pop(fingerprint, None)
+        _timers.pop(("renewal", fingerprint), None)
+
+
+def _consume_renewal(fingerprint):
+    with _lock:
+        entry = _renewal_handles.pop(fingerprint, None)
+        timer = _timers.pop(("renewal", fingerprint), None)
+        if timer:
+            timer.cancel()
+    if entry is None:
+        raise HTTPException(409, detail={"reason_code": "bootstrap_backup_renewal_handle_replayed", "message": "Renewal handle is unknown, consumed, or restart-invalidated."})
+    if entry.expires_at <= datetime.now(UTC):
+        raise HTTPException(409, detail={"reason_code": "bootstrap_backup_renewal_handle_expired", "message": "Renewal handle expired."})
+    return entry
+
+
+def _backup_renewal_result(audit, *, request_atlas_write_count=0, idempotent=False):
+    renewals = audit.backup_renewals or []
+    return WordPressBootstrapBackupRenewalResult(
+        establishment_audit_id=audit.id or 0,
+        status="backup_renewed_awaiting_manual_verification",
+        reason_code="bootstrap_backup_renewal_already_finalized" if idempotent else "bootstrap_backup_renewal_committed",
+        renewal_sequence=len(renewals),
+        original_backup=_original_backup(audit),
+        active_backup=_active_backup(audit),
+        renewal_history=renewals,
+        state_history=audit.transition_history,
+        idempotent_replay=idempotent,
+        request_atlas_write_count=request_atlas_write_count,
+        atlas_write_count=audit.atlas_write_count,
+        recovery_recommendation="proceed_to_manual_verification",
+    )
+
+
 def _expiry(request):
     now = datetime.now(UTC)
     evidence = upgrade._evidence_expiry(request.manual_browser_evidence.expires_at)
@@ -1182,7 +1540,7 @@ def _expire(kind, handle):
 def _clear_establishment_handles():
     with _lock:
         for timer in _timers.values(): timer.cancel()
-        _manual_handles.clear(); _activation_handles.clear(); _timers.clear()
+        _manual_handles.clear(); _activation_handles.clear(); _renewal_handles.clear(); _timers.clear()
 
 
 def _hash(value):

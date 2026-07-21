@@ -1402,6 +1402,98 @@ class WordPressBootstrapActivationApplyRequest(SQLModel):
     confirmation_phrase: str = Field(min_length=1, max_length=120)
 
 
+class WordPressBootstrapBackupRenewalRequest(SQLModel):
+    """Minimum caller contract for one Atlas-only SiteGround backup renewal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    establishment_audit_id: int = Field(gt=0)
+    atlas_data_backup_file: str = Field(min_length=6, max_length=255)
+    atlas_media_backup_file: str = Field(min_length=6, max_length=255)
+    atlas_program_backup_file: str = Field(min_length=6, max_length=255)
+    replacement_backup_method: str = Field(min_length=6, max_length=255)
+    replacement_backup_reference: str = Field(min_length=3, max_length=255)
+    replacement_backup_completed_at: datetime
+    replacement_backup_deadline: datetime
+    database_included_attestation: bool
+    plugins_included_attestation: bool
+    restore_capability_attestation: bool
+    no_relevant_wordpress_change_after_backup: bool
+    confirmer_identity: str = Field(min_length=3, max_length=200)
+
+
+class WordPressBootstrapBackupRenewalApplyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    renewal_handle_fingerprint: str = Field(min_length=64, max_length=64)
+    confirmation_phrase: str = Field(min_length=1, max_length=160)
+
+
+class WordPressBootstrapBackupRenewalRecoveryRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    establishment_audit_id: int = Field(gt=0)
+
+
+class WordPressBootstrapBackupRenewalPreflight(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    establishment_audit_id: int
+    status: str
+    ready: bool
+    reason_code: str
+    renewal_handle_fingerprint: str | None = None
+    expires_at: datetime | None = None
+    confirmation_phrase: str | None = None
+    original_backup: dict[str, Any]
+    active_backup: dict[str, Any]
+    proposed_replacement: dict[str, Any]
+    renewal_sequence: int
+    gate_results: list[WordPressDraftGateResult]
+    wordpress_write_count: Literal[0] = 0
+    cache_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+
+
+class WordPressBootstrapBackupRenewalResult(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    establishment_audit_id: int
+    status: str
+    reason_code: str
+    renewal_sequence: int
+    original_backup: dict[str, Any]
+    active_backup: dict[str, Any]
+    renewal_history: list[dict[str, Any]]
+    state_history: list[str]
+    idempotent_replay: bool = False
+    wordpress_write_count: Literal[0] = 0
+    cache_write_count: Literal[0] = 0
+    request_atlas_write_count: int = Field(default=0, ge=0)
+    atlas_write_count: int
+    recovery_recommendation: str
+
+
+class WordPressBootstrapBackupRenewalRecovery(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    establishment_audit_id: int
+    status: Literal["recovery_assessment_complete"] = "recovery_assessment_complete"
+    classification: str
+    recommendation: Literal[
+        "create_fresh_siteground_backup", "run_guarded_backup_renewal",
+        "proceed_to_manual_verification", "renew_backup_again",
+        "new_manual_authorization_required", "guarded_bootstrap_recovery",
+        "siteground_restore", "no_action",
+    ]
+    original_backup: dict[str, Any]
+    active_backup: dict[str, Any]
+    renewal_history: list[dict[str, Any]]
+    wordpress_write_count: Literal[0] = 0
+    cache_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+
+
 class WordPressBootstrapEstablishmentPreflight(SQLModel):
     page_id: Literal[41] = 41
     wordpress_post_id: Literal[8] = 8
@@ -1447,6 +1539,9 @@ class WordPressBootstrapEstablishmentResult(SQLModel):
     stable_evidence_match: bool = False
     fresh_evidence_required: bool = False
     backup_deadline_valid: bool = False
+    original_backup: dict[str, Any] = Field(default_factory=dict)
+    active_backup: dict[str, Any] = Field(default_factory=dict)
+    backup_renewals: list[dict[str, Any]] = Field(default_factory=list)
     recovery_recommendation: str
     further_action_required: bool
 

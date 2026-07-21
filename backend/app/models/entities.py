@@ -635,6 +635,8 @@ class WordPressBootstrapEstablishmentAudit(SQLModel, table=True):
     activation_binding_hash: str | None = Field(default=None, max_length=64, index=True)
     release_identity: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
     backup_evidence: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    backup_renewals: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    active_backup_evidence: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     browser_evidence_id: str = Field(max_length=200)
     pre_snapshot: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
     upload_snapshot: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))

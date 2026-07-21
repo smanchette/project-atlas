@@ -997,7 +997,20 @@ export type WordPressBootstrapEstablishmentResult = {
   cache_write_count:0; atlas_write_count:number; atlas_write_scope:string[];
   authorization_evidence:Record<string,unknown>; verification_evidence?:Record<string,unknown>|null;
   stable_evidence_match:boolean; fresh_evidence_required:boolean; backup_deadline_valid:boolean;
+  original_backup:Record<string,unknown>; active_backup:Record<string,unknown>; backup_renewals:Record<string,unknown>[];
   recovery_recommendation:string; further_action_required:boolean;
+};
+export type WordPressBootstrapBackupRenewalPreflight = {
+  page_id:41; wordpress_post_id:8; establishment_audit_id:number; status:string; ready:boolean; reason_code:string;
+  renewal_handle_fingerprint?:string|null; expires_at?:string|null; confirmation_phrase?:string|null;
+  original_backup:Record<string,unknown>; active_backup:Record<string,unknown>; proposed_replacement:Record<string,unknown>;
+  renewal_sequence:number; gate_results:WordPressDeploymentGate[]; wordpress_write_count:0; cache_write_count:0; atlas_write_count:0;
+};
+export type WordPressBootstrapBackupRenewalResult = {
+  page_id:41; wordpress_post_id:8; establishment_audit_id:number; status:string; reason_code:string; renewal_sequence:number;
+  original_backup:Record<string,unknown>; active_backup:Record<string,unknown>; renewal_history:Record<string,unknown>[];
+  state_history:string[]; idempotent_replay:boolean; wordpress_write_count:0; cache_write_count:0;
+  request_atlas_write_count:number; atlas_write_count:number; recovery_recommendation:string;
 };
 export type WordPressMetadataVerification = { status: "verified" | "failed" | "not_applied"; metadata_correct: boolean; apply_needed: boolean; payload_hash: string; live_payload_hash?: string | null; gate_results: WordPressMetadataGate[]; read_only: true };
 export type WordPressMetadataRollbackDryRun = { status: "blocked" | "rollback_ready"; ready: boolean; current_payload_hash?: string | null; gate_results: WordPressMetadataGate[]; confirmation_token?: string | null; confirmation_phrase?: string | null; expires_at?: string | null };

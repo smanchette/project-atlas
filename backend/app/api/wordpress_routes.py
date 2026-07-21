@@ -73,6 +73,12 @@ from app.schemas.wordpress import (
     WordPressBootstrapManualInstallAuthorizeRequest,
     WordPressBootstrapManualInstallVerifyRequest,
     WordPressBootstrapActivationApplyRequest,
+    WordPressBootstrapBackupRenewalApplyRequest,
+    WordPressBootstrapBackupRenewalPreflight,
+    WordPressBootstrapBackupRenewalRecovery,
+    WordPressBootstrapBackupRenewalRecoveryRequest,
+    WordPressBootstrapBackupRenewalRequest,
+    WordPressBootstrapBackupRenewalResult,
     WordPressBootstrapEstablishmentPreflight,
     WordPressBootstrapEstablishmentResult,
     WordPressBootstrapRecoveryAssessment,
@@ -173,10 +179,13 @@ from app.services.wordpress_bootstrap_cleanup import (
 )
 from app.services.wordpress_bootstrap_establishment import (
     activation_preflight as bootstrap_establishment_activation_preflight,
+    apply_backup_renewal as bootstrap_backup_renewal_apply,
     apply_activation as bootstrap_establishment_activation_apply,
+    assess_backup_renewal_recovery as bootstrap_backup_renewal_recovery_assess,
     assess_recovery as bootstrap_establishment_recovery_assess,
     authorize_manual_install as bootstrap_manual_install_authorize,
     manual_install_preflight as bootstrap_manual_install_preflight,
+    backup_renewal_preflight as bootstrap_backup_renewal_preflight,
     verify_manual_install as bootstrap_manual_install_verify,
 )
 from app.services.wordpress_metadata_lifecycle import (
@@ -366,6 +375,39 @@ def upgrade_bootstrap_manual_install_verify(
     session: Session = Depends(get_session),
 ) -> WordPressBootstrapEstablishmentResult:
     return bootstrap_manual_install_verify(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/backup-renewal/preflight/{page_id}",
+    response_model=WordPressBootstrapBackupRenewalPreflight,
+)
+def upgrade_bootstrap_backup_renewal_preflight(
+    page_id: int, payload: WordPressBootstrapBackupRenewalRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapBackupRenewalPreflight:
+    return bootstrap_backup_renewal_preflight(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/backup-renewal/apply/{page_id}",
+    response_model=WordPressBootstrapBackupRenewalResult,
+)
+def upgrade_bootstrap_backup_renewal_apply(
+    page_id: int, payload: WordPressBootstrapBackupRenewalApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapBackupRenewalResult:
+    return bootstrap_backup_renewal_apply(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/backup-renewal/recovery/assess/{page_id}",
+    response_model=WordPressBootstrapBackupRenewalRecovery,
+)
+def upgrade_bootstrap_backup_renewal_recovery_assess(
+    page_id: int, payload: WordPressBootstrapBackupRenewalRecoveryRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapBackupRenewalRecovery:
+    return bootstrap_backup_renewal_recovery_assess(session, page_id, payload)
 
 
 @router.post(

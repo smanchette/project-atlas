@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.86
+
+Added a dedicated Atlas-only SiteGround backup-renewal lifecycle for an unresolved manual Bootstrap 0.3.0 handoff. The original authorization backup and evidence remain immutable; each explicitly approved replacement is stored as a sequenced renewal with a separate active-backup pointer. Preflight is zero-write, apply uses a short-lived process-memory single-use fingerprint and an audit-specific phrase, equivalent retries are idempotent, and conflicting or stale requests fail closed. Manual verification and activation use the current replacement backup while preserving authorization history. Renewals are limited to three and are prohibited after manual verification or activation begins.
+
 ## v0.59.85
 
 Separated historical manual-upload authorization evidence from fresh manual-install verification evidence. Verification now requires a new, valid, unexpired schema-v1 proof and compares a server-computed stable public-identity fingerprint that excludes evidence IDs, acquisition timestamps, durations, volatile cache headers, and ephemeral request identifiers. The original authorization evidence remains intact; the successful verification evidence identity and stable-match result are stored separately in the durable upload snapshot. Equivalent stable retries remain idempotent and zero-write, while expired, reused, tampered, or drifted evidence fails without downgrading a successful audit. Existing SiteGround backup identity and four-hour deadline remain mandatory; this release does not silently renew or replace an expired backup.
