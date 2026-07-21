@@ -29,6 +29,7 @@ from app.schemas.wordpress import (
 )
 from app.services.wordpress_draft_review import check_live_wordpress_draft_status
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
+from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 
 TARGET_PAGE_ID = 41
 TARGET_POST_ID = 8
@@ -143,8 +144,8 @@ def upload_wordpress_media(session: Session, page_id: int, request: WordPressMed
     endpoint = f"{settings.site_url.rstrip('/')}/wp-json/wp/v2/media"
     password = get_wordpress_application_password() or ""
     try:
-        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-            response = client.post(endpoint, files={"file": (dry.source_file_name, path.read_bytes(), dry.mime_type)}, auth=httpx.BasicAuth(settings.username, password))
+        with wordpress_http_client(settings.site_url, timeout=30.0, follow_redirects=True, client_factory=httpx.Client) as client:
+            response = client.post(endpoint, files={"file": (dry.source_file_name, path.read_bytes(), dry.mime_type)}, auth=wordpress_basic_auth(settings.username, password))
             if response.status_code not in {200, 201}: raise RuntimeError(f"WordPress returned HTTP {response.status_code}.")
             data = response.json()
             media_id = data.get("id")
@@ -153,9 +154,9 @@ def upload_wordpress_media(session: Session, page_id: int, request: WordPressMed
             audit.returned_media_url = data.get("source_url") if isinstance(data.get("source_url"), str) else None
             session.add(audit); session.commit(); session.refresh(audit)
             markers = {"_atlas_source_checksum": dry.checksum, "_atlas_image_metadata_id": "1", "_atlas_generated_page_id": "41", "_atlas_managed_media": "true"}
-            patched = client.post(f"{endpoint}/{media_id}", json={"alt_text": dry.alt_text, "title": dry.image_title, "meta": markers}, auth=httpx.BasicAuth(settings.username, password))
+            patched = client.post(f"{endpoint}/{media_id}", json={"alt_text": dry.alt_text, "title": dry.image_title, "meta": markers}, auth=wordpress_basic_auth(settings.username, password))
             if patched.status_code not in {200, 201}: raise RuntimeError(f"WordPress metadata update returned HTTP {patched.status_code}.")
-            verified = client.get(f"{endpoint}/{media_id}?context=edit", auth=httpx.BasicAuth(settings.username, password))
+            verified = client.get(f"{endpoint}/{media_id}?context=edit", auth=wordpress_basic_auth(settings.username, password))
             if verified.status_code >= 400: raise RuntimeError(f"WordPress attachment verification GET returned HTTP {verified.status_code}.")
             verify_data = verified.json()
             media_url = verify_data.get("source_url")
@@ -209,10 +210,10 @@ def inspect_wordpress_media(session: Session, page_id: int) -> WordPressMediaIns
     title = image.image_title or image.file_name
     endpoint = f"{settings.site_url.rstrip('/')}/wp-json/wp/v2/media"
     try:
-        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+        with wordpress_http_client(settings.site_url, timeout=20.0, follow_redirects=True, client_factory=httpx.Client) as client:
             response = client.get(
                 f"{endpoint}?context=edit&per_page=50&orderby=date&order=desc",
-                auth=httpx.BasicAuth(settings.username, password),
+                auth=wordpress_basic_auth(settings.username, password),
             )
         if response.status_code >= 400:
             raise HTTPException(status_code=502, detail=f"WordPress recent-media inspection returned HTTP {response.status_code}.")
@@ -327,10 +328,10 @@ def dry_run_wordpress_media_reconciliation(
     candidates: list[WordPressMediaReconciliationCandidate] = []
     post_data: dict = {}
     if settings.site_url and settings.username and password:
-        auth = httpx.BasicAuth(settings.username, password)
+        auth = wordpress_basic_auth(settings.username, password)
         api = f"{settings.site_url.rstrip('/')}/wp-json/wp/v2"
         try:
-            with httpx.Client(timeout=httpx.Timeout(20.0, read=30.0), follow_redirects=False) as client:
+            with wordpress_http_client(settings.site_url, timeout=httpx.Timeout(20.0, read=30.0), follow_redirects=False, client_factory=httpx.Client) as client:
                 post_response = client.get(f"{api}/pages/8?context=edit", auth=auth)
                 if post_response.status_code >= 400:
                     raise RuntimeError(f"WordPress post inspection returned HTTP {post_response.status_code}.")
@@ -491,10 +492,10 @@ def dry_run_wordpress_featured_image(
     post_data: dict = {}
     media: WordPressMediaReconciliationCandidate | None = None
     if settings.site_url and settings.username and password and local_checksum:
-        auth = httpx.BasicAuth(settings.username, password)
+        auth = wordpress_basic_auth(settings.username, password)
         api = f"{settings.site_url.rstrip('/')}/wp-json/wp/v2"
         try:
-            with httpx.Client(timeout=httpx.Timeout(20.0, read=30.0), follow_redirects=False) as client:
+            with wordpress_http_client(settings.site_url, timeout=httpx.Timeout(20.0, read=30.0), follow_redirects=False, client_factory=httpx.Client) as client:
                 post_response = client.get(f"{api}/pages/8?context=edit", auth=auth)
                 if post_response.status_code >= 400:
                     raise RuntimeError(f"WordPress post inspection returned HTTP {post_response.status_code}.")
@@ -574,11 +575,11 @@ def apply_wordpress_featured_image(
         backup_file_name=request.confirmed_data_backup_file,
     )
     session.add(audit); session.commit(); session.refresh(audit)
-    auth = httpx.BasicAuth(settings.username, get_wordpress_application_password() or "")
+    auth = wordpress_basic_auth(settings.username, get_wordpress_application_password() or "")
     api = f"{settings.site_url.rstrip('/')}/wp-json/wp/v2"
     wordpress_updated = False
     try:
-        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+        with wordpress_http_client(settings.site_url, timeout=30.0, follow_redirects=True, client_factory=httpx.Client) as client:
             response = client.post(f"{api}/pages/8", json={"featured_media": 31}, auth=auth)
             if response.status_code not in {200, 201}:
                 raise RuntimeError(f"WordPress featured-image update returned HTTP {response.status_code}.")
@@ -662,10 +663,10 @@ def verify_wordpress_featured_image(
     media_31: WordPressMediaReconciliationCandidate | None = None
     media_32: WordPressMediaReconciliationCandidate | None = None
     if settings.site_url and settings.username and password and local_checksum:
-        auth = httpx.BasicAuth(settings.username, password)
+        auth = wordpress_basic_auth(settings.username, password)
         api = f"{settings.site_url.rstrip('/')}/wp-json/wp/v2"
         try:
-            with httpx.Client(timeout=httpx.Timeout(20.0, read=30.0), follow_redirects=False) as client:
+            with wordpress_http_client(settings.site_url, timeout=httpx.Timeout(20.0, read=30.0), follow_redirects=False, client_factory=httpx.Client) as client:
                 post_response = client.get(f"{api}/pages/8?context=edit", auth=auth)
                 if post_response.status_code >= 400:
                     raise RuntimeError(f"WordPress post verification returned HTTP {post_response.status_code}.")
@@ -1028,9 +1029,9 @@ def _inspect_file(path: Path) -> tuple[str, int, int, int, str, str | None]:
 
 def _attachment_match(site: str, username: str, password: str, image: ImageMetadata, checksum: str) -> WordPressMediaAttachmentMatch:
     endpoint = f"{site.rstrip('/')}/wp-json/wp/v2/media"
-    auth = httpx.BasicAuth(username, password)
+    auth = wordpress_basic_auth(username, password)
     try:
-        with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+        with wordpress_http_client(site, timeout=12.0, follow_redirects=True, client_factory=httpx.Client) as client:
             if image.wordpress_media_id:
                 r = client.get(f"{endpoint}/{image.wordpress_media_id}?context=edit", auth=auth)
                 if r.status_code >= 400: return WordPressMediaAttachmentMatch(status="blocked", message="Saved WordPress media mapping could not be verified.")

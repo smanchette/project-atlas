@@ -19,6 +19,7 @@ from app.schemas.wordpress import (
     WordPressMetadataReconciliationResult, WordPressMetadataRollbackDryRun,
     WordPressMetadataRollbackRequest, WordPressMetadataRollbackResult, WordPressMetadataVerification,
 )
+from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 
 TARGET_PAGE_ID, TARGET_POST_ID, TARGET_MEDIA_ID, EXCLUDED_MEDIA_ID = 41, 8, 31, 32
@@ -280,13 +281,13 @@ def _token_bound_hash(token): return _verify(token,"reconcile_metadata",41)["bou
 def _get_json(site,user,password,path): return _send_json(site,user,password or "",path,"GET",None)
 def _send_json(site,user,password,path,method,body):
     try:
-        with httpx.Client(timeout=15,follow_redirects=True) as client:r=client.request(method,f"{site.rstrip('/')}{path}",json=body,auth=httpx.BasicAuth(user,password),headers={"Cache-Control":"no-cache","Pragma":"no-cache"})
+        with wordpress_http_client(site, timeout=15, follow_redirects=True, client_factory=httpx.Client) as client:r=client.request(method,f"{site.rstrip('/')}{path}",json=body,auth=wordpress_basic_auth(user,password),headers={"Cache-Control":"no-cache","Pragma":"no-cache"})
         if r.status_code>=400:return {"_error":f"HTTP {r.status_code}"}
         value=r.json();return value if isinstance(value,dict) else {"_error":"Non-object response"}
     except (httpx.HTTPError,ValueError) as exc:return {"_error":exc.__class__.__name__}
 def _get_html(site,user,password):
     try:
-        with httpx.Client(timeout=15,follow_redirects=True) as client:r=client.get(f"{site.rstrip('/')}/drywood-termite-tenting-orlando-fl/?atlas_verify={secrets.token_hex(8)}",auth=httpx.BasicAuth(user,password),headers={"Cache-Control":"no-cache, no-store","Pragma":"no-cache"})
+        with wordpress_http_client(site, timeout=15, follow_redirects=True, client_factory=httpx.Client) as client:r=client.get(f"{site.rstrip('/')}/drywood-termite-tenting-orlando-fl/?atlas_verify={secrets.token_hex(8)}",auth=wordpress_basic_auth(user,password),headers={"Cache-Control":"no-cache, no-store","Pragma":"no-cache"})
         return r.text if r.status_code<400 else ""
     except httpx.HTTPError:return ""
 def _gate(code,label,passed,message): return WordPressDraftGateResult(code=code,label=label,passed=passed,message=message)

@@ -2379,9 +2379,27 @@ def test_wordpress_settings_save_without_exposing_or_persisting_password(
     }
 
 
-def test_wordpress_connection_requires_process_memory_password_when_username_configured(
+def test_wordpress_connection_without_password_still_reports_anonymous_reachability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    requests: list[str] = []
+
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def json(self) -> dict[str, str]:
+            return {"name": "Public REST"}
+
+    class Client:
+        def __init__(self, **_: object) -> None: pass
+        def __enter__(self): return self
+        def __exit__(self, *_: object) -> None: return None
+        def get(self, url: str, **_: object) -> Response:
+            requests.append(url)
+            return Response()
+
+    monkeypatch.setattr(wordpress_sandbox.httpx, "Client", Client)
     monkeypatch.delenv("WORDPRESS_APPLICATION_PASSWORD", raising=False)
     wordpress_sandbox.clear_wordpress_application_password()
     with TestClient(app) as client:
@@ -2402,12 +2420,11 @@ def test_wordpress_connection_requires_process_memory_password_when_username_con
     assert save.status_code == 200
     assert save.json()["has_application_password"] is False
     assert response.status_code == 200
-    assert response.json()["connection_status"] == "failed"
-    assert response.json()["rest_api_reachable"] is False
+    assert response.json()["connection_status"] == "connected"
+    assert response.json()["rest_api_reachable"] is True
     assert response.json()["authenticated"] is False
     assert response.json()["credentials_present"] is False
-    assert "application password is not stored" in response.json()["error_message"]
-    assert "Re-enter it after backend restart" in response.json()["error_message"]
+    assert requests == ["https://wordpress.example/wp-json/"]
 
 
 def test_data_backup_and_restore_exclude_wordpress_secrets(tmp_path: Path) -> None:
@@ -2457,16 +2474,21 @@ def test_wordpress_connection_test_uses_get_requests_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requests: list[tuple[str, str, bool]] = []
+    client_headers: dict[str, str] = {}
 
     class FakeResponse:
         status_code = 200
+        headers = {"content-type": "application/json"}
 
-        def json(self) -> dict[str, str]:
-            return {"name": "Atlas WordPress Sandbox"}
+        def __init__(self, payload: dict[str, object]) -> None:
+            self.payload = payload
+
+        def json(self) -> dict[str, object]:
+            return self.payload
 
     class FakeClient:
-        def __init__(self, **_: object) -> None:
-            pass
+        def __init__(self, **kwargs: object) -> None:
+            client_headers.update(kwargs.get("headers", {}))
 
         def __enter__(self):
             return self
@@ -2476,7 +2498,11 @@ def test_wordpress_connection_test_uses_get_requests_only(
 
         def get(self, url: str, *, auth: object | None = None) -> FakeResponse:
             requests.append(("GET", url, auth is not None))
-            return FakeResponse()
+            if "/users/me" in url:
+                return FakeResponse({"id": 7, "slug": "atlas-operator"})
+            if "/project-atlas/v1/status" in url:
+                return FakeResponse({"rendering_enabled": False})
+            return FakeResponse({"name": "Atlas WordPress Sandbox"})
 
     monkeypatch.setattr(wordpress_sandbox.httpx, "Client", FakeClient)
     wordpress_sandbox.clear_wordpress_application_password()
@@ -2504,11 +2530,19 @@ def test_wordpress_connection_test_uses_get_requests_only(
     assert response.json()["authenticated"] is True
     assert response.json()["credentials_present"] is True
     assert response.json()["site_name"] == "Atlas WordPress Sandbox"
-    assert [request[0] for request in requests] == ["GET", "GET"]
+    assert [request[0] for request in requests] == ["GET", "GET", "GET"]
     assert requests[0][1].endswith("/wp-json/")
     assert requests[1][1].endswith("/wp-json/wp/v2/users/me?context=edit")
+    assert requests[2][1].endswith("/wp-json/project-atlas/v1/status")
     assert requests[0][2] is False
     assert requests[1][2] is True
+    assert requests[2][2] is True
+    assert client_headers["User-Agent"] == "Project-Atlas-WordPress/v0.59.89"
+    assert client_headers["Accept"] == "application/json"
+    assert response.json()["atlas_status_checked"] is True
+    assert response.json()["atlas_status_reachable"] is True
+    assert response.json()["authenticated_user_id"] == 7
+    assert response.json()["authenticated_username"] == "atlas-operator"
 
 
 def test_wordpress_connection_reachable_without_auth_is_not_authenticated(
@@ -2562,6 +2596,133 @@ def test_wordpress_connection_reachable_without_auth_is_not_authenticated(
     assert len(requests) == 1
     assert requests[0][0].endswith("/wp-json/")
     assert requests[0][1] is False
+
+
+def test_wordpress_connection_html_403_preserves_credential_state_and_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status_code = 403
+        headers = {"content-type": "text/html", "server": "nginx"}
+
+    class Client:
+        def __init__(self, **_: object): pass
+        def __enter__(self): return self
+        def __exit__(self, *_: object): return None
+        def get(self, _url: str, **_: object): return Response()
+
+    monkeypatch.setattr(wordpress_sandbox.httpx, "Client", Client)
+    wordpress_sandbox.clear_wordpress_application_password()
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+        client.put("/api/wordpress/settings", json={
+            "site_url": "https://wordpress.example",
+            "username": "atlas",
+            "application_password": "local-only",
+            "publishing_mode": "sandbox",
+        })
+        response = client.post("/api/wordpress/test-connection")
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    payload = response.json()
+    assert payload["credentials_present"] is True
+    assert payload["rest_api_reachable"] is False
+    assert payload["authenticated"] is False
+    assert payload["response_source"] == "security_layer_block"
+    assert payload["reason_code"] == "security_layer_html_403"
+
+
+def test_wordpress_connection_json_401_reports_loaded_but_rejected_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, status_code: int, payload: dict[str, object]):
+            self.status_code = status_code
+            self.payload = payload
+
+        def json(self): return self.payload
+
+    class Client:
+        def __init__(self, **_: object): pass
+        def __enter__(self): return self
+        def __exit__(self, *_: object): return None
+        def get(self, url: str, **_: object):
+            if url.endswith("/wp-json/"):
+                return Response(200, {"name": "My WordPress"})
+            return Response(401, {"code": "rest_not_logged_in", "message": "Not logged in"})
+
+    monkeypatch.setattr(wordpress_sandbox.httpx, "Client", Client)
+    wordpress_sandbox.clear_wordpress_application_password()
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+        client.put("/api/wordpress/settings", json={
+            "site_url": "https://wordpress.example",
+            "username": "atlas",
+            "application_password": "local-only",
+            "publishing_mode": "sandbox",
+        })
+        response = client.post("/api/wordpress/test-connection")
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    payload = response.json()
+    assert payload["credentials_present"] is True
+    assert payload["rest_api_reachable"] is True
+    assert payload["authenticated"] is False
+    assert payload["response_source"] == "wordpress_json_authentication_error"
+    assert payload["reason_code"] == "wordpress_credentials_rejected"
+
+
+def test_wordpress_connection_auth_timeout_preserves_anonymous_rest_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def json(self): return {"name": "My WordPress"}
+
+    class Client:
+        def __init__(self, **_: object): pass
+        def __enter__(self): return self
+        def __exit__(self, *_: object): return None
+        def get(self, url: str, **_: object):
+            if url.endswith("/wp-json/"):
+                return Response()
+            raise wordpress_sandbox.httpx.ReadTimeout(
+                "timed out",
+                request=wordpress_sandbox.httpx.Request("GET", url),
+            )
+
+    monkeypatch.setattr(wordpress_sandbox.httpx, "Client", Client)
+    wordpress_sandbox.clear_wordpress_application_password()
+    with TestClient(app) as client:
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+        client.put("/api/wordpress/settings", json={
+            "site_url": "https://wordpress.example",
+            "username": "atlas",
+            "application_password": "local-only",
+            "publishing_mode": "sandbox",
+        })
+        response = client.post("/api/wordpress/test-connection")
+        with Session(engine) as session:
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    payload = response.json()
+    assert payload["credentials_present"] is True
+    assert payload["rest_api_reachable"] is True
+    assert payload["authenticated"] is False
+    assert payload["response_source"] == "timeout"
+    assert payload["reason_code"] == "wordpress_request_timeout"
 
 
 def test_wordpress_payload_preview_is_draft_and_read_only() -> None:

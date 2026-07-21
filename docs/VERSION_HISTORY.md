@@ -1,5 +1,14 @@
 \# Project Atlas Version History
 
+## v0.59.89
+
+- Centralized every active WordPress HTTP caller behind one exact-origin request policy.
+- Set `Project-Atlas-WordPress/v0.59.89` as the stable non-browser WordPress User-Agent.
+- Added fail-closed host, redirect, and User-Agent override enforcement plus safe response-source classification.
+- Corrected Sandbox reporting so loaded credentials remain distinct from REST reachability and authentication.
+- Added the authenticated identity and optional fixed Atlas read-only status stages.
+- Preserved SiteGround security and every existing guarded mutation boundary.
+
 ## v0.59.88
 
 Completed the guarded bootstrap backup-renewal recovery contract with authoritative durable lifecycle fields. The read-only response now separates operation completion from audit status and explicitly reports backup source, server-computed expiration state, renewal capacity, eligibility, deterministic reason code, recommendation, next action, upload/verification/activation/quarantine state, and pending-operation state. The operator UI renders these fields without inferring protected lifecycle state, preserves the narrow request contract, and uses the exact actions **Run renewal preflight** and **Apply guarded renewal**. Metadata Bridge 0.57.7 and Bootstrap 0.3.0 artifacts remain unchanged, and publication does not authorize live renewal or any WordPress/cache mutation.

@@ -20,6 +20,7 @@ from app.services.wordpress_sandbox import (
     get_wordpress_application_password,
     read_wordpress_settings,
 )
+from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 
 
 def list_wordpress_draft_reviews(session: Session) -> WordPressDraftReviewList:
@@ -68,10 +69,10 @@ def check_live_wordpress_draft_status(
 
     endpoint = f"{settings.site_url.rstrip('/')}/wp-json/wp/v2/pages/{page.wordpress_post_id}?context=edit"
     try:
-        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+        with wordpress_http_client(settings.site_url, timeout=10.0, follow_redirects=True, client_factory=httpx.Client) as client:
             response = client.get(
                 endpoint,
-                auth=httpx.BasicAuth(settings.username, password),
+                auth=wordpress_basic_auth(settings.username, password),
             )
     except httpx.HTTPError as exc:
         return _live_error(

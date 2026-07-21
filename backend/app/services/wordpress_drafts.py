@@ -21,6 +21,7 @@ from app.schemas.wordpress import (
 )
 from app.services.approval_audit import draft_content_hash
 from app.services.page_export import build_page_export_package
+from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 from app.services.wordpress_sandbox import (
     build_wordpress_payload_preview,
     get_wordpress_application_password,
@@ -99,11 +100,11 @@ def create_wordpress_draft(
     request_payload = context["payload"].model_dump(mode="json")
     request_payload["status"] = "draft"
     try:
-        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+        with wordpress_http_client(settings.site_url, timeout=15.0, follow_redirects=True, client_factory=httpx.Client) as client:
             response = client.post(
                 endpoint,
                 json=request_payload,
-                auth=httpx.BasicAuth(settings.username, password or ""),
+                auth=wordpress_basic_auth(settings.username, password or ""),
             )
     except httpx.HTTPError as exc:
         _record_audit(

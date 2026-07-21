@@ -53,6 +53,7 @@ from app.services.wordpress_heading_contract import (
     EXPECTED_URL,
     wordpress_body_hash,
 )
+from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 from app.services.wordpress_deployment_release import (
     SOURCE_EXPECTATIONS,
@@ -1140,8 +1141,8 @@ def _request(site: str, user: str, password: str, method: str, path: str, text: 
     if method != "GET":
         raise RuntimeError("Deployment inspection permits WordPress GET requests only.")
     try:
-        with httpx.Client(timeout=15, follow_redirects=True) as client:
-            response = client.request(method, f"{site.rstrip('/')}{path}", auth=httpx.BasicAuth(user, password), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+        with wordpress_http_client(site, timeout=15, follow_redirects=True, client_factory=httpx.Client) as client:
+            response = client.request(method, f"{site.rstrip('/')}{path}", auth=wordpress_basic_auth(user, password), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
         if response.status_code >= 400:
             return {"_error": f"HTTP {response.status_code}"}
         if text:

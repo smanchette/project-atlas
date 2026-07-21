@@ -29,6 +29,7 @@ from app.services.wordpress_sandbox import (
     get_wordpress_application_password,
     read_wordpress_settings,
 )
+from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 
 TOKEN_TTL_MINUTES = 15
 _update_confirmation_secret = secrets.token_bytes(32)
@@ -261,11 +262,11 @@ def apply_wordpress_draft_update(
     request_payload = dry_run.payload.model_dump(mode="json")
     request_payload["status"] = "draft"
     try:
-        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+        with wordpress_http_client(settings.site_url, timeout=15.0, follow_redirects=True, client_factory=httpx.Client) as client:
             response = client.post(
                 endpoint,
                 json=request_payload,
-                auth=httpx.BasicAuth(settings.username, password or ""),
+                auth=wordpress_basic_auth(settings.username, password or ""),
             )
     except httpx.HTTPError as exc:
         _record_update_audit(

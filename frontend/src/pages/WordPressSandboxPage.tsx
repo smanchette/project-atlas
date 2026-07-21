@@ -323,6 +323,12 @@ function WordPressSandboxPage() {
                 <div><dt>Authenticated</dt><dd>{yesNo(connection.authenticated)}</dd></div>
                 <div><dt>Site name</dt><dd>{connection.site_name || "-"}</dd></div>
                 <div><dt>Endpoint</dt><dd>{connection.endpoint || "-"}</dd></div>
+                <div><dt>Response source</dt><dd>{connection.response_source ? humanize(connection.response_source) : "-"}</dd></div>
+                <div><dt>Reason code</dt><dd>{connection.reason_code || "-"}</dd></div>
+                <div><dt>Authenticated identity</dt><dd>{connection.authenticated_username || connection.authenticated_user_id || "-"}</dd></div>
+                <div><dt>Atlas status checked</dt><dd>{yesNo(connection.atlas_status_checked)}</dd></div>
+                <div><dt>Atlas status reachable</dt><dd>{connection.atlas_status_checked ? yesNo(connection.atlas_status_reachable) : "Not checked"}</dd></div>
+                <div><dt>Atlas status HTTP</dt><dd>{connection.atlas_status_code ?? "-"}</dd></div>
               </dl>
               {connection.error_message && <div className="inlineWarning">{connection.error_message}</div>}
             </>
@@ -590,9 +596,10 @@ function yesNo(value: boolean) {
 
 function connectionSummary(connection: WordPressConnectionResult) {
   if (connection.connection_status === "disabled") return "Disabled";
-  if (!connection.rest_api_reachable) return "REST Not Reachable";
-  if (!connection.credentials_present) return "REST Reachable, Credentials Missing";
-  if (!connection.authenticated) return "REST Reachable, Credentials Rejected";
+  if (!connection.credentials_present && !connection.rest_api_reachable) return "Credentials Missing; REST Not Reachable";
+  if (!connection.credentials_present) return "REST Reachable; Credentials Missing";
+  if (!connection.rest_api_reachable) return "Credentials Loaded; REST Blocked Before WordPress";
+  if (!connection.authenticated) return "REST Reachable; Credentials Not Accepted";
   return "REST Reachable, Authenticated";
 }
 

@@ -49,6 +49,7 @@ from app.schemas.wordpress import (
 from app.services import wordpress_plugin_upgrade_0577 as upgrade
 from app.services import wordpress_cache_aware_rendering as cache_binding
 from app.services.wordpress_deployment import _canonical_plugins, _gate
+from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 
 
@@ -751,10 +752,10 @@ def _activate_fixed_entry(session):
     if not (settings.site_url and settings.username and password):
         return {"accepted": False, "request_performed": False, "_error": "credentials_unavailable", "request_keys": ["status"]}
     try:
-        with httpx.Client(timeout=30, follow_redirects=False) as client:
+        with wordpress_http_client(settings.site_url, timeout=30, follow_redirects=False, client_factory=httpx.Client) as client:
             response = client.post(
                 f"{settings.site_url.rstrip('/')}/wp-json/wp/v2/plugins/{BOOTSTRAP_REST_ID}",
-                json={"status": "active"}, auth=httpx.BasicAuth(settings.username, password),
+                json={"status": "active"}, auth=wordpress_basic_auth(settings.username, password),
                 headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
             )
         payload = response.json() if response.status_code == 200 else {}

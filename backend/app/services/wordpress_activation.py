@@ -51,6 +51,7 @@ from app.services.wordpress_deployment import (
     _verify_artifact,
 )
 from app.services.wordpress_rendered_state import EXPECTED_H1, validate_manual_browser_evidence
+from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 
 
@@ -337,11 +338,11 @@ def _activate_plugin(session: Session) -> dict[str, Any]:
         return {"_error": "credentials_unavailable"}
     path = "/wp-json/wp/v2/plugins/project-atlas-metadata-bridge/project-atlas-metadata-bridge"
     try:
-        with httpx.Client(timeout=20, follow_redirects=False) as client:
+        with wordpress_http_client(settings.site_url, timeout=20, follow_redirects=False, client_factory=httpx.Client) as client:
             response = client.post(
                 f"{settings.site_url.rstrip('/')}{path}",
                 json={"status": "active"},
-                auth=httpx.BasicAuth(settings.username, password),
+                auth=wordpress_basic_auth(settings.username, password),
                 headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
             )
         if response.status_code >= 400:
@@ -358,10 +359,10 @@ def _read_plugin_status(session: Session) -> dict[str, Any]:
     if not (settings.site_url and settings.username and password):
         return {"_error": "credentials_unavailable"}
     try:
-        with httpx.Client(timeout=15, follow_redirects=False) as client:
+        with wordpress_http_client(settings.site_url, timeout=15, follow_redirects=False, client_factory=httpx.Client) as client:
             response = client.get(
                 f"{settings.site_url.rstrip('/')}/wp-json/project-atlas/v1/status",
-                auth=httpx.BasicAuth(settings.username, password),
+                auth=wordpress_basic_auth(settings.username, password),
                 headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
             )
         if response.status_code >= 400:

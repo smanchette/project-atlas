@@ -19,6 +19,12 @@ from app.schemas.wordpress import (
     WordPressSettingsUpdate,
 )
 from app.services.page_export import build_page_export_package
+from app.services.wordpress_http import (
+    classify_wordpress_exception,
+    classify_wordpress_response,
+    wordpress_basic_auth,
+    wordpress_http_client,
+)
 
 SITE_URL_KEY = "wordpress_site_url"
 USERNAME_KEY = "wordpress_username"
@@ -101,38 +107,72 @@ def test_wordpress_connection(session: Session) -> WordPressConnectionResult:
     if not settings.site_url:
         return _failed("WordPress site URL is required.")
     password = _get_application_password()
-    if settings.username and not password:
-        return WordPressConnectionResult(
-            connection_status="failed",
-            rest_api_reachable=False,
-            authenticated=False,
-            credentials_present=False,
-            error_message=(
-                "WordPress username is configured, but the application password is not stored "
-                "in backend process memory. REST API reachability is unknown. Re-enter it after backend restart."
-            ),
-        )
-
     rest_url = f"{settings.site_url.rstrip('/')}/wp-json/"
     auth = (
-        httpx.BasicAuth(settings.username, password)
+        wordpress_basic_auth(settings.username, password)
         if settings.username and password
         else None
     )
     try:
-        with httpx.Client(timeout=8.0, follow_redirects=True) as client:
-            response = client.get(rest_url)
+        with wordpress_http_client(
+            settings.site_url,
+            timeout=8.0,
+            follow_redirects=True,
+            client_factory=httpx.Client,
+        ) as client:
+            try:
+                response = client.get(rest_url)
+            except httpx.HTTPError as exc:
+                response_source, reason_code = classify_wordpress_exception(exc)
+                return _failed(
+                    f"WordPress REST API request failed: {response_source}.",
+                    endpoint=rest_url,
+                    credentials_present=bool(settings.username and password),
+                    response_source=response_source,
+                    reason_code=reason_code,
+                )
+            response_source, reason_code = classify_wordpress_response(response)
             if response.status_code >= 400:
                 return _failed(
                     f"WordPress REST API returned HTTP {response.status_code}.",
                     endpoint=rest_url,
+                    credentials_present=bool(settings.username and password),
+                    response_source=response_source,
+                    reason_code=reason_code,
                 )
             site_name = _site_name(response)
             authenticated = False
+            authenticated_user_id = None
+            authenticated_username = None
+            atlas_status_checked = False
+            atlas_status_reachable = False
+            atlas_status_code = None
             if auth is not None:
                 auth_url = f"{settings.site_url.rstrip('/')}/wp-json/wp/v2/users/me?context=edit"
-                auth_response = client.get(auth_url, auth=auth)
-                authenticated = auth_response.status_code < 400
+                try:
+                    auth_response = client.get(auth_url, auth=auth)
+                except httpx.HTTPError as exc:
+                    response_source, reason_code = classify_wordpress_exception(exc)
+                    return WordPressConnectionResult(
+                        connection_status="failed",
+                        rest_api_reachable=True,
+                        authenticated=False,
+                        credentials_present=True,
+                        site_name=site_name,
+                        error_message=f"REST API reachable: yes. Authenticated identity request failed: {response_source}.",
+                        endpoint=auth_url,
+                        response_source=response_source,
+                        reason_code=reason_code,
+                    )
+                response_source, reason_code = classify_wordpress_response(auth_response)
+                identity = _json_object(auth_response)
+                authenticated_user_id = identity.get("id") if isinstance(identity.get("id"), int) else None
+                authenticated_username = _safe_identity_name(identity)
+                authenticated = (
+                    auth_response.status_code < 400
+                    and response_source == "wordpress_json_success"
+                    and authenticated_user_id is not None
+                )
                 if not authenticated:
                     return WordPressConnectionResult(
                         connection_status="failed",
@@ -141,10 +181,30 @@ def test_wordpress_connection(session: Session) -> WordPressConnectionResult:
                         credentials_present=True,
                         site_name=site_name,
                         error_message=(
-                            "REST API reachable: yes. Authenticated: no. WordPress rejected the supplied credentials "
-                            f"(HTTP {auth_response.status_code})."
+                            "REST API reachable: yes. Authenticated: no. "
+                            + (
+                                "The request was blocked before WordPress could validate credentials "
+                                if response_source in {"security_layer_block", "security_layer_error", "security_challenge"}
+                                else "WordPress did not accept the authenticated identity request "
+                            )
+                            + f"(HTTP {auth_response.status_code})."
                         ),
                         endpoint=rest_url,
+                        response_source=response_source,
+                        reason_code=reason_code,
+                    )
+                atlas_status_checked = True
+                status_url = f"{settings.site_url.rstrip('/')}/wp-json/project-atlas/v1/status"
+                try:
+                    status_response = client.get(status_url, auth=auth)
+                except httpx.HTTPError as exc:
+                    response_source, reason_code = classify_wordpress_exception(exc)
+                else:
+                    atlas_status_code = status_response.status_code
+                    response_source, reason_code = classify_wordpress_response(status_response)
+                    atlas_status_reachable = (
+                        status_response.status_code < 400
+                        and response_source == "wordpress_json_success"
                     )
             return WordPressConnectionResult(
                 connection_status="connected",
@@ -153,9 +213,23 @@ def test_wordpress_connection(session: Session) -> WordPressConnectionResult:
                 credentials_present=bool(settings.username and password),
                 site_name=site_name,
                 endpoint=rest_url,
+                response_source=response_source,
+                reason_code=reason_code,
+                authenticated_user_id=authenticated_user_id,
+                authenticated_username=authenticated_username,
+                atlas_status_checked=atlas_status_checked,
+                atlas_status_reachable=atlas_status_reachable,
+                atlas_status_code=atlas_status_code,
             )
     except httpx.HTTPError as exc:
-        return _failed(f"Connection failed: {exc.__class__.__name__}.", endpoint=rest_url)
+        response_source, reason_code = classify_wordpress_exception(exc)
+        return _failed(
+            f"Connection failed: {response_source}.",
+            endpoint=rest_url,
+            credentials_present=bool(settings.username and password),
+            response_source=response_source,
+            reason_code=reason_code,
+        )
 
 
 def build_wordpress_payload_preview(
@@ -251,15 +325,40 @@ def _site_name(response: httpx.Response) -> str | None:
     return name.strip() if isinstance(name, str) and name.strip() else None
 
 
-def _failed(message: str, *, endpoint: str | None = None) -> WordPressConnectionResult:
+def _failed(
+    message: str,
+    *,
+    endpoint: str | None = None,
+    credentials_present: bool = False,
+    response_source: str | None = None,
+    reason_code: str | None = None,
+) -> WordPressConnectionResult:
     return WordPressConnectionResult(
         connection_status="failed",
         rest_api_reachable=False,
         authenticated=False,
-        credentials_present=False,
+        credentials_present=credentials_present,
         error_message=message,
         endpoint=endpoint,
+        response_source=response_source,
+        reason_code=reason_code,
     )
+
+
+def _json_object(response: httpx.Response) -> dict[str, Any]:
+    try:
+        value = response.json()
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _safe_identity_name(value: dict[str, Any]) -> str | None:
+    for key in ("slug", "name"):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
 
 
 def _get_application_password() -> str | None:

@@ -51,6 +51,7 @@ from app.services.wordpress_heading_contract import (
     build_orlando_heading_correction_dry_run,
     wordpress_body_hash,
 )
+from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 from app.services.wordpress_sandbox import (
     get_wordpress_application_password,
     read_wordpress_settings,
@@ -340,11 +341,11 @@ def apply_heading_correction(
     payload = WordPressHeadingContentPayload(**dry.request_payload)
     endpoint = f"{settings.site_url.rstrip('/')}/wp-json/wp/v2/pages/{WORDPRESS_POST_ID}"
     try:
-        with httpx.Client(timeout=15.0, follow_redirects=False) as client:
+        with wordpress_http_client(settings.site_url, timeout=15.0, follow_redirects=False, client_factory=httpx.Client) as client:
             response = client.post(
                 endpoint,
                 json=payload.model_dump(mode="json"),
-                auth=httpx.BasicAuth(settings.username, get_wordpress_application_password() or ""),
+                auth=wordpress_basic_auth(settings.username, get_wordpress_application_password() or ""),
             )
     except httpx.HTTPError as exc:
         _mark_reconciliation_required(session, audit, f"WordPress response was uncertain: {exc.__class__.__name__}.", 1)
@@ -473,9 +474,9 @@ def _observe(
         }
         return {**unavailable, "page": None, "media_31": None, "media_32": None, "rendered_html": ""}
 
-    auth = httpx.BasicAuth(username, password)
+    auth = wordpress_basic_auth(username, password)
     result: dict[str, Any] = {"page": None, "media_31": None, "media_32": None, "rendered_html": ""}
-    with httpx.Client(timeout=15.0, follow_redirects=False) as client:
+    with wordpress_http_client(site_url, timeout=15.0, follow_redirects=False, client_factory=httpx.Client) as client:
         for key, url in urls.items():
             resource_name = key.removesuffix("_observation")
             storage_name = "page" if resource_name == "page_8" else resource_name

@@ -30,6 +30,7 @@ from app.services.wordpress_sandbox import (
     get_wordpress_application_password,
     read_wordpress_settings,
 )
+from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 
 TOKEN_TTL_MINUTES = 15
 _publish_confirmation_secret = secrets.token_bytes(32)
@@ -280,11 +281,11 @@ def apply_wordpress_publish(
 
     endpoint = f"{settings.site_url.rstrip('/')}/wp-json/wp/v2/pages/{page.wordpress_post_id}"
     try:
-        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+        with wordpress_http_client(settings.site_url, timeout=15.0, follow_redirects=True, client_factory=httpx.Client) as client:
             response = client.post(
                 endpoint,
                 json=dry_run.payload.model_dump(mode="json"),
-                auth=httpx.BasicAuth(settings.username, get_wordpress_application_password() or ""),
+                auth=wordpress_basic_auth(settings.username, get_wordpress_application_password() or ""),
             )
     except httpx.HTTPError as exc:
         _finish_failed_audit(session, audit, f"WordPress publish request failed: {exc.__class__.__name__}.")

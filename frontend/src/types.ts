@@ -273,6 +273,13 @@ export type WordPressConnectionResult = {
   site_name?: string | null;
   error_message?: string | null;
   endpoint?: string | null;
+  response_source?: string | null;
+  reason_code?: string | null;
+  authenticated_user_id?: number | null;
+  authenticated_username?: string | null;
+  atlas_status_checked: boolean;
+  atlas_status_reachable: boolean;
+  atlas_status_code?: number | null;
 };
 
 export type WordPressPayload = {

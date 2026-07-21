@@ -12,6 +12,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
+from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
+
 
 EXPECTED_URL = "https://www.drywoodtenting.com/drywood-termite-tenting-orlando-fl/"
 EXPECTED_MEDIA_URL = "https://www.drywoodtenting.com/wp-content/uploads/2026/07/orlando-drywood-termite-tenting-hero.png"
@@ -843,14 +845,19 @@ def _public_http_observation(value: dict[str, Any] | None) -> dict[str, Any]:
 
 def acquire_rendered_state(username: str, password: str, *, manual_evidence: dict[str, Any] | Any | None = None, evidence_signing_key: str = "", verified_bypass_url: str = "", bypass_independently_verified: bool = False, client: httpx.Client | None = None) -> dict[str, Any]:
     owned = client is None
-    browser = client or httpx.Client(timeout=15, follow_redirects=False)
+    browser = client or wordpress_http_client(
+        EXPECTED_URL,
+        timeout=15,
+        follow_redirects=False,
+        client_factory=httpx.Client,
+    )
     result: dict[str, Any]
     try:
         routes: list[tuple[str, str, Any]] = []
         if verified_bypass_url and bypass_independently_verified:
             routes.append((verified_bypass_url, "cache_bypass_verified", None))
         routes.append((EXPECTED_URL, "public_html_verified", None))
-        routes.append((EXPECTED_URL, "authenticated_html_verified", httpx.BasicAuth(username, password)))
+        routes.append((EXPECTED_URL, "authenticated_html_verified", wordpress_basic_auth(username, password)))
         result = {"source": "none", "outcome": "unavailable", "verified": False}
         public_result: dict[str, Any] | None = None
         for url, outcome, auth in routes:

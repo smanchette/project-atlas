@@ -59,6 +59,7 @@ from app.services.wordpress_deployment import (
 )
 from app.services.wordpress_deployment_release import release_paths, resolve_program_root
 from app.services.wordpress_rendered_state import EXPECTED_H1, validate_manual_browser_evidence
+from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 
 
@@ -457,11 +458,11 @@ def _send_fixed_upgrade(session: Session) -> dict[str, Any]:
         return {"_error": "credentials_unavailable"}
     zip_path, _ = release_paths(resolve_program_root())
     try:
-        with httpx.Client(timeout=60, follow_redirects=False) as client:
+        with wordpress_http_client(settings.site_url, timeout=60, follow_redirects=False, client_factory=httpx.Client) as client:
             response = client.post(
                 f"{settings.site_url.rstrip('/')}/wp-json{BOOTSTRAP_UPGRADE_ROUTE}",
                 files={"artifact": (ZIP_NAME, zip_path.read_bytes(), "application/zip")},
-                auth=httpx.BasicAuth(settings.username, password),
+                auth=wordpress_basic_auth(settings.username, password),
                 headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
             )
         payload = response.json() if response.status_code == 200 else {}
@@ -497,10 +498,10 @@ def _read_bootstrap_status(session: Session) -> dict[str, Any]:
     if not (settings.site_url and settings.username and password):
         return {"_error": "credentials_unavailable"}
     try:
-        with httpx.Client(timeout=15, follow_redirects=False) as client:
+        with wordpress_http_client(settings.site_url, timeout=15, follow_redirects=False, client_factory=httpx.Client) as client:
             response = client.get(
                 f"{settings.site_url.rstrip('/')}/wp-json{BOOTSTRAP_STATUS_ROUTE}",
-                auth=httpx.BasicAuth(settings.username, password),
+                auth=wordpress_basic_auth(settings.username, password),
                 headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
             )
         payload = response.json() if response.status_code == 200 else {}
@@ -518,10 +519,10 @@ def _read_disabled_preview_contract(session: Session) -> dict[str, Any]:
     if not (settings.site_url and settings.username and password):
         return {"_error": "credentials_unavailable", "request_method": "GET", "output_verification_deferred": True}
     try:
-        with httpx.Client(timeout=15, follow_redirects=False) as client:
+        with wordpress_http_client(settings.site_url, timeout=15, follow_redirects=False, client_factory=httpx.Client) as client:
             response = client.get(
                 f"{settings.site_url.rstrip('/')}/wp-json{PREVIEW_ROUTE}",
-                auth=httpx.BasicAuth(settings.username, password),
+                auth=wordpress_basic_auth(settings.username, password),
                 headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
             )
         payload = response.json() if response.status_code == 409 else {}
@@ -542,10 +543,10 @@ def _read_route_registry(session: Session) -> dict[str, Any]:
     if not (settings.site_url and settings.username and password):
         return {"routes": [], "legacy_route_registered": False, "request_method": "GET", "_error": "credentials_unavailable"}
     try:
-        with httpx.Client(timeout=15, follow_redirects=False) as client:
+        with wordpress_http_client(settings.site_url, timeout=15, follow_redirects=False, client_factory=httpx.Client) as client:
             response = client.get(
                 f"{settings.site_url.rstrip('/')}/wp-json/",
-                auth=httpx.BasicAuth(settings.username, password),
+                auth=wordpress_basic_auth(settings.username, password),
                 headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
             )
         payload = response.json() if response.status_code == 200 else {}

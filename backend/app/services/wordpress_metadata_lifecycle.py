@@ -48,6 +48,7 @@ from app.services.wordpress_deployment import (
 from app.services.wordpress_deployment_release import SOURCE_EXPECTATIONS
 from app.services.wordpress_deployment_release import resolve_program_root
 from app.services.wordpress_rendered_state import EXPECTED_H1, validate_manual_browser_evidence
+from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 
 
@@ -740,8 +741,8 @@ def _send_operation(session, action, preflight, before):
     settings = read_wordpress_settings(session); password = get_wordpress_application_password()
     if not (settings.site_url and settings.username and password): return {"_error": "credentials_unavailable"}
     try:
-        with httpx.Client(timeout=20, follow_redirects=False) as client:
-            response = client.put(f"{settings.site_url.rstrip('/')}{PLUGIN_PATHS[action]}", json=body, auth=httpx.BasicAuth(settings.username, password), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+        with wordpress_http_client(settings.site_url, timeout=20, follow_redirects=False, client_factory=httpx.Client) as client:
+            response = client.put(f"{settings.site_url.rstrip('/')}{PLUGIN_PATHS[action]}", json=body, auth=wordpress_basic_auth(settings.username, password), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
         if response.status_code >= 400:
             try:
                 value = response.json()
@@ -763,8 +764,8 @@ def _read_status(session):
     settings = read_wordpress_settings(session); password = get_wordpress_application_password()
     if not (settings.site_url and settings.username and password): return {"_error": "credentials_unavailable"}
     try:
-        with httpx.Client(timeout=15, follow_redirects=False) as client:
-            response = client.get(f"{settings.site_url.rstrip('/')}/wp-json/project-atlas/v1/status", auth=httpx.BasicAuth(settings.username, password), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+        with wordpress_http_client(settings.site_url, timeout=15, follow_redirects=False, client_factory=httpx.Client) as client:
+            response = client.get(f"{settings.site_url.rstrip('/')}/wp-json/project-atlas/v1/status", auth=wordpress_basic_auth(settings.username, password), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
         if response.status_code >= 400: return {"_error": f"HTTP {response.status_code}"}
         value = response.json(); return value if isinstance(value, dict) else {"_error": "non_object_response"}
     except (httpx.HTTPError, ValueError) as exc: return {"_error": exc.__class__.__name__}

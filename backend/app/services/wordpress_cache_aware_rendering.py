@@ -51,6 +51,7 @@ from app.services.wordpress_deployment_release import (
 )
 from app.services.wordpress_metadata import _parse_html
 from app.services.wordpress_metadata_lifecycle import approved_payload, payload_sha256
+from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 from app.services.wordpress_rendered_state import (
     EXPECTED_H1,
     sanitize_public_response_headers,
@@ -791,8 +792,8 @@ def _public_exact(value):
 def _read_public_page():
     started_at = datetime.now(UTC)
     try:
-        with httpx.Client(timeout=20, follow_redirects=False) as client:
-            response = client.get(CANONICAL_URL, headers={"User-Agent": "Project-Atlas-Cache-Verification/0.59.70"})
+        with wordpress_http_client(CANONICAL_URL, timeout=20, follow_redirects=False, client_factory=httpx.Client) as client:
+            response = client.get(CANONICAL_URL)
         completed_at = datetime.now(UTC)
         parsed = _parse_html(response.text)
         return {
@@ -836,8 +837,8 @@ def _authenticated_json(session, method, path, body=None):
     settings = read_wordpress_settings(session); password = get_wordpress_application_password()
     if not (settings.site_url and settings.username and password): return {"_error": "credentials_unavailable"}
     try:
-        with httpx.Client(timeout=20, follow_redirects=False) as client:
-            response = client.request(method, f"{settings.site_url.rstrip('/')}{path}", json=body if method != "GET" else None, auth=httpx.BasicAuth(settings.username, password), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+        with wordpress_http_client(settings.site_url, timeout=20, follow_redirects=False, client_factory=httpx.Client) as client:
+            response = client.request(method, f"{settings.site_url.rstrip('/')}{path}", json=body if method != "GET" else None, auth=wordpress_basic_auth(settings.username, password), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
         if response.status_code >= 400:
             code = "cache_provider_unavailable" if response.status_code in {404, 503} and path == CACHE_PATH else f"wordpress_http_{response.status_code}"
             return {"_error": code, "reason_code": code, "status_code": response.status_code}

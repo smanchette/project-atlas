@@ -39,6 +39,13 @@ class WordPressConnectionResult(SQLModel):
     site_name: str | None = None
     error_message: str | None = None
     endpoint: str | None = None
+    response_source: str | None = None
+    reason_code: str | None = None
+    authenticated_user_id: int | None = None
+    authenticated_username: str | None = None
+    atlas_status_checked: bool = False
+    atlas_status_reachable: bool = False
+    atlas_status_code: int | None = None
 
 
 class WordPressPayload(SQLModel):
