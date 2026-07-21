@@ -148,6 +148,7 @@ def test_fresh_manual_verification_uses_replacement_and_preserves_original(db, m
         ({"database_included_attestation": False}, "bootstrap_backup_renewal_database_missing"),
         ({"plugins_included_attestation": False}, "bootstrap_backup_renewal_plugins_missing"),
         ({"restore_capability_attestation": False}, "bootstrap_backup_renewal_restore_unconfirmed"),
+        ({"no_relevant_wordpress_change_after_backup": False}, "bootstrap_backup_renewal_conflict"),
         ({"replacement_backup_deadline": datetime.now(UTC) - timedelta(minutes=1)}, "bootstrap_backup_renewal_replacement_expired"),
     ],
 )
@@ -236,6 +237,14 @@ def test_caller_cannot_inject_original_backup_pointer_or_sequence():
     for field in ("original_backup", "active_backup", "renewal_sequence", "protected_state_hash"):
         with pytest.raises(ValidationError):
             WordPressBootstrapBackupRenewalRequest.model_validate({**payload, field: "caller"})
+
+
+def test_no_relevant_change_attestation_is_required_and_never_defaulted():
+    payload = request(1).model_dump()
+    payload.pop("no_relevant_wordpress_change_after_backup")
+    with pytest.raises(ValidationError):
+        WordPressBootstrapBackupRenewalRequest.model_validate(payload)
+    assert request(1).no_relevant_wordpress_change_after_backup is True
 
 
 def test_migration_0024_adds_only_separate_renewal_storage():

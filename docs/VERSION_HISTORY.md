@@ -1,5 +1,9 @@
 \# Project Atlas Version History
 
+## v0.59.87
+
+Corrected the guarded bootstrap backup-renewal operator interface so every replacement-backup value and safety attestation is explicit. The UI now loads audit 1 through the read-only recovery assessment, displays the immutable original backup, effective active backup, ordered renewal history, expiration and renewal-limit state, and keeps preflight and apply visibly separate. Completion and deadline require timezone-aware ISO-8601 values; the optional four-hour calculation is a deliberate reviewable action. The no-relevant-WordPress-change attestation defaults false and is never synthesized. Focused component, validation, request-contract, refresh, warning, and post-renewal tests lock the corrected behavior.
+
 ## v0.59.86
 
 Added a dedicated Atlas-only SiteGround backup-renewal lifecycle for an unresolved manual Bootstrap 0.3.0 handoff. The original authorization backup and evidence remain immutable; each explicitly approved replacement is stored as a sequenced renewal with a separate active-backup pointer. Preflight is zero-write, apply uses a short-lived process-memory single-use fingerprint and an audit-specific phrase, equivalent retries are idempotent, and conflicting or stale requests fail closed. Manual verification and activation use the current replacement backup while preserving authorization history. Renewals are limited to three and are prohibited after manual verification or activation begins.

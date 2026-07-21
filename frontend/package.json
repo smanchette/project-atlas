@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:renewal": "node tests/run-bootstrap-backup-renewal-tests.mjs",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
