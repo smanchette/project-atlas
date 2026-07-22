@@ -91,6 +91,8 @@ _VERIFICATION_FINGERPRINT_KEY = "_atlas_manual_install_verification_fingerprint"
 _VERIFICATION_PROOF_KEY = "_atlas_manual_install_verification_proof"
 _AUTHORIZATION_EVIDENCE_KEY = "_atlas_authorization_evidence"
 _VERIFICATION_EVIDENCE_KEY = "_atlas_verification_evidence"
+TRANSPORT_IDENTITY_VERSION = "project-atlas-public-transport-identity-v2"
+TRANSPORT_COMPATIBILITY_REASON = "manual_install_verification_transport_compatibility_applied"
 
 
 @dataclass(frozen=True)
@@ -282,7 +284,8 @@ def verify_manual_install(session: Session, page_id: int, request: WordPressBoot
         if not all(g.passed for g in gates):
             if kind == "exact_inactive":
                 _raise_verification_conflict(
-                    _verification_gate_reason(gates),
+                    _verification_stable_drift_reason(audit, base.inspected_state)
+                    or _verification_gate_reason(gates),
                     "Fresh manual-install verification did not match the authorized stable state.",
                 )
             status = "installation_partial" if kind == "installation_partial" else "manual_installation_mismatch"
@@ -291,10 +294,12 @@ def verify_manual_install(session: Session, page_id: int, request: WordPressBoot
 
         proof = _verification_proof(request, base.inspected_state, classification, audit)
         fingerprint = _hash(proof)
+        comparison = _verification_stable_comparison(audit, base.inspected_state)
         verification_evidence = _evidence_record(
             request.manual_browser_evidence,
             base.inspected_state,
             result="stable_identity_matched",
+            comparison=comparison,
         )
         audit.upload_snapshot = {
             **base.inspected_state,
@@ -701,14 +706,16 @@ def _inspect_against_audit(session, page_id, request, audit, *, require_inactive
     base = upgrade.plugin_upgrade_preflight(session, page_id, request, issue_handle=False)
     classification = _classify(base.inspected_state.get("plugins", []))
     expected_kind = "exact_inactive" if require_inactive else "exact_active"
-    verification_drift = _verification_stable_drift_reason(audit, base.inspected_state)
+    verification_comparison = _verification_stable_comparison(audit, base.inspected_state)
+    verification_drift = verification_comparison["reason_code"] if not verification_comparison["compatible"] else None
+    base.inspected_state["manual_install_transport_identity"] = verification_comparison
     gates = _base_gates(base) + [
         _gate("bootstrap_inventory_shape", f"Bootstrap inventory is {expected_kind.replace('_', ' ')}", classification["classification"] == expected_kind, "Bootstrap path, version, status, count, or inventory is not exact."),
         _gate("unrelated_plugin_drift", "No unrelated plugin changed", _without_bootstrap(base.inspected_state.get("plugins", [])) == _without_bootstrap(audit.pre_snapshot.get("plugins", [])), "An unrelated plugin changed."),
         _gate("protected_state", "Page, body, media, settings, rendering, payload, revision, and cache remain bound", _protected_non_rendered(base.inspected_state) == _protected_non_rendered(audit.protected_state, already_protected=True), "Protected state changed."),
         _gate("verification_stable_identity", "Fresh evidence matches the authorized stable public identity", verification_drift is None, "Fresh rendered evidence changed stable public identity."),
         _gate("verification_rendered_hashes", "Fresh rendered hashes match authorization", verification_drift != "manual_install_verification_rendered_hash_drift", "Rendered-head, visible-content, or raw-DOM identity changed."),
-        _gate("verification_privacy", "Fresh evidence preserves the credential-free privacy classification", verification_drift != "manual_install_verification_privacy_drift", "Cookie, authentication, admin, login, challenge, or error classification changed."),
+        _gate("verification_privacy", "Fresh evidence preserves the credential-free privacy classification", verification_drift != "manual_install_verification_privacy_transport_drift", "Cookie, authentication, admin, login, challenge, or error classification changed."),
         _gate("active_backup_binding", "The request uses the current audit-bound replacement backup", not (audit.backup_renewals or []) or _normalized_backup(_backup(request)) == _normalized_backup(_active_backup(audit, include_deadline=False)), "The request does not use the current guarded replacement backup identity."),
         _gate("active_inventory", "Active inventory matches the required lifecycle state", (base.inspected_state.get("active_plugin_inventory_hash") == audit.source_inventories.get("active")) if require_inactive else True, "Active inventory changed before guarded activation."),
     ]
@@ -793,8 +800,11 @@ def _result(audit, stage, gates, snapshot, recommendation, *, request_atlas_writ
         verification_evidence=verification_evidence,
         stable_evidence_match=bool(
             verification_evidence
-            and authorization_evidence.get("stable_fingerprint")
-            == verification_evidence.get("stable_fingerprint")
+            and (
+                verification_evidence.get("transport_compatibility_applied") is True
+                or authorization_evidence.get("stable_fingerprint")
+                == verification_evidence.get("stable_fingerprint")
+            )
         ),
         fresh_evidence_required=audit.status == "awaiting_manual_bootstrap_installation",
         backup_deadline_valid=_audit_backup_deadline_valid(audit),
@@ -907,9 +917,9 @@ def _stable_verification_fingerprint(snapshot):
     return _hash(_stable_verification_observation(snapshot))
 
 
-def _evidence_record(evidence, snapshot, *, result):
+def _evidence_record(evidence, snapshot, *, result, comparison=None):
     value = _evidence_value(evidence)
-    return {
+    record = {
         "evidence_id": value.get("evidence_id"),
         "captured_at": value.get("captured_at"),
         "expires_at": value.get("expires_at"),
@@ -919,6 +929,16 @@ def _evidence_record(evidence, snapshot, *, result):
         "stable_fingerprint": _stable_verification_fingerprint(snapshot),
         "result": result,
     }
+    if isinstance(comparison, dict):
+        record.update({
+            "transport_identity_version": comparison.get("version"),
+            "transport_compatibility_applied": comparison.get("compatibility_applied") is True,
+            "transport_comparison_reason": comparison.get("reason_code"),
+            "canonical_stable_fingerprint": comparison.get("canonical_fingerprint"),
+            "authorization_stable_fingerprint": comparison.get("authorization_stable_fingerprint"),
+            "verification_stable_fingerprint": comparison.get("verification_stable_fingerprint"),
+        })
+    return record
 
 
 def _authorization_evidence_record(audit):
@@ -943,25 +963,156 @@ def _verification_evidence_record(audit):
     return stored if isinstance(stored, dict) else None
 
 
-def _authorization_stable_fingerprint(audit):
-    return str(_authorization_evidence_record(audit).get("stable_fingerprint") or "")
-
-
 def _verification_stable_drift_reason(audit, snapshot):
+    comparison = _verification_stable_comparison(audit, snapshot)
+    return None if comparison["compatible"] else comparison["reason_code"]
+
+
+def _verification_stable_comparison(audit, snapshot):
     before = _stable_verification_observation(audit.pre_snapshot or {})
     after = _stable_verification_observation(snapshot)
+    authorization_fingerprint = _hash(before)
+    verification_fingerprint = _hash(after)
+    result = {
+        "version": TRANSPORT_IDENTITY_VERSION,
+        "compatible": False,
+        "compatibility_applied": False,
+        "reason_code": "manual_install_verification_stable_identity_mismatch",
+        "authorization_stable_fingerprint": authorization_fingerprint,
+        "verification_stable_fingerprint": verification_fingerprint,
+        "canonical_fingerprint": verification_fingerprint,
+    }
     hash_keys = ("rendered_head_hash", "visible_content_hash", "raw_dom_hash")
     if any(before.get(key) != after.get(key) for key in hash_keys):
-        return "manual_install_verification_rendered_hash_drift"
+        return {**result, "reason_code": "manual_install_verification_rendered_hash_drift"}
     if (
         before.get("privacy_attestations") != after.get("privacy_attestations")
         or before.get("classifications") != after.get("classifications")
         or before.get("public_transport", {}).get("challenge_error")
         != after.get("public_transport", {}).get("challenge_error")
     ):
-        return "manual_install_verification_privacy_drift"
-    if before != after:
-        return "manual_install_verification_stable_identity_mismatch"
+        return {**result, "reason_code": "manual_install_verification_privacy_transport_drift"}
+    raw_equal = before == after
+    before_identity = {key: value for key, value in before.items() if key not in {"outcome", "public_transport"}}
+    after_identity = {key: value for key, value in after.items() if key not in {"outcome", "public_transport"}}
+    if before_identity != after_identity:
+        return {**result, "reason_code": "manual_install_verification_stable_page_identity_mismatch"}
+
+    transport = _cross_release_transport_compatibility(before, after)
+    if not transport["compatible"]:
+        if raw_equal:
+            return {**result, "compatible": True, "reason_code": "manual_install_verification_stable_identity_exact"}
+        return {**result, "reason_code": transport["reason_code"]}
+    canonical = {
+        "version": TRANSPORT_IDENTITY_VERSION,
+        "signed_public_identity": after_identity,
+        "transport_identity": transport["canonical_transport"],
+    }
+    return {
+        **result,
+        "compatible": True,
+        "compatibility_applied": not raw_equal,
+        "reason_code": (
+            "manual_install_verification_stable_identity_exact"
+            if raw_equal
+            else TRANSPORT_COMPATIBILITY_REASON
+        ),
+        "canonical_fingerprint": _hash(canonical),
+    }
+
+
+def _cross_release_transport_compatibility(before, after):
+    """Canonicalize representation without weakening response security meaning.
+
+    The historical raw observation remains immutable.  This derived comparison
+    deliberately excludes the client User-Agent, response timing, ETag, body
+    bytes from a blocked response, cache-age/request identifiers, diagnostic
+    field order, and equivalent provider-label spelling.  HTTP status/source
+    semantics are deliberately retained.
+    """
+
+    old = before.get("public_transport", {})
+    new = after.get("public_transport", {})
+    canonical_url = cache_binding.CANONICAL_URL
+    for transport in (old, new):
+        if (
+            transport.get("request_url") != canonical_url
+            or transport.get("final_url") != canonical_url
+            or transport.get("redirect_count") != 0
+            or transport.get("content_type_class") != "html"
+            or any(transport.get("challenge_error", {}).values())
+        ):
+            return {"compatible": False, "reason_code": "manual_install_verification_origin_drift"}
+
+    old_provider = old.get("provider", {})
+    new_provider = new.get("provider", {})
+    if not (_siteground_nginx_provider(old_provider) and _siteground_nginx_provider(new_provider)):
+        return {"compatible": False, "reason_code": "manual_install_verification_provider_identity_drift"}
+    old_cache_state = _transport_cache_state(old_provider)
+    new_cache_state = _transport_cache_state(new_provider)
+    if old_cache_state != new_cache_state:
+        return {"compatible": False, "reason_code": "manual_install_verification_provider_identity_drift"}
+
+    old_source = _transport_response_source(old)
+    new_source = _transport_response_source(new)
+    if old_source is None or new_source is None or old_source != new_source:
+        return {"compatible": False, "reason_code": "manual_install_verification_response_source_drift"}
+
+    if old_source == "provider_verified_public_html":
+        for stable, identity in ((old, before), (new, after)):
+            public_hashes = stable.get("public_rendered_hashes", {})
+            if (
+                public_hashes.get("head") != identity.get("rendered_head_hash")
+                or public_hashes.get("visible") != identity.get("visible_content_hash")
+            ):
+                return {"compatible": False, "reason_code": "manual_install_verification_rendered_hash_drift"}
+    return {
+        "compatible": True,
+        "reason_code": TRANSPORT_COMPATIBILITY_REASON,
+        "canonical_transport": {
+            "request_url": canonical_url,
+            "final_url": canonical_url,
+            "redirect_count": 0,
+            "content_type_class": "html",
+            "provider": "siteground-nginx",
+            "cache_state": old_cache_state,
+            "response_source": old_source,
+            "public_identity_source": "signed_browser_evidence",
+            "head_hash": after.get("rendered_head_hash"),
+            "visible_content_hash": after.get("visible_content_hash"),
+        },
+    }
+
+
+def _transport_response_source(transport):
+    status = transport.get("status_code")
+    classification = transport.get("response_classification")
+    if status == 403 and classification == "provider_verified_status_blocked":
+        return "provider_verified_html_block"
+    if status == 200 and classification in {
+        "siteground_cache_provider_verified", "cache_status_hit", "cache_status_miss", "cache_status_bypass",
+    }:
+        return "provider_verified_public_html"
+    return None
+
+
+def _siteground_nginx_provider(provider):
+    if not isinstance(provider, dict) or provider.get("verified") is not True:
+        return False
+    if provider.get("reason_code") != "siteground_cache_provider_verified":
+        return False
+    headers = provider.get("headers", {})
+    return isinstance(headers, dict) and headers.get("server") == "nginx" and any(
+        name in headers for name in ("x-proxy-cache-info", "x-cache-enabled", "x-proxy-cache", "x-sg-cache", "x-cache")
+    )
+
+
+def _transport_cache_state(provider):
+    headers = provider.get("headers", {}) if isinstance(provider, dict) else {}
+    for name in ("x-proxy-cache", "x-sg-cache", "x-cache"):
+        value = headers.get(name)
+        if value in {"HIT", "MISS", "BYPASS"}:
+            return value.lower()
     return None
 
 
@@ -1007,7 +1158,7 @@ def _verification_gate_reason(gates):
     if "verification_rendered_hashes" in failed:
         return "manual_install_verification_rendered_hash_drift"
     if "verification_privacy" in failed:
-        return "manual_install_verification_privacy_drift"
+        return "manual_install_verification_privacy_transport_drift"
     if "verification_stable_identity" in failed:
         return "manual_install_verification_stable_identity_mismatch"
     if failed & {"rendered_state", "page_snapshot", "page_identity", "body_hash", "media31", "media32", "site_identity"}:
@@ -1056,11 +1207,11 @@ def _protected_rendered(rendered):
 
 
 def _protected_equal(audit, snapshot):
+    comparison = _verification_stable_comparison(audit, snapshot)
     return (
         _protected_non_rendered(snapshot)
         == _protected_non_rendered(audit.protected_state, already_protected=True)
-        and _stable_verification_fingerprint(snapshot)
-        == _authorization_stable_fingerprint(audit)
+        and comparison["compatible"]
     )
 
 
@@ -1069,6 +1220,7 @@ def _verification_fingerprint(request, snapshot, classification, audit):
 
 
 def _verification_proof(request, snapshot, classification, audit):
+    comparison = _verification_stable_comparison(audit, snapshot)
     return {
         "audit": {"id": audit.id, "page_id": audit.generated_page_id, "wordpress_post_id": audit.wordpress_post_id},
         "artifact": {
@@ -1078,7 +1230,9 @@ def _verification_proof(request, snapshot, classification, audit):
         },
         "runtime": request.expected_runtime_identity.model_dump(mode="json"),
         "backup": _backup(request),
-        "evidence_stable_fingerprint": _stable_verification_fingerprint(snapshot),
+        "evidence_stable_fingerprint": comparison["canonical_fingerprint"],
+        "transport_identity_version": comparison["version"],
+        "transport_compatibility_applied": comparison["compatibility_applied"],
         "classification": classification,
         "inventories": _inventories(snapshot),
         "protected": _protected(snapshot),
@@ -1099,14 +1253,15 @@ def _committed_verification_proof(audit):
 
 def _retry_conflict_reason(request, snapshot, classification, audit, gates):
     committed = _committed_verification_proof(audit)
-    if _protected(snapshot) != audit.protected_state:
+    if _protected_non_rendered(snapshot) != _protected_non_rendered(audit.protected_state, already_protected=True):
         return "manual_install_protected_state_drift"
     if classification.get("classification") != "exact_inactive" or _inventories(snapshot) != audit.upload_inventories:
         return "manual_install_inventory_drift"
     if _backup(request) != committed.get("backup"):
         return "manual_install_backup_identity_drift"
-    if _stable_verification_fingerprint(snapshot) != committed.get("evidence_stable_fingerprint"):
-        return "manual_install_verification_stable_identity_mismatch"
+    comparison = _verification_stable_comparison(audit, snapshot)
+    if comparison["canonical_fingerprint"] != committed.get("evidence_stable_fingerprint"):
+        return comparison["reason_code"] if not comparison["compatible"] else "manual_install_verification_stable_identity_mismatch"
     if _retry_stale(request):
         return "manual_install_request_stale"
     if any(not gate.passed for gate in gates):

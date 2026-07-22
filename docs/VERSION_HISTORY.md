@@ -1,5 +1,13 @@
 \# Project Atlas Version History
 
+## v0.59.90
+
+- Added the versioned, directional `project-atlas-public-transport-identity-v2` comparison for manual Bootstrap 0.3.0 verification across the v0.59.89 centralized HTTP-client boundary.
+- Canonicalized only equivalent SiteGround/nginx transport representations while preserving exact HTTP status and response-source security meaning.
+- Preserved raw observations and immutable authorization history while recording safe derived compatibility diagnostics on a later successful verification.
+- Kept reverse status regressions, HTTP 202 challenges, origin/redirect/provider drift, signed-identity drift, and every page/media/plugin/backup/runtime gate fail-closed.
+- Left the Metadata Bridge 0.57.7 and Upgrade Bootstrap 0.3.0 artifacts unchanged and did not authorize any live action.
+
 ## v0.59.89
 
 - Centralized every active WordPress HTTP caller behind one exact-origin request policy.

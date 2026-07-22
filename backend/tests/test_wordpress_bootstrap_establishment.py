@@ -348,8 +348,8 @@ def test_authorization_evidence_id_cannot_be_reused_for_manual_verification(db, 
     ("field", "value", "reason"),
     [
         ("head_hash", "f" * 64, "manual_install_verification_rendered_hash_drift"),
-        ("document_title", ["Changed title"], "manual_install_verification_stable_identity_mismatch"),
-        ("privacy_attestations", {"cookies_stored": True}, "manual_install_verification_privacy_drift"),
+        ("document_title", ["Changed title"], "manual_install_verification_stable_page_identity_mismatch"),
+        ("privacy_attestations", {"cookies_stored": True}, "manual_install_verification_privacy_transport_drift"),
     ],
 )
 def test_fresh_evidence_stable_drift_is_zero_write_conflict(db, monkeypatch, field, value, reason):
