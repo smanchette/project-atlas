@@ -38,7 +38,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.38"
+BACKUP_VERSION = "0.39"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -62,6 +62,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.36",
     "0.37",
     "0.38",
+    "0.39",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"

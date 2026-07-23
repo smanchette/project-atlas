@@ -1007,6 +1007,22 @@ export type WordPressBootstrapEstablishmentResult = {
   original_backup:Record<string,unknown>; active_backup:Record<string,unknown>; backup_renewals:Record<string,unknown>[];
   recovery_recommendation:string; further_action_required:boolean;
 };
+export type WordPressBootstrapAuthorizationRetirementPreflight = {
+  page_id:41; wordpress_post_id:8; establishment_audit_id:number; ready:boolean; status:string;
+  current_status:string; retirement_reason:"manual_install_verification_genuine_transport_drift";
+  transport_comparison:Record<string,unknown>; expected_transition:string[]; expected_history_append:"authorization_retired";
+  expected_atlas_write_count:1; confirmation_phrase?:string|null; retirement_handle?:string|null;
+  handle_fingerprint?:string|null; expires_at?:string|null; gate_results:WordPressDeploymentGate[];
+  wordpress_write_count:0; plugin_write_count:0; cache_write_count:0; atlas_write_count:0;
+};
+export type WordPressBootstrapAuthorizationRetirementResult = {
+  page_id:41; wordpress_post_id:8; establishment_audit_id:number; status:"authorization_retired";
+  retirement_reason:"manual_install_verification_genuine_transport_drift"; state_history:string[];
+  renewal_history:Record<string,unknown>[]; authorization_snapshot_preserved:boolean;
+  verification_evidence_present:boolean; activation_handle_present:boolean; checksum_quarantine_active:boolean;
+  pending_operation:boolean; idempotent_replay:boolean; wordpress_write_count:0; plugin_write_count:0;
+  cache_write_count:0; request_atlas_write_count:number; atlas_write_count:number; fresh_authorization_permitted:boolean;
+};
 export type WordPressBootstrapBackupRenewalPreflight = {
   page_id:41; wordpress_post_id:8; establishment_audit_id:number; status:string; ready:boolean; reason_code:string;
   renewal_handle_fingerprint?:string|null; expires_at?:string|null; confirmation_phrase?:string|null;

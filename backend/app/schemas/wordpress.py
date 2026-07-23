@@ -1409,6 +1409,79 @@ class WordPressBootstrapActivationApplyRequest(SQLModel):
     confirmation_phrase: str = Field(min_length=1, max_length=120)
 
 
+class WordPressBootstrapAuthorizationRetirementRequest(SQLModel):
+    """Read-only binding for retiring one stale pre-activation authorization.
+
+    Retirement deliberately does not accept browser evidence or backup proof:
+    those belong to the later, distinct fresh-authorization lifecycle.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    establishment_audit_id: int = Field(gt=0)
+    retirement_reason: Literal["manual_install_verification_genuine_transport_drift"]
+    expected_runtime_identity: WordPressDeploymentExpectedRuntimeIdentity
+
+
+class WordPressBootstrapAuthorizationRetirementApplyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    retirement_handle: str = Field(min_length=32, max_length=200)
+    confirmation_phrase: str = Field(min_length=1, max_length=180)
+
+
+class WordPressBootstrapAuthorizationRetirementPreflight(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    establishment_audit_id: int
+    ready: bool
+    status: str
+    current_status: str
+    retirement_reason: str
+    transport_comparison: dict[str, Any]
+    expected_transition: list[str]
+    expected_history_append: Literal["authorization_retired"] = "authorization_retired"
+    expected_atlas_write_count: Literal[1] = 1
+    confirmation_phrase: str | None = None
+    retirement_handle: str | None = None
+    handle_fingerprint: str | None = None
+    expires_at: datetime | None = None
+    gate_results: list[WordPressDraftGateResult]
+    wordpress_write_count: Literal[0] = 0
+    plugin_write_count: Literal[0] = 0
+    cache_write_count: Literal[0] = 0
+    atlas_write_count: Literal[0] = 0
+
+
+class WordPressBootstrapAuthorizationRetirementResult(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    establishment_audit_id: int
+    status: Literal["authorization_retired"] = "authorization_retired"
+    retirement_reason: Literal["manual_install_verification_genuine_transport_drift"]
+    state_history: list[str]
+    renewal_history: list[dict[str, Any]]
+    authorization_snapshot_preserved: bool
+    verification_evidence_present: bool
+    activation_handle_present: bool
+    checksum_quarantine_active: bool
+    pending_operation: bool
+    idempotent_replay: bool = False
+    wordpress_write_count: Literal[0] = 0
+    plugin_write_count: Literal[0] = 0
+    cache_write_count: Literal[0] = 0
+    request_atlas_write_count: int = Field(default=0, ge=0)
+    atlas_write_count: int = Field(ge=0)
+    fresh_authorization_permitted: bool
+
+
+class WordPressBootstrapInstalledInactiveAuthorizeRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    installed_bootstrap_handle: str = Field(min_length=32, max_length=200)
+    confirmation_phrase: str = Field(min_length=1, max_length=180)
+
+
 class WordPressBootstrapBackupRenewalRequest(SQLModel):
     """Minimum caller contract for one Atlas-only SiteGround backup renewal."""
 

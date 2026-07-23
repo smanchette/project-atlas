@@ -1,5 +1,11 @@
 \# Project Atlas Version History
 
+## v0.59.91
+
+- Added a phrase-gated Atlas-only terminal retirement for stale pre-activation Bootstrap authorizations when immutable SiteGround transport evidence proves genuine HTTP 403 block to HTTP 200 cached-public drift.
+- Added a distinct fresh authorization mode for the exact installed, single, inactive Bootstrap 0.3.0 without upload, reinstall, replacement, deletion, activation, or any WordPress mutation.
+- Added migration 0025 and Data Backup schema 0.39 so retirement reason, authorization mode, and renewal history remain durable while 0.38 backups remain supported.
+
 ## v0.59.90
 
 - Added the versioned, directional `project-atlas-public-transport-identity-v2` comparison for manual Bootstrap 0.3.0 verification across the v0.59.89 centralized HTTP-client boundary.
@@ -195,3 +201,10 @@ Planned focus:
 \- Version history documentation
 
 \- Standard verification commands
+# Project Atlas version history
+
+## v0.59.91
+
+- Added a phrase-gated Atlas-only terminal retirement for stale pre-activation Bootstrap authorizations when immutable SiteGround transport evidence proves genuine HTTP 403 block to HTTP 200 cached-public drift.
+- Added a distinct fresh authorization mode for the exact installed, single, inactive Bootstrap 0.3.0 without upload, reinstall, replacement, deletion, activation, or any WordPress mutation.
+- Added migration 0025 and Data Backup schema 0.39 so retirement reason, authorization mode, and renewal history remain durable while 0.38 backups remain supported.

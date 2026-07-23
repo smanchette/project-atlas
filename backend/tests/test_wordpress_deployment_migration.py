@@ -1,4 +1,7 @@
 from pathlib import Path
+import importlib.util
+
+import pytest
 
 from alembic import command
 from alembic.config import Config
@@ -135,3 +138,48 @@ def test_0021_upgrade_downgrade_reupgrade_lifecycle_recovery_fields(monkeypatch,
     columns = {item["name"] for item in inspect(engine).get_columns("wordpressmetadatalifecycleaudit")}
     assert {"completion_mode", "recovery_recommendation"} <= columns
     get_settings.cache_clear()
+
+
+def test_0025_upgrade_downgrade_reupgrade_bootstrap_retirement_fields(monkeypatch, tmp_path):
+    database = tmp_path / "bootstrap-retirement-matrix.sqlite3"
+    config = config_for(monkeypatch, database)
+    command.upgrade(config, "20260720_0024")
+    engine = create_engine(f"sqlite:///{database.as_posix()}")
+    command.upgrade(config, "20260722_0025")
+    inspector = inspect(engine)
+    columns = {item["name"] for item in inspector.get_columns("wordpressbootstrapestablishmentaudit")}
+    assert {"authorization_mode", "retirement_reason"} <= columns
+    constraints = {item["name"] for item in inspector.get_check_constraints("wordpressbootstrapestablishmentaudit")}
+    assert {
+        "ck_wordpressbootstrapestablishmentaudit_status",
+        "ck_wordpressbootstrapestablishmentaudit_authorization_mode",
+        "ck_wordpressbootstrapestablishmentaudit_retirement_reason",
+    } <= constraints
+    command.downgrade(config, "20260720_0024")
+    columns = {item["name"] for item in inspect(engine).get_columns("wordpressbootstrapestablishmentaudit")}
+    assert "authorization_mode" not in columns and "retirement_reason" not in columns
+    command.upgrade(config, "20260722_0025")
+    assert {"authorization_mode", "retirement_reason"} <= {
+        item["name"] for item in inspect(engine).get_columns("wordpressbootstrapestablishmentaudit")
+    }
+    get_settings.cache_clear()
+
+
+def test_0025_downgrade_refuses_retired_rows(monkeypatch):
+    path = BACKEND / "alembic/versions/20260722_0025_bootstrap_authorization_retirement.py"
+    spec = importlib.util.spec_from_file_location("atlas_migration_0025_guard", path)
+    assert spec and spec.loader
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    class Result:
+        def scalar_one(self):
+            return 1
+
+    class Bind:
+        def execute(self, statement):
+            return Result()
+
+    monkeypatch.setattr(migration.op, "get_bind", lambda: Bind())
+    with pytest.raises(RuntimeError, match="authorization_retired"):
+        migration.downgrade()

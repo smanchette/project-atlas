@@ -15,7 +15,7 @@ import hmac
 import json
 import os
 import secrets
-from threading import Lock, Timer
+from threading import RLock, Timer
 from typing import Any
 
 import httpx
@@ -32,6 +32,10 @@ from app.models import (
 )
 from app.schemas.wordpress import (
     WordPressBootstrapActivationApplyRequest,
+    WordPressBootstrapAuthorizationRetirementApplyRequest,
+    WordPressBootstrapAuthorizationRetirementPreflight,
+    WordPressBootstrapAuthorizationRetirementRequest,
+    WordPressBootstrapAuthorizationRetirementResult,
     WordPressBootstrapBackupRenewalApplyRequest,
     WordPressBootstrapBackupRenewalPreflight,
     WordPressBootstrapBackupRenewalRecovery,
@@ -43,12 +47,13 @@ from app.schemas.wordpress import (
     WordPressBootstrapManualInstallAuthorizeRequest,
     WordPressBootstrapManualInstallPreflightRequest,
     WordPressBootstrapManualInstallVerifyRequest,
+    WordPressBootstrapInstalledInactiveAuthorizeRequest,
     WordPressBootstrapRecoveryAssessment,
     WordPressDraftGateResult,
 )
 from app.services import wordpress_plugin_upgrade_0577 as upgrade
 from app.services import wordpress_cache_aware_rendering as cache_binding
-from app.services.wordpress_deployment import _canonical_plugins, _gate
+from app.services.wordpress_deployment import _canonical_plugins, _gate, _observe, deployment_readiness
 from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 
@@ -64,6 +69,9 @@ BOOTSTRAP_ENTRY_SHA256 = "a977c077573ab732213a06d17dcc317b09854564777ce9cb24c869
 MANUAL_PHRASE = "AUTHORIZE MANUAL UPLOAD OF PROJECT ATLAS UPGRADE BOOTSTRAP 0.3.0"
 ACTIVATION_PHRASE = "ACTIVATE PROJECT ATLAS UPGRADE BOOTSTRAP 0.3.0"
 BACKUP_RENEWAL_PHRASE_PREFIX = "RENEW PROJECT ATLAS BOOTSTRAP HANDOFF BACKUP FOR AUDIT"
+RETIREMENT_REASON = "manual_install_verification_genuine_transport_drift"
+RETIREMENT_PHRASE_PREFIX = "RETIRE PROJECT ATLAS BOOTSTRAP AUTHORIZATION FOR AUDIT"
+INSTALLED_INACTIVE_PHRASE = "AUTHORIZE PROJECT ATLAS EXISTING EXACT INACTIVE BOOTSTRAP 0.3.0"
 MANUAL_BINDING_REASON_CODES = frozenset({
     "manual_upload_stable_observation_mismatch",
     "manual_upload_observation_expired",
@@ -120,10 +128,20 @@ class _RenewalHandle:
     fingerprint: str
 
 
-_lock = Lock()
+@dataclass(frozen=True)
+class _RetirementHandle:
+    request: WordPressBootstrapAuthorizationRetirementRequest
+    audit_id: int
+    binding_hash: str
+    expires_at: datetime
+
+
+_lock = RLock()
 _manual_handles: dict[str, _Handle] = {}
 _activation_handles: dict[str, _Handle] = {}
 _renewal_handles: dict[str, _RenewalHandle] = {}
+_installed_handles: dict[str, _Handle] = {}
+_retirement_handles: dict[str, _RetirementHandle] = {}
 _timers: dict[tuple[str, str], Timer] = {}
 
 
@@ -206,6 +224,7 @@ def authorize_manual_install(session: Session, page_id: int, request: WordPressB
         generated_page_id=41, wordpress_post_id=8,
         installation_audit_id=entry.request.installation_audit_id,
         activation_audit_id=entry.request.activation_audit_id,
+        authorization_mode="manual_upload",
         status="awaiting_manual_bootstrap_installation", operator=entry.request.operator,
         bootstrap_slug=BOOTSTRAP_SLUG, bootstrap_directory=BOOTSTRAP_DIRECTORY,
         bootstrap_path=BOOTSTRAP_ENTRY, bootstrap_version=BOOTSTRAP_VERSION,
@@ -234,6 +253,183 @@ def authorize_manual_install(session: Session, page_id: int, request: WordPressB
         audit, "manual_upload_authorized", gates, base.inspected_state, "continue_manual_upload",
         request_atlas_write_count=1, reason_code="manual_upload_authorization_committed",
     )
+
+
+def installed_inactive_preflight(
+    session: Session, page_id: int, request: WordPressBootstrapManualInstallPreflightRequest,
+) -> WordPressBootstrapEstablishmentPreflight:
+    base = upgrade.plugin_upgrade_preflight(session, page_id, request, issue_handle=False)
+    classification = _classify(base.inspected_state.get("plugins", []))
+    temporal = _preflight_temporal_contract(request, base.inspected_state, base.backup_deadline)
+    retired = list(session.exec(select(WordPressBootstrapEstablishmentAudit).where(
+        WordPressBootstrapEstablishmentAudit.status == "authorization_retired"
+    )))
+    reused_evidence, reused_backup = _retired_identity_reuse(retired, request)
+    current_transport = _stable_verification_observation(base.inspected_state).get("public_transport", {})
+    gates = _base_gates(base) + [
+        _gate("bootstrap_exact_inactive", "The exact Bootstrap 0.3.0 is installed once and inactive", classification["classification"] == "exact_inactive", "The installed Bootstrap is missing, active, duplicated, conflicting, or the wrong version."),
+        _gate("establishment_clear", "No unresolved bootstrap-establishment audit exists", not _unresolved(session), "An unresolved bootstrap-establishment audit already exists."),
+        _gate("retired_history", "A prior stale authorization is preserved as retired history", bool(retired), "No retired authorization history is available."),
+        _gate("fresh_evidence_identity", "Fresh authorization evidence is not reused", not reused_evidence, "Browser evidence was used by a retired authorization."),
+        _gate("fresh_backup_identity", "Fresh authorization backups are not reused", not reused_backup, "Backup identity was used by a retired authorization."),
+        _gate("current_public_transport", "Current transport is provider-verified HTTP 200 cached public HTML", _current_cached_public_transport(current_transport), "Current transport is not the required SiteGround/nginx cached-public identity."),
+        *temporal["gates"],
+    ]
+    ready = all(g.passed for g in gates)
+    expires_at = _expiry(request) if ready else None
+    stable = _stable_rendered_observation(base.inspected_state, request.manual_browser_evidence)
+    binding = _binding(
+        request, base.inspected_state, None, "existing_exact_inactive_bootstrap", expires_at,
+        stable_rendered_fingerprint=_hash(stable), preflight_observed_at=temporal["observed_at"],
+        evidence_expires_at=temporal["evidence_expires_at"], backup_deadline=temporal["backup_deadline"],
+    )
+    handle = _store(
+        "installed", request, _hash(binding), expires_at, None,
+        stable_rendered_fingerprint=_hash(stable), stable_rendered_observation=stable,
+        preflight_observed_at=temporal["observed_at"], evidence_expires_at=temporal["evidence_expires_at"],
+        backup_deadline=temporal["backup_deadline"],
+    ) if ready and expires_at and temporal["complete"] else None
+    return _preflight_response(
+        "bootstrap_installed_inactive_preflight", ready,
+        "installed_inactive_authorization_ready" if ready else "installed_inactive_authorization_blocked",
+        base, gates, binding, handle, expires_at, classification,
+        instructions=[
+            "Do not upload, reinstall, replace, delete, or activate Bootstrap.",
+            "Authorize the already-installed exact inactive Bootstrap only, then capture separate fresh evidence for inventory verification.",
+        ] if ready else [],
+    ).model_copy(update={"confirmation_phrase": INSTALLED_INACTIVE_PHRASE if ready else None})
+
+
+def authorize_installed_inactive(
+    session: Session, page_id: int, request: WordPressBootstrapInstalledInactiveAuthorizeRequest,
+) -> WordPressBootstrapEstablishmentResult:
+    if page_id != 41:
+        raise HTTPException(404, "Bootstrap establishment is limited to Atlas page 41.")
+    if not hmac.compare_digest(request.confirmation_phrase, INSTALLED_INACTIVE_PHRASE):
+        raise HTTPException(422, "The installed-inactive Bootstrap authorization phrase is incorrect.")
+    entry = _consume("installed", request.installed_bootstrap_handle)
+    base = upgrade.plugin_upgrade_preflight(session, page_id, entry.request, issue_handle=False)
+    classification = _classify(base.inspected_state.get("plugins", []))
+    retired = list(session.exec(select(WordPressBootstrapEstablishmentAudit).where(
+        WordPressBootstrapEstablishmentAudit.status == "authorization_retired"
+    )))
+    reused_evidence, reused_backup = _retired_identity_reuse(retired, entry.request)
+    stable = _stable_rendered_observation(base.inspected_state, entry.request.manual_browser_evidence)
+    gates = _base_gates(base) + [
+        _gate("bootstrap_exact_inactive", "The exact Bootstrap 0.3.0 remains installed once and inactive", classification["classification"] == "exact_inactive", "Installed Bootstrap state changed."),
+        _gate("establishment_clear", "No unresolved bootstrap-establishment audit exists", not _unresolved(session), "An unresolved audit exists."),
+        _gate("fresh_evidence_identity", "Evidence remains fresh and distinct", not reused_evidence, "Evidence identity was reused."),
+        _gate("fresh_backup_identity", "Backup identity remains fresh and distinct", not reused_backup, "Backup identity was reused."),
+        _gate("current_public_transport", "Current transport remains provider-verified HTTP 200 cached public HTML", _current_cached_public_transport(_stable_verification_observation(base.inspected_state).get("public_transport", {})), "Current transport changed."),
+    ]
+    binding = _hash(_binding(
+        entry.request, base.inspected_state, None, "existing_exact_inactive_bootstrap", entry.expires_at,
+        stable_rendered_fingerprint=_hash(stable), preflight_observed_at=entry.preflight_observed_at,
+        evidence_expires_at=entry.evidence_expires_at, backup_deadline=entry.backup_deadline,
+    ))
+    if not all(g.passed for g in gates) or binding != entry.binding_hash:
+        raise HTTPException(409, "Installed-inactive authorization state changed; no audit was created.")
+    evidence = entry.request.manual_browser_evidence
+    audit = WordPressBootstrapEstablishmentAudit(
+        generated_page_id=41, wordpress_post_id=8,
+        installation_audit_id=entry.request.installation_audit_id,
+        activation_audit_id=entry.request.activation_audit_id,
+        authorization_mode="existing_exact_inactive_bootstrap",
+        status="awaiting_manual_bootstrap_installation", operator=entry.request.operator,
+        bootstrap_slug=BOOTSTRAP_SLUG, bootstrap_directory=BOOTSTRAP_DIRECTORY,
+        bootstrap_path=BOOTSTRAP_ENTRY, bootstrap_version=BOOTSTRAP_VERSION,
+        bootstrap_zip_filename=BOOTSTRAP_ZIP, bootstrap_zip_sha256=BOOTSTRAP_ZIP_SHA256,
+        bootstrap_entry_sha256=BOOTSTRAP_ENTRY_SHA256,
+        manual_phrase_hash=_sha(INSTALLED_INACTIVE_PHRASE), activation_phrase_hash=_sha(ACTIVATION_PHRASE),
+        manual_handle_fingerprint=_sha(request.installed_bootstrap_handle), manual_binding_hash=entry.binding_hash,
+        release_identity=entry.request.expected_runtime_identity.model_dump(mode="json"),
+        backup_evidence=_backup(entry.request), browser_evidence_id=evidence.evidence_id if evidence else "",
+        pre_snapshot={**base.inspected_state, _AUTHORIZATION_EVIDENCE_KEY: _evidence_record(evidence, base.inspected_state, result="installed_inactive_authorization_committed")},
+        source_inventories=_inventories(base.inspected_state), protected_state=_protected(base.inspected_state),
+        gate_results=[g.model_dump(mode="json") for g in gates], inactive_checksum_verifiable=False,
+        approved_residual_risk=True, atlas_write_count=1, atlas_write_scope=ATLAS_SCOPE,
+        transition_history=["awaiting_manual_bootstrap_installation"],
+        recovery_recommendation="capture_fresh_evidence_then_verify_installed_inventory",
+    )
+    session.add(audit); session.commit(); session.refresh(audit)
+    return _result(audit, "installed_inactive_authorization_committed", gates, base.inspected_state,
+                   "capture_fresh_evidence_then_verify_installed_inventory", request_atlas_write_count=1,
+                   reason_code="installed_inactive_authorization_committed")
+
+
+def retirement_preflight(
+    session: Session, page_id: int, request: WordPressBootstrapAuthorizationRetirementRequest,
+) -> WordPressBootstrapAuthorizationRetirementPreflight:
+    if page_id != 41:
+        raise HTTPException(404, "Bootstrap establishment is limited to Atlas page 41.")
+    audit = _audit(session, request.establishment_audit_id)
+    observed = _observe(session, None)
+    classification = _classify(observed.get("plugins", []))
+    comparison_snapshot = _retirement_comparison_snapshot(audit, observed)
+    comparison = _verification_stable_comparison(audit, comparison_snapshot)
+    genuine = _genuine_transport_retirement_drift(audit, comparison_snapshot, comparison)
+    runtime_matches = _retirement_runtime_matches(request)
+    gates = [
+        _gate("audit_status", "Audit awaits pre-activation manual verification", audit.status == "awaiting_manual_bootstrap_installation", "Audit is not retirement-eligible."),
+        _gate("reason", "Retirement reason is the supported genuine-transport reason", request.retirement_reason == RETIREMENT_REASON, "Retirement reason is unsupported."),
+        _gate("authorization_snapshot", "Original authorization snapshot is preserved", bool(audit.pre_snapshot), "Authorization snapshot is missing."),
+        _gate("verification_absent", "Verification evidence is absent", _verification_evidence_record(audit) is None, "Verification evidence already exists."),
+        _gate("activation_absent", "Activation and checksum quarantine never started", not audit.activation_handle_fingerprint and not audit.checksum_verification_result, "Activation or checksum verification started."),
+        _gate("pending_operation", "No conflicting Atlas operation is pending", not _pending_operation_exists(session), "Another operation is pending."),
+        _gate("runtime_identity", "The independently expected runtime identity is verified and exact", runtime_matches, "Runtime identity is unavailable or mismatched."),
+        _gate("credentials", "Authenticated WordPress GET observations are available", "_error" not in observed and observed.get("wordpress_request_performed") is True, "WordPress application-password credentials are unavailable."),
+        _gate("read_only", "Every WordPress observation is GET-only", observed.get("read_only") is True and observed.get("wordpress_request_methods") == ["GET"], "A non-read-only observation was attempted."),
+        _gate("bootstrap_exact_inactive", "Bootstrap is exact, single, and inactive", classification["classification"] == "exact_inactive", "Bootstrap is not exact inactive."),
+        _gate("public_identity", "Current public HTML hashes match the preserved signed page identity", _retirement_public_identity_matches(audit, observed), "Current unsigned public HTML cannot be bound to the preserved signed identity."),
+        _gate("genuine_transport_drift", "Durable 403 block and current 200 HIT are canonically incompatible", genuine, "Genuine canonical transport drift is not proven."),
+        _gate("zero_mutation", "Retirement requires no WordPress, plugin, or cache mutation", True, ""),
+    ]
+    ready = all(g.passed for g in gates)
+    expires_at = datetime.now(UTC) + HANDLE_TTL if ready else None
+    phrase = _retirement_phrase(audit.id or 0)
+    binding = _retirement_binding(audit, request, comparison, expires_at)
+    handle = _store_retirement(request, audit.id or 0, _hash(binding), expires_at) if ready and expires_at else None
+    return WordPressBootstrapAuthorizationRetirementPreflight(
+        establishment_audit_id=audit.id or 0, ready=ready,
+        status="authorization_retirement_ready" if ready else "authorization_retirement_blocked",
+        current_status=audit.status, retirement_reason=request.retirement_reason,
+        transport_comparison=_safe_transport_retirement_summary(audit, comparison_snapshot, comparison),
+        expected_transition=[audit.status, "authorization_retired"],
+        confirmation_phrase=phrase if ready else None, retirement_handle=handle,
+        handle_fingerprint=_sha(handle) if handle else None, expires_at=expires_at,
+        gate_results=gates,
+    )
+
+
+def apply_retirement(
+    session: Session, page_id: int, request: WordPressBootstrapAuthorizationRetirementApplyRequest,
+) -> WordPressBootstrapAuthorizationRetirementResult:
+    if page_id != 41:
+        raise HTTPException(404, "Bootstrap establishment is limited to Atlas page 41.")
+    entry = _consume_retirement(request.retirement_handle)
+    if not hmac.compare_digest(request.confirmation_phrase, _retirement_phrase(entry.audit_id)):
+        raise HTTPException(422, "The bootstrap-authorization retirement phrase is incorrect.")
+    with _lock:
+        audit = _audit_for_update(session, entry.audit_id)
+        if audit.status == "authorization_retired" and audit.retirement_reason == RETIREMENT_REASON:
+            return _retirement_result(audit, idempotent=True)
+        rerun = retirement_preflight(session, page_id, entry.request)
+        _discard_retirement(rerun.retirement_handle)
+        if not rerun.ready or _hash(_retirement_binding(audit, entry.request, {"reason_code": rerun.transport_comparison.get("reason_code")}, entry.expires_at)) != entry.binding_hash:
+            raise HTTPException(409, "Retirement state changed after preflight; no audit transition occurred.")
+        original_snapshot = _hash(audit.pre_snapshot)
+        original_renewals = _hash(audit.backup_renewals or [])
+        audit.status = "authorization_retired"
+        audit.retirement_reason = RETIREMENT_REASON
+        audit.transition_history = [*audit.transition_history, "authorization_retired"]
+        audit.atlas_write_count += 1
+        audit.atlas_write_scope = [*audit.atlas_write_scope, "retire stale authorization without WordPress mutation"]
+        audit.recovery_recommendation = "fresh_authorization_required"
+        audit.completed_at = datetime.now(UTC)
+        session.add(audit); session.commit(); session.refresh(audit)
+        if _hash(audit.pre_snapshot) != original_snapshot or _hash(audit.backup_renewals or []) != original_renewals:
+            raise RuntimeError("Retirement altered immutable authorization history.")
+        return _retirement_result(audit, request_atlas_write_count=1)
 
 
 def verify_manual_install(session: Session, page_id: int, request: WordPressBootstrapManualInstallVerifyRequest) -> WordPressBootstrapEstablishmentResult:
@@ -853,7 +1049,129 @@ def _audit_for_update(session, audit_id):
 
 
 def _unresolved(session):
-    return any(a.status != "verified" for a in session.exec(select(WordPressBootstrapEstablishmentAudit)))
+    return any(a.status not in {"verified", "authorization_retired"} for a in session.exec(select(WordPressBootstrapEstablishmentAudit)))
+
+
+def _current_cached_public_transport(transport):
+    provider = transport.get("provider", {}) if isinstance(transport, dict) else {}
+    return bool(
+        transport.get("status_code") == 200
+        and _transport_response_source(transport) == "provider_verified_public_html"
+        and _siteground_nginx_provider(provider)
+        and _transport_cache_state(provider) == "hit"
+        and not any((transport.get("challenge_error") or {}).values())
+    )
+
+
+def _retirement_comparison_snapshot(audit, observed):
+    """Compare current transport while retaining the signed authorization identity.
+
+    The retirement phase intentionally captures no new browser evidence.  The
+    independently acquired public HTTP observation is therefore spliced into a
+    copy of the immutable, signed authorization rendering identity.  This lets
+    the comparison answer only the approved question—whether transport changed—
+    without treating an unsigned response as replacement page evidence.
+    """
+
+    value = json.loads(json.dumps(observed or {}, sort_keys=True, default=str))
+    historical = json.loads(json.dumps(_rendered_observation(audit.pre_snapshot or {}), sort_keys=True, default=str))
+    current_public = _public_observation(observed)
+    historical["public_http_observation"] = json.loads(json.dumps(current_public, sort_keys=True, default=str))
+    historical["cache_headers"] = json.loads(json.dumps(current_public.get("cache_headers", {}), sort_keys=True, default=str))
+    value["rendered"] = historical
+    value["cache_headers"] = historical["cache_headers"]
+    return value
+
+
+def _retirement_runtime_matches(request):
+    try:
+        readiness = deployment_readiness()
+        release = readiness.get("release") or {}
+    except (HTTPException, TypeError, ValueError):
+        return False
+    actual = {
+        "atlas_version": release.get("atlas_version"),
+        "atlas_commit": release.get("atlas_commit"),
+        "atlas_tag": release.get("atlas_tag"),
+        "manifest_sha256": release.get("manifest_sha256"),
+        "source_compatibility_id": release.get("source_compatibility_id"),
+    }
+    return bool(
+        readiness.get("release_status") == "verified"
+        and actual == request.expected_runtime_identity.model_dump(mode="json")
+        and release.get("runtime_identity_verified") is True
+        and release.get("manifest_integrity_verified") is True
+        and release.get("expected_release_matched") is True
+    )
+
+
+def _retirement_public_identity_matches(audit, observed):
+    historical = _rendered_observation(audit.pre_snapshot or {})
+    current = _public_observation(observed)
+    return bool(
+        current.get("verified") is True
+        and current.get("head_hash") == historical.get("head_hash")
+        and current.get("visible_hash") == historical.get("visible_hash")
+    )
+
+
+def _genuine_transport_retirement_drift(audit, snapshot, comparison):
+    before = _stable_verification_observation(audit.pre_snapshot or {})
+    after = _stable_verification_observation(snapshot)
+    old = before.get("public_transport", {})
+    new = after.get("public_transport", {})
+    old_provider = old.get("provider", {})
+    new_provider = new.get("provider", {})
+    before_identity = {key: value for key, value in before.items() if key not in {"outcome", "public_transport"}}
+    after_identity = {key: value for key, value in after.items() if key not in {"outcome", "public_transport"}}
+    return bool(
+        comparison.get("compatible") is False
+        and comparison.get("reason_code") in {
+            "manual_install_verification_provider_identity_drift",
+            "manual_install_verification_response_source_drift",
+        }
+        and before_identity == after_identity
+        and old.get("status_code") == 403
+        and _transport_response_source(old) == "provider_verified_html_block"
+        and _siteground_nginx_provider(old_provider)
+        and _transport_cache_state(old_provider) is None
+        and _current_cached_public_transport(new)
+    )
+
+
+def _safe_transport_retirement_summary(audit, snapshot, comparison):
+    old = _stable_verification_observation(audit.pre_snapshot or {}).get("public_transport", {})
+    new = _stable_verification_observation(snapshot).get("public_transport", {})
+    return {
+        "version": TRANSPORT_IDENTITY_VERSION,
+        "reason_code": comparison.get("reason_code"),
+        "authorization": {
+            "status_code": old.get("status_code"),
+            "response_source": _transport_response_source(old),
+            "provider": "siteground-nginx" if _siteground_nginx_provider(old.get("provider", {})) else "unverified",
+            "cache_state": _transport_cache_state(old.get("provider", {})),
+        },
+        "current": {
+            "status_code": new.get("status_code"),
+            "response_source": _transport_response_source(new),
+            "provider": "siteground-nginx" if _siteground_nginx_provider(new.get("provider", {})) else "unverified",
+            "cache_state": _transport_cache_state(new.get("provider", {})),
+        },
+    }
+
+
+def _retired_identity_reuse(retired, request):
+    evidence_id = request.manual_browser_evidence.evidence_id if request.manual_browser_evidence else ""
+    backup = _hash(_normalized_backup(_backup(request)))
+    reused_evidence = any(audit.browser_evidence_id == evidence_id for audit in retired)
+    reused_backup = any(
+        backup in {
+            _hash(_normalized_backup(_active_backup(audit, include_deadline=False))),
+            _hash(_normalized_backup({key: value for key, value in _original_backup(audit).items() if key not in {"deadline", "no_relevant_wordpress_change_after_backup"}})),
+        }
+        for audit in retired
+    )
+    return reused_evidence, reused_backup
 
 
 def _inventories(snapshot):
@@ -1692,7 +2010,7 @@ def _backup_renewal_gates(session, audit, request, *, duplicate: bool):
     method = replacement["wordpress_backup_method"].lower()
     renewals = audit.backup_renewals or []
     other_unresolved = list(session.exec(select(WordPressBootstrapEstablishmentAudit).where(WordPressBootstrapEstablishmentAudit.id != audit.id)))
-    other_unresolved = [item for item in other_unresolved if item.status not in {"verified", "recovery_required"}]
+    other_unresolved = [item for item in other_unresolved if item.status not in {"verified", "authorization_retired", "recovery_required"}]
     return [
         _gate("runtime_identity", "The running Atlas runtime identity is verified", _runtime_verified(), "Runtime identity is unavailable or mismatched."),
         _gate("audit_eligible", "The selected audit awaits manual bootstrap verification", audit.status == "awaiting_manual_bootstrap_installation", "The selected audit state is ineligible."),
@@ -1792,6 +2110,79 @@ def _backup_renewal_result(audit, *, request_atlas_write_count=0, idempotent=Fal
     )
 
 
+def _retirement_phrase(audit_id: int) -> str:
+    return f"{RETIREMENT_PHRASE_PREFIX} {audit_id} DUE TO GENUINE TRANSPORT DRIFT"
+
+
+def _retirement_binding(audit, request, comparison, expires_at):
+    return {
+        "audit_id": audit.id,
+        "status": audit.status,
+        "history": audit.transition_history,
+        "atlas_write_count": audit.atlas_write_count,
+        "authorization_snapshot": _hash(audit.pre_snapshot),
+        "renewal_history": _hash(audit.backup_renewals or []),
+        "reason": request.retirement_reason,
+        "transport_reason": comparison.get("reason_code"),
+        "runtime": request.expected_runtime_identity.model_dump(mode="json"),
+        "expires_at": expires_at.isoformat() if expires_at else None,
+    }
+
+
+def _store_retirement(request, audit_id, binding_hash, expires_at):
+    if not expires_at:
+        return None
+    handle = secrets.token_urlsafe(32)
+    with _lock:
+        _retirement_handles[handle] = _RetirementHandle(request.model_copy(deep=True), audit_id, binding_hash, expires_at)
+        timer = Timer(max(0.0, (expires_at - datetime.now(UTC)).total_seconds()), _discard_retirement, args=(handle,))
+        timer.daemon = True
+        _timers[("retirement", handle)] = timer
+        timer.start()
+    return handle
+
+
+def _consume_retirement(handle):
+    with _lock:
+        entry = _retirement_handles.pop(handle, None)
+        timer = _timers.pop(("retirement", handle), None)
+        if timer:
+            timer.cancel()
+    if not entry:
+        raise HTTPException(422, "Retirement handle is unknown, expired, consumed, or restart-invalidated.")
+    if entry.expires_at <= datetime.now(UTC):
+        raise HTTPException(422, "Retirement handle expired.")
+    return entry
+
+
+def _discard_retirement(handle):
+    if not handle:
+        return
+    with _lock:
+        _retirement_handles.pop(handle, None)
+        timer = _timers.pop(("retirement", handle), None)
+        if timer:
+            timer.cancel()
+
+
+def _retirement_result(audit, *, request_atlas_write_count=0, idempotent=False):
+    return WordPressBootstrapAuthorizationRetirementResult(
+        establishment_audit_id=audit.id or 0,
+        retirement_reason=RETIREMENT_REASON,
+        state_history=audit.transition_history,
+        renewal_history=audit.backup_renewals or [],
+        authorization_snapshot_preserved=bool(audit.pre_snapshot),
+        verification_evidence_present=_verification_evidence_record(audit) is not None,
+        activation_handle_present=bool(audit.activation_handle_fingerprint),
+        checksum_quarantine_active=bool(audit.checksum_verification_result),
+        pending_operation=False,
+        idempotent_replay=idempotent,
+        request_atlas_write_count=request_atlas_write_count,
+        atlas_write_count=audit.atlas_write_count,
+        fresh_authorization_permitted=True,
+    )
+
+
 def _expiry(request):
     now = datetime.now(UTC)
     evidence = upgrade._evidence_expiry(request.manual_browser_evidence.expires_at)
@@ -1827,7 +2218,7 @@ def _store(
         maximum_interval=cache_binding.MAX_OBSERVATION_INTERVAL,
         clock_reversal_tolerance=cache_binding.CLOCK_REVERSAL_TOLERANCE,
     )
-    table = _manual_handles if kind == "manual" else _activation_handles
+    table = _manual_handles if kind == "manual" else _installed_handles if kind == "installed" else _activation_handles
     with _lock:
         table[handle] = entry
         timer = Timer(max(0.0, (expires_at - datetime.now(UTC)).total_seconds()), _expire, args=(kind, handle))
@@ -1836,7 +2227,7 @@ def _store(
 
 
 def _consume(kind, handle):
-    table = _manual_handles if kind == "manual" else _activation_handles
+    table = _manual_handles if kind == "manual" else _installed_handles if kind == "installed" else _activation_handles
     with _lock:
         entry = table.pop(handle, None); timer = _timers.pop((kind, handle), None)
         if timer: timer.cancel()
@@ -1849,7 +2240,7 @@ def _consume(kind, handle):
 
 def _discard(kind, handle):
     if handle:
-        table = _manual_handles if kind == "manual" else _activation_handles
+        table = _manual_handles if kind == "manual" else _installed_handles if kind == "installed" else _activation_handles
         with _lock:
             table.pop(handle, None); timer = _timers.pop((kind, handle), None)
             if timer: timer.cancel()
@@ -1862,7 +2253,7 @@ def _expire(kind, handle):
 def _clear_establishment_handles():
     with _lock:
         for timer in _timers.values(): timer.cancel()
-        _manual_handles.clear(); _activation_handles.clear(); _renewal_handles.clear(); _timers.clear()
+        _manual_handles.clear(); _installed_handles.clear(); _activation_handles.clear(); _renewal_handles.clear(); _retirement_handles.clear(); _timers.clear()
 
 
 def _hash(value):

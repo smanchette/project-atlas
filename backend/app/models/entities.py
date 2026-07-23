@@ -606,8 +606,16 @@ class WordPressBootstrapEstablishmentAudit(SQLModel, table=True):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('awaiting_manual_bootstrap_installation','manual_installation_inventory_verified','activation_pending_checksum_verification','verified','manual_installation_mismatch','manual_activation_detected','installation_partial','checksum_mismatch','checksum_unavailable','verification_failed','recovery_required')",
+            "status IN ('awaiting_manual_bootstrap_installation','manual_installation_inventory_verified','activation_pending_checksum_verification','verified','authorization_retired','manual_installation_mismatch','manual_activation_detected','installation_partial','checksum_mismatch','checksum_unavailable','verification_failed','recovery_required')",
             name="ck_wordpressbootstrapestablishmentaudit_status",
+        ),
+        CheckConstraint(
+            "authorization_mode IN ('manual_upload','existing_exact_inactive_bootstrap')",
+            name="ck_wordpressbootstrapestablishmentaudit_authorization_mode",
+        ),
+        CheckConstraint(
+            "(status = 'authorization_retired' AND retirement_reason = 'manual_install_verification_genuine_transport_drift') OR (status != 'authorization_retired' AND retirement_reason IS NULL)",
+            name="ck_wordpressbootstrapestablishmentaudit_retirement_reason",
         ),
         UniqueConstraint("manual_handle_fingerprint", name="uq_bootstrapestablishment_manual_handle"),
         UniqueConstraint("activation_handle_fingerprint", name="uq_bootstrapestablishment_activation_handle"),
@@ -618,7 +626,9 @@ class WordPressBootstrapEstablishmentAudit(SQLModel, table=True):
     installation_audit_id: int = Field(foreign_key="wordpressdeploymentaudit.id", index=True)
     activation_audit_id: int = Field(foreign_key="wordpressactivationaudit.id", index=True)
     action_type: str = Field(default="establish_upgrade_bootstrap_0_3_0", max_length=80, index=True)
+    authorization_mode: str = Field(default="manual_upload", max_length=64, index=True)
     status: str = Field(default="awaiting_manual_bootstrap_installation", max_length=64, index=True)
+    retirement_reason: str | None = Field(default=None, max_length=100, index=True)
     operator: str = Field(max_length=200)
     bootstrap_slug: str = Field(max_length=100)
     bootstrap_directory: str = Field(max_length=160)

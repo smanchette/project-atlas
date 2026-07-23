@@ -224,7 +224,7 @@ def test_backup_export_contains_metadata_counts_and_all_data_groups(tmp_path: Pa
 
     assert backup_path.is_file()
     assert payload["metadata"]["app"] == "Project Atlas"
-    assert payload["metadata"]["version"] == "0.38"
+    assert payload["metadata"]["version"] == "0.39"
     assert isinstance(payload["metadata"]["created_at"], str)
     assert payload["metadata"]["table_counts"] == before_counts
     assert set(payload["data"]) == set(BACKUP_MODELS)
@@ -1742,7 +1742,7 @@ def test_backup_restore_preserves_review_notes_and_approval_audits_idempotently(
                 session.delete(record)
             session.commit()
 
-        assert payload["metadata"]["version"] == "0.38"
+        assert payload["metadata"]["version"] == "0.39"
     assert payload["data"]["approval_audits"]
     exported_page = next(
         record
@@ -2126,7 +2126,7 @@ def test_backup_restore_preserves_page_revisions_idempotently(tmp_path: Path) ->
                 revisions=restored_revisions,
             )
 
-    assert payload_json["metadata"]["version"] == "0.38"
+    assert payload_json["metadata"]["version"] == "0.39"
     assert payload_json["data"]["page_revisions"]
     assert len(restored_revisions) == 1
     assert restored_after["hero_subheadline"].endswith("Reviewed for backup.")
@@ -2537,7 +2537,7 @@ def test_wordpress_connection_test_uses_get_requests_only(
     assert requests[0][2] is False
     assert requests[1][2] is True
     assert requests[2][2] is True
-    assert client_headers["User-Agent"] == "Project-Atlas-WordPress/v0.59.90"
+    assert client_headers["User-Agent"] == "Project-Atlas-WordPress/v0.59.91"
     assert client_headers["Accept"] == "application/json"
     assert response.json()["atlas_status_checked"] is True
     assert response.json()["atlas_status_reachable"] is True
@@ -3423,10 +3423,14 @@ def test_wordpress_api_exposes_only_controlled_publish_and_existing_write_routes
                     ("/api/wordpress/deployment/metadata-bridge/upgrade/preflight/{page_id}", "POST"),
                     ("/api/wordpress/deployment/metadata-bridge/upgrade/apply/{page_id}", "POST"),
                         ("/api/wordpress/deployment/metadata-bridge/upgrade/recovery/assess/{page_id}", "POST"),
-                        ("/api/wordpress/deployment/upgrade-bootstrap/manual-install/preflight/{page_id}", "POST"),
-                        ("/api/wordpress/deployment/upgrade-bootstrap/manual-install/authorize/{page_id}", "POST"),
-                        ("/api/wordpress/deployment/upgrade-bootstrap/manual-install/verify/{page_id}", "POST"),
-                        ("/api/wordpress/deployment/upgrade-bootstrap/backup-renewal/preflight/{page_id}", "POST"),
+                            ("/api/wordpress/deployment/upgrade-bootstrap/manual-install/preflight/{page_id}", "POST"),
+                            ("/api/wordpress/deployment/upgrade-bootstrap/manual-install/authorize/{page_id}", "POST"),
+                            ("/api/wordpress/deployment/upgrade-bootstrap/manual-install/verify/{page_id}", "POST"),
+                            ("/api/wordpress/deployment/upgrade-bootstrap/authorization/retirement/preflight/{page_id}", "POST"),
+                            ("/api/wordpress/deployment/upgrade-bootstrap/authorization/retirement/apply/{page_id}", "POST"),
+                            ("/api/wordpress/deployment/upgrade-bootstrap/installed-inactive/preflight/{page_id}", "POST"),
+                            ("/api/wordpress/deployment/upgrade-bootstrap/installed-inactive/authorize/{page_id}", "POST"),
+                            ("/api/wordpress/deployment/upgrade-bootstrap/backup-renewal/preflight/{page_id}", "POST"),
                         ("/api/wordpress/deployment/upgrade-bootstrap/backup-renewal/apply/{page_id}", "POST"),
                         ("/api/wordpress/deployment/upgrade-bootstrap/backup-renewal/recovery/assess/{page_id}", "POST"),
                         ("/api/wordpress/deployment/upgrade-bootstrap/activation/preflight/{page_id}", "POST"),
@@ -4775,7 +4779,7 @@ def test_backup_restore_preserves_wordpress_audits_and_safe_references_idempoten
                 audits=restored_audits,
             )
 
-    assert payload["metadata"]["version"] == "0.38"
+    assert payload["metadata"]["version"] == "0.39"
     assert payload["data"]["wordpress_draft_audits"]
     assert payload["data"]["generated_pages"][0].get("wordpress_post_id") is not None or any(
         item.get("wordpress_post_id") == 911

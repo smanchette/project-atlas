@@ -73,6 +73,11 @@ from app.schemas.wordpress import (
     WordPressBootstrapManualInstallAuthorizeRequest,
     WordPressBootstrapManualInstallVerifyRequest,
     WordPressBootstrapActivationApplyRequest,
+    WordPressBootstrapAuthorizationRetirementApplyRequest,
+    WordPressBootstrapAuthorizationRetirementPreflight,
+    WordPressBootstrapAuthorizationRetirementRequest,
+    WordPressBootstrapAuthorizationRetirementResult,
+    WordPressBootstrapInstalledInactiveAuthorizeRequest,
     WordPressBootstrapBackupRenewalApplyRequest,
     WordPressBootstrapBackupRenewalPreflight,
     WordPressBootstrapBackupRenewalRecovery,
@@ -184,6 +189,10 @@ from app.services.wordpress_bootstrap_establishment import (
     assess_backup_renewal_recovery as bootstrap_backup_renewal_recovery_assess,
     assess_recovery as bootstrap_establishment_recovery_assess,
     authorize_manual_install as bootstrap_manual_install_authorize,
+    authorize_installed_inactive as bootstrap_installed_inactive_authorize,
+    installed_inactive_preflight as bootstrap_installed_inactive_preflight,
+    retirement_preflight as bootstrap_retirement_preflight,
+    apply_retirement as bootstrap_retirement_apply,
     manual_install_preflight as bootstrap_manual_install_preflight,
     backup_renewal_preflight as bootstrap_backup_renewal_preflight,
     verify_manual_install as bootstrap_manual_install_verify,
@@ -375,6 +384,50 @@ def upgrade_bootstrap_manual_install_verify(
     session: Session = Depends(get_session),
 ) -> WordPressBootstrapEstablishmentResult:
     return bootstrap_manual_install_verify(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/authorization/retirement/preflight/{page_id}",
+    response_model=WordPressBootstrapAuthorizationRetirementPreflight,
+)
+def upgrade_bootstrap_authorization_retirement_preflight(
+    page_id: int, payload: WordPressBootstrapAuthorizationRetirementRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapAuthorizationRetirementPreflight:
+    return bootstrap_retirement_preflight(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/authorization/retirement/apply/{page_id}",
+    response_model=WordPressBootstrapAuthorizationRetirementResult,
+)
+def upgrade_bootstrap_authorization_retirement_apply(
+    page_id: int, payload: WordPressBootstrapAuthorizationRetirementApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapAuthorizationRetirementResult:
+    return bootstrap_retirement_apply(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/installed-inactive/preflight/{page_id}",
+    response_model=WordPressBootstrapEstablishmentPreflight,
+)
+def upgrade_bootstrap_installed_inactive_preflight(
+    page_id: int, payload: WordPressBootstrapManualInstallPreflightRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapEstablishmentPreflight:
+    return bootstrap_installed_inactive_preflight(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/installed-inactive/authorize/{page_id}",
+    response_model=WordPressBootstrapEstablishmentResult,
+)
+def upgrade_bootstrap_installed_inactive_authorize(
+    page_id: int, payload: WordPressBootstrapInstalledInactiveAuthorizeRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapEstablishmentResult:
+    return bootstrap_installed_inactive_authorize(session, page_id, payload)
 
 
 @router.post(

@@ -635,6 +635,6 @@ def test_target_and_current_zip_contracts_are_locked():
 
 
 def test_upgrade_audit_is_in_data_backup_v036_contract():
-    assert backup_service.BACKUP_VERSION == "0.38"
+    assert backup_service.BACKUP_VERSION == "0.39"
     assert backup_service.BACKUP_MODELS["wordpress_plugin_upgrade_audits"] is WordPressPluginUpgradeAudit
     assert "0.34" in backup_service.SUPPORTED_BACKUP_VERSIONS
