@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import socket
 import ssl
 from types import SimpleNamespace
 
@@ -250,6 +251,26 @@ def test_transport_classification_distinguishes_timeout_tls_and_network():
         "network_error",
         "wordpress_dns_or_network_error",
     )
+
+
+def test_public_transport_classification_is_precise_and_safe():
+    request = httpx.Request("GET", "https://wordpress.example/")
+    tls = httpx.ConnectError("sensitive TLS detail", request=request)
+    tls.__cause__ = ssl.SSLError("certificate detail")
+    dns = httpx.ConnectError("sensitive DNS detail", request=request)
+    dns.__cause__ = socket.gaierror("resolver detail")
+    cases = [
+        (httpx.ConnectTimeout("secret", request=request), "connect_timeout"),
+        (httpx.ReadTimeout("secret", request=request), "read_timeout"),
+        (tls, "tls_failed"),
+        (dns, "dns_failed"),
+        (httpx.ConnectError("secret", request=request), "network_failed"),
+    ]
+    for exception, expected in cases:
+        category, reason = wordpress_http.classify_public_transport_exception(exception)
+        assert category == expected
+        assert reason.startswith("public_transport_")
+        assert "secret" not in reason
 
 
 def test_siteground_like_fixture_blocks_default_httpx_and_allows_atlas_policy():

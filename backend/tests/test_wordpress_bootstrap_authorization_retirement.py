@@ -141,6 +141,59 @@ def test_retirement_rejects_noneligible_states(db, monkeypatch, change):
         assert session.get(WordPressBootstrapEstablishmentAudit, audit_id).status != "authorization_retired"
 
 
+@pytest.mark.parametrize("cache_state", ["EXPIRED", "MISS", "BYPASS"])
+def test_retirement_requires_a_current_siteground_hit(db, monkeypatch, cache_state):
+    audit_id = stale_audit(db, monkeypatch)
+    current = current_hit()
+    current["rendered"]["public_http_observation"]["cache_headers"]["x-proxy-cache"] = cache_state
+    monkeypatch.setattr(
+        establishment,
+        "_observe",
+        lambda *args, **kwargs: base_snapshot(deepcopy(current), "inactive").inspected_state,
+    )
+    with Session(db) as session:
+        before = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        writes = before.atlas_write_count
+        result = establishment.retirement_preflight(session, 41, retirement_request(audit_id))
+        after = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+    assert result.ready is False
+    assert result.retirement_handle is None
+    assert result.transport_comparison["current"]["cache_state"] == cache_state.lower()
+    assert after.atlas_write_count == writes
+    assert after.status == "awaiting_manual_bootstrap_installation"
+
+
+def test_retirement_transport_failure_is_not_reported_as_origin_drift(db, monkeypatch):
+    audit_id = stale_audit(db, monkeypatch)
+    current = current_hit()
+    current["rendered"]["public_http_observation"].update({
+        "status_code": None,
+        "final_url": None,
+        "cache_headers": {},
+        "outcome": "dns_failed",
+        "transport_category": "dns_failed",
+        "transport_reason_code": "public_transport_dns_failed",
+    })
+    monkeypatch.setattr(
+        establishment,
+        "_observe",
+        lambda *args, **kwargs: base_snapshot(deepcopy(current), "inactive").inspected_state,
+    )
+    with Session(db) as session:
+        before = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+        writes = before.atlas_write_count
+        result = establishment.retirement_preflight(session, 41, retirement_request(audit_id))
+        after = session.get(WordPressBootstrapEstablishmentAudit, audit_id)
+    assert result.ready is False
+    assert result.retirement_handle is None
+    assert result.transport_comparison["reason_code"] == (
+        "manual_install_verification_transport_acquisition_failed"
+    )
+    assert result.transport_comparison["current"]["transport_category"] == "dns_failed"
+    assert after.atlas_write_count == writes
+    assert after.status == "awaiting_manual_bootstrap_installation"
+
+
 def test_retirement_phrase_handle_and_replay_fail_closed(db, monkeypatch):
     audit_id = stale_audit(db, monkeypatch)
     with Session(db) as session:

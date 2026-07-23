@@ -1156,6 +1156,8 @@ def _safe_transport_retirement_summary(audit, snapshot, comparison):
             "response_source": _transport_response_source(new),
             "provider": "siteground-nginx" if _siteground_nginx_provider(new.get("provider", {})) else "unverified",
             "cache_state": _transport_cache_state(new.get("provider", {})),
+            "transport_category": new.get("transport_category"),
+            "transport_reason_code": new.get("transport_reason_code"),
         },
     }
 
@@ -1354,6 +1356,20 @@ def _cross_release_transport_compatibility(before, after):
     canonical_url = cache_binding.CANONICAL_URL
     for transport in (old, new):
         if (
+            transport.get("status_code") is None
+            or transport.get("transport_category") in {
+                "dns_failed", "connect_timeout", "read_timeout", "tls_failed",
+                "network_failed", "transport_acquisition_failed",
+            }
+        ):
+            return {
+                "compatible": False,
+                "reason_code": "manual_install_verification_transport_acquisition_failed",
+                "transport_category": (
+                    transport.get("transport_category") or "transport_acquisition_failed"
+                ),
+            }
+        if (
             transport.get("request_url") != canonical_url
             or transport.get("final_url") != canonical_url
             or transport.get("redirect_count") != 0
@@ -1408,7 +1424,8 @@ def _transport_response_source(transport):
     if status == 403 and classification == "provider_verified_status_blocked":
         return "provider_verified_html_block"
     if status == 200 and classification in {
-        "siteground_cache_provider_verified", "cache_status_hit", "cache_status_miss", "cache_status_bypass",
+        "siteground_cache_provider_verified", "cache_status_hit", "cache_status_miss",
+        "cache_status_bypass", "cache_status_expired",
     }:
         return "provider_verified_public_html"
     return None
@@ -1429,7 +1446,7 @@ def _transport_cache_state(provider):
     headers = provider.get("headers", {}) if isinstance(provider, dict) else {}
     for name in ("x-proxy-cache", "x-sg-cache", "x-cache"):
         value = headers.get(name)
-        if value in {"HIT", "MISS", "BYPASS"}:
+        if value in {"HIT", "MISS", "BYPASS", "EXPIRED"}:
             return value.lower()
     return None
 

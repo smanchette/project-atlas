@@ -1,5 +1,11 @@
 \# Project Atlas Version History
 
+## v0.59.92
+
+- Repaired the rendered-state producer contract so verified public and authenticated acquisitions retain one sanitized canonical `public_http_observation` for downstream retirement checks.
+- Preserved precise DNS, connect-timeout, read-timeout, TLS, network, and acquisition-failure categories without exposing raw exception details or misreporting missing responses as origin drift.
+- Kept retirement fail-closed and explicitly classified SiteGround `EXPIRED`, `MISS`, and `BYPASS` responses as non-HIT states that cannot authorize retirement.
+
 ## v0.59.91
 
 - Added a phrase-gated Atlas-only terminal retirement for stale pre-activation Bootstrap authorizations when immutable SiteGround transport evidence proves genuine HTTP 403 block to HTTP 200 cached-public drift.

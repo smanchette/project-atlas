@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 from functools import lru_cache
 import math
 import re
+import socket
 import ssl
 from typing import Any
 from urllib.parse import urlparse
@@ -156,6 +157,86 @@ def classify_wordpress_exception(exc: httpx.HTTPError) -> tuple[str, str]:
     if isinstance(exc, (httpx.NetworkError, httpx.RequestError)):
         return "network_error", "wordpress_dns_or_network_error"
     return "request_error", "wordpress_request_error"
+
+
+def classify_public_transport_exception(exc: httpx.HTTPError) -> tuple[str, str]:
+    """Return a precise, non-secret category for public HTML acquisition failures."""
+
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "connect_timeout", "public_transport_connect_timeout"
+    if isinstance(exc, httpx.ReadTimeout):
+        return "read_timeout", "public_transport_read_timeout"
+    if _exception_chain_contains(exc, ssl.SSLError):
+        return "tls_failed", "public_transport_tls_failed"
+    if _exception_chain_contains(exc, socket.gaierror):
+        return "dns_failed", "public_transport_dns_failed"
+    if isinstance(exc, httpx.TimeoutException):
+        return "network_failed", "public_transport_timeout_failed"
+    if isinstance(exc, (httpx.NetworkError, httpx.RequestError)):
+        return "network_failed", "public_transport_network_failed"
+    return "transport_acquisition_failed", "public_transport_acquisition_failed"
+
+
+def classify_siteground_cache_headers(headers: Mapping[str, Any]) -> dict[str, Any]:
+    """Classify already-sanitized provider headers with one shared fail-closed policy."""
+
+    sanitized = {str(key).lower(): str(value) for key, value in headers.items()}
+    if not sanitized:
+        return {
+            "verified": False,
+            "reason_code": "cache_headers_missing",
+            "status_reason_code": None,
+            "headers": {},
+        }
+    enabled = sanitized.get("x-cache-enabled", "").lower()
+    if enabled and enabled not in {"true", "false"}:
+        return {
+            "verified": False,
+            "reason_code": "cache_header_value_invalid",
+            "status_reason_code": None,
+            "headers": sanitized,
+        }
+    raw_status = sanitized.get(
+        "x-proxy-cache",
+        sanitized.get("x-sg-cache", sanitized.get("x-cache", "")),
+    )
+    status = raw_status.strip().upper()
+    status_codes = {
+        "HIT": "cache_status_hit",
+        "MISS": "cache_status_miss",
+        "BYPASS": "cache_status_bypass",
+        "EXPIRED": "cache_status_expired",
+    }
+    if status and status not in status_codes:
+        return {
+            "verified": False,
+            "reason_code": "cache_header_value_invalid",
+            "status_reason_code": None,
+            "headers": sanitized,
+        }
+    proxy_info = sanitized.get("x-proxy-cache-info", "")
+    proxy_info_valid = (
+        bool(re.search(r"(?:^|[\s,;])DT:\d+(?:$|[\s,;])", proxy_info, re.I))
+        if proxy_info
+        else False
+    )
+    if proxy_info and not proxy_info_valid:
+        return {
+            "verified": False,
+            "reason_code": "cache_header_value_invalid",
+            "status_reason_code": None,
+            "headers": sanitized,
+        }
+    verified = enabled == "true" or status in status_codes or proxy_info_valid
+    return {
+        "verified": verified,
+        "reason_code": (
+            "siteground_cache_provider_verified" if verified else "cache_provider_unrecognized"
+        ),
+        "status_reason_code": status_codes.get(status),
+        "supporting_nginx": "nginx" in sanitized.get("server", "").lower(),
+        "headers": sanitized,
+    }
 
 
 def sanitized_response_diagnostics(response: httpx.Response) -> dict[str, Any]:

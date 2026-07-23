@@ -315,6 +315,7 @@ def test_cache_aware_plugin_identity_rejects_version_or_activity_drift():
     ({"x-proxy-cache": "HIT"}, True, "siteground_cache_provider_verified", "cache_status_hit"),
     ({"X-Proxy-Cache": "miss"}, True, "siteground_cache_provider_verified", "cache_status_miss"),
     ({"x-proxy-cache": "BYPASS"}, True, "siteground_cache_provider_verified", "cache_status_bypass"),
+    ({"x-proxy-cache": "EXPIRED"}, True, "siteground_cache_provider_verified", "cache_status_expired"),
     ({"x-sg-cache": "HIT"}, True, "siteground_cache_provider_verified", "cache_status_hit"),
     ({"X-Proxy-Cache-Info": "DT:1"}, True, "siteground_cache_provider_verified", None),
     ({}, False, "cache_headers_missing", None),

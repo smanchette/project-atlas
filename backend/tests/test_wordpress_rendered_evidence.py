@@ -6,6 +6,8 @@ import hmac
 import json
 from pathlib import Path
 import runpy
+import socket
+import ssl
 import sys
 
 import httpx
@@ -84,6 +86,19 @@ class StaticPublicClient:
         return self.response
 
 
+class SequenceClient:
+    def __init__(self, outcomes):
+        self.outcomes = iter(outcomes)
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        outcome = next(self.outcomes)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
 def test_signed_browser_fallback_preserves_separate_sanitized_public_http_observation():
     signed = evidence()
     response = httpx.Response(
@@ -125,6 +140,103 @@ def test_signed_browser_fallback_preserves_separate_sanitized_public_http_observ
     encoded = json.dumps(result).lower()
     assert "set-cookie" not in encoded
     assert "wordpress_logged_in" not in encoded
+
+
+def test_verified_public_result_attaches_canonical_sanitized_observation():
+    response = httpx.Response(
+        200,
+        request=httpx.Request("GET", EXPECTED_URL),
+        headers={
+            "Content-Type": "text/html",
+            "Server": "nginx",
+            "X-Cache-Enabled": "True",
+            "X-Proxy-Cache": "HIT",
+            "Set-Cookie": "secret=value",
+        },
+        text=HTML,
+    )
+    result = acquire_rendered_state("", "", client=StaticPublicClient(response))
+    observation = result["public_http_observation"]
+    assert result["verified"] is True
+    assert observation["compatibility_version"] == "project-atlas-public-http-observation-v1"
+    assert observation["requested_url"] == observation["final_url"] == EXPECTED_URL
+    assert observation["origin"] == "https://www.drywoodtenting.com"
+    assert observation["provider_family"] == "siteground-nginx"
+    assert observation["provider_verified"] is True
+    assert observation["cache_state"] == "hit"
+    assert observation["response_source"] == "provider_verified_public_html"
+    assert observation["transport_category"] == "response_received"
+    assert observation["head_hash"] == result["head_hash"]
+    assert observation["visible_hash"] == result["visible_hash"]
+    encoded = json.dumps(observation).lower()
+    assert "cookie" not in encoded
+    assert "authorization" not in encoded
+    assert "secret=value" not in encoded
+    assert "helper_signature" not in encoded
+
+
+def test_authenticated_success_retains_preceding_public_transport_observation():
+    public = httpx.Response(
+        403,
+        request=httpx.Request("GET", EXPECTED_URL),
+        headers={"Content-Type": "text/html", "Server": "nginx"},
+        text="Unavailable",
+    )
+    authenticated = httpx.Response(
+        200,
+        request=httpx.Request("GET", EXPECTED_URL),
+        headers={"Content-Type": "text/html"},
+        text=HTML,
+    )
+    result = acquire_rendered_state("atlas", "password", client=SequenceClient([public, authenticated]))
+    assert result["source"] == "authenticated"
+    assert result["verified"] is True
+    assert result["public_http_observation"]["source"] == "public"
+    assert result["public_http_observation"]["status_code"] == 403
+    assert result["public_http_observation"]["transport_category"] == "response_received"
+
+
+@pytest.mark.parametrize(
+    ("exception_factory", "category"),
+    [
+        (lambda request: httpx.ConnectTimeout("safe", request=request), "connect_timeout"),
+        (lambda request: httpx.ReadTimeout("safe", request=request), "read_timeout"),
+        (
+            lambda request: _caused_connect_error(request, ssl.SSLError("safe")),
+            "tls_failed",
+        ),
+        (
+            lambda request: _caused_connect_error(request, socket.gaierror("safe")),
+            "dns_failed",
+        ),
+        (lambda request: httpx.ConnectError("safe", request=request), "network_failed"),
+    ],
+)
+def test_public_transport_failures_retain_precise_safe_category(exception_factory, category):
+    request = httpx.Request("GET", EXPECTED_URL)
+    invalid_auth = httpx.Response(
+        403,
+        request=request,
+        headers={"Content-Type": "text/html"},
+        text="Unavailable",
+    )
+    result = acquire_rendered_state(
+        "atlas",
+        "password",
+        client=SequenceClient([exception_factory(request), invalid_auth]),
+    )
+    observation = result["public_http_observation"]
+    assert observation["transport_category"] == category
+    assert observation["status_code"] is None
+    assert observation["final_url"] is None
+    assert observation["verified"] is False
+    assert "safe" not in json.dumps(observation)
+
+
+def _caused_connect_error(request, cause):
+    error = httpx.ConnectError("safe", request=request)
+    error.__cause__ = cause
+    return error
 
 
 def test_public_header_sanitizer_preserves_repeats_and_rejects_secrets():

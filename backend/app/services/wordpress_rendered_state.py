@@ -12,7 +12,12 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
-from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
+from app.services.wordpress_http import (
+    classify_public_transport_exception,
+    classify_siteground_cache_headers,
+    wordpress_basic_auth,
+    wordpress_http_client,
+)
 
 
 EXPECTED_URL = "https://www.drywoodtenting.com/drywood-termite-tenting-orlando-fl/"
@@ -60,6 +65,7 @@ PUBLIC_RESPONSE_HEADER_ALLOWLIST = {
 }
 CACHE_HEADERS = PUBLIC_RESPONSE_HEADER_ALLOWLIST
 CACHE_BUSTING_QUERY_KEYS = {"_", "cb", "cache", "cachebust", "timestamp", "ver", "v"}
+PUBLIC_HTTP_OBSERVATION_VERSION = "project-atlas-public-http-observation-v1"
 VOLATILE_ATTRIBUTES = {"nonce", "integrity", "crossorigin"}
 WP_VOLATILE_TOKEN = re.compile(r"^(?:wp-|wp_|postid-|page-id-|page-template-|logged-in|admin-bar)", re.I)
 MEDIA32_PATTERN = re.compile(r"(?:hero-1\.png|wp-image-32\b|/wp-json/wp/v2/media/32\b)", re.I)
@@ -813,6 +819,66 @@ def _public_http_observation(value: dict[str, Any] | None) -> dict[str, Any]:
     """Expose only sanitized, credential-free response facts for deterministic binding."""
 
     value = value or {}
+    final_url = value.get("final_url")
+    try:
+        final_parts = urlsplit(final_url) if isinstance(final_url, str) else None
+        origin = (
+            f"{final_parts.scheme.lower()}://{final_parts.netloc.lower()}"
+            if final_parts and final_parts.scheme and final_parts.netloc
+            else None
+        )
+    except ValueError:
+        origin = None
+    headers = value.get("cache_headers")
+    headers = headers if isinstance(headers, dict) else {}
+    provider = classify_siteground_cache_headers(headers)
+    provider_verified = (
+        provider["verified"] is True and provider.get("supporting_nginx") is True
+    )
+    status_reason = provider.get("status_reason_code")
+    status_code = value.get("status_code")
+    transport_category = value.get("transport_category")
+    if not transport_category:
+        transport_category = (
+            "invalid_origin_response"
+            if isinstance(final_url, str) and final_url != EXPECTED_URL
+            else ("response_received" if isinstance(status_code, int) else "transport_acquisition_failed")
+        )
+    if status_code == 403 and provider_verified:
+        response_source = "provider_verified_html_block"
+    elif status_code == 200 and provider_verified:
+        response_source = "provider_verified_public_html"
+    else:
+        response_source = None
+    cache_state = {
+        "cache_status_hit": "hit",
+        "cache_status_miss": "miss",
+        "cache_status_bypass": "bypass",
+        "cache_status_expired": "expired",
+    }.get(status_reason, "unavailable")
+    canonical = {
+        "compatibility_version": PUBLIC_HTTP_OBSERVATION_VERSION,
+        "requested_url": EXPECTED_URL,
+        "origin": origin,
+        "content_classification": (
+            "html" if "text/html" in str(value.get("content_type", "")).lower() else "other"
+        ),
+        "provider_family": "siteground-nginx" if provider_verified else "unverified",
+        "provider_verified": provider_verified,
+        "provider_signals": headers,
+        "cache_state": cache_state,
+        "response_source": response_source,
+        "challenge_block_classification": value.get("outcome")
+        if value.get("outcome") in {"bot_protection_blocked", "error_page_detected", "unavailable"}
+        else None,
+        "privacy_classification": (
+            "credential_free_public"
+            if value.get("source") in {"public", "cache_bypass"}
+            else "authenticated_transport"
+        ),
+        "transport_category": transport_category,
+        "transport_reason_code": value.get("transport_reason_code"),
+    }
     allowed = {
         "source",
         "outcome",
@@ -840,7 +906,25 @@ def _public_http_observation(value: dict[str, Any] | None) -> dict[str, Any]:
         "error_page_detected",
         "admin_detection_signals",
     }
-    return {key: value.get(key) for key in sorted(allowed) if key in value}
+    canonical.update({key: value.get(key) for key in sorted(allowed) if key in value})
+    return canonical
+
+
+def _public_transport_failure(source: str, exc: httpx.HTTPError) -> dict[str, Any]:
+    category, reason = classify_public_transport_exception(exc)
+    return {
+        "source": source,
+        "outcome": category,
+        "verified": False,
+        "final_url": None,
+        "status_code": None,
+        "observed_at": datetime.now(UTC).isoformat(),
+        "redirect_count": None,
+        "content_type": "",
+        "cache_headers": {},
+        "transport_category": category,
+        "transport_reason_code": reason,
+    }
 
 
 def acquire_rendered_state(username: str, password: str, *, manual_evidence: dict[str, Any] | Any | None = None, evidence_signing_key: str = "", verified_bypass_url: str = "", bypass_independently_verified: bool = False, client: httpx.Client | None = None) -> dict[str, Any]:
@@ -866,8 +950,11 @@ def acquire_rendered_state(username: str, password: str, *, manual_evidence: dic
                 break
             try:
                 response = browser.get(url, auth=auth, headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
-            except httpx.HTTPError:
-                result = {"source": "authenticated" if auth else "public", "outcome": "network_failed", "verified": False}
+            except httpx.HTTPError as exc:
+                source = "authenticated" if auth else "public"
+                result = _public_transport_failure(source, exc)
+                if source == "public":
+                    public_result = result
                 continue
             source = "cache_bypass" if outcome == "cache_bypass_verified" else ("authenticated" if auth else "public")
             candidate = _html_result(response, outcome, source)
@@ -877,7 +964,12 @@ def acquire_rendered_state(username: str, password: str, *, manual_evidence: dic
                     result = candidate
                     break
             if candidate.get("verified"):
-                return candidate
+                return {
+                    **candidate,
+                    "public_http_observation": _public_http_observation(
+                        candidate if source == "public" else public_result
+                    ),
+                }
             result = candidate
     finally:
         if owned:
@@ -892,4 +984,10 @@ def acquire_rendered_state(username: str, password: str, *, manual_evidence: dic
         return {"source": "manual_browser_evidence", "outcome": "manual_browser_evidence_verified", "verified": True, "final_url": EXPECTED_URL, "head_hash": manual_evidence["rendered_head_hash"], "visible_hash": manual_evidence["visible_content_hash"], "document_title": [identity["document_title"]], "h1": [identity["h1"]], "canonical": [identity["canonical_url"]], "featured_image_url": identity["featured_image_url"], "featured_image_alt": identity["featured_image_alt"], "browser_evidence_identifier": manual_evidence["evidence_id"], "evidence_schema": manual_evidence["evidence_schema"], "evidence_schema_version": manual_evidence["evidence_schema_version"], "capture_helper_version": manual_evidence["capture_helper_version"], "evidence_timestamp": manual_evidence["captured_at"], "evidence_expires_at": manual_evidence["expires_at"], "metadata_inventory": manual_evidence["metadata_inventory"], "metadata_inventory_hash": manual_evidence["metadata_inventory_hash"], "privacy_attestations": manual_evidence["privacy_attestations"], "signature_validated": True, "atlas_metadata_marker_present": not absence["atlas_ownership_marker_absent"], "media32_reference_present": not absence["media32_absent"], "cache_headers": public_observation.get("cache_headers", {}), "public_http_observation": public_observation}
     if public_result and public_result.get("outcome") == "bot_protection_blocked":
         result = public_result
-    return {**result, "manual_evidence_outcome": "manual_browser_evidence_required", "manual_evidence_reason": reason, "verified": False}
+    return {
+        **result,
+        "manual_evidence_outcome": "manual_browser_evidence_required",
+        "manual_evidence_reason": reason,
+        "public_http_observation": _public_http_observation(public_result),
+        "verified": False,
+    }

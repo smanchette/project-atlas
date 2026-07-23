@@ -51,7 +51,11 @@ from app.services.wordpress_deployment_release import (
 )
 from app.services.wordpress_metadata import _parse_html
 from app.services.wordpress_metadata_lifecycle import approved_payload, payload_sha256
-from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
+from app.services.wordpress_http import (
+    classify_siteground_cache_headers,
+    wordpress_basic_auth,
+    wordpress_http_client,
+)
 from app.services.wordpress_rendered_state import (
     EXPECTED_H1,
     sanitize_public_response_headers,
@@ -214,6 +218,17 @@ def _stable_public_observation(observation: dict[str, Any], evidence: Any | None
             )
         },
         "outcome": observation.get("outcome") if isinstance(observation, dict) else None,
+        "transport_category": (
+            observation.get("transport_category")
+            if isinstance(observation, dict)
+            else "transport_acquisition_failed"
+        ),
+        "transport_reason_code": (
+            observation.get("transport_reason_code") if isinstance(observation, dict) else None
+        ),
+        "compatibility_version": (
+            observation.get("compatibility_version") if isinstance(observation, dict) else None
+        ),
         "body_sha256": observation.get("body_sha256") if status == 200 else None,
         "public_rendered_hashes": {
             "head": observation.get("head_hash") if status == 200 else None,
@@ -916,36 +931,7 @@ def _audit_three_preserved(session):
 
 def _siteground_cache_evidence(headers):
     sanitized = _cache_headers(headers)
-    if not sanitized:
-        return {"verified": False, "reason_code": "cache_headers_missing", "status_reason_code": None, "headers": {}}
-
-    enabled = sanitized.get("x-cache-enabled", "").lower()
-    if enabled and enabled not in {"true", "false"}:
-        return {"verified": False, "reason_code": "cache_header_value_invalid", "status_reason_code": None, "headers": sanitized}
-
-    raw_status = sanitized.get("x-proxy-cache", sanitized.get("x-sg-cache", sanitized.get("x-cache", "")))
-    status = raw_status.strip().upper()
-    status_codes = {
-        "HIT": "cache_status_hit",
-        "MISS": "cache_status_miss",
-        "BYPASS": "cache_status_bypass",
-    }
-    if status and status not in status_codes:
-        return {"verified": False, "reason_code": "cache_header_value_invalid", "status_reason_code": None, "headers": sanitized}
-
-    proxy_info = sanitized.get("x-proxy-cache-info", "")
-    proxy_info_valid = bool(re.search(r"(?:^|[\s,;])DT:\d+(?:$|[\s,;])", proxy_info, re.I)) if proxy_info else False
-    if proxy_info and not proxy_info_valid:
-        return {"verified": False, "reason_code": "cache_header_value_invalid", "status_reason_code": None, "headers": sanitized}
-
-    verified = enabled == "true" or status in status_codes or proxy_info_valid
-    return {
-        "verified": verified,
-        "reason_code": "siteground_cache_provider_verified" if verified else "cache_provider_unrecognized",
-        "status_reason_code": status_codes.get(status),
-        "supporting_nginx": "nginx" in sanitized.get("server", "").lower(),
-        "headers": sanitized,
-    }
+    return classify_siteground_cache_headers(sanitized)
 
 
 def _siteground_cache_present(headers): return _siteground_cache_evidence(headers)["verified"]
@@ -1001,7 +987,10 @@ def _public_observation_matches_evidence(observation, evidence):
     status = observation.get("status_code")
     if status == 202 or observation.get("challenge_page_detected") or observation.get("outcome") == "bot_protection_blocked":
         return False, "challenge_response_rejected"
-    if observation.get("outcome") in {"error_page_detected", "unexpected_redirect", "network_failed"}:
+    if observation.get("outcome") in {
+        "error_page_detected", "unexpected_redirect", "dns_failed", "connect_timeout",
+        "read_timeout", "tls_failed", "network_failed", "transport_acquisition_failed",
+    }:
         return False, "public_observation_mismatch"
     if any(observation.get(field) for field in ("admin_page_detected", "login_page_detected", "authenticated_context_detected", "error_page_detected")):
         return False, "public_observation_mismatch"
