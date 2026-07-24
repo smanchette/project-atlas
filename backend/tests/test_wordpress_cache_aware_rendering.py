@@ -168,7 +168,7 @@ def test_reason_code_contract_is_complete():
 
 
 def test_cache_aware_audit_is_in_versioned_data_backup():
-    assert backup_service.BACKUP_VERSION == "0.39"
+    assert backup_service.BACKUP_VERSION == "0.40"
     assert backup_service.BACKUP_MODELS["wordpress_cache_aware_rendering_audits"] is WordPressCacheAwareRenderingAudit
 
 

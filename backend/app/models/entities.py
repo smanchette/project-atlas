@@ -617,8 +617,17 @@ class WordPressBootstrapEstablishmentAudit(SQLModel, table=True):
             "(status = 'authorization_retired' AND retirement_reason = 'manual_install_verification_genuine_transport_drift') OR (status != 'authorization_retired' AND retirement_reason IS NULL)",
             name="ck_wordpressbootstrapestablishmentaudit_retirement_reason",
         ),
+        CheckConstraint(
+            "(reconciliation_reason IS NULL AND reconciliation_handle_fingerprint IS NULL AND reconciliation_binding_hash IS NULL AND reconciled_at IS NULL) OR "
+            "(status = 'verified' AND reconciliation_reason = 'post_activation_verifier_contract_defect_reconciled' AND reconciliation_handle_fingerprint IS NOT NULL AND reconciliation_binding_hash IS NOT NULL AND reconciled_at IS NOT NULL)",
+            name="ck_wordpressbootstrapestablishmentaudit_reconciliation",
+        ),
         UniqueConstraint("manual_handle_fingerprint", name="uq_bootstrapestablishment_manual_handle"),
         UniqueConstraint("activation_handle_fingerprint", name="uq_bootstrapestablishment_activation_handle"),
+        UniqueConstraint(
+            "reconciliation_handle_fingerprint",
+            name="uq_wordpressbootstrapestablishmentaudit_reconciliation_handle",
+        ),
     )
     id: int | None = Field(default=None, primary_key=True)
     generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
@@ -660,6 +669,10 @@ class WordPressBootstrapEstablishmentAudit(SQLModel, table=True):
     approved_residual_risk: bool = Field(default=True)
     checksum_verification_source: str | None = Field(default=None, max_length=160)
     checksum_verification_result: str | None = Field(default=None, max_length=80)
+    reconciliation_reason: str | None = Field(default=None, max_length=100, index=True)
+    reconciliation_handle_fingerprint: str | None = Field(default=None, max_length=64, index=True)
+    reconciliation_binding_hash: str | None = Field(default=None, max_length=64)
+    reconciled_at: datetime | None = None
     wordpress_write_count: int = Field(default=0)
     wordpress_write_scope: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
     cache_write_count: int = Field(default=0)

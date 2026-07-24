@@ -327,7 +327,7 @@ def test_data_backup_039_serializes_retirement_and_renewals(db, monkeypatch, tmp
         result = export_backup(session, backup_dir=tmp_path)
         payload = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
         record = next(item for item in payload["data"]["wordpress_bootstrap_establishment_audits"] if item["id"] == audit_id)
-        assert payload["metadata"]["version"] == "0.39"
+        assert payload["metadata"]["version"] == "0.40"
         assert record["authorization_mode"] == "manual_upload"
         assert record["retirement_reason"] == establishment.RETIREMENT_REASON
         assert len(record["backup_renewals"]) == 2

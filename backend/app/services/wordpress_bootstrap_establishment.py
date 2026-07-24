@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import os
+from pathlib import PureWindowsPath
 import secrets
 from threading import RLock, Timer
 from typing import Any
@@ -28,10 +29,17 @@ from app.models import (
     WordPressBootstrapEstablishmentAudit,
     WordPressCacheAwareRenderingAudit,
     WordPressMetadataLifecycleAudit,
+    WordPressMetadataState,
+    WordPressMetadataSyncAudit,
     WordPressPluginUpgradeAudit,
 )
+from app.db.backup import BackupValidationError, load_backup, resolve_backup_download
 from app.schemas.wordpress import (
     WordPressBootstrapActivationApplyRequest,
+    WordPressBootstrapActivationReconciliationApplyRequest,
+    WordPressBootstrapActivationReconciliationPreflight,
+    WordPressBootstrapActivationReconciliationRequest,
+    WordPressBootstrapActivationReconciliationResult,
     WordPressBootstrapAuthorizationRetirementApplyRequest,
     WordPressBootstrapAuthorizationRetirementPreflight,
     WordPressBootstrapAuthorizationRetirementRequest,
@@ -68,6 +76,14 @@ BOOTSTRAP_ZIP_SHA256 = "de5bfb7875b6f84f2009ef2043c1c86c7f9d20f0f973a5cb16b478fe
 BOOTSTRAP_ENTRY_SHA256 = "a977c077573ab732213a06d17dcc317b09854564777ce9cb24c869383972cd53"
 MANUAL_PHRASE = "AUTHORIZE MANUAL UPLOAD OF PROJECT ATLAS UPGRADE BOOTSTRAP 0.3.0"
 ACTIVATION_PHRASE = "ACTIVATE PROJECT ATLAS UPGRADE BOOTSTRAP 0.3.0"
+ACTIVATION_RECONCILIATION_PHRASE = (
+    "RECONCILE PROJECT ATLAS BOOTSTRAP ACTIVATION FOR AUDIT 2 "
+    "WITHOUT ANOTHER WORDPRESS WRITE"
+)
+ACTIVATION_RECONCILIATION_REASON = (
+    "post_activation_verifier_contract_defect_reconciled"
+)
+ACTIVATION_RECONCILIATION_HISTORY = ACTIVATION_RECONCILIATION_REASON
 BACKUP_RENEWAL_PHRASE_PREFIX = "RENEW PROJECT ATLAS BOOTSTRAP HANDOFF BACKUP FOR AUDIT"
 RETIREMENT_REASON = "manual_install_verification_genuine_transport_drift"
 RETIREMENT_PHRASE_PREFIX = "RETIRE PROJECT ATLAS BOOTSTRAP AUTHORIZATION FOR AUDIT"
@@ -94,7 +110,13 @@ ATLAS_SCOPE = [
     "create or update only one WordPressBootstrapEstablishmentAudit",
     "record state transitions and read-only verification findings",
 ]
-_BASE_IGNORED_GATE_CODES = {"upgrade_bootstrap", "bootstrap_establishment_audit", "plugin_inventory", "expected_post_inventory"}
+_BASE_IGNORED_GATE_CODES = {
+    "upgrade_bootstrap",
+    "bootstrap_establishment_audit",
+    "plugin_inventory",
+    "active_inventory",
+    "expected_post_inventory",
+}
 _VERIFICATION_FINGERPRINT_KEY = "_atlas_manual_install_verification_fingerprint"
 _VERIFICATION_PROOF_KEY = "_atlas_manual_install_verification_proof"
 _AUTHORIZATION_EVIDENCE_KEY = "_atlas_authorization_evidence"
@@ -136,12 +158,21 @@ class _RetirementHandle:
     expires_at: datetime
 
 
+@dataclass(frozen=True)
+class _ActivationReconciliationHandle:
+    request: WordPressBootstrapActivationReconciliationRequest
+    audit_id: int
+    binding_hash: str
+    expires_at: datetime
+
+
 _lock = RLock()
 _manual_handles: dict[str, _Handle] = {}
 _activation_handles: dict[str, _Handle] = {}
 _renewal_handles: dict[str, _RenewalHandle] = {}
 _installed_handles: dict[str, _Handle] = {}
 _retirement_handles: dict[str, _RetirementHandle] = {}
+_activation_reconciliation_handles: dict[str, _ActivationReconciliationHandle] = {}
 _timers: dict[tuple[str, str], Timer] = {}
 
 
@@ -843,11 +874,216 @@ def apply_activation(session: Session, page_id: int, request: WordPressBootstrap
     audit.status = intermediate
     audit.transition_history = [*audit.transition_history, intermediate]
     session.add(audit); session.commit(); session.refresh(audit)
-    recommendation = "siteground_restore" if not _protected_equal(audit, base.inspected_state) else "guarded_bootstrap_recovery"
+    recommendation = (
+        "siteground_restore"
+        if not _protected_equal(
+            audit,
+            base.inspected_state,
+            allow_post_mutation_cache_variation=True,
+        )
+        else "guarded_bootstrap_recovery"
+    )
     return _transition(
         session, audit, "recovery_required", all_gates,
         {**base.inspected_state, "bootstrap_status": upgrade._safe_bootstrap_status(status)},
         recommendation, request_atlas_write_count=3,
+    )
+
+
+def activation_reconciliation_preflight(
+    session: Session,
+    page_id: int,
+    request: WordPressBootstrapActivationReconciliationRequest,
+) -> WordPressBootstrapActivationReconciliationPreflight:
+    if page_id != 41:
+        raise HTTPException(404, "Bootstrap activation reconciliation is limited to Atlas page 41.")
+    audit = _audit(session, request.establishment_audit_id)
+    inspected, gates, backup = _activation_reconciliation_inspect(
+        session,
+        request,
+        audit,
+    )
+    ready = all(gate.passed for gate in gates)
+    expires_at = None
+    if ready:
+        evidence_expiry = upgrade._evidence_expiry(
+            request.manual_browser_evidence.expires_at
+        )
+        expires_at = min(datetime.now(UTC) + HANDLE_TTL, evidence_expiry)
+        if expires_at <= datetime.now(UTC):
+            ready = False
+            expires_at = None
+            gates.append(
+                _gate(
+                    "reconciliation_handle_lifetime",
+                    "Fresh evidence permits a positive reconciliation-handle lifetime",
+                    False,
+                    "Fresh evidence expires before reconciliation can be authorized.",
+                )
+            )
+    binding = _activation_reconciliation_binding(
+        request,
+        audit,
+        inspected,
+        backup,
+        expires_at,
+    )
+    binding_hash = _hash(binding)
+    handle = (
+        _store_activation_reconciliation(
+            request,
+            audit.id or 0,
+            binding_hash,
+            expires_at,
+        )
+        if ready and expires_at
+        else None
+    )
+    return WordPressBootstrapActivationReconciliationPreflight(
+        status=(
+            "bootstrap_activation_reconciliation_ready"
+            if ready
+            else "bootstrap_activation_reconciliation_blocked"
+        ),
+        reconciliation_ready=ready,
+        reconciliation_handle=handle,
+        reconciliation_handle_fingerprint=_sha(handle) if handle else None,
+        binding_hash=binding_hash if ready else None,
+        confirmation_phrase=ACTIVATION_RECONCILIATION_PHRASE if ready else None,
+        expires_at=expires_at,
+        atlas_data_backup=backup,
+        inspected_state=inspected,
+        gate_results=gates,
+    )
+
+
+def apply_activation_reconciliation(
+    session: Session,
+    page_id: int,
+    request: WordPressBootstrapActivationReconciliationApplyRequest,
+) -> WordPressBootstrapActivationReconciliationResult:
+    if page_id != 41:
+        raise HTTPException(404, "Bootstrap activation reconciliation is limited to Atlas page 41.")
+    if not hmac.compare_digest(
+        request.confirmation_phrase,
+        ACTIVATION_RECONCILIATION_PHRASE,
+    ):
+        raise HTTPException(422, "The Bootstrap activation reconciliation phrase is incorrect.")
+    fingerprint = _sha(request.reconciliation_handle)
+    replay = session.exec(
+        select(WordPressBootstrapEstablishmentAudit).where(
+            WordPressBootstrapEstablishmentAudit.reconciliation_handle_fingerprint
+            == fingerprint
+        )
+    ).one_or_none()
+    if replay is not None:
+        if (
+            replay.id == 2
+            and replay.status == "verified"
+            and replay.reconciliation_reason == ACTIVATION_RECONCILIATION_REASON
+        ):
+            return _activation_reconciliation_result(
+                replay,
+                inspected=replay.final_snapshot or {},
+                gates=[
+                    WordPressDraftGateResult.model_validate(item)
+                    for item in (
+                        (replay.final_snapshot or {})
+                        .get("activation_reconciliation", {})
+                        .get("gate_results", [])
+                    )
+                ],
+                request_atlas_write_count=0,
+                idempotent=True,
+            )
+        raise HTTPException(409, "The reconciliation handle fingerprint conflicts with another audit.")
+
+    entry = _consume_activation_reconciliation(request.reconciliation_handle)
+    if entry.audit_id != 2:
+        raise HTTPException(409, "The reconciliation handle is bound to another audit.")
+    audit = _audit_for_update(session, entry.audit_id)
+    if audit is None:
+        raise HTTPException(404, "Bootstrap-establishment audit not found.")
+    inspected, gates, backup = _activation_reconciliation_inspect(
+        session,
+        entry.request,
+        audit,
+    )
+    binding = _activation_reconciliation_binding(
+        entry.request,
+        audit,
+        inspected,
+        backup,
+        entry.expires_at,
+    )
+    if not all(gate.passed for gate in gates):
+        raise HTTPException(
+            409,
+            {
+                "reason_code": "bootstrap_activation_reconciliation_gate_drift",
+                "message": "A reconciliation gate changed after preflight.",
+            },
+        )
+    if not hmac.compare_digest(_hash(binding), entry.binding_hash):
+        raise HTTPException(
+            409,
+            {
+                "reason_code": "bootstrap_activation_reconciliation_binding_drift",
+                "message": "The reconciliation binding changed after preflight.",
+            },
+        )
+
+    now = datetime.now(UTC)
+    previous_history = list(audit.transition_history)
+    original_failure_gates = list(audit.gate_results)
+    original_recovery_snapshot = json.loads(
+        json.dumps(audit.final_snapshot or {}, sort_keys=True, default=str)
+    )
+    original_recovery_inventories = json.loads(
+        json.dumps(audit.final_inventories or {}, sort_keys=True, default=str)
+    )
+    audit.status = "verified"
+    audit.reconciliation_reason = ACTIVATION_RECONCILIATION_REASON
+    audit.reconciliation_handle_fingerprint = fingerprint
+    audit.reconciliation_binding_hash = entry.binding_hash
+    audit.reconciled_at = now
+    audit.completed_at = now
+    audit.transition_history = [
+        *previous_history,
+        ACTIVATION_RECONCILIATION_HISTORY,
+    ]
+    audit.final_snapshot = {
+        **inspected,
+        "activation_reconciliation": {
+            "reason": ACTIVATION_RECONCILIATION_REASON,
+            "original_failure_history_preserved": True,
+            "original_recovery_snapshot": original_recovery_snapshot,
+            "original_recovery_inventories": original_recovery_inventories,
+            "wordpress_write_count": 0,
+            "plugin_write_count": 0,
+            "cache_write_count": 0,
+            "original_failure_gate_results": original_failure_gates,
+            "gate_results": [gate.model_dump(mode="json") for gate in gates],
+        },
+    }
+    audit.final_inventories = _inventories(inspected)
+    audit.atlas_write_count += 1
+    audit.atlas_write_scope = [
+        "finalize only WordPressBootstrapEstablishmentAudit 2 after read-only reconciliation",
+        "preserve the original activation write, checksum result, and complete failure history",
+    ]
+    audit.recovery_recommendation = "no_action"
+    audit.error_code = None
+    audit.error_message = None
+    session.add(audit)
+    session.commit()
+    session.refresh(audit)
+    return _activation_reconciliation_result(
+        audit,
+        inspected=audit.final_snapshot or inspected,
+        gates=gates,
+        request_atlas_write_count=1,
+        idempotent=False,
     )
 
 
@@ -857,7 +1093,11 @@ def assess_recovery(session: Session, page_id: int, request: WordPressBootstrapM
     kind = classification["classification"]
     status = upgrade._read_bootstrap_status(session) if kind == "exact_active" else {"_error": "inactive_or_absent"}
     checksum = status.get("bootstrap_checksum")
-    protected = _protected_equal(audit, base.inspected_state)
+    protected = _protected_equal(
+        audit,
+        base.inspected_state,
+        allow_post_mutation_cache_variation=True,
+    )
     if not protected:
         recommendation = "siteground_restore"
     elif kind == "no_upload_yet":
@@ -874,6 +1114,521 @@ def assess_recovery(session: Session, page_id: int, request: WordPressBootstrapM
         classification=kind if kind != "exact_active" else ("exact_active_checksum_match" if checksum == BOOTSTRAP_ENTRY_SHA256 else "exact_active_checksum_unavailable" if not checksum else "exact_active_checksum_mismatch"),
         recommendation=recommendation, gate_results=gates,
         inspected_state={**base.inspected_state, "bootstrap_classification": classification, "bootstrap_status": upgrade._safe_bootstrap_status(status)},
+    )
+
+
+def _activation_reconciliation_inspect(session, request, audit):
+    readiness = deployment_readiness()
+    release = readiness.get("release") or {}
+    expected_runtime = request.expected_runtime_identity.model_dump(mode="json")
+    actual_runtime = {
+        "atlas_version": release.get("atlas_version"),
+        "atlas_commit": release.get("atlas_commit"),
+        "atlas_tag": release.get("atlas_tag"),
+        "manifest_sha256": release.get("manifest_sha256"),
+        "source_compatibility_id": release.get("source_compatibility_id"),
+    }
+    runtime_exact = bool(
+        readiness.get("release_status") == "verified"
+        and release.get("runtime_identity_verified") is True
+        and release.get("manifest_integrity_verified") is True
+        and release.get("expected_release_matched") is True
+        and expected_runtime == actual_runtime
+    )
+    evidence = request.manual_browser_evidence
+    evidence_valid, evidence_reason = upgrade.validate_manual_browser_evidence(
+        evidence,
+        os.environ.get("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", ""),
+    )
+    evidence_valid = bool(
+        evidence_valid
+        and evidence.evidence_schema_version == 1
+        and evidence.evidence_id
+        not in {
+            audit.browser_evidence_id,
+            (_verification_evidence_record(audit) or {}).get("evidence_id"),
+        }
+    )
+    if evidence.evidence_schema_version != 1:
+        evidence_reason = "Reconciliation requires fresh schema-v1 evidence."
+    elif evidence.evidence_id in {
+        audit.browser_evidence_id,
+        (_verification_evidence_record(audit) or {}).get("evidence_id"),
+    }:
+        evidence_reason = "Reconciliation evidence must be freshly captured."
+
+    observed = (
+        _observe(session, request)
+        if runtime_exact and evidence_valid
+        else upgrade._unavailable_observation(
+            evidence_reason or "runtime_identity_unavailable"
+        )
+    )
+    plugin_status = (
+        upgrade._read_plugin_status(session)
+        if observed.get("wordpress_request_performed")
+        else {"_error": "observation_unavailable"}
+    )
+    bootstrap_status = (
+        upgrade._read_bootstrap_status(session)
+        if observed.get("wordpress_request_performed")
+        else {"_error": "observation_unavailable"}
+    )
+    metadata_states = list(
+        session.exec(
+            select(WordPressMetadataState).where(
+                WordPressMetadataState.generated_page_id == 41
+            )
+        )
+    )
+    metadata_sync_audits = list(
+        session.exec(
+            select(WordPressMetadataSyncAudit).where(
+                WordPressMetadataSyncAudit.generated_page_id == 41
+            )
+        )
+    )
+    metadata_state = metadata_states[0] if len(metadata_states) == 1 else None
+    observed = {
+        **observed,
+        "plugin_status": {
+            key: plugin_status.get(key)
+            for key in ("plugin", "version", "checksum", "active", "snapshot")
+            if key in plugin_status
+        },
+        "bootstrap_status": upgrade._safe_bootstrap_status(bootstrap_status),
+        "metadata_state_rows": len(metadata_states),
+        "metadata_sync_audit_rows": len(metadata_sync_audits),
+        "metadata_state_record": (
+            {
+                "status": metadata_state.status,
+                "payload_hash": metadata_state.payload_hash,
+                "wordpress_revision": metadata_state.wordpress_revision,
+            }
+            if metadata_state
+            else None
+        ),
+    }
+    classification = _classify(observed.get("plugins", []))
+    expected_post = _expected_post_activation_inventories(audit)
+    comparison = _verification_stable_comparison(
+        audit,
+        observed,
+        allow_post_mutation_cache_variation=True,
+    )
+    backup, backup_gates = _activation_reconciliation_backup(
+        request,
+        release,
+        audit,
+    )
+    failed_codes = {
+        item.get("code")
+        for item in (audit.gate_results or [])
+        if item.get("passed") is False
+    }
+    expected_history = [
+        "awaiting_manual_bootstrap_installation",
+        "manual_installation_inventory_verified",
+        "activation_pending_checksum_verification",
+        "verification_failed",
+        "recovery_required",
+    ]
+    audit_one = session.get(WordPressBootstrapEstablishmentAudit, 1)
+    other_unresolved = [
+        item
+        for item in session.exec(select(WordPressBootstrapEstablishmentAudit))
+        if item.id != audit.id
+        and item.status not in {"verified", "authorization_retired"}
+    ]
+    status_snapshot = (
+        plugin_status.get("snapshot", {})
+        if isinstance(plugin_status.get("snapshot"), dict)
+        else {}
+    )
+    metadata_state_record = observed.get("metadata_state_record") or {}
+    gates = [
+        _gate(
+            "runtime_identity",
+            "v0.59.93 runtime and independently expected identity are exact",
+            runtime_exact
+            and release.get("atlas_version") == "v0.59.93",
+            "The loaded runtime identity is unavailable or differs.",
+        ),
+        _gate(
+            "repository_identity",
+            "Repository identity and protected-path attestations are exact",
+            request.repository_head
+            == request.repository_origin_main
+            == request.expected_runtime_identity.atlas_commit
+            and request.repository_tag == "v0.59.93"
+            and request.repository_branch == "main"
+            and request.repository_working_tree_clean
+            and request.protected_paths_unchanged,
+            "Repository identity, cleanliness, or protected paths differ.",
+        ),
+        _gate(
+            "fresh_evidence",
+            "Fresh signed schema-v1 browser evidence is valid",
+            evidence_valid,
+            evidence_reason or "Fresh signed schema-v1 evidence is invalid.",
+        ),
+        _gate(
+            "read_only_observation",
+            "WordPress observation succeeded using GET requests only",
+            observed.get("wordpress_request_performed") is True
+            and observed.get("wordpress_request_methods") == ["GET"],
+            "Authenticated WordPress read-only observation is unavailable.",
+        ),
+        _gate(
+            "audit_identity",
+            "Audit ID 2 is bound to Atlas page 41 and WordPress page 8",
+            audit.id == 2
+            and audit.generated_page_id == 41
+            and audit.wordpress_post_id == 8,
+            "The selected audit identity differs.",
+        ),
+        _gate(
+            "retired_audit_preserved",
+            "Historical Audit ID 1 remains authorization-retired",
+            bool(
+                audit_one
+                and audit_one.status == "authorization_retired"
+                and audit_one.retirement_reason == RETIREMENT_REASON
+            ),
+            "Historical Audit ID 1 is missing or no longer authorization-retired.",
+        ),
+        _gate(
+            "audit_recovery_state",
+            "Audit ID 2 is the exact known recovery-required activation incident",
+            audit.status == "recovery_required"
+            and audit.transition_history == expected_history
+            and failed_codes
+            == {
+                "active_inventory",
+                "protected_state",
+                "verification_stable_identity",
+            }
+            and audit.error_code == "recovery_required",
+            "Audit status, history, or verifier-defect signature differs.",
+        ),
+        _gate(
+            "original_activation_write",
+            "Exactly one original fixed Bootstrap activation write is preserved",
+            audit.wordpress_write_count == 1
+            and audit.wordpress_write_scope == ACTIVATION_SCOPE,
+            "The original activation write record is missing or differs.",
+        ),
+        _gate(
+            "activation_handle_consumed",
+            "No raw activation handle remains in process memory",
+            not _activation_handles,
+            "An activation handle remains live.",
+        ),
+        _gate(
+            "checksum_record",
+            "The durable checksum result and source remain exact",
+            audit.checksum_verification_result == "matched"
+            and audit.checksum_verification_source
+            == upgrade.BOOTSTRAP_STATUS_ROUTE,
+            "The durable checksum result or source differs.",
+        ),
+        _gate(
+            "bootstrap_inventory_shape",
+            "Bootstrap 0.3.0 is installed once, ordinary-active, and not network-active",
+            classification["classification"] == "exact_active"
+            and classification["count"] == 1
+            and classification["conflict_count"] == 0,
+            "Bootstrap identity, count, version, path, or active status differs.",
+        ),
+        _gate(
+            "bootstrap_checksum",
+            "Bootstrap executable checksum remains exact",
+            bootstrap_status.get("status_code") == 200
+            and bootstrap_status.get("request_method") == "GET"
+            and bootstrap_status.get("bootstrap_checksum")
+            == BOOTSTRAP_ENTRY_SHA256,
+            "Bootstrap checksum is unavailable or differs.",
+        ),
+        _gate(
+            "plugin_inventory",
+            "Only the authorized Bootstrap inactive-to-active transition changed full inventory",
+            observed.get("plugin_inventory_hash") == expected_post.get("plugins")
+            and _without_bootstrap(observed.get("plugins", []))
+            == _without_bootstrap((audit.upload_snapshot or {}).get("plugins", [])),
+            "Full plugin inventory contains an unexpected change.",
+        ),
+        _gate(
+            "active_inventory",
+            "Active inventory is the exact deterministic post-activation inventory",
+            observed.get("active_plugin_inventory_hash")
+            == expected_post.get("active"),
+            "Active inventory differs from the one authorized activation.",
+        ),
+        _gate(
+            "metadata_bridge",
+            "Metadata Bridge remains active at version 0.57.6",
+            plugin_status.get("version") == "0.57.6"
+            and plugin_status.get("active") is True,
+            "Metadata Bridge version or active state differs.",
+        ),
+        _gate(
+            "metadata_state",
+            "Payload, revision, rendering, and Atlas metadata rows remain exact",
+            status_snapshot.get("rendering_enabled") is False
+            and status_snapshot.get("payload_hash")
+            == "fe24398ee322ca8557814feb034a0ccff0302d5d26b6ea47b11001567854711d"
+            and str(status_snapshot.get("revision")) == "1"
+            and observed.get("metadata_state_rows") == 1
+            and observed.get("metadata_sync_audit_rows") == 0
+            and metadata_state_record.get("status") == "staged"
+            and metadata_state_record.get("payload_hash")
+            == "fe24398ee322ca8557814feb034a0ccff0302d5d26b6ea47b11001567854711d"
+            and str(metadata_state_record.get("wordpress_revision")) == "1",
+            "Metadata payload, revision, rendering, or Atlas row counts differ.",
+        ),
+        _gate(
+            "durable_protected_state",
+            "Page, body, media, settings, payload, revision, rendering, and purge count remain exact",
+            _protected_non_rendered(observed)
+            == _protected_non_rendered(
+                audit.protected_state,
+                already_protected=True,
+            ),
+            "Durable protected state changed.",
+        ),
+        _gate(
+            "stable_public_identity",
+            "Origin, URL, HTTP status, provider family, privacy, and signed page identity remain exact",
+            comparison["compatible"] is True,
+            f"Stable public identity differs: {comparison.get('reason_code')}.",
+        ),
+        _gate(
+            "pending_operations",
+            "No other Atlas lifecycle mutation is pending",
+            not _pending_operation_exists(session),
+            "Another lifecycle mutation is pending.",
+        ),
+        _gate(
+            "conflicting_audit",
+            "No conflicting Bootstrap-establishment audit is unresolved",
+            not other_unresolved,
+            "Another Bootstrap-establishment audit is unresolved.",
+        ),
+        _gate(
+            "not_previously_reconciled",
+            "Audit ID 2 has not already been reconciled",
+            audit.reconciliation_reason is None
+            and audit.reconciliation_handle_fingerprint is None
+            and audit.reconciled_at is None,
+            "Audit ID 2 was already reconciled.",
+        ),
+        *backup_gates,
+    ]
+    inspected = {
+        **observed,
+        "bootstrap_classification": classification,
+        "post_activation_transport_identity": comparison,
+        "expected_post_inventories": {
+            "plugins": expected_post.get("plugins"),
+            "active": expected_post.get("active"),
+        },
+        "reconciliation_wordpress_write_count": 0,
+        "reconciliation_plugin_write_count": 0,
+        "reconciliation_cache_write_count": 0,
+        "reconciliation_atlas_write_count": 0,
+    }
+    return inspected, gates, backup
+
+
+def _activation_reconciliation_backup(request, release, audit):
+    summary = {
+        "file_name": request.atlas_data_backup_file,
+        "sha256": request.atlas_data_backup_sha256,
+        "size": request.atlas_data_backup_size,
+        "created_at": request.atlas_data_backup_created_at.astimezone(UTC).isoformat()
+        if request.atlas_data_backup_created_at.tzinfo
+        else None,
+        "onedrive_path": request.atlas_data_backup_onedrive_path,
+        "onedrive_synced": request.atlas_data_backup_onedrive_synced,
+    }
+    path = None
+    payload = None
+    try:
+        path = resolve_backup_download(request.atlas_data_backup_file)
+        payload = load_backup(path)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        structural = True
+    except (BackupValidationError, OSError, KeyError, TypeError, ValueError):
+        digest = None
+        structural = False
+    metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
+    records = (
+        payload.get("data", {}).get("wordpress_bootstrap_establishment_audits", [])
+        if isinstance(payload, dict)
+        else []
+    )
+    backup_audit = next(
+        (item for item in records if item.get("id") == audit.id),
+        None,
+    )
+    try:
+        created_at = _timestamp(metadata.get("created_at"))
+        runtime_generated_at = _timestamp(release.get("generated_at"))
+    except (TypeError, ValueError):
+        created_at = runtime_generated_at = None
+    onedrive_name = PureWindowsPath(
+        request.atlas_data_backup_onedrive_path
+    ).name
+    gates = [
+        _gate(
+            "atlas_data_backup_structure",
+            "Fresh Atlas Data backup is structurally valid",
+            structural,
+            "Atlas Data backup is unavailable or structurally invalid.",
+        ),
+        _gate(
+            "atlas_data_backup_identity",
+            "Atlas Data backup filename, size, and SHA-256 are exact",
+            bool(
+                path
+                and path.name == request.atlas_data_backup_file
+                and onedrive_name == request.atlas_data_backup_file
+                and path.stat().st_size == request.atlas_data_backup_size
+                and digest == request.atlas_data_backup_sha256
+            ),
+            "Atlas Data backup filename, size, or checksum differs.",
+        ),
+        _gate(
+            "atlas_data_backup_fresh",
+            "Atlas Data backup was created after the loaded v0.59.93 runtime",
+            bool(
+                created_at
+                and runtime_generated_at
+                and request.atlas_data_backup_created_at.tzinfo
+                and created_at
+                == request.atlas_data_backup_created_at.astimezone(UTC)
+                and created_at >= runtime_generated_at
+            ),
+            "Atlas Data backup predates the loaded v0.59.93 runtime or has a mismatched timestamp.",
+        ),
+        _gate(
+            "atlas_data_backup_audit",
+            "Atlas Data backup preserves Audit ID 2 before reconciliation",
+            bool(
+                backup_audit
+                and backup_audit.get("status") == "recovery_required"
+                and backup_audit.get("wordpress_write_count") == 1
+                and backup_audit.get("atlas_write_count") == audit.atlas_write_count
+                and backup_audit.get("transition_history")
+                == audit.transition_history
+            ),
+            "Atlas Data backup does not preserve the exact pre-reconciliation audit.",
+        ),
+        _gate(
+            "atlas_data_backup_onedrive",
+            "OneDrive backup path and synchronization are explicitly confirmed",
+            request.atlas_data_backup_onedrive_synced
+            and bool(onedrive_name == request.atlas_data_backup_file),
+            "OneDrive backup synchronization is unconfirmed.",
+        ),
+    ]
+    return summary, gates
+
+
+def _activation_reconciliation_binding(request, audit, inspected, backup, expires_at):
+    comparison = inspected.get("post_activation_transport_identity", {})
+    return {
+        "action": "reconcile_bootstrap_activation_without_wordpress_write",
+        "audit": {
+            "id": audit.id,
+            "status": audit.status,
+            "history": audit.transition_history,
+            "wordpress_write_count": audit.wordpress_write_count,
+            "atlas_write_count": audit.atlas_write_count,
+            "checksum_result": audit.checksum_verification_result,
+            "row_identity": _activation_reconciliation_audit_identity(audit),
+        },
+        "runtime": request.expected_runtime_identity.model_dump(mode="json"),
+        "repository": {
+            "head": request.repository_head,
+            "origin_main": request.repository_origin_main,
+            "tag": request.repository_tag,
+            "branch": request.repository_branch,
+            "clean": request.repository_working_tree_clean,
+            "protected": request.protected_paths_unchanged,
+        },
+        "backup": backup,
+        "evidence": {
+            "id": request.manual_browser_evidence.evidence_id,
+            "schema": request.manual_browser_evidence.evidence_schema,
+            "version": request.manual_browser_evidence.evidence_schema_version,
+            "head_hash": request.manual_browser_evidence.rendered_head_hash,
+            "visible_hash": request.manual_browser_evidence.visible_content_hash,
+            "expires_at": request.manual_browser_evidence.expires_at,
+        },
+        "current": {
+            "inventories": _inventories(inspected),
+            "protected": _protected_non_rendered(inspected),
+            "bootstrap_checksum": inspected.get("bootstrap_status", {}).get(
+                "bootstrap_checksum"
+            ),
+            "transport_identity": comparison.get("canonical_fingerprint"),
+        },
+        "reason": ACTIVATION_RECONCILIATION_REASON,
+        "expected_final_status": "verified",
+        "expected_history_append": ACTIVATION_RECONCILIATION_HISTORY,
+        "expected_writes": {
+            "wordpress": 0,
+            "plugin": 0,
+            "cache": 0,
+            "atlas": 1,
+        },
+        "expires_at": expires_at.astimezone(UTC).isoformat()
+        if expires_at
+        else None,
+    }
+
+
+def _activation_reconciliation_audit_identity(audit):
+    return _hash(
+        {
+            "id": audit.id,
+            "status": audit.status,
+            "history": audit.transition_history,
+            "wordpress_write_count": audit.wordpress_write_count,
+            "wordpress_write_scope": audit.wordpress_write_scope,
+            "atlas_write_count": audit.atlas_write_count,
+            "checksum_result": audit.checksum_verification_result,
+            "checksum_source": audit.checksum_verification_source,
+            "failed_gates": [
+                item.get("code")
+                for item in audit.gate_results
+                if item.get("passed") is False
+            ],
+            "reconciliation_reason": audit.reconciliation_reason,
+        }
+    )
+
+
+def _activation_reconciliation_result(
+    audit,
+    *,
+    inspected,
+    gates,
+    request_atlas_write_count,
+    idempotent,
+):
+    return WordPressBootstrapActivationReconciliationResult(
+        state_history=audit.transition_history,
+        binding_hash=audit.reconciliation_binding_hash or "",
+        reconciliation_handle_fingerprint=(
+            audit.reconciliation_handle_fingerprint or ""
+        ),
+        request_atlas_write_count=request_atlas_write_count,
+        cumulative_atlas_write_count=audit.atlas_write_count,
+        idempotent_replay=idempotent,
+        inspected_state=inspected,
+        gate_results=gates,
     )
 
 
@@ -902,18 +1657,52 @@ def _inspect_against_audit(session, page_id, request, audit, *, require_inactive
     base = upgrade.plugin_upgrade_preflight(session, page_id, request, issue_handle=False)
     classification = _classify(base.inspected_state.get("plugins", []))
     expected_kind = "exact_inactive" if require_inactive else "exact_active"
-    verification_comparison = _verification_stable_comparison(audit, base.inspected_state)
+    verification_comparison = _verification_stable_comparison(
+        audit,
+        base.inspected_state,
+        allow_post_mutation_cache_variation=not require_inactive,
+    )
     verification_drift = verification_comparison["reason_code"] if not verification_comparison["compatible"] else None
+    expected_post = _expected_post_activation_inventories(audit)
     base.inspected_state["manual_install_transport_identity"] = verification_comparison
     gates = _base_gates(base) + [
         _gate("bootstrap_inventory_shape", f"Bootstrap inventory is {expected_kind.replace('_', ' ')}", classification["classification"] == expected_kind, "Bootstrap path, version, status, count, or inventory is not exact."),
         _gate("unrelated_plugin_drift", "No unrelated plugin changed", _without_bootstrap(base.inspected_state.get("plugins", [])) == _without_bootstrap(audit.pre_snapshot.get("plugins", [])), "An unrelated plugin changed."),
-        _gate("protected_state", "Page, body, media, settings, rendering, payload, revision, and cache remain bound", _protected_non_rendered(base.inspected_state) == _protected_non_rendered(audit.protected_state, already_protected=True), "Protected state changed."),
+        _gate("protected_state", "Page, body, media, settings, rendering, payload, revision, and cache-purge count remain bound", _protected_non_rendered(base.inspected_state) == _protected_non_rendered(audit.protected_state, already_protected=True), "Protected state changed."),
         _gate("verification_stable_identity", "Fresh evidence matches the authorized stable public identity", verification_drift is None, "Fresh rendered evidence changed stable public identity."),
         _gate("verification_rendered_hashes", "Fresh rendered hashes match authorization", verification_drift != "manual_install_verification_rendered_hash_drift", "Rendered-head, visible-content, or raw-DOM identity changed."),
         _gate("verification_privacy", "Fresh evidence preserves the credential-free privacy classification", verification_drift != "manual_install_verification_privacy_transport_drift", "Cookie, authentication, admin, login, challenge, or error classification changed."),
         _gate("active_backup_binding", "The request uses the current audit-bound replacement backup", not (audit.backup_renewals or []) or _normalized_backup(_backup(request)) == _normalized_backup(_active_backup(audit, include_deadline=False)), "The request does not use the current guarded replacement backup identity."),
-        _gate("active_inventory", "Active inventory matches the required lifecycle state", (base.inspected_state.get("active_plugin_inventory_hash") == audit.source_inventories.get("active")) if require_inactive else True, "Active inventory changed before guarded activation."),
+        _gate(
+            "plugin_inventory",
+            "Full plugin inventory matches the exact lifecycle state",
+            (
+                base.inspected_state.get("plugin_inventory_hash")
+                == audit.upload_inventories.get("plugins")
+            )
+            if require_inactive and audit.upload_inventories
+            else (
+                base.inspected_state.get("plugin_inventory_hash")
+                == expected_post.get("plugins")
+            )
+            if not require_inactive
+            else True,
+            "Full plugin inventory differs from the exact authorized lifecycle state.",
+        ),
+        _gate(
+            "active_inventory",
+            "Active inventory matches the exact lifecycle state",
+            (
+                base.inspected_state.get("active_plugin_inventory_hash")
+                == audit.source_inventories.get("active")
+            )
+            if require_inactive
+            else (
+                base.inspected_state.get("active_plugin_inventory_hash")
+                == expected_post.get("active")
+            ),
+            "Active inventory differs from the exact authorized lifecycle state.",
+        ),
     ]
     return base, gates, classification
 
@@ -942,8 +1731,10 @@ def _classify(plugins):
         kind = "wrong_version"
     elif candidates[0].get("status") == "inactive":
         kind = "exact_inactive"
-    elif candidates[0].get("status") in {"active", "network-active"}:
+    elif candidates[0].get("status") == "active" and candidates[0].get("network_only") is False:
         kind = "exact_active"
+    elif candidates[0].get("status") == "network-active" or candidates[0].get("network_only") is True:
+        kind = "network_active"
     else:
         kind = "installation_partial"
     return {"classification": kind, "count": len(candidates), "conflict_count": len(conflicts), "entry": candidates[0] if len(candidates) == 1 else None}
@@ -962,7 +1753,15 @@ def _activate_fixed_entry(session):
                 headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
             )
         payload = response.json() if response.status_code == 200 else {}
-        accepted = isinstance(payload, dict) and response.status_code == 200 and payload.get("status") in {"active", "network-active"} and payload.get("version") == BOOTSTRAP_VERSION and str(payload.get("plugin", "")).replace("\\", "/") in {BOOTSTRAP_ENTRY, BOOTSTRAP_REST_ID}
+        accepted = (
+            isinstance(payload, dict)
+            and response.status_code == 200
+            and payload.get("status") == "active"
+            and payload.get("network_only") is not True
+            and payload.get("version") == BOOTSTRAP_VERSION
+            and str(payload.get("plugin", "")).replace("\\", "/")
+            in {BOOTSTRAP_ENTRY, BOOTSTRAP_REST_ID}
+        )
         return {"accepted": accepted, "request_performed": True, "status_code": response.status_code, "request_keys": ["status"]}
     except (httpx.HTTPError, ValueError):
         return {"accepted": False, "request_performed": True, "_error": "fixed_activation_unavailable", "request_keys": ["status"]}
@@ -1180,13 +1979,44 @@ def _inventories(snapshot):
     return {"plugins": snapshot.get("plugin_inventory_hash"), "active": snapshot.get("active_plugin_inventory_hash")}
 
 
+def _expected_post_activation_inventories(audit):
+    snapshot = audit.upload_snapshot or audit.pre_snapshot or {}
+    plugins = json.loads(json.dumps(snapshot.get("plugins", []), sort_keys=True, default=str))
+    candidates = [
+        item
+        for item in plugins
+        if str(item.get("plugin", "")).replace("\\", "/") in {BOOTSTRAP_ENTRY, BOOTSTRAP_REST_ID}
+    ]
+    if len(candidates) != 1:
+        return {}
+    candidate = candidates[0]
+    if (
+        candidate.get("version") != BOOTSTRAP_VERSION
+        or candidate.get("status") != "inactive"
+        or candidate.get("network_only") is not False
+    ):
+        return {}
+    candidate["status"] = "active"
+    active_plugins = sorted(
+        str(item.get("plugin"))
+        for item in plugins
+        if item.get("status") == "active"
+    )
+    return {
+        "plugins": _hash(plugins),
+        "active": _hash(active_plugins),
+        "plugin_records": plugins,
+        "active_plugins": active_plugins,
+    }
+
+
 def _protected(snapshot):
     status = snapshot.get("plugin_status", {}).get("snapshot", {})
     return {
         "page": snapshot.get("page_snapshot_hash"), "body": snapshot.get("page_body_hash"),
         "media31": snapshot.get("media31_snapshot_hash"), "media32": snapshot.get("media32_snapshot_hash"),
         "site": snapshot.get("site"), "rendered": _protected_rendered(snapshot.get("rendered")),
-        "cache_headers": _stable_diagnostic_headers(snapshot.get("cache_headers")), "cache_purge_count": snapshot.get("cache_purge_count", 0),
+        "cache_purge_count": snapshot.get("cache_purge_count", 0),
         "rendering_enabled": status.get("rendering_enabled"), "payload_hash": status.get("payload_hash"),
         "revision": str(status.get("revision")), "payload": status.get("payload"),
     }
@@ -1288,7 +2118,12 @@ def _verification_stable_drift_reason(audit, snapshot):
     return None if comparison["compatible"] else comparison["reason_code"]
 
 
-def _verification_stable_comparison(audit, snapshot):
+def _verification_stable_comparison(
+    audit,
+    snapshot,
+    *,
+    allow_post_mutation_cache_variation=False,
+):
     before = _stable_verification_observation(audit.pre_snapshot or {})
     after = _stable_verification_observation(snapshot)
     authorization_fingerprint = _hash(before)
@@ -1318,7 +2153,11 @@ def _verification_stable_comparison(audit, snapshot):
     if before_identity != after_identity:
         return {**result, "reason_code": "manual_install_verification_stable_page_identity_mismatch"}
 
-    transport = _cross_release_transport_compatibility(before, after)
+    transport = _cross_release_transport_compatibility(
+        before,
+        after,
+        allow_cache_variation=allow_post_mutation_cache_variation,
+    )
     if not transport["compatible"]:
         if raw_equal:
             return {**result, "compatible": True, "reason_code": "manual_install_verification_stable_identity_exact"}
@@ -1341,7 +2180,12 @@ def _verification_stable_comparison(audit, snapshot):
     }
 
 
-def _cross_release_transport_compatibility(before, after):
+def _cross_release_transport_compatibility(
+    before,
+    after,
+    *,
+    allow_cache_variation=False,
+):
     """Canonicalize representation without weakening response security meaning.
 
     The historical raw observation remains immutable.  This derived comparison
@@ -1384,7 +2228,12 @@ def _cross_release_transport_compatibility(before, after):
         return {"compatible": False, "reason_code": "manual_install_verification_provider_identity_drift"}
     old_cache_state = _transport_cache_state(old_provider)
     new_cache_state = _transport_cache_state(new_provider)
-    if old_cache_state != new_cache_state:
+    allowed_cache_states = {"hit", "miss", "expired", "bypass"}
+    if old_cache_state != new_cache_state and not (
+        allow_cache_variation
+        and old_cache_state in allowed_cache_states
+        and new_cache_state in allowed_cache_states
+    ):
         return {"compatible": False, "reason_code": "manual_install_verification_provider_identity_drift"}
 
     old_source = _transport_response_source(old)
@@ -1409,7 +2258,11 @@ def _cross_release_transport_compatibility(before, after):
             "redirect_count": 0,
             "content_type_class": "html",
             "provider": "siteground-nginx",
-            "cache_state": old_cache_state,
+            "cache_state": (
+                "post_mutation_cache_state_variation"
+                if old_cache_state != new_cache_state
+                else old_cache_state
+            ),
             "response_source": old_source,
             "public_identity_source": "signed_browser_evidence",
             "head_hash": after.get("rendered_head_hash"),
@@ -1517,17 +2370,6 @@ def _raise_verification_conflict(code, message):
     raise HTTPException(409, detail={"reason_code": code, "message": message})
 
 
-def _stable_diagnostic_headers(headers):
-    if not isinstance(headers, dict):
-        return headers
-    volatile = {"age", "date", "expires", "last-modified"}
-    return {
-        str(key).lower(): value
-        for key, value in headers.items()
-        if str(key).lower() not in volatile
-    }
-
-
 def _protected_rendered(rendered):
     if not isinstance(rendered, dict):
         return rendered
@@ -1536,13 +2378,17 @@ def _protected_rendered(rendered):
     if isinstance(public, dict):
         public.pop("observed_at", None)
         public.pop("observation_completed_at", None)
-        public["cache_headers"] = _stable_diagnostic_headers(public.get("cache_headers"))
-    value["cache_headers"] = _stable_diagnostic_headers(value.get("cache_headers"))
+        public.pop("cache_headers", None)
+    value.pop("cache_headers", None)
     return value
 
 
-def _protected_equal(audit, snapshot):
-    comparison = _verification_stable_comparison(audit, snapshot)
+def _protected_equal(audit, snapshot, *, allow_post_mutation_cache_variation=False):
+    comparison = _verification_stable_comparison(
+        audit,
+        snapshot,
+        allow_post_mutation_cache_variation=allow_post_mutation_cache_variation,
+    )
     return (
         _protected_non_rendered(snapshot)
         == _protected_non_rendered(audit.protected_state, already_protected=True)
@@ -2182,6 +3028,54 @@ def _discard_retirement(handle):
             timer.cancel()
 
 
+def _store_activation_reconciliation(request, audit_id, binding_hash, expires_at):
+    handle = secrets.token_urlsafe(32)
+    entry = _ActivationReconciliationHandle(
+        request=request.model_copy(deep=True),
+        audit_id=audit_id,
+        binding_hash=binding_hash,
+        expires_at=expires_at,
+    )
+    with _lock:
+        _activation_reconciliation_handles[handle] = entry
+        timer = Timer(
+            max(0.0, (expires_at - datetime.now(UTC)).total_seconds()),
+            _discard_activation_reconciliation,
+            args=(handle,),
+        )
+        timer.daemon = True
+        _timers[("activation_reconciliation", handle)] = timer
+        timer.start()
+    return handle
+
+
+def _consume_activation_reconciliation(handle):
+    with _lock:
+        entry = _activation_reconciliation_handles.pop(handle, None)
+        timer = _timers.pop(("activation_reconciliation", handle), None)
+        if timer:
+            timer.cancel()
+    if not entry:
+        raise HTTPException(
+            422,
+            "Activation reconciliation handle is unknown, expired, consumed, "
+            "or restart-invalidated.",
+        )
+    if entry.expires_at <= datetime.now(UTC):
+        raise HTTPException(422, "Activation reconciliation handle expired.")
+    return entry
+
+
+def _discard_activation_reconciliation(handle):
+    if not handle:
+        return
+    with _lock:
+        _activation_reconciliation_handles.pop(handle, None)
+        timer = _timers.pop(("activation_reconciliation", handle), None)
+        if timer:
+            timer.cancel()
+
+
 def _retirement_result(audit, *, request_atlas_write_count=0, idempotent=False):
     return WordPressBootstrapAuthorizationRetirementResult(
         establishment_audit_id=audit.id or 0,
@@ -2270,7 +3164,13 @@ def _expire(kind, handle):
 def _clear_establishment_handles():
     with _lock:
         for timer in _timers.values(): timer.cancel()
-        _manual_handles.clear(); _installed_handles.clear(); _activation_handles.clear(); _renewal_handles.clear(); _retirement_handles.clear(); _timers.clear()
+        _manual_handles.clear()
+        _installed_handles.clear()
+        _activation_handles.clear()
+        _renewal_handles.clear()
+        _retirement_handles.clear()
+        _activation_reconciliation_handles.clear()
+        _timers.clear()
 
 
 def _hash(value):

@@ -1007,6 +1007,47 @@ export type WordPressBootstrapEstablishmentResult = {
   original_backup:Record<string,unknown>; active_backup:Record<string,unknown>; backup_renewals:Record<string,unknown>[];
   recovery_recommendation:string; further_action_required:boolean;
 };
+export type WordPressBootstrapActivationReconciliationRequest = {
+  establishment_audit_id:2; operator:string;
+  manual_browser_evidence:WordPressManualBrowserEvidence;
+  expected_runtime_identity:{
+    atlas_version:string; atlas_commit:string; atlas_tag:string;
+    manifest_sha256:string; source_compatibility_id:string;
+  };
+  repository_head:string; repository_origin_main:string; repository_tag:"v0.59.93";
+  repository_branch:"main"; repository_working_tree_clean:boolean;
+  protected_paths_unchanged:boolean; atlas_data_backup_file:string;
+  atlas_data_backup_sha256:string; atlas_data_backup_size:number;
+  atlas_data_backup_created_at:string; atlas_data_backup_onedrive_path:string;
+  atlas_data_backup_onedrive_synced:boolean;
+};
+export type WordPressBootstrapActivationReconciliationApplyRequest = {
+  reconciliation_handle:string; confirmation_phrase:string;
+};
+export type WordPressBootstrapActivationReconciliationPreflight = {
+  page_id:41; wordpress_post_id:8; establishment_audit_id:2;
+  status:"bootstrap_activation_reconciliation_blocked"|"bootstrap_activation_reconciliation_ready";
+  reconciliation_ready:boolean; reconciliation_handle?:string|null;
+  reconciliation_handle_fingerprint?:string|null; binding_hash?:string|null;
+  confirmation_phrase?:string|null; expires_at?:string|null; expected_final_status:"verified";
+  expected_history_append:"post_activation_verifier_contract_defect_reconciled";
+  expected_wordpress_write_count:0; expected_plugin_write_count:0; expected_cache_write_count:0;
+  expected_atlas_write_count:1; atlas_data_backup:Record<string,unknown>;
+  inspected_state:Record<string,unknown>; gate_results:WordPressDeploymentGate[];
+  inspection_only:true; audit_created:false;
+};
+export type WordPressBootstrapActivationReconciliationResult = {
+  page_id:41; wordpress_post_id:8; establishment_audit_id:2; status:"verified";
+  reconciliation_reason:"post_activation_verifier_contract_defect_reconciled";
+  state_history:string[]; binding_hash:string; reconciliation_handle_fingerprint:string;
+  wordpress_write_count:0; plugin_write_count:0; cache_write_count:0;
+  request_atlas_write_count:0|1; cumulative_atlas_write_count:number;
+  original_activation_write_count:1; original_activation_write_preserved:true;
+  original_failure_history_preserved:true; new_audit_created:false;
+  new_authorization_created:false; idempotent_replay:boolean;
+  inspected_state:Record<string,unknown>; gate_results:WordPressDeploymentGate[];
+  further_action_required:false;
+};
 export type WordPressBootstrapAuthorizationRetirementPreflight = {
   page_id:41; wordpress_post_id:8; establishment_audit_id:number; ready:boolean; status:string;
   current_status:string; retirement_reason:"manual_install_verification_genuine_transport_drift";

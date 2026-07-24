@@ -1663,6 +1663,103 @@ class WordPressBootstrapRecoveryAssessment(SQLModel):
     automatic_recovery_performed: Literal[False] = False
 
 
+class WordPressBootstrapActivationReconciliationRequest(SQLModel):
+    """Fresh read-only proof for reconciling the exact v0.59.92 activation result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    establishment_audit_id: Literal[2]
+    operator: str = Field(min_length=3, max_length=200)
+    manual_browser_evidence: WordPressManualBrowserEvidence
+    expected_runtime_identity: WordPressDeploymentExpectedRuntimeIdentity
+    repository_head: str = Field(min_length=40, max_length=40)
+    repository_origin_main: str = Field(min_length=40, max_length=40)
+    repository_tag: Literal["v0.59.93"]
+    repository_branch: Literal["main"]
+    repository_working_tree_clean: bool
+    protected_paths_unchanged: bool
+    atlas_data_backup_file: str = Field(min_length=6, max_length=255)
+    atlas_data_backup_sha256: str = Field(min_length=64, max_length=64)
+    atlas_data_backup_size: int = Field(gt=0)
+    atlas_data_backup_created_at: datetime
+    atlas_data_backup_onedrive_path: str = Field(min_length=10, max_length=1000)
+    atlas_data_backup_onedrive_synced: bool
+
+    @field_validator(
+        "repository_head",
+        "repository_origin_main",
+        "atlas_data_backup_sha256",
+    )
+    @classmethod
+    def validate_reconciliation_hashes(cls, value: str) -> str:
+        if re.fullmatch(r"[0-9a-f]+", value) is None:
+            raise ValueError("Reconciliation hashes must be lowercase hexadecimal.")
+        return value
+
+
+class WordPressBootstrapActivationReconciliationPreflight(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    establishment_audit_id: Literal[2] = 2
+    status: Literal[
+        "bootstrap_activation_reconciliation_blocked",
+        "bootstrap_activation_reconciliation_ready",
+    ]
+    reconciliation_ready: bool
+    reconciliation_handle: str | None = None
+    reconciliation_handle_fingerprint: str | None = None
+    binding_hash: str | None = None
+    confirmation_phrase: str | None = None
+    expires_at: datetime | None = None
+    expected_final_status: Literal["verified"] = "verified"
+    expected_history_append: Literal[
+        "post_activation_verifier_contract_defect_reconciled"
+    ] = "post_activation_verifier_contract_defect_reconciled"
+    expected_wordpress_write_count: Literal[0] = 0
+    expected_plugin_write_count: Literal[0] = 0
+    expected_cache_write_count: Literal[0] = 0
+    expected_atlas_write_count: Literal[1] = 1
+    atlas_data_backup: dict[str, Any]
+    inspected_state: dict[str, Any]
+    gate_results: list[WordPressDraftGateResult]
+    inspection_only: Literal[True] = True
+    audit_created: Literal[False] = False
+
+
+class WordPressBootstrapActivationReconciliationApplyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reconciliation_handle: str = Field(min_length=32, max_length=200)
+    confirmation_phrase: str = Field(min_length=1, max_length=160)
+
+
+class WordPressBootstrapActivationReconciliationResult(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    establishment_audit_id: Literal[2] = 2
+    status: Literal["verified"] = "verified"
+    reconciliation_reason: Literal[
+        "post_activation_verifier_contract_defect_reconciled"
+    ] = "post_activation_verifier_contract_defect_reconciled"
+    state_history: list[str]
+    binding_hash: str
+    reconciliation_handle_fingerprint: str
+    wordpress_write_count: Literal[0] = 0
+    plugin_write_count: Literal[0] = 0
+    cache_write_count: Literal[0] = 0
+    request_atlas_write_count: Literal[0, 1]
+    cumulative_atlas_write_count: int = Field(ge=0)
+    original_activation_write_count: Literal[1] = 1
+    original_activation_write_preserved: Literal[True] = True
+    original_failure_history_preserved: Literal[True] = True
+    new_audit_created: Literal[False] = False
+    new_authorization_created: Literal[False] = False
+    idempotent_replay: bool = False
+    inspected_state: dict[str, Any]
+    gate_results: list[WordPressDraftGateResult]
+    further_action_required: Literal[False] = False
+
+
 class WordPressBootstrapCleanupPreflightRequest(WordPressDeploymentBackupEvidence):
     """Immutable proof for deactivating the fixed upgrade bootstrap."""
 

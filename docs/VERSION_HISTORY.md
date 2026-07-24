@@ -1,4 +1,11 @@
-\# Project Atlas Version History
+# Project Atlas Version History
+
+## v0.59.93
+
+- Corrected post-activation verification so the exact Bootstrap 0.3.0 inactive-to-active transition is expected while duplicate, alternate-path, wrong-version, network-active, checksum, or unrelated plugin drift remains blocked.
+- Removed volatile SiteGround cache telemetry from durable protected-state equality and permitted HIT/MISS/EXPIRED/BYPASS variation only during post-mutation verification with origin, HTTP, provider, privacy, and signed page identity still exact.
+- Added a fresh-evidence, fresh-Data-backup, phrase-gated Atlas-only reconciliation for the exact Audit ID 2 verifier-defect state, preserving the original activation write and failure history while performing zero WordPress, plugin, or cache writes.
+- Added migration 0026 and Data Backup schema 0.40 so the reconciliation reason, binding, one-time handle fingerprint, and completion timestamp remain durable while older supported backups remain restorable.
 
 ## v0.59.92
 

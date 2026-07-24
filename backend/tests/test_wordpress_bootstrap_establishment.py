@@ -10,12 +10,15 @@ import pytest
 from fastapi import HTTPException
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.models import WordPressBootstrapEstablishmentAudit
+from app.models import WordPressBootstrapEstablishmentAudit, WordPressMetadataState
 from app.schemas.wordpress import (
     WordPressBootstrapActivationApplyRequest,
+    WordPressBootstrapActivationReconciliationApplyRequest,
+    WordPressBootstrapActivationReconciliationRequest,
     WordPressBootstrapManualInstallAuthorizeRequest,
     WordPressBootstrapManualInstallPreflightRequest,
     WordPressBootstrapManualInstallVerifyRequest,
+    WordPressDeploymentExpectedRuntimeIdentity,
 )
 from app.services import wordpress_bootstrap_establishment as establishment
 from app.services import wordpress_plugin_upgrade_0577 as upgrade
@@ -135,7 +138,12 @@ def snapshot(state="absent"):
     value["plugins"] = [item for item in value["plugins"] if not item["plugin"].startswith(establishment.BOOTSTRAP_DIRECTORY)]
     value["active_plugins"] = sorted(item["plugin"] for item in value["plugins"] if item["status"] == "active")
     if state in {"inactive", "active"}:
-        item = {"plugin": establishment.BOOTSTRAP_REST_ID, "version": "0.3.0", "status": state}
+        item = {
+            "plugin": establishment.BOOTSTRAP_REST_ID,
+            "version": "0.3.0",
+            "status": state,
+            "network_only": False,
+        }
         value["plugins"].append(item)
         if state == "active":
             value["active_plugins"].append(establishment.BOOTSTRAP_REST_ID)
@@ -158,6 +166,7 @@ def base_snapshot(value, state="absent"):
             establishment._gate("upgrade_bootstrap", "Bootstrap", False, "absent"),
             establishment._gate("bootstrap_establishment_audit", "Establishment", False, "not established yet"),
             establishment._gate("plugin_inventory", "Inventory", state == "absent", "changed"),
+            establishment._gate("active_inventory", "Active inventory", state == "absent", "changed"),
             establishment._gate("read_only_preflight", "Read only", True, ""),
         ],
     )
@@ -198,6 +207,170 @@ def test_manual_handoff_and_fixed_activation_success(db, monkeypatch):
         audit = session.exec(select(WordPressBootstrapEstablishmentAudit)).one()
         assert audit.checksum_verification_result == "matched"
         assert audit.inactive_checksum_verifiable is False and audit.approved_residual_risk is True
+        gate_by_code = {gate.code: gate for gate in result.gate_results}
+        assert gate_by_code["plugin_inventory"].passed
+        assert gate_by_code["active_inventory"].passed
+
+
+def test_post_activation_cache_state_variation_is_not_durable_protected_drift():
+    before = snapshot("absent")
+    after = snapshot("active")
+    for value, cache_state in ((before, "HIT"), (after, "MISS")):
+        public = value["rendered"]["public_http_observation"]
+        public["cache_headers"] = {
+            "server": "nginx",
+            "x-cache-enabled": "True",
+            "x-proxy-cache": cache_state,
+        }
+        public["transport_category"] = cache_state.lower()
+        public["transport_reason_code"] = f"cache_status_{cache_state.lower()}"
+    audit = SimpleNamespace(pre_snapshot=before)
+    strict = establishment._verification_stable_comparison(audit, after)
+    corrected = establishment._verification_stable_comparison(
+        audit,
+        after,
+        allow_post_mutation_cache_variation=True,
+    )
+    assert strict["compatible"] is False
+    assert corrected["compatible"] is True
+    transport = establishment._cross_release_transport_compatibility(
+        establishment._stable_verification_observation(before),
+        establishment._stable_verification_observation(after),
+        allow_cache_variation=True,
+    )
+    assert (
+        transport["canonical_transport"]["cache_state"]
+        == "post_mutation_cache_state_variation"
+    )
+    protected = establishment._protected(before)
+    assert "cache_headers" not in protected["rendered"]
+    assert (
+        "cache_headers"
+        not in protected["rendered"]["public_http_observation"]
+    )
+
+
+@pytest.mark.parametrize("new_cache_state", ["MISS", "EXPIRED", "BYPASS"])
+def test_post_activation_allows_only_bounded_cache_state_variation(
+    new_cache_state,
+):
+    before = snapshot("absent")
+    after = snapshot("active")
+    for value, cache_state in ((before, "HIT"), (after, new_cache_state)):
+        public = value["rendered"]["public_http_observation"]
+        public["cache_headers"] = {
+            "server": "nginx",
+            "x-cache-enabled": "True",
+            "x-proxy-cache": cache_state,
+            "x-proxy-cache-info": "DT:123",
+            "age": "47",
+        }
+        public["transport_category"] = cache_state.lower()
+        public["transport_reason_code"] = f"cache_status_{cache_state.lower()}"
+    result = establishment._verification_stable_comparison(
+        SimpleNamespace(pre_snapshot=before),
+        after,
+        allow_post_mutation_cache_variation=True,
+    )
+    assert result["compatible"] is True
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "origin",
+        "status",
+        "provider",
+        "privacy",
+        "challenge",
+        "rendered_head",
+        "visible_content",
+    ],
+)
+def test_post_activation_cache_exception_does_not_weaken_other_identity_gates(
+    mutation,
+):
+    before = snapshot("absent")
+    after = snapshot("active")
+    for value in (before, after):
+        public = value["rendered"]["public_http_observation"]
+        public["cache_headers"] = {
+            "server": "nginx",
+            "x-cache-enabled": "True",
+            "x-proxy-cache": "HIT",
+        }
+        public["transport_category"] = "hit"
+        public["transport_reason_code"] = "cache_status_hit"
+    public = after["rendered"]["public_http_observation"]
+    if mutation == "origin":
+        public["final_url"] = "https://example.invalid/"
+    elif mutation == "status":
+        public["status_code"] = 403
+    elif mutation == "provider":
+        public["cache_headers"]["server"] = "other"
+    elif mutation == "privacy":
+        after["rendered"]["privacy_attestations"] = {"cookies_stored": True}
+    elif mutation == "challenge":
+        public["challenge_page_detected"] = True
+    elif mutation == "rendered_head":
+        after["rendered"]["head_hash"] = "a" * 64
+        public["head_hash"] = "a" * 64
+    elif mutation == "visible_content":
+        after["rendered"]["visible_hash"] = "b" * 64
+        public["visible_hash"] = "b" * 64
+    result = establishment._verification_stable_comparison(
+        SimpleNamespace(pre_snapshot=before),
+        after,
+        allow_post_mutation_cache_variation=True,
+    )
+    assert result["compatible"] is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("page_snapshot_hash", "a" * 64),
+        ("page_body_hash", "b" * 64),
+        ("media31_snapshot_hash", "c" * 64),
+        ("media32_snapshot_hash", "d" * 64),
+        ("site", {"name": "Changed", "description": ""}),
+        ("cache_purge_count", 1),
+    ],
+)
+def test_durable_protected_state_rejects_page_media_settings_and_purge_drift(
+    field,
+    value,
+):
+    before = snapshot("absent")
+    after = deepcopy(before)
+    after[field] = value
+    assert establishment._protected_non_rendered(
+        after
+    ) != establishment._protected_non_rendered(
+        establishment._protected(before),
+        already_protected=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("rendering_enabled", True),
+        ("payload_hash", "f" * 64),
+        ("revision", "2"),
+        ("payload", {"changed": True}),
+    ],
+)
+def test_durable_protected_state_rejects_metadata_bridge_state_drift(field, value):
+    before = snapshot("absent")
+    after = deepcopy(before)
+    after["plugin_status"]["snapshot"][field] = value
+    assert establishment._protected_non_rendered(
+        after
+    ) != establishment._protected_non_rendered(
+        establishment._protected(before),
+        already_protected=True,
+    )
 
 
 def test_no_upload_remains_waiting(db, monkeypatch):
@@ -646,7 +819,9 @@ def test_post_activation_checksum_failure_enters_recovery_without_cleanup(db, mo
 @pytest.mark.parametrize(("items", "expected"), [
     ([], "no_upload_yet"),
     ([{"plugin": establishment.BOOTSTRAP_ENTRY, "version": "0.3.0", "status": "inactive"}], "exact_inactive"),
-    ([{"plugin": establishment.BOOTSTRAP_REST_ID, "version": "0.3.0", "status": "active"}], "exact_active"),
+    ([{"plugin": establishment.BOOTSTRAP_REST_ID, "version": "0.3.0", "status": "active", "network_only": False}], "exact_active"),
+    ([{"plugin": establishment.BOOTSTRAP_REST_ID, "version": "0.3.0", "status": "active", "network_only": True}], "network_active"),
+    ([{"plugin": establishment.BOOTSTRAP_REST_ID, "version": "0.3.0", "status": "network-active", "network_only": True}], "network_active"),
     ([{"plugin": establishment.BOOTSTRAP_REST_ID, "version": "0.2.0", "status": "inactive"}], "wrong_version"),
     ([{"plugin": establishment.BOOTSTRAP_REST_ID, "version": "0.3.0", "status": "inactive"}, {"plugin": establishment.BOOTSTRAP_ENTRY, "version": "0.3.0", "status": "inactive"}], "duplicate_bootstrap"),
     ([{"plugin": "project-atlas-upgrade-bootstrap/wrong", "version": "0.3.0", "status": "inactive"}], "installation_partial"),
@@ -825,7 +1000,24 @@ def test_source_contains_no_upload_or_generic_activation_capability():
     frontend = (upgrade.resolve_program_root() / "frontend/src/pages/WordPressMetadataBridgeInstallPage.tsx").read_text(encoding="utf-8")
     assert "localStorage" not in frontend
     assert establishment.MANUAL_PHRASE in source and establishment.ACTIVATION_PHRASE in source
-    assert "/deployment/upgrade-bootstrap/manual-install/preflight/{page_id}" in (__import__("pathlib").Path(__file__).resolve().parents[1] / "app/api/wordpress_routes.py").read_text(encoding="utf-8")
+    routes = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "app/api/wordpress_routes.py"
+    ).read_text(encoding="utf-8")
+    assert "/deployment/upgrade-bootstrap/manual-install/preflight/{page_id}" in routes
+    assert (
+        "/deployment/upgrade-bootstrap/recovery/reconciliation/preflight/{page_id}"
+        in routes
+    )
+    assert (
+        "/deployment/upgrade-bootstrap/recovery/reconciliation/apply/{page_id}"
+        in routes
+    )
+    assert (
+        establishment.ACTIVATION_RECONCILIATION_PHRASE
+        == "RECONCILE PROJECT ATLAS BOOTSTRAP ACTIVATION FOR AUDIT 2 "
+        "WITHOUT ANOTHER WORDPRESS WRITE"
+    )
 
 
 def test_migration_and_program_backup_include_dedicated_audit():
@@ -833,7 +1025,7 @@ def test_migration_and_program_backup_include_dedicated_audit():
     assert 'revision = "20260719_0023"' in migration
     assert 'down_revision = "20260717_0022"' in migration
     assert "wordpressbootstrapestablishmentaudit" in migration
-    assert backup_service.BACKUP_VERSION == "0.39"
+    assert backup_service.BACKUP_VERSION == "0.40"
     assert backup_service.BACKUP_MODELS["wordpress_bootstrap_establishment_audits"] is WordPressBootstrapEstablishmentAudit
 
 
@@ -865,3 +1057,369 @@ def test_quarantine_guard_is_wired_to_rendering_cache_lifecycle_and_cleanup():
     assert cache_source.count("assert_no_establishment_quarantine(session)") >= 2
     cleanup_source = (root / "wordpress_bootstrap_cleanup.py").read_text(encoding="utf-8")
     assert cleanup_source.count("assert_no_establishment_quarantine(session)") == 4
+
+
+def _reconciliation_audit(audit_id: int, *, status: str) -> WordPressBootstrapEstablishmentAudit:
+    active = snapshot("active")
+    inactive = snapshot("inactive")
+    return WordPressBootstrapEstablishmentAudit(
+        id=audit_id,
+        generated_page_id=41,
+        wordpress_post_id=8,
+        installation_audit_id=1,
+        activation_audit_id=1,
+        status=status,
+        retirement_reason=(
+            establishment.RETIREMENT_REASON
+            if status == "authorization_retired"
+            else None
+        ),
+        operator="Shawn Manchette",
+        bootstrap_slug=establishment.BOOTSTRAP_SLUG,
+        bootstrap_directory=establishment.BOOTSTRAP_DIRECTORY,
+        bootstrap_path=establishment.BOOTSTRAP_ENTRY,
+        bootstrap_version=establishment.BOOTSTRAP_VERSION,
+        bootstrap_zip_filename=establishment.BOOTSTRAP_ZIP,
+        bootstrap_zip_sha256=establishment.BOOTSTRAP_ZIP_SHA256,
+        bootstrap_entry_sha256=establishment.BOOTSTRAP_ENTRY_SHA256,
+        manual_phrase_hash="a" * 64,
+        activation_phrase_hash="b" * 64,
+        manual_handle_fingerprint=f"{audit_id:x}".rjust(64, "c"),
+        activation_handle_fingerprint=(
+            f"{audit_id:x}".rjust(64, "d") if audit_id == 2 else None
+        ),
+        manual_binding_hash=f"{audit_id:x}".rjust(64, "e"),
+        activation_binding_hash=(
+            f"{audit_id:x}".rjust(64, "f") if audit_id == 2 else None
+        ),
+        release_identity={"atlas_version": "v0.59.92"},
+        backup_evidence={"reference": "Atlas Backup"},
+        browser_evidence_id=f"orlando-original-{audit_id}",
+        pre_snapshot=snapshot("absent"),
+        upload_snapshot=inactive if audit_id == 2 else None,
+        final_snapshot=active if audit_id == 2 else None,
+        source_inventories=establishment._inventories(snapshot("absent")),
+        upload_inventories=(
+            establishment._inventories(inactive) if audit_id == 2 else None
+        ),
+        final_inventories=(
+            establishment._inventories(active) if audit_id == 2 else None
+        ),
+        protected_state=establishment._protected(snapshot("absent")),
+        gate_results=(
+            [
+                establishment._gate(
+                    code,
+                    code,
+                    False,
+                    "historical verifier defect",
+                ).model_dump(mode="json")
+                for code in (
+                    "active_inventory",
+                    "protected_state",
+                    "verification_stable_identity",
+                )
+            ]
+            if audit_id == 2
+            else []
+        ),
+        checksum_verification_source=(
+            upgrade.BOOTSTRAP_STATUS_ROUTE if audit_id == 2 else None
+        ),
+        checksum_verification_result="matched" if audit_id == 2 else None,
+        wordpress_write_count=1 if audit_id == 2 else 0,
+        wordpress_write_scope=(
+            establishment.ACTIVATION_SCOPE if audit_id == 2 else []
+        ),
+        atlas_write_count=5 if audit_id == 2 else 1,
+        transition_history=(
+            [
+                "awaiting_manual_bootstrap_installation",
+                "manual_installation_inventory_verified",
+                "activation_pending_checksum_verification",
+                "verification_failed",
+                "recovery_required",
+            ]
+            if audit_id == 2
+            else [
+                "awaiting_manual_bootstrap_installation",
+                "authorization_retired",
+            ]
+        ),
+        recovery_recommendation=(
+            "guarded_bootstrap_recovery" if audit_id == 2 else "no_action"
+        ),
+        error_code="recovery_required" if audit_id == 2 else None,
+        error_message="historical verifier defect" if audit_id == 2 else None,
+    )
+
+
+def _reconciliation_request() -> WordPressBootstrapActivationReconciliationRequest:
+    evidence = build_manual_browser_evidence(
+        HTML,
+        final_url="https://www.drywoodtenting.com/drywood-termite-tenting-orlando-fl/",
+        evidence_identifier="orlando-fresh-activation-reconciliation",
+        signing_key=KEY,
+    )
+    return WordPressBootstrapActivationReconciliationRequest(
+        establishment_audit_id=2,
+        operator="Shawn Manchette",
+        manual_browser_evidence=evidence,
+        expected_runtime_identity=WordPressDeploymentExpectedRuntimeIdentity(
+            atlas_version="v0.59.93",
+            atlas_commit="a" * 40,
+            atlas_tag="v0.59.93",
+            manifest_sha256="b" * 64,
+            source_compatibility_id="project-atlas-release-identity-v0.59.93",
+        ),
+        repository_head="a" * 40,
+        repository_origin_main="a" * 40,
+        repository_tag="v0.59.93",
+        repository_branch="main",
+        repository_working_tree_clean=True,
+        protected_paths_unchanged=True,
+        atlas_data_backup_file="atlas-backup-fresh.json",
+        atlas_data_backup_sha256="c" * 64,
+        atlas_data_backup_size=1024,
+        atlas_data_backup_created_at=datetime.now(UTC),
+        atlas_data_backup_onedrive_path=(
+            r"C:\Users\offic\OneDrive\Atlas\atlas-backup-fresh.json"
+        ),
+        atlas_data_backup_onedrive_synced=True,
+    )
+
+
+def test_activation_reconciliation_is_phrase_gated_one_time_and_atlas_only(
+    db,
+    monkeypatch,
+):
+    inspected = snapshot("active")
+    gates = [
+        establishment._gate(
+            "read_only_reconciliation",
+            "All exact recovery gates pass",
+            True,
+            "",
+        )
+    ]
+    monkeypatch.setattr(
+        establishment,
+        "_activation_reconciliation_inspect",
+        lambda session, request, audit: (
+            deepcopy(inspected),
+            deepcopy(gates),
+            {"sha256": request.atlas_data_backup_sha256},
+        ),
+    )
+    with Session(db) as session:
+        session.add(_reconciliation_audit(1, status="authorization_retired"))
+        session.add(_reconciliation_audit(2, status="recovery_required"))
+        session.commit()
+        before_count = len(list(session.exec(select(WordPressBootstrapEstablishmentAudit))))
+        preflight = establishment.activation_reconciliation_preflight(
+            session,
+            41,
+            _reconciliation_request(),
+        )
+        assert preflight.reconciliation_ready
+        assert preflight.confirmation_phrase == establishment.ACTIVATION_RECONCILIATION_PHRASE
+        assert preflight.expected_wordpress_write_count == 0
+        assert preflight.expected_plugin_write_count == 0
+        assert preflight.expected_cache_write_count == 0
+        before = session.get(WordPressBootstrapEstablishmentAudit, 2)
+        before_history = list(before.transition_history)
+        before_failure_gates = deepcopy(before.gate_results)
+        before_recovery_snapshot = deepcopy(before.final_snapshot)
+        before_recovery_inventories = deepcopy(before.final_inventories)
+        before_atlas_writes = before.atlas_write_count
+
+        with pytest.raises(HTTPException):
+            establishment.apply_activation_reconciliation(
+                session,
+                41,
+                WordPressBootstrapActivationReconciliationApplyRequest(
+                    reconciliation_handle=preflight.reconciliation_handle,
+                    confirmation_phrase="wrong phrase",
+                ),
+            )
+        result = establishment.apply_activation_reconciliation(
+            session,
+            41,
+            WordPressBootstrapActivationReconciliationApplyRequest(
+                reconciliation_handle=preflight.reconciliation_handle,
+                confirmation_phrase=establishment.ACTIVATION_RECONCILIATION_PHRASE,
+            ),
+        )
+        assert result.status == "verified"
+        assert result.wordpress_write_count == 0
+        assert result.plugin_write_count == 0
+        assert result.cache_write_count == 0
+        assert result.request_atlas_write_count == 1
+        assert result.original_activation_write_preserved
+        assert result.original_failure_history_preserved
+        audit = session.get(WordPressBootstrapEstablishmentAudit, 2)
+        assert audit.wordpress_write_count == 1
+        assert audit.atlas_write_count == before_atlas_writes + 1
+        assert audit.transition_history == [
+            *before_history,
+            establishment.ACTIVATION_RECONCILIATION_HISTORY,
+        ]
+        assert audit.gate_results == before_failure_gates
+        assert (
+            audit.final_snapshot["activation_reconciliation"][
+                "original_failure_gate_results"
+            ]
+            == before_failure_gates
+        )
+        assert (
+            audit.final_snapshot["activation_reconciliation"][
+                "original_recovery_snapshot"
+            ]
+            == before_recovery_snapshot
+        )
+        assert (
+            audit.final_snapshot["activation_reconciliation"][
+                "original_recovery_inventories"
+            ]
+            == before_recovery_inventories
+        )
+        assert audit.reconciliation_reason == establishment.ACTIVATION_RECONCILIATION_REASON
+        assert len(list(session.exec(select(WordPressBootstrapEstablishmentAudit)))) == before_count
+
+        replay = establishment.apply_activation_reconciliation(
+            session,
+            41,
+            WordPressBootstrapActivationReconciliationApplyRequest(
+                reconciliation_handle=preflight.reconciliation_handle,
+                confirmation_phrase=establishment.ACTIVATION_RECONCILIATION_PHRASE,
+            ),
+        )
+        assert replay.idempotent_replay
+        assert replay.request_atlas_write_count == 0
+        assert session.get(WordPressBootstrapEstablishmentAudit, 2).atlas_write_count == before_atlas_writes + 1
+
+
+def test_activation_reconciliation_inspection_matches_exact_audit_2_incident(
+    db,
+    monkeypatch,
+):
+    request = _reconciliation_request()
+    observed = snapshot("active")
+    monkeypatch.setattr(
+        establishment,
+        "deployment_readiness",
+        lambda: {
+            "release_status": "verified",
+            "release": {
+                **request.expected_runtime_identity.model_dump(mode="json"),
+                "runtime_identity_verified": True,
+                "manifest_integrity_verified": True,
+                "expected_release_matched": True,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        upgrade,
+        "validate_manual_browser_evidence",
+        lambda evidence, key: (True, "valid"),
+    )
+    monkeypatch.setattr(
+        establishment,
+        "_observe",
+        lambda session, value: deepcopy(observed),
+    )
+    monkeypatch.setattr(
+        upgrade,
+        "_read_plugin_status",
+        lambda session: {
+            "plugin": "project-atlas-metadata-bridge",
+            "version": "0.57.6",
+            "checksum": "0" * 64,
+            "active": True,
+            "snapshot": deepcopy(observed["plugin_status"]["snapshot"]),
+        },
+    )
+    monkeypatch.setattr(
+        upgrade,
+        "_read_bootstrap_status",
+        lambda session: {
+            "bootstrap": establishment.BOOTSTRAP_SLUG,
+            "bootstrap_version": establishment.BOOTSTRAP_VERSION,
+            "bootstrap_checksum": establishment.BOOTSTRAP_ENTRY_SHA256,
+            "status_code": 200,
+            "request_method": "GET",
+        },
+    )
+    monkeypatch.setattr(
+        establishment,
+        "_activation_reconciliation_backup",
+        lambda value, release, audit: (
+            {"sha256": value.atlas_data_backup_sha256},
+            [
+                establishment._gate(
+                    "atlas_data_backup",
+                    "Fresh Atlas Data backup is exact",
+                    True,
+                    "",
+                )
+            ],
+        ),
+    )
+    with Session(db) as session:
+        session.add(_reconciliation_audit(1, status="authorization_retired"))
+        session.add(_reconciliation_audit(2, status="recovery_required"))
+        session.add(
+            WordPressMetadataState(
+                generated_page_id=41,
+                wordpress_post_id=8,
+                status="staged",
+                payload={"locked": True},
+                payload_hash=upgrade.EXPECTED_PAYLOAD_HASH,
+                wordpress_revision="1",
+            )
+        )
+        session.commit()
+        audit = session.get(WordPressBootstrapEstablishmentAudit, 2)
+        inspected, gates, _ = establishment._activation_reconciliation_inspect(
+            session,
+            request,
+            audit,
+        )
+        failures = [gate for gate in gates if not gate.passed]
+        assert failures == []
+        assert inspected["bootstrap_classification"]["classification"] == "exact_active"
+        assert inspected["reconciliation_wordpress_write_count"] == 0
+        assert inspected["reconciliation_plugin_write_count"] == 0
+        assert inspected["reconciliation_cache_write_count"] == 0
+
+
+def test_activation_reconciliation_handle_expiry_restart_and_cross_audit_fail_closed():
+    request = _reconciliation_request()
+    expired = establishment._store_activation_reconciliation(
+        request,
+        2,
+        "a" * 64,
+        datetime.now(UTC) - timedelta(seconds=1),
+    )
+    with pytest.raises(HTTPException, match="expired"):
+        establishment._consume_activation_reconciliation(expired)
+
+    stale = establishment._store_activation_reconciliation(
+        request,
+        2,
+        "b" * 64,
+        datetime.now(UTC) + timedelta(minutes=1),
+    )
+    establishment._clear_establishment_handles()
+    with pytest.raises(HTTPException, match="unknown"):
+        establishment._consume_activation_reconciliation(stale)
+
+    cross_audit = establishment._store_activation_reconciliation(
+        request,
+        1,
+        "c" * 64,
+        datetime.now(UTC) + timedelta(minutes=1),
+    )
+    entry = establishment._consume_activation_reconciliation(cross_audit)
+    assert entry.audit_id == 1
+    assert cross_audit not in establishment._activation_reconciliation_handles

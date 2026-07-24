@@ -73,6 +73,10 @@ from app.schemas.wordpress import (
     WordPressBootstrapManualInstallAuthorizeRequest,
     WordPressBootstrapManualInstallVerifyRequest,
     WordPressBootstrapActivationApplyRequest,
+    WordPressBootstrapActivationReconciliationApplyRequest,
+    WordPressBootstrapActivationReconciliationPreflight,
+    WordPressBootstrapActivationReconciliationRequest,
+    WordPressBootstrapActivationReconciliationResult,
     WordPressBootstrapAuthorizationRetirementApplyRequest,
     WordPressBootstrapAuthorizationRetirementPreflight,
     WordPressBootstrapAuthorizationRetirementRequest,
@@ -184,8 +188,10 @@ from app.services.wordpress_bootstrap_cleanup import (
 )
 from app.services.wordpress_bootstrap_establishment import (
     activation_preflight as bootstrap_establishment_activation_preflight,
+    activation_reconciliation_preflight as bootstrap_activation_reconciliation_preflight,
     apply_backup_renewal as bootstrap_backup_renewal_apply,
     apply_activation as bootstrap_establishment_activation_apply,
+    apply_activation_reconciliation as bootstrap_activation_reconciliation_apply,
     assess_backup_renewal_recovery as bootstrap_backup_renewal_recovery_assess,
     assess_recovery as bootstrap_establishment_recovery_assess,
     authorize_manual_install as bootstrap_manual_install_authorize,
@@ -494,6 +500,38 @@ def upgrade_bootstrap_establishment_recovery_assess(
     session: Session = Depends(get_session),
 ) -> WordPressBootstrapRecoveryAssessment:
     return bootstrap_establishment_recovery_assess(session, page_id, payload)
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/recovery/reconciliation/preflight/{page_id}",
+    response_model=WordPressBootstrapActivationReconciliationPreflight,
+)
+def upgrade_bootstrap_activation_reconciliation_preflight(
+    page_id: int,
+    payload: WordPressBootstrapActivationReconciliationRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapActivationReconciliationPreflight:
+    return bootstrap_activation_reconciliation_preflight(
+        session,
+        page_id,
+        payload,
+    )
+
+
+@router.post(
+    "/deployment/upgrade-bootstrap/recovery/reconciliation/apply/{page_id}",
+    response_model=WordPressBootstrapActivationReconciliationResult,
+)
+def upgrade_bootstrap_activation_reconciliation_apply(
+    page_id: int,
+    payload: WordPressBootstrapActivationReconciliationApplyRequest,
+    session: Session = Depends(get_session),
+) -> WordPressBootstrapActivationReconciliationResult:
+    return bootstrap_activation_reconciliation_apply(
+        session,
+        page_id,
+        payload,
+    )
 
 
 @router.post(

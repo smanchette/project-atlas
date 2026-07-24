@@ -183,3 +183,81 @@ def test_0025_downgrade_refuses_retired_rows(monkeypatch):
     monkeypatch.setattr(migration.op, "get_bind", lambda: Bind())
     with pytest.raises(RuntimeError, match="authorization_retired"):
         migration.downgrade()
+
+
+def test_0026_upgrade_downgrade_reupgrade_activation_reconciliation_fields(
+    monkeypatch,
+    tmp_path,
+):
+    database = tmp_path / "bootstrap-activation-reconciliation.sqlite3"
+    config = config_for(monkeypatch, database)
+    command.upgrade(config, "20260722_0025")
+    engine = create_engine(f"sqlite:///{database.as_posix()}")
+    command.upgrade(config, "20260723_0026")
+    inspector = inspect(engine)
+    columns = {
+        item["name"]
+        for item in inspector.get_columns("wordpressbootstrapestablishmentaudit")
+    }
+    assert {
+        "reconciliation_reason",
+        "reconciliation_handle_fingerprint",
+        "reconciliation_binding_hash",
+        "reconciled_at",
+    } <= columns
+    constraints = {
+        item["name"]
+        for item in inspector.get_check_constraints(
+            "wordpressbootstrapestablishmentaudit"
+        )
+    }
+    unique = {
+        item["name"]
+        for item in inspector.get_unique_constraints(
+            "wordpressbootstrapestablishmentaudit"
+        )
+    }
+    assert "ck_wordpressbootstrapestablishmentaudit_reconciliation" in constraints
+    assert (
+        "uq_wordpressbootstrapestablishmentaudit_reconciliation_handle"
+        in unique
+    )
+    command.downgrade(config, "20260722_0025")
+    columns = {
+        item["name"]
+        for item in inspect(engine).get_columns(
+            "wordpressbootstrapestablishmentaudit"
+        )
+    }
+    assert "reconciliation_reason" not in columns
+    command.upgrade(config, "20260723_0026")
+    assert "reconciliation_reason" in {
+        item["name"]
+        for item in inspect(engine).get_columns(
+            "wordpressbootstrapestablishmentaudit"
+        )
+    }
+    get_settings.cache_clear()
+
+
+def test_0026_downgrade_refuses_reconciled_rows(monkeypatch):
+    path = (
+        BACKEND
+        / "alembic/versions/20260723_0026_bootstrap_activation_reconciliation.py"
+    )
+    spec = importlib.util.spec_from_file_location("atlas_migration_0026_guard", path)
+    assert spec and spec.loader
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    class Result:
+        def scalar_one(self):
+            return 1
+
+    class Bind:
+        def execute(self, statement):
+            return Result()
+
+    monkeypatch.setattr(migration.op, "get_bind", lambda: Bind())
+    with pytest.raises(RuntimeError, match="reconciled"):
+        migration.downgrade()
