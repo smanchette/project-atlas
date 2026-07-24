@@ -105,12 +105,26 @@ For each major version:
 
 ### Important docs
 
+- docs/PROJECT_ATLAS_CONSTITUTION.md
+- docs/PROJECT_ATLAS_ROADMAP.md
+- docs/PROJECT_ATLAS_ARCHITECTURE.md
+- docs/PROJECT_ATLAS_CHANGELOG.md
 - docs/NEW_COMPUTER_SETUP.md
 - docs/BACKUP_AND_RESTORE.md
 - docs/PROTECTED_PATHS.md
 - docs/VERSION_HISTORY.md
 - docs/RESTORE_DRILL.md
 - docs/MACHINE_SETUP.md
+
+### Documentation compliance
+
+`docs/PROJECT_ATLAS_CONSTITUTION.md` is the governing design document. Before planning or implementing a major future milestone, contributors must read:
+
+- `docs/PROJECT_ATLAS_CONSTITUTION.md`
+- `docs/PROJECT_ATLAS_ROADMAP.md`
+- `docs/PROJECT_ATLAS_ARCHITECTURE.md`
+
+If another project document or implementation conflicts with the Constitution, the Constitution takes precedence.
 
 ## Stack
 
