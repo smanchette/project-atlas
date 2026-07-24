@@ -670,7 +670,7 @@ class WordPressBootstrapEstablishmentAudit(SQLModel, table=True):
     checksum_verification_source: str | None = Field(default=None, max_length=160)
     checksum_verification_result: str | None = Field(default=None, max_length=80)
     reconciliation_reason: str | None = Field(default=None, max_length=100, index=True)
-    reconciliation_handle_fingerprint: str | None = Field(default=None, max_length=64, index=True)
+    reconciliation_handle_fingerprint: str | None = Field(default=None, max_length=64)
     reconciliation_binding_hash: str | None = Field(default=None, max_length=64)
     reconciled_at: datetime | None = None
     wordpress_write_count: int = Field(default=0)

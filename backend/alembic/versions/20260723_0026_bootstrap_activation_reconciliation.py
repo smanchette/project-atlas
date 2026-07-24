@@ -32,11 +32,6 @@ def upgrade() -> None:
             TABLE,
             sa.Column("reconciliation_handle_fingerprint", sa.String(length=64), nullable=True),
         )
-        op.create_index(
-            "ix_wordpressbootstrapestablishmentaudit_reconciliation_handle_fingerprint",
-            TABLE,
-            ["reconciliation_handle_fingerprint"],
-        )
     if "reconciliation_binding_hash" not in columns:
         op.add_column(
             TABLE,
@@ -76,10 +71,6 @@ def downgrade() -> None:
     else:
         op.drop_constraint(CONSTRAINT, TABLE, type_="check")
         op.drop_constraint(UNIQUE, TABLE, type_="unique")
-    op.drop_index(
-        "ix_wordpressbootstrapestablishmentaudit_reconciliation_handle_fingerprint",
-        table_name=TABLE,
-    )
     op.drop_index(
         "ix_wordpressbootstrapestablishmentaudit_reconciliation_reason",
         table_name=TABLE,

@@ -261,3 +261,24 @@ def test_0026_downgrade_refuses_reconciled_rows(monkeypatch):
     monkeypatch.setattr(migration.op, "get_bind", lambda: Bind())
     with pytest.raises(RuntimeError, match="reconciled"):
         migration.downgrade()
+
+
+def test_0026_postgresql_identifiers_fit_the_63_byte_limit():
+    path = (
+        BACKEND
+        / "alembic/versions/20260723_0026_bootstrap_activation_reconciliation.py"
+    )
+    source = path.read_text(encoding="utf-8")
+    identifiers = {
+        token.strip('"')
+        for token in source.replace("(", " ").replace(")", " ").replace(",", " ").split()
+        if token.startswith(
+            (
+                '"ix_wordpressbootstrap',
+                '"uq_wordpressbootstrap',
+                '"ck_wordpressbootstrap',
+            )
+        )
+    }
+    assert identifiers
+    assert all(len(identifier.encode("utf-8")) <= 63 for identifier in identifiers)
