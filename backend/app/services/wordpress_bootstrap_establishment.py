@@ -1249,9 +1249,9 @@ def _activation_reconciliation_inspect(session, request, audit):
     gates = [
         _gate(
             "runtime_identity",
-            "v0.59.93 runtime and independently expected identity are exact",
+            "v0.59.94 runtime and independently expected identity are exact",
             runtime_exact
-            and release.get("atlas_version") == "v0.59.93",
+            and release.get("atlas_version") == "v0.59.94",
             "The loaded runtime identity is unavailable or differs.",
         ),
         _gate(
@@ -1260,7 +1260,7 @@ def _activation_reconciliation_inspect(session, request, audit):
             request.repository_head
             == request.repository_origin_main
             == request.expected_runtime_identity.atlas_commit
-            and request.repository_tag == "v0.59.93"
+            and request.repository_tag == "v0.59.94"
             and request.repository_branch == "main"
             and request.repository_working_tree_clean
             and request.protected_paths_unchanged,
@@ -1500,7 +1500,7 @@ def _activation_reconciliation_backup(request, release, audit):
         ),
         _gate(
             "atlas_data_backup_fresh",
-            "Atlas Data backup was created after the loaded v0.59.93 runtime",
+            "Atlas Data backup was created after the loaded v0.59.94 runtime",
             bool(
                 created_at
                 and runtime_generated_at
@@ -1509,7 +1509,7 @@ def _activation_reconciliation_backup(request, release, audit):
                 == request.atlas_data_backup_created_at.astimezone(UTC)
                 and created_at >= runtime_generated_at
             ),
-            "Atlas Data backup predates the loaded v0.59.93 runtime or has a mismatched timestamp.",
+            "Atlas Data backup predates the loaded v0.59.94 runtime or has a mismatched timestamp.",
         ),
         _gate(
             "atlas_data_backup_audit",

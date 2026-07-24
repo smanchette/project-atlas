@@ -2537,7 +2537,7 @@ def test_wordpress_connection_test_uses_get_requests_only(
     assert requests[0][2] is False
     assert requests[1][2] is True
     assert requests[2][2] is True
-    assert client_headers["User-Agent"] == "Project-Atlas-WordPress/v0.59.93"
+    assert client_headers["User-Agent"] == "Project-Atlas-WordPress/v0.59.94"
     assert client_headers["Accept"] == "application/json"
     assert response.json()["atlas_status_checked"] is True
     assert response.json()["atlas_status_reachable"] is True
