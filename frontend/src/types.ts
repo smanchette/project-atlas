@@ -1014,7 +1014,7 @@ export type WordPressBootstrapActivationReconciliationRequest = {
     atlas_version:string; atlas_commit:string; atlas_tag:string;
     manifest_sha256:string; source_compatibility_id:string;
   };
-  repository_head:string; repository_origin_main:string; repository_tag:"v0.59.94";
+  repository_head:string; repository_origin_main:string; repository_tag:"v0.59.95";
   repository_branch:"main"; repository_working_tree_clean:boolean;
   protected_paths_unchanged:boolean; atlas_data_backup_file:string;
   atlas_data_backup_sha256:string; atlas_data_backup_size:number;

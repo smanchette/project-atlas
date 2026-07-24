@@ -58,7 +58,7 @@ class RuntimeReleaseIdentity:
 
 SOURCE_EXPECTATIONS = DeploymentSourceExpectations(
     manifest_schema_version=2,
-    source_compatibility_id="project-atlas-release-identity-v0.59.94",
+    source_compatibility_id="project-atlas-release-identity-v0.59.95",
     plugin_version="0.57.7",
     plugin_zip_filename="project-atlas-metadata-bridge-0.57.7.zip",
     plugin_zip_sha256="ada4d97ea627a148d07fda809c1776a91a87d7a7e4957de3bece423a9bb80a62",

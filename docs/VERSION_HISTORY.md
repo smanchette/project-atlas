@@ -1,5 +1,11 @@
 # Project Atlas Version History
 
+## v0.59.95
+
+- Normalized the exact legacy top-level `cache_headers` field from v0.59.92 durable protected-state records only during historical comparison.
+- Preserved current snapshot generation and fail-closed equality for every durable field, unknown key, misspelled cache-like key, nested unexpected key, plugin inventory, and Metadata Bridge state.
+- Added exact Audit ID 2-shape reconciliation coverage without rewriting stored history or authorizing any WordPress, plugin, cache, or Atlas lifecycle mutation.
+
 ## v0.59.93
 
 - Corrected post-activation verification so the exact Bootstrap 0.3.0 inactive-to-active transition is expected while duplicate, alternate-path, wrong-version, network-active, checksum, or unrelated plugin drift remains blocked.

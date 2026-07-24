@@ -373,6 +373,66 @@ def test_durable_protected_state_rejects_metadata_bridge_state_drift(field, valu
     )
 
 
+def test_v05992_legacy_cache_headers_normalize_only_for_historical_comparison():
+    current = snapshot("absent")
+    historical = establishment._protected(current)
+    historical["cache_headers"] = {
+        "server": "nginx",
+        "x-cache-enabled": "True",
+        "x-proxy-cache": "HIT",
+    }
+    original = deepcopy(historical)
+
+    assert establishment._protected_non_rendered(
+        current
+    ) == establishment._protected_non_rendered(
+        historical,
+        already_protected=True,
+    )
+    assert historical == original
+    assert "cache_headers" not in establishment._protected(current)
+
+
+@pytest.mark.parametrize(
+    "unknown_key",
+    [
+        "cache_header",
+        "cache_headers_v2",
+        "transport_headers",
+        "unknown_historical_field",
+    ],
+)
+def test_legacy_normalization_rejects_unknown_historical_keys(unknown_key):
+    current = snapshot("absent")
+    historical = establishment._protected(current)
+    historical["cache_headers"] = {"x-proxy-cache": "HIT"}
+    historical[unknown_key] = {"value": "unexpected"}
+
+    assert establishment._protected_non_rendered(
+        current
+    ) != establishment._protected_non_rendered(
+        historical,
+        already_protected=True,
+    )
+
+
+def test_legacy_normalization_rejects_nested_unexpected_durable_key():
+    current = snapshot("absent")
+    historical = establishment._protected(current)
+    historical["cache_headers"] = {"x-proxy-cache": "HIT"}
+    historical["site"] = {
+        **historical["site"],
+        "unexpected_setting": "unexpected",
+    }
+
+    assert establishment._protected_non_rendered(
+        current
+    ) != establishment._protected_non_rendered(
+        historical,
+        already_protected=True,
+    )
+
+
 def test_no_upload_remains_waiting(db, monkeypatch):
     monkeypatch.setattr(upgrade, "plugin_upgrade_preflight", lambda *args, **kwargs: base("absent"))
     monkeypatch.setattr(establishment, "_expiry", lambda request: datetime.now(UTC) + timedelta(minutes=5))
@@ -1062,6 +1122,13 @@ def test_quarantine_guard_is_wired_to_rendering_cache_lifecycle_and_cleanup():
 def _reconciliation_audit(audit_id: int, *, status: str) -> WordPressBootstrapEstablishmentAudit:
     active = snapshot("active")
     inactive = snapshot("inactive")
+    protected_state = establishment._protected(snapshot("absent"))
+    if audit_id == 2:
+        protected_state["cache_headers"] = {
+            "server": "nginx",
+            "x-cache-enabled": "True",
+            "x-proxy-cache": "HIT",
+        }
     return WordPressBootstrapEstablishmentAudit(
         id=audit_id,
         generated_page_id=41,
@@ -1105,7 +1172,7 @@ def _reconciliation_audit(audit_id: int, *, status: str) -> WordPressBootstrapEs
         final_inventories=(
             establishment._inventories(active) if audit_id == 2 else None
         ),
-        protected_state=establishment._protected(snapshot("absent")),
+        protected_state=protected_state,
         gate_results=(
             [
                 establishment._gate(
@@ -1166,15 +1233,15 @@ def _reconciliation_request() -> WordPressBootstrapActivationReconciliationReque
         operator="Shawn Manchette",
         manual_browser_evidence=evidence,
         expected_runtime_identity=WordPressDeploymentExpectedRuntimeIdentity(
-            atlas_version="v0.59.94",
+            atlas_version="v0.59.95",
             atlas_commit="a" * 40,
-            atlas_tag="v0.59.94",
+            atlas_tag="v0.59.95",
             manifest_sha256="b" * 64,
-            source_compatibility_id="project-atlas-release-identity-v0.59.94",
+            source_compatibility_id="project-atlas-release-identity-v0.59.95",
         ),
         repository_head="a" * 40,
         repository_origin_main="a" * 40,
-        repository_tag="v0.59.94",
+        repository_tag="v0.59.95",
         repository_branch="main",
         repository_working_tree_clean=True,
         protected_paths_unchanged=True,
