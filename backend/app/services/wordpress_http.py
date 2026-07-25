@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from email.utils import parsedate_to_datetime
 from functools import lru_cache
 import math
 import re
@@ -36,6 +37,41 @@ _SAFE_DIAGNOSTIC_HEADERS = {
     "x-proxy-cache",
     "x-proxy-cache-info",
     "x-request-id",
+    "x-sg-cache",
+}
+SITEGROUND_CACHE_BOUNDARY_HEADERS = {
+    "age",
+    "cache-control",
+    "cf-cache-status",
+    "content-security-policy",
+    "etag",
+    "expires",
+    "last-modified",
+    "permissions-policy",
+    "referrer-policy",
+    "server",
+    "strict-transport-security",
+    "via",
+    "x-cache",
+    "x-cache-enabled",
+    "x-content-type-options",
+    "x-frame-options",
+    "x-proxy-cache",
+    "x-proxy-cache-info",
+    "x-sg-cache",
+}
+_SITEGROUND_PROXY_INFO_PATTERN = re.compile(
+    r"(?:^|[\s,;])DT:\d+(?:$|[\s,;])|^\d+\s+NC:[0-9A-F]+\s+UP:$",
+    re.I,
+)
+_CACHE_STATUS_VALUES = {"HIT", "MISS"}
+_VOLATILE_CACHE_HEADERS = {
+    "age",
+    "cf-cache-status",
+    "expires",
+    "x-cache",
+    "x-proxy-cache",
+    "x-proxy-cache-info",
     "x-sg-cache",
 }
 
@@ -215,11 +251,7 @@ def classify_siteground_cache_headers(headers: Mapping[str, Any]) -> dict[str, A
             "headers": sanitized,
         }
     proxy_info = sanitized.get("x-proxy-cache-info", "")
-    proxy_info_valid = (
-        bool(re.search(r"(?:^|[\s,;])DT:\d+(?:$|[\s,;])", proxy_info, re.I))
-        if proxy_info
-        else False
-    )
+    proxy_info_valid = bool(_SITEGROUND_PROXY_INFO_PATTERN.search(proxy_info)) if proxy_info else False
     if proxy_info and not proxy_info_valid:
         return {
             "verified": False,
@@ -236,6 +268,96 @@ def classify_siteground_cache_headers(headers: Mapping[str, Any]) -> dict[str, A
         "status_reason_code": status_codes.get(status),
         "supporting_nginx": "nginx" in sanitized.get("server", "").lower(),
         "headers": sanitized,
+    }
+
+
+def compare_siteground_cache_boundaries(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compare SiteGround cache observations without equating request volatility.
+
+    Only normalized, flat, allowlisted headers are accepted. Provider identity,
+    nginx origin support, cache enablement, durable cache/security headers, and
+    recognized syntax remain exact. Only HIT/MISS, numeric age, parseable expiry,
+    and recognized request-specific provider diagnostics may vary.
+    """
+
+    normalized: list[dict[str, str]] = []
+    for label, value in (("before", before), ("after", after)):
+        if not isinstance(value, Mapping):
+            return {"compatible": False, "reason_code": f"{label}_cache_headers_malformed"}
+        current: dict[str, str] = {}
+        for raw_name, raw_value in value.items():
+            if (
+                not isinstance(raw_name, str)
+                or raw_name != raw_name.lower()
+                or raw_name not in SITEGROUND_CACHE_BOUNDARY_HEADERS
+                or not isinstance(raw_value, str)
+                or not raw_value.strip()
+            ):
+                return {
+                    "compatible": False,
+                    "reason_code": f"{label}_cache_header_unknown_or_malformed",
+                }
+            current[raw_name] = raw_value.strip()
+        normalized.append(current)
+
+    first, second = normalized
+    first_provider = classify_siteground_cache_headers(first)
+    second_provider = classify_siteground_cache_headers(second)
+    if not all(
+        item.get("verified") is True and item.get("supporting_nginx") is True
+        for item in (first_provider, second_provider)
+    ):
+        return {"compatible": False, "reason_code": "provider_family_changed_or_unverified"}
+    if first.get("server", "").lower() != second.get("server", "").lower():
+        return {"compatible": False, "reason_code": "server_origin_changed"}
+    if first.get("x-cache-enabled", "").lower() != second.get(
+        "x-cache-enabled", ""
+    ).lower():
+        return {"compatible": False, "reason_code": "cache_enablement_changed"}
+
+    durable = SITEGROUND_CACHE_BOUNDARY_HEADERS - _VOLATILE_CACHE_HEADERS
+    for name in sorted(durable):
+        if name in {"server", "x-cache-enabled"}:
+            continue
+        if first.get(name) != second.get(name):
+            return {
+                "compatible": False,
+                "reason_code": f"durable_header_changed:{name}",
+            }
+
+    for current in (first, second):
+        if current.get("x-proxy-cache", "").strip().upper() not in _CACHE_STATUS_VALUES:
+            return {
+                "compatible": False,
+                "reason_code": "volatile_cache_status_unrecognized:x-proxy-cache",
+            }
+        for name in ("x-proxy-cache", "x-sg-cache", "x-cache", "cf-cache-status"):
+            if name in current and current[name].strip().upper() not in _CACHE_STATUS_VALUES:
+                return {
+                    "compatible": False,
+                    "reason_code": f"volatile_cache_status_unrecognized:{name}",
+                }
+        if "age" in current:
+            try:
+                if int(current["age"]) < 0:
+                    raise ValueError
+            except ValueError:
+                return {"compatible": False, "reason_code": "cache_age_malformed"}
+        if "expires" in current:
+            try:
+                if parsedate_to_datetime(current["expires"]).tzinfo is None:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
+                return {"compatible": False, "reason_code": "cache_expiry_malformed"}
+
+    return {
+        "compatible": True,
+        "reason_code": "recognized_siteground_request_cache_volatility",
+        "before": first,
+        "after": second,
     }
 
 

@@ -1085,7 +1085,7 @@ def test_migration_and_program_backup_include_dedicated_audit():
     assert 'revision = "20260719_0023"' in migration
     assert 'down_revision = "20260717_0022"' in migration
     assert "wordpressbootstrapestablishmentaudit" in migration
-    assert backup_service.BACKUP_VERSION == "0.40"
+    assert backup_service.BACKUP_VERSION == "0.41"
     assert backup_service.BACKUP_MODELS["wordpress_bootstrap_establishment_audits"] is WordPressBootstrapEstablishmentAudit
 
 
@@ -1233,15 +1233,15 @@ def _reconciliation_request() -> WordPressBootstrapActivationReconciliationReque
         operator="Shawn Manchette",
         manual_browser_evidence=evidence,
         expected_runtime_identity=WordPressDeploymentExpectedRuntimeIdentity(
-            atlas_version="v0.59.95",
+            atlas_version="v0.59.96",
             atlas_commit="a" * 40,
-            atlas_tag="v0.59.95",
+            atlas_tag="v0.59.96",
             manifest_sha256="b" * 64,
-            source_compatibility_id="project-atlas-release-identity-v0.59.95",
+            source_compatibility_id="project-atlas-release-identity-v0.59.96",
         ),
         repository_head="a" * 40,
         repository_origin_main="a" * 40,
-        repository_tag="v0.59.95",
+        repository_tag="v0.59.96",
         repository_branch="main",
         repository_working_tree_clean=True,
         protected_paths_unchanged=True,

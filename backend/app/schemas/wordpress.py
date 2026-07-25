@@ -1385,6 +1385,102 @@ class WordPressPluginUpgradeRecoveryAssessment(SQLModel):
     automatic_recovery_performed: Literal[False] = False
 
 
+class WordPressPluginUpgradeReconciliationRequest(SQLModel):
+    """Fresh proof for Atlas-only reconciliation of the exact 0.57.7 upgrade."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    upgrade_audit_id: Literal[3]
+    operator: str = Field(min_length=3, max_length=200)
+    manual_browser_evidence: WordPressManualBrowserEvidence
+    expected_runtime_identity: WordPressDeploymentExpectedRuntimeIdentity
+    repository_head: str = Field(min_length=40, max_length=40)
+    repository_origin_main: str = Field(min_length=40, max_length=40)
+    repository_tag: Literal["v0.59.96"]
+    repository_branch: Literal["main"]
+    repository_working_tree_clean: bool
+    protected_paths_unchanged: bool
+    atlas_data_backup_file: str = Field(min_length=6, max_length=255)
+    atlas_data_backup_sha256: str = Field(min_length=64, max_length=64)
+    atlas_data_backup_size: int = Field(gt=0)
+    atlas_data_backup_created_at: datetime
+    atlas_data_backup_onedrive_path: str = Field(min_length=10, max_length=1000)
+    atlas_data_backup_onedrive_synced: bool
+
+    @field_validator(
+        "repository_head",
+        "repository_origin_main",
+        "atlas_data_backup_sha256",
+    )
+    @classmethod
+    def validate_upgrade_reconciliation_hashes(cls, value: str) -> str:
+        if re.fullmatch(r"[0-9a-f]+", value) is None:
+            raise ValueError("Upgrade reconciliation hashes must be lowercase hexadecimal.")
+        return value
+
+
+class WordPressPluginUpgradeReconciliationPreflight(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    upgrade_audit_id: Literal[3] = 3
+    status: Literal[
+        "plugin_upgrade_reconciliation_blocked",
+        "plugin_upgrade_reconciliation_ready",
+    ]
+    reconciliation_ready: bool
+    reconciliation_handle: str | None = None
+    reconciliation_handle_fingerprint: str | None = None
+    binding_hash: str | None = None
+    confirmation_phrase: str | None = None
+    expires_at: datetime | None = None
+    expected_final_status: Literal["verified"] = "verified"
+    expected_history_append: Literal[
+        "cache_boundary_volatile_observation_reconciled"
+    ] = "cache_boundary_volatile_observation_reconciled"
+    expected_wordpress_write_count: Literal[0] = 0
+    expected_plugin_write_count: Literal[0] = 0
+    expected_cache_write_count: Literal[0] = 0
+    expected_atlas_write_count: Literal[1] = 1
+    atlas_data_backup: dict[str, Any]
+    inspected_state: dict[str, Any]
+    gate_results: list[WordPressDraftGateResult]
+    inspection_only: Literal[True] = True
+    audit_created: Literal[False] = False
+
+
+class WordPressPluginUpgradeReconciliationApplyRequest(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reconciliation_handle: str = Field(min_length=32, max_length=200)
+    confirmation_phrase: str = Field(min_length=1, max_length=180)
+
+
+class WordPressPluginUpgradeReconciliationResult(SQLModel):
+    page_id: Literal[41] = 41
+    wordpress_post_id: Literal[8] = 8
+    upgrade_audit_id: Literal[3] = 3
+    status: Literal["verified"] = "verified"
+    reconciliation_reason: Literal[
+        "cache_boundary_volatile_observation_reconciled"
+    ] = "cache_boundary_volatile_observation_reconciled"
+    state_history: list[str]
+    binding_hash: str
+    reconciliation_handle_fingerprint: str
+    wordpress_write_count: Literal[0] = 0
+    plugin_write_count: Literal[0] = 0
+    cache_write_count: Literal[0] = 0
+    request_atlas_write_count: Literal[1] = 1
+    cumulative_atlas_write_count: int = Field(ge=0)
+    original_upgrade_write_count: Literal[1] = 1
+    original_upgrade_write_preserved: Literal[True] = True
+    original_failure_history_preserved: Literal[True] = True
+    new_audit_created: Literal[False] = False
+    new_authorization_created: Literal[False] = False
+    inspected_state: dict[str, Any]
+    gate_results: list[WordPressDraftGateResult]
+    further_action_required: Literal[False] = False
+
+
 class WordPressBootstrapManualInstallPreflightRequest(WordPressPluginUpgradePreflightRequest):
     """The fixed 0.3.0 manual-upload proof; no artifact selector is accepted."""
 
@@ -1674,7 +1770,7 @@ class WordPressBootstrapActivationReconciliationRequest(SQLModel):
     expected_runtime_identity: WordPressDeploymentExpectedRuntimeIdentity
     repository_head: str = Field(min_length=40, max_length=40)
     repository_origin_main: str = Field(min_length=40, max_length=40)
-    repository_tag: Literal["v0.59.95"]
+    repository_tag: Literal["v0.59.96"]
     repository_branch: Literal["main"]
     repository_working_tree_clean: bool
     protected_paths_unchanged: bool

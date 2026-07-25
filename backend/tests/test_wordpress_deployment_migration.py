@@ -282,3 +282,94 @@ def test_0026_postgresql_identifiers_fit_the_63_byte_limit():
     }
     assert identifiers
     assert all(len(identifier.encode("utf-8")) <= 63 for identifier in identifiers)
+
+
+def test_0027_upgrade_downgrade_reupgrade_plugin_reconciliation_fields(
+    monkeypatch,
+    tmp_path,
+):
+    database = tmp_path / "plugin-upgrade-reconciliation.sqlite3"
+    config = config_for(monkeypatch, database)
+    command.upgrade(config, "20260723_0026")
+    engine = create_engine(f"sqlite:///{database.as_posix()}")
+    command.upgrade(config, "20260725_0027")
+    columns = {
+        item["name"]
+        for item in inspect(engine).get_columns("wordpresspluginupgradeaudit")
+    }
+    assert {
+        "reconciliation_reason",
+        "reconciliation_handle_fingerprint",
+        "reconciliation_binding_hash",
+        "reconciliation_snapshot",
+        "reconciled_at",
+    } <= columns
+    constraints = {
+        item["name"]
+        for item in inspect(engine).get_check_constraints(
+            "wordpresspluginupgradeaudit"
+        )
+    }
+    unique = {
+        item["name"]
+        for item in inspect(engine).get_unique_constraints(
+            "wordpresspluginupgradeaudit"
+        )
+    }
+    assert "ck_wppluginupgradeaudit_reconciliation" in constraints
+    assert "uq_wppluginupgradeaudit_reconciliation_handle" in unique
+    command.downgrade(config, "20260723_0026")
+    assert "reconciliation_reason" not in {
+        item["name"]
+        for item in inspect(engine).get_columns("wordpresspluginupgradeaudit")
+    }
+    command.upgrade(config, "20260725_0027")
+    assert "reconciliation_reason" in {
+        item["name"]
+        for item in inspect(engine).get_columns("wordpresspluginupgradeaudit")
+    }
+    get_settings.cache_clear()
+
+
+def test_0027_downgrade_refuses_reconciled_rows(monkeypatch):
+    path = (
+        BACKEND
+        / "alembic/versions/20260725_0027_plugin_upgrade_reconciliation.py"
+    )
+    spec = importlib.util.spec_from_file_location("atlas_migration_0027_guard", path)
+    assert spec and spec.loader
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    class Result:
+        def scalar_one(self):
+            return 1
+
+    class Bind:
+        def execute(self, statement):
+            return Result()
+
+    monkeypatch.setattr(migration.op, "get_bind", lambda: Bind())
+    with pytest.raises(RuntimeError, match="reconciled"):
+        migration.downgrade()
+
+
+def test_0027_postgresql_identifiers_fit_the_63_byte_limit():
+    path = (
+        BACKEND
+        / "alembic/versions/20260725_0027_plugin_upgrade_reconciliation.py"
+    )
+    source = path.read_text(encoding="utf-8")
+    identifiers = {
+        token.strip('"')
+        for token in source.replace("(", " ").replace(")", " ").replace(",", " ").split()
+        if token.startswith(
+            (
+                '"ix_wpplugin',
+                '"uq_wpplugin',
+                '"ck_wpplugin',
+            )
+        )
+    }
+    assert identifiers
+    assert all(len(identifier.encode("utf-8")) <= 63 for identifier in identifiers)

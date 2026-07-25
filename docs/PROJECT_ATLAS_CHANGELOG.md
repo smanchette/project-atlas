@@ -99,6 +99,23 @@ Major changes:
 
 ---
 
+## v0.59.96
+
+Corrected the Metadata Bridge 0.57.7 post-upgrade cache boundary so ordinary
+SiteGround HIT/MISS and recognized request-diagnostic variation cannot be
+misreported as durable WordPress drift. Provider, origin, privacy,
+authentication, URL, redirects, signed rendered identity, security headers,
+purge count, plugin inventories, and all durable protected state remain
+fail-closed.
+
+Added a dedicated one-time Atlas-only reconciliation for the exact Upgrade
+Audit ID 3 cache-boundary incident. It requires fresh signed evidence,
+authenticated GET-only WordPress observations, a fresh post-runtime Atlas Data
+backup, exact historical audit identity, and unchanged Metadata Bridge,
+Bootstrap, page, media, settings, payload, revision, rendering, and cache-purge
+state. Reconciliation performs one atomic update to Audit ID 3 and zero
+WordPress, plugin, or cache writes.
+
 ## Atlas Documentation Foundation v1.0
 
 The following governing documents were established:

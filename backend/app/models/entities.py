@@ -493,6 +493,21 @@ class WordPressPluginUpgradeAudit(SQLModel, table=True):
             "handle_fingerprint",
             name="uq_wordpresspluginupgradeaudit_handle_fingerprint",
         ),
+        UniqueConstraint(
+            "reconciliation_handle_fingerprint",
+            name="uq_wppluginupgradeaudit_reconciliation_handle",
+        ),
+        CheckConstraint(
+            "(reconciliation_reason IS NULL AND reconciliation_handle_fingerprint IS NULL "
+            "AND reconciliation_binding_hash IS NULL AND reconciliation_snapshot IS NULL "
+            "AND reconciled_at IS NULL) OR "
+            "(status = 'verified' AND "
+            "reconciliation_reason = 'cache_boundary_volatile_observation_reconciled' "
+            "AND reconciliation_handle_fingerprint IS NOT NULL "
+            "AND reconciliation_binding_hash IS NOT NULL "
+            "AND reconciliation_snapshot IS NOT NULL AND reconciled_at IS NOT NULL)",
+            name="ck_wppluginupgradeaudit_reconciliation",
+        ),
     )
     id: int | None = Field(default=None, primary_key=True)
     generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
@@ -531,6 +546,14 @@ class WordPressPluginUpgradeAudit(SQLModel, table=True):
     completed_at: datetime | None = None
     error_code: str | None = Field(default=None, max_length=64)
     error_message: str | None = Field(default=None, max_length=2000)
+    reconciliation_reason: str | None = Field(default=None, max_length=100, index=True)
+    reconciliation_handle_fingerprint: str | None = Field(default=None, max_length=64)
+    reconciliation_binding_hash: str | None = Field(default=None, max_length=64)
+    reconciliation_snapshot: dict[str, Any] | None = Field(
+        default=None,
+        sa_column=Column(JSON(none_as_null=True)),
+    )
+    reconciled_at: datetime | None = None
 
 
 class WordPressBootstrapCleanupAudit(SQLModel, table=True):

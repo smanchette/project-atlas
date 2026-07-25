@@ -58,8 +58,16 @@ from app.services.wordpress_deployment import (
     _verify_artifact,
 )
 from app.services.wordpress_deployment_release import release_paths, resolve_program_root
-from app.services.wordpress_rendered_state import EXPECTED_H1, validate_manual_browser_evidence
-from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
+from app.services.wordpress_rendered_state import (
+    EXPECTED_H1,
+    EXPECTED_URL,
+    validate_manual_browser_evidence,
+)
+from app.services.wordpress_http import (
+    compare_siteground_cache_boundaries,
+    wordpress_basic_auth,
+    wordpress_http_client,
+)
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 
 
@@ -408,6 +416,7 @@ def _post_upgrade_gates(request, before, after, plugin_status, bootstrap_status,
     previous_status = before.get("plugin_status", {}).get("snapshot", {})
     state = metadata_states[0] if len(metadata_states) == 1 else None
     expected = _expected_post_upgrade(before)
+    cache_boundary = compare_upgrade_cache_boundary(before, after)
     return [
         _gate("plugin_singleton", "Exactly one Metadata Bridge remains installed", len(matches) == 1, "Plugin is missing or duplicated."),
         _gate("target_version", "Installed version is exactly 0.57.7", len(matches) == 1 and matches[0].get("version") == TARGET_VERSION and plugin_status.get("version") == TARGET_VERSION, "Target version not observed."),
@@ -428,10 +437,10 @@ def _post_upgrade_gates(request, before, after, plugin_status, bootstrap_status,
         _gate("rendered_metadata", "No Atlas metadata renders", rendered.get("verified") is True and _rendered_metadata_absent(rendered) and not rendered.get("atlas_metadata_marker_present", False), "Atlas metadata rendered."),
         _gate(
             "cache_boundary",
-            "No cache purge occurred",
-            after.get("cache_headers") == before.get("cache_headers")
+            "Provider, origin, privacy, security, page identity, and purge count remain exact while recognized SiteGround request-cache state may vary",
+            cache_boundary.get("compatible") is True
             and after.get("cache_purge_count", 0) == before.get("cache_purge_count", 0) == request.expected_cache_purge_count == 0,
-            "Cache observation changed or a purge occurred.",
+            f"Cache boundary changed or a purge occurred: {cache_boundary.get('reason_code')}.",
         ),
         _gate("lifecycle_routes", "Separated lifecycle, preview, and cache routes are registered", (LIFECYCLE_ROUTES | {PREVIEW_ROUTE, CACHE_PURGE_ROUTE}) <= set(routes.get("routes", [])), "Required lifecycle, preview, or cache route is missing."),
         _gate("preview_disabled_contract", "Read-only preview fails closed with the approved HTTP 409 while rendering is disabled", preview.get("status_code") == 409 and preview.get("code") == "atlas_rendering_preview_unavailable" and preview.get("request_method") == "GET" and _target_artifact_preview_contract(), "Disabled preview contract changed or unexpectedly returned output."),
@@ -448,6 +457,102 @@ def _post_upgrade_gates(request, before, after, plugin_status, bootstrap_status,
         ),
         _gate("read_only_verification", "Post-upgrade verification uses GET requests only", after.get("wordpress_request_methods") == ["GET"] and routes.get("request_method") == preview.get("request_method") == "GET", "Post-upgrade verification attempted a mutation."),
     ]
+
+
+def compare_upgrade_cache_boundary(
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> dict[str, Any]:
+    """Preserve durable public identity while permitting narrow cache volatility."""
+
+    first_rendered = before.get("rendered")
+    second_rendered = after.get("rendered")
+    if not isinstance(first_rendered, dict) or not isinstance(second_rendered, dict):
+        return {"compatible": False, "reason_code": "rendered_observation_malformed"}
+    first_public = first_rendered.get("public_http_observation")
+    second_public = second_rendered.get("public_http_observation")
+    if not isinstance(first_public, dict) or not isinstance(second_public, dict):
+        return {"compatible": False, "reason_code": "public_http_observation_missing"}
+
+    stable_fields = (
+        "requested_url",
+        "origin",
+        "content_classification",
+        "provider_family",
+        "provider_verified",
+        "response_source",
+        "challenge_block_classification",
+        "privacy_classification",
+        "transport_category",
+        "transport_reason_code",
+        "content_type",
+        "body_sha256",
+    )
+    for field in stable_fields:
+        if first_public.get(field) != second_public.get(field):
+            return {"compatible": False, "reason_code": f"public_boundary_changed:{field}"}
+    if (
+        first_rendered.get("final_url") != second_rendered.get("final_url")
+        or first_rendered.get("redirect_count") != second_rendered.get("redirect_count")
+        or first_rendered.get("status_code") != second_rendered.get("status_code")
+        or first_rendered.get("final_url") != EXPECTED_URL
+        or first_rendered.get("redirect_count") != 0
+        or first_rendered.get("status_code") != 200
+    ):
+        return {"compatible": False, "reason_code": "url_redirect_or_status_changed"}
+    if (
+        first_public.get("provider_family") != "siteground-nginx"
+        or first_public.get("provider_verified") is not True
+        or first_public.get("privacy_classification") != "credential_free_public"
+        or first_public.get("response_source") != "provider_verified_public_html"
+    ):
+        return {"compatible": False, "reason_code": "provider_or_privacy_unverified"}
+    rendered_identity_fields = (
+        "document_title",
+        "h1",
+        "canonical",
+        "featured_image_url",
+        "featured_image_alt",
+        "metadata_inventory",
+        "atlas_metadata_marker_present",
+        "media32_reference_present",
+        "admin_page_detected",
+        "login_page_detected",
+        "authenticated_context_detected",
+        "challenge_page_detected",
+        "error_page_detected",
+        "admin_detection_signals",
+    )
+    for field in rendered_identity_fields:
+        if first_rendered.get(field) != second_rendered.get(field):
+            return {"compatible": False, "reason_code": f"rendered_identity_changed:{field}"}
+    for field in ("head_hash", "visible_hash"):
+        if not first_rendered.get(field) or first_rendered.get(field) != second_rendered.get(field):
+            return {"compatible": False, "reason_code": f"rendered_identity_changed:{field}"}
+
+    first_cache = before.get("cache_headers", {})
+    second_cache = after.get("cache_headers", {})
+    if (
+        first_rendered.get("cache_headers") != first_cache
+        or second_rendered.get("cache_headers") != second_cache
+        or (
+            "provider_signals" in first_public
+            and first_public.get("provider_signals") != first_cache
+        )
+        or (
+            "provider_signals" in second_public
+            and second_public.get("provider_signals") != second_cache
+        )
+    ):
+        return {"compatible": False, "reason_code": "cache_observation_structure_mismatch"}
+    cache = compare_siteground_cache_boundaries(first_cache, second_cache)
+    if cache.get("compatible") is not True:
+        return cache
+    return {
+        "compatible": True,
+        "reason_code": "durable_boundary_stable_with_recognized_cache_volatility",
+        "cache": cache,
+    }
 
 
 def _send_fixed_upgrade(session: Session) -> dict[str, Any]:

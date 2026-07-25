@@ -1,5 +1,12 @@
 # Project Atlas Version History
 
+## v0.59.96
+
+- Classified the v0.59.95 Metadata Bridge 0.57.7 verification incident as expected volatile SiteGround request-cache behavior, not durable protected-state drift.
+- Replaced byte-for-byte cache-header equality in the locked 0.57.6-to-0.57.7 post-upgrade verifier with a narrow semantic comparison: provider, nginx origin, privacy, URL, redirects, signed rendered identity, cache enablement, security headers, and purge count remain exact while recognized HIT/MISS and valid SiteGround request diagnostics may vary.
+- Added a fresh-evidence, fresh-Data-backup, phrase-gated Atlas-only reconciliation for exact Upgrade Audit ID 3, preserving the original plugin write, failure findings, post-upgrade snapshot, inventories, and history while performing zero WordPress, plugin, or cache writes.
+- Added migration 0027 and Data Backup schema 0.41 for durable reconciliation identity, one-time handle fingerprint, binding, snapshot, and completion time while preserving 0.40 restore compatibility.
+
 ## v0.59.95
 
 - Normalized the exact legacy top-level `cache_headers` field from v0.59.92 durable protected-state records only during historical comparison.

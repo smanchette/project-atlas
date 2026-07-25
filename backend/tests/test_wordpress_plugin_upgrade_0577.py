@@ -23,6 +23,7 @@ from app.schemas.wordpress import WordPressPluginUpgradeApplyRequest, WordPressP
 from app.services import wordpress_deployment as deployment
 from app.services import wordpress_metadata_lifecycle as lifecycle
 from app.services import wordpress_plugin_upgrade_0577 as upgrade
+from app.services.wordpress_http import classify_siteground_cache_headers
 from test_wordpress_plugin_upgrade import (
     COMMIT,
     KEY,
@@ -80,13 +81,39 @@ def observation(version=upgrade.CURRENT_VERSION):
         "rendered": {
             "verified": True,
             "signature_validated": True,
+            "status_code": 200,
+            "final_url": "https://www.drywoodtenting.com/drywood-termite-tenting-orlando-fl/",
+            "redirect_count": 0,
+            "head_hash": "1" * 64,
+            "visible_hash": "2" * 64,
             "h1": ["Drywood Termite Tenting in Orlando, FL"],
+            "canonical": ["https://www.drywoodtenting.com/drywood-termite-tenting-orlando-fl/"],
+            "featured_image_url": "https://www.drywoodtenting.com/wp-content/uploads/2026/07/orlando-drywood-termite-tenting-hero.png",
+            "featured_image_alt": "Two-story Orlando Florida home professionally covered for drywood termite tenting",
             "atlas_metadata_marker_present": False,
             "media32_reference_present": False,
             "metadata_inventory": {"meta_descriptions": [], "open_graph": [], "twitter": [], "json_ld": [], "atlas_ownership_markers": []},
-            "cache_headers": {},
+            "cache_headers": {
+                "server": "nginx",
+                "x-cache-enabled": "True",
+                "x-proxy-cache": "HIT",
+            },
+            "public_http_observation": {
+                "requested_url": "https://www.drywoodtenting.com/drywood-termite-tenting-orlando-fl/",
+                "origin": "https://www.drywoodtenting.com",
+                "content_classification": "html",
+                "provider_family": "siteground-nginx",
+                "provider_verified": True,
+                "response_source": "provider_verified_public_html",
+                "privacy_classification": "credential_free_public",
+                "transport_category": "response_received",
+            },
         },
-        "cache_headers": {},
+        "cache_headers": {
+            "server": "nginx",
+            "x-cache-enabled": "True",
+            "x-proxy-cache": "HIT",
+        },
         "cache_purge_count": 0,
         "wordpress_request_performed": True,
         "wordpress_request_methods": ["GET"],
@@ -434,6 +461,148 @@ def test_0576_post_upgrade_drift_fails_verification(case, failed_gate):
         preview, [state], [],
     )
     assert failed_gate in {gate.code for gate in gates if not gate.passed}
+
+
+@pytest.mark.parametrize(
+    ("before_status", "after_status", "before_info", "after_info"),
+    [
+        ("HIT", "MISS", None, "0 NC:000000 UP:"),
+        ("MISS", "HIT", "0 NC:000000 UP:", None),
+    ],
+)
+def test_0577_cache_boundary_accepts_only_recognized_request_volatility(
+    before_status,
+    after_status,
+    before_info,
+    after_info,
+):
+    before = observation()
+    after = observation(upgrade.TARGET_VERSION)
+    before["cache_headers"]["x-proxy-cache"] = before_status
+    after["cache_headers"]["x-proxy-cache"] = after_status
+    before["rendered"]["cache_headers"] = deepcopy(before["cache_headers"])
+    after["rendered"]["cache_headers"] = deepcopy(after["cache_headers"])
+    if before_info:
+        before["cache_headers"]["x-proxy-cache-info"] = before_info
+        before["rendered"]["cache_headers"] = deepcopy(before["cache_headers"])
+    if after_info:
+        after["cache_headers"]["x-proxy-cache-info"] = after_info
+        after["rendered"]["cache_headers"] = deepcopy(after["cache_headers"])
+    result = upgrade.compare_upgrade_cache_boundary(before, after)
+    assert result["compatible"] is True
+
+
+def test_siteground_observed_proxy_info_format_is_narrowly_recognized():
+    valid = classify_siteground_cache_headers(
+        {
+            "server": "nginx",
+            "x-cache-enabled": "True",
+            "x-proxy-cache": "MISS",
+            "x-proxy-cache-info": "0 NC:000000 UP:",
+        }
+    )
+    assert valid["verified"] is True
+    assert valid["status_reason_code"] == "cache_status_miss"
+    invalid = classify_siteground_cache_headers(
+        {
+            "server": "nginx",
+            "x-cache-enabled": "True",
+            "x-proxy-cache": "MISS",
+            "x-proxy-cache-info": "0 NC:000000 UNKNOWN:",
+        }
+    )
+    assert invalid["verified"] is False
+    assert invalid["reason_code"] == "cache_header_value_invalid"
+
+
+@pytest.mark.parametrize(
+    ("mutator", "reason"),
+    [
+        (
+            lambda value: value["cache_headers"].update(
+                {"x-proxy-cache-info": "unknown diagnostic"}
+            ),
+            "provider_family_changed_or_unverified",
+        ),
+        (
+            lambda value: value["cache_headers"].update({"server": "cloudflare"}),
+            "provider_family_changed_or_unverified",
+        ),
+        (
+            lambda value: value["cache_headers"].update(
+                {"strict-transport-security": "max-age=1"}
+            ),
+            "durable_header_changed:strict-transport-security",
+        ),
+        (
+            lambda value: value["cache_headers"].update({"x-proxy-cashe": "HIT"}),
+            "after_cache_header_unknown_or_malformed",
+        ),
+        (
+            lambda value: value["cache_headers"].pop("x-proxy-cache"),
+            "volatile_cache_status_unrecognized:x-proxy-cache",
+        ),
+    ],
+)
+def test_0577_cache_boundary_rejects_unknown_provider_security_and_header_drift(
+    mutator,
+    reason,
+):
+    before = observation()
+    after = observation(upgrade.TARGET_VERSION)
+    mutator(after)
+    after["rendered"]["cache_headers"] = deepcopy(after["cache_headers"])
+    result = upgrade.compare_upgrade_cache_boundary(before, after)
+    assert result == {"compatible": False, "reason_code": reason}
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("origin", "https://other.example", "public_boundary_changed:origin"),
+        ("provider_family", "other", "public_boundary_changed:provider_family"),
+        ("privacy_classification", "authenticated_transport", "public_boundary_changed:privacy_classification"),
+        ("response_source", "provider_verified_html_block", "public_boundary_changed:response_source"),
+    ],
+)
+def test_0577_cache_boundary_rejects_origin_provider_and_privacy_drift(
+    field,
+    value,
+    reason,
+):
+    before = observation()
+    after = observation(upgrade.TARGET_VERSION)
+    after["rendered"]["public_http_observation"][field] = value
+    result = upgrade.compare_upgrade_cache_boundary(before, after)
+    assert result == {"compatible": False, "reason_code": reason}
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("final_url", "https://example.com/", "url_redirect_or_status_changed"),
+        ("redirect_count", 1, "url_redirect_or_status_changed"),
+        ("document_title", ["Changed"], "rendered_identity_changed:document_title"),
+        ("h1", ["Changed"], "rendered_identity_changed:h1"),
+        ("canonical", ["https://example.com/"], "rendered_identity_changed:canonical"),
+        ("featured_image_url", "https://example.com/changed.png", "rendered_identity_changed:featured_image_url"),
+        ("featured_image_alt", "Changed", "rendered_identity_changed:featured_image_alt"),
+        ("atlas_metadata_marker_present", True, "rendered_identity_changed:atlas_metadata_marker_present"),
+        ("media32_reference_present", True, "rendered_identity_changed:media32_reference_present"),
+        ("head_hash", "f" * 64, "rendered_identity_changed:head_hash"),
+        ("visible_hash", "f" * 64, "rendered_identity_changed:visible_hash"),
+    ],
+)
+def test_0577_cache_boundary_rejects_url_redirect_and_page_identity_drift(
+    field,
+    value,
+    reason,
+):
+    before = observation()
+    after = observation(upgrade.TARGET_VERSION)
+    after["rendered"][field] = value
+    result = upgrade.compare_upgrade_cache_boundary(before, after)
+    assert result == {"compatible": False, "reason_code": reason}
 
 
 @pytest.mark.parametrize("case,failed_gate", [

@@ -38,7 +38,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.40"
+BACKUP_VERSION = "0.41"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -64,6 +64,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.38",
     "0.39",
     "0.40",
+    "0.41",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -601,6 +602,7 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 "activation_audit_id": _mapped_id(activation_audit_ids, record["activation_audit_id"], "wordpress_plugin_upgrade_audits.activation_audit_id"),
                 "attempted_at": attempted_at,
                 "completed_at": _datetime_value(record["completed_at"], "wordpress_plugin_upgrade_audits.completed_at") if record.get("completed_at") else None,
+                "reconciled_at": _datetime_value(record["reconciled_at"], "wordpress_plugin_upgrade_audits.reconciled_at") if record.get("reconciled_at") else None,
             }
             _upsert(
                 session,

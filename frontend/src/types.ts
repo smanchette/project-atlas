@@ -989,6 +989,47 @@ export type WordPressPluginUpgradeRecoveryAssessment = {
   gate_results:WordPressDeploymentGate[]; inspected_state:Record<string,unknown>;
   wordpress_write_count:0; atlas_write_count:0; automatic_recovery_performed:false;
 };
+export type WordPressPluginUpgradeReconciliationRequest = {
+  upgrade_audit_id:3; operator:string;
+  manual_browser_evidence:WordPressManualBrowserEvidence;
+  expected_runtime_identity:{
+    atlas_version:string; atlas_commit:string; atlas_tag:string;
+    manifest_sha256:string; source_compatibility_id:string;
+  };
+  repository_head:string; repository_origin_main:string; repository_tag:"v0.59.96";
+  repository_branch:"main"; repository_working_tree_clean:boolean;
+  protected_paths_unchanged:boolean; atlas_data_backup_file:string;
+  atlas_data_backup_sha256:string; atlas_data_backup_size:number;
+  atlas_data_backup_created_at:string; atlas_data_backup_onedrive_path:string;
+  atlas_data_backup_onedrive_synced:boolean;
+};
+export type WordPressPluginUpgradeReconciliationApplyRequest = {
+  reconciliation_handle:string; confirmation_phrase:string;
+};
+export type WordPressPluginUpgradeReconciliationPreflight = {
+  page_id:41; wordpress_post_id:8; upgrade_audit_id:3;
+  status:"plugin_upgrade_reconciliation_blocked"|"plugin_upgrade_reconciliation_ready";
+  reconciliation_ready:boolean; reconciliation_handle?:string|null;
+  reconciliation_handle_fingerprint?:string|null; binding_hash?:string|null;
+  confirmation_phrase?:string|null; expires_at?:string|null;
+  expected_final_status:"verified";
+  expected_history_append:"cache_boundary_volatile_observation_reconciled";
+  expected_wordpress_write_count:0; expected_plugin_write_count:0;
+  expected_cache_write_count:0; expected_atlas_write_count:1;
+  atlas_data_backup:Record<string,unknown>; inspected_state:Record<string,unknown>;
+  gate_results:WordPressDeploymentGate[]; inspection_only:true; audit_created:false;
+};
+export type WordPressPluginUpgradeReconciliationResult = {
+  page_id:41; wordpress_post_id:8; upgrade_audit_id:3; status:"verified";
+  reconciliation_reason:"cache_boundary_volatile_observation_reconciled";
+  state_history:string[]; binding_hash:string; reconciliation_handle_fingerprint:string;
+  wordpress_write_count:0; plugin_write_count:0; cache_write_count:0;
+  request_atlas_write_count:1; cumulative_atlas_write_count:number;
+  original_upgrade_write_count:1; original_upgrade_write_preserved:true;
+  original_failure_history_preserved:true; new_audit_created:false;
+  new_authorization_created:false; inspected_state:Record<string,unknown>;
+  gate_results:WordPressDeploymentGate[]; further_action_required:false;
+};
 export type WordPressBootstrapEstablishmentPreflight = {
   page_id:41; wordpress_post_id:8; stage:string; ready:boolean; status:string;
   establishment_audit_id?:number|null; handle?:string|null; handle_fingerprint?:string|null;
@@ -1014,7 +1055,7 @@ export type WordPressBootstrapActivationReconciliationRequest = {
     atlas_version:string; atlas_commit:string; atlas_tag:string;
     manifest_sha256:string; source_compatibility_id:string;
   };
-  repository_head:string; repository_origin_main:string; repository_tag:"v0.59.95";
+  repository_head:string; repository_origin_main:string; repository_tag:"v0.59.96";
   repository_branch:"main"; repository_working_tree_clean:boolean;
   protected_paths_unchanged:boolean; atlas_data_backup_file:string;
   atlas_data_backup_sha256:string; atlas_data_backup_size:number;
