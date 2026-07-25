@@ -303,6 +303,7 @@ def _inspect(session, request, audit):
     backup, backup_gates = _backup(request, release, audit)
     post = audit.post_snapshot if audit and isinstance(audit.post_snapshot, dict) else {}
     rendered = observed.get("rendered", {})
+    rendered_public = rendered.get("public_http_observation", {})
     historical_rendered = post.get("rendered", {}) if isinstance(post, dict) else {}
     matches = _matching_reconciliation_plugins(observed.get("plugins", []))
     bootstrap_matches = [
@@ -503,8 +504,12 @@ def _inspect(session, request, audit):
             and rendered.get("evidence_schema_version") == 1
             and rendered.get("browser_evidence_identifier") == evidence.evidence_id
             and rendered.get("final_url") == EXPECTED_URL
-            and rendered.get("redirect_count") == 0
-            and rendered.get("status_code") == 200
+            and rendered_public.get("final_url") == EXPECTED_URL
+            and rendered_public.get("redirect_count") == 0
+            and rendered_public.get("status_code") == 200
+            and rendered.get("redirect_count")
+            == rendered_public.get("redirect_count")
+            and rendered.get("status_code") == rendered_public.get("status_code")
             and rendered.get("h1") == [EXPECTED_H1]
             and rendered.get("featured_image_url") == EXPECTED_MEDIA_URL
             and rendered.get("featured_image_alt") == EXPECTED_MEDIA_ALT
@@ -694,9 +699,9 @@ def _binding(request, audit, inspected, backup, expires_at):
             "provider_family": public.get("provider_family"),
             "privacy": public.get("privacy_classification"),
             "response_source": public.get("response_source"),
-            "status_code": rendered.get("status_code"),
-            "final_url": rendered.get("final_url"),
-            "redirect_count": rendered.get("redirect_count"),
+            "status_code": public.get("status_code"),
+            "final_url": public.get("final_url"),
+            "redirect_count": public.get("redirect_count"),
             "plugin_status": inspected.get("plugin_status"),
             "bootstrap_status": inspected.get("bootstrap_status"),
         },

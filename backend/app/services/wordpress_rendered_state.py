@@ -987,7 +987,37 @@ def acquire_rendered_state(username: str, password: str, *, manual_evidence: dic
         identity = manual_evidence["page_identity"]
         absence = manual_evidence["absence_findings"]
         public_observation = _public_http_observation(public_result)
-        return {"source": "manual_browser_evidence", "outcome": "manual_browser_evidence_verified", "verified": True, "final_url": EXPECTED_URL, "head_hash": manual_evidence["rendered_head_hash"], "visible_hash": manual_evidence["visible_content_hash"], "document_title": [identity["document_title"]], "h1": [identity["h1"]], "canonical": [identity["canonical_url"]], "featured_image_url": identity["featured_image_url"], "featured_image_alt": identity["featured_image_alt"], "browser_evidence_identifier": manual_evidence["evidence_id"], "evidence_schema": manual_evidence["evidence_schema"], "evidence_schema_version": manual_evidence["evidence_schema_version"], "capture_helper_version": manual_evidence["capture_helper_version"], "evidence_timestamp": manual_evidence["captured_at"], "evidence_expires_at": manual_evidence["expires_at"], "metadata_inventory": manual_evidence["metadata_inventory"], "metadata_inventory_hash": manual_evidence["metadata_inventory_hash"], "privacy_attestations": manual_evidence["privacy_attestations"], "signature_validated": True, "atlas_metadata_marker_present": not absence["atlas_ownership_marker_absent"], "media32_reference_present": not absence["media32_absent"], "cache_headers": public_observation.get("cache_headers", {}), "public_http_observation": public_observation}
+        return {
+            "source": "manual_browser_evidence",
+            "outcome": "manual_browser_evidence_verified",
+            "verified": True,
+            "final_url": EXPECTED_URL,
+            "status_code": public_observation.get("status_code"),
+            "redirect_count": public_observation.get("redirect_count"),
+            "head_hash": manual_evidence["rendered_head_hash"],
+            "visible_hash": manual_evidence["visible_content_hash"],
+            "document_title": [identity["document_title"]],
+            "h1": [identity["h1"]],
+            "canonical": [identity["canonical_url"]],
+            "featured_image_url": identity["featured_image_url"],
+            "featured_image_alt": identity["featured_image_alt"],
+            "browser_evidence_identifier": manual_evidence["evidence_id"],
+            "evidence_schema": manual_evidence["evidence_schema"],
+            "evidence_schema_version": manual_evidence["evidence_schema_version"],
+            "capture_helper_version": manual_evidence["capture_helper_version"],
+            "evidence_timestamp": manual_evidence["captured_at"],
+            "evidence_expires_at": manual_evidence["expires_at"],
+            "metadata_inventory": manual_evidence["metadata_inventory"],
+            "metadata_inventory_hash": manual_evidence["metadata_inventory_hash"],
+            "privacy_attestations": manual_evidence["privacy_attestations"],
+            "signature_validated": True,
+            "atlas_metadata_marker_present": not absence[
+                "atlas_ownership_marker_absent"
+            ],
+            "media32_reference_present": not absence["media32_absent"],
+            "cache_headers": public_observation.get("cache_headers", {}),
+            "public_http_observation": public_observation,
+        }
     if public_result and public_result.get("outcome") == "bot_protection_blocked":
         result = public_result
     return {

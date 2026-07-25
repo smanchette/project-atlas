@@ -303,6 +303,38 @@ def test_reconciliation_preflight_is_fresh_read_only_and_zero_write(monkeypatch,
         assert current["wordpress_request_methods"] == ["GET"]
 
 
+def test_reconciliation_accepts_legacy_null_transport_projection(monkeypatch, db):
+    configure(monkeypatch)
+    with Session(db) as session:
+        seed_reconciliation(session)
+        audit = session.get(WordPressPluginUpgradeAudit, 3)
+        audit.pre_snapshot["rendered"]["status_code"] = None
+        audit.pre_snapshot["rendered"]["redirect_count"] = None
+        session.add(audit)
+        session.commit()
+
+        preflight = reconciliation.reconciliation_preflight(session, 41, request())
+        assert preflight.reconciliation_ready is True, [
+            (gate.code, gate.message)
+            for gate in preflight.gate_results
+            if not gate.passed
+        ]
+        result = reconciliation.apply_reconciliation(
+            session,
+            41,
+            WordPressPluginUpgradeReconciliationApplyRequest(
+                reconciliation_handle=preflight.reconciliation_handle,
+                confirmation_phrase=reconciliation.RECONCILIATION_PHRASE,
+            ),
+        )
+
+        assert result.status == "verified"
+        assert result.wordpress_write_count == 0
+        assert result.plugin_write_count == 0
+        assert result.cache_write_count == 0
+        assert result.request_atlas_write_count == 1
+
+
 def test_reconciliation_apply_is_one_atomic_atlas_update_and_preserves_history(monkeypatch, db):
     configure(monkeypatch)
     with Session(db) as session:
@@ -472,6 +504,7 @@ def test_reconciliation_durable_drift_blocks_without_write(monkeypatch, db, case
         current["rendered"]["public_http_observation"]["provider_family"] = "other"
     elif case == "redirect":
         current["rendered"]["redirect_count"] = 1
+        current["rendered"]["public_http_observation"]["redirect_count"] = 1
     elif case == "purge":
         current["cache_purge_count"] = 1
     configure(monkeypatch, current)

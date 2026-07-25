@@ -491,13 +491,28 @@ def compare_upgrade_cache_boundary(
     for field in stable_fields:
         if first_public.get(field) != second_public.get(field):
             return {"compatible": False, "reason_code": f"public_boundary_changed:{field}"}
+
+    transport_fields = ("final_url", "redirect_count", "status_code")
+    for label, rendered, public in (
+        ("before", first_rendered, first_public),
+        ("after", second_rendered, second_public),
+    ):
+        for field in transport_fields:
+            projected = rendered.get(field)
+            if projected is not None and projected != public.get(field):
+                return {
+                    "compatible": False,
+                    "reason_code": (
+                        f"{label}_rendered_transport_projection_conflict:{field}"
+                    ),
+                }
     if (
-        first_rendered.get("final_url") != second_rendered.get("final_url")
-        or first_rendered.get("redirect_count") != second_rendered.get("redirect_count")
-        or first_rendered.get("status_code") != second_rendered.get("status_code")
-        or first_rendered.get("final_url") != EXPECTED_URL
-        or first_rendered.get("redirect_count") != 0
-        or first_rendered.get("status_code") != 200
+        first_public.get("final_url") != second_public.get("final_url")
+        or first_public.get("redirect_count") != second_public.get("redirect_count")
+        or first_public.get("status_code") != second_public.get("status_code")
+        or first_public.get("final_url") != EXPECTED_URL
+        or first_public.get("redirect_count") != 0
+        or first_public.get("status_code") != 200
     ):
         return {"compatible": False, "reason_code": "url_redirect_or_status_changed"}
     if (

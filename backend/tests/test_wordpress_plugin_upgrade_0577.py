@@ -8,6 +8,7 @@ import inspect
 import zipfile
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -24,8 +25,13 @@ from app.services import wordpress_deployment as deployment
 from app.services import wordpress_metadata_lifecycle as lifecycle
 from app.services import wordpress_plugin_upgrade_0577 as upgrade
 from app.services.wordpress_http import classify_siteground_cache_headers
+from app.services.wordpress_rendered_state import (
+    EXPECTED_URL,
+    acquire_rendered_state,
+)
 from test_wordpress_plugin_upgrade import (
     COMMIT,
+    HTML,
     KEY,
     MANIFEST,
     MEDIA31_HASH,
@@ -107,6 +113,9 @@ def observation(version=upgrade.CURRENT_VERSION):
                 "response_source": "provider_verified_public_html",
                 "privacy_classification": "credential_free_public",
                 "transport_category": "response_received",
+                "final_url": "https://www.drywoodtenting.com/drywood-termite-tenting-orlando-fl/",
+                "status_code": 200,
+                "redirect_count": 0,
             },
         },
         "cache_headers": {
@@ -492,6 +501,60 @@ def test_0577_cache_boundary_accepts_only_recognized_request_volatility(
     assert result["compatible"] is True
 
 
+def test_0577_cache_boundary_accepts_identical_legacy_projection_with_nested_transport():
+    before = observation()
+    after = deepcopy(before)
+    before["rendered"]["status_code"] = None
+    before["rendered"]["redirect_count"] = None
+    after["rendered"]["status_code"] = None
+    after["rendered"]["redirect_count"] = None
+
+    result = upgrade.compare_upgrade_cache_boundary(before, after)
+
+    assert result["compatible"] is True
+
+
+def test_0577_cache_boundary_uses_real_evidence_backed_rendered_projection():
+    signed = evidence()
+    response = httpx.Response(
+        200,
+        request=httpx.Request("GET", EXPECTED_URL),
+        headers={
+            "Content-Type": "text/html; charset=UTF-8",
+            "Server": "nginx",
+            "X-Cache-Enabled": "True",
+            "X-Proxy-Cache": "HIT",
+        },
+        text=HTML,
+    )
+
+    class PublicClient:
+        def get(self, url, **kwargs):
+            return response
+
+    current_rendered = acquire_rendered_state(
+        "unused",
+        "unused",
+        manual_evidence=signed,
+        evidence_signing_key=KEY,
+        client=PublicClient(),
+    )
+    before = observation()
+    after = deepcopy(before)
+    before["rendered"] = deepcopy(current_rendered)
+    before["rendered"]["status_code"] = None
+    before["rendered"]["redirect_count"] = None
+    before["cache_headers"] = deepcopy(current_rendered["cache_headers"])
+    after["rendered"] = deepcopy(current_rendered)
+    after["cache_headers"] = deepcopy(current_rendered["cache_headers"])
+
+    result = upgrade.compare_upgrade_cache_boundary(before, after)
+
+    assert current_rendered["status_code"] == 200
+    assert current_rendered["redirect_count"] == 0
+    assert result["compatible"] is True
+
+
 def test_siteground_observed_proxy_info_format_is_narrowly_recognized():
     valid = classify_siteground_cache_headers(
         {
@@ -582,6 +645,7 @@ def test_0577_cache_boundary_rejects_origin_provider_and_privacy_drift(
     [
         ("final_url", "https://example.com/", "url_redirect_or_status_changed"),
         ("redirect_count", 1, "url_redirect_or_status_changed"),
+        ("status_code", 503, "url_redirect_or_status_changed"),
         ("document_title", ["Changed"], "rendered_identity_changed:document_title"),
         ("h1", ["Changed"], "rendered_identity_changed:h1"),
         ("canonical", ["https://example.com/"], "rendered_identity_changed:canonical"),
@@ -600,9 +664,32 @@ def test_0577_cache_boundary_rejects_url_redirect_and_page_identity_drift(
 ):
     before = observation()
     after = observation(upgrade.TARGET_VERSION)
-    after["rendered"][field] = value
+    if field in {"final_url", "redirect_count", "status_code"}:
+        after["rendered"][field] = value
+        after["rendered"]["public_http_observation"][field] = value
+    else:
+        after["rendered"][field] = value
     result = upgrade.compare_upgrade_cache_boundary(before, after)
     assert result == {"compatible": False, "reason_code": reason}
+
+
+@pytest.mark.parametrize("field", ["final_url", "redirect_count", "status_code"])
+def test_0577_cache_boundary_rejects_fabricated_rendered_transport_projection(field):
+    before = observation()
+    after = observation(upgrade.TARGET_VERSION)
+    values = {
+        "final_url": "https://example.com/",
+        "redirect_count": 1,
+        "status_code": 503,
+    }
+    after["rendered"][field] = values[field]
+
+    result = upgrade.compare_upgrade_cache_boundary(before, after)
+
+    assert result == {
+        "compatible": False,
+        "reason_code": f"after_rendered_transport_projection_conflict:{field}",
+    }
 
 
 @pytest.mark.parametrize("case,failed_gate", [

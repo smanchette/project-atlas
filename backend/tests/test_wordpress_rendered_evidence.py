@@ -125,10 +125,14 @@ def test_signed_browser_fallback_preserves_separate_sanitized_public_http_observ
     assert len(client.calls) == 1
     assert result["source"] == "manual_browser_evidence"
     assert result["head_hash"] == signed["rendered_head_hash"]
+    assert result["status_code"] == 200
+    assert result["redirect_count"] == 0
     observation = result["public_http_observation"]
     assert observation["source"] == "public"
     assert observation["status_code"] == 200
     assert observation["redirect_count"] == 0
+    assert result["status_code"] == observation["status_code"]
+    assert result["redirect_count"] == observation["redirect_count"]
     assert observation["head_hash"] == signed["rendered_head_hash"]
     assert observation["visible_hash"] == signed["visible_content_hash"]
     assert observation["cache_headers"] == {
@@ -140,6 +144,34 @@ def test_signed_browser_fallback_preserves_separate_sanitized_public_http_observ
     encoded = json.dumps(result).lower()
     assert "set-cookie" not in encoded
     assert "wordpress_logged_in" not in encoded
+
+
+def test_signed_browser_fallback_projects_observed_failure_without_fabrication():
+    signed = evidence()
+    response = httpx.Response(
+        403,
+        request=httpx.Request("GET", EXPECTED_URL),
+        headers={
+            "Content-Type": "text/html; charset=UTF-8",
+            "X-Cache-Enabled": "True",
+            "X-Proxy-Cache": "HIT",
+            "Server": "nginx",
+        },
+        text="Unavailable",
+    )
+    result = acquire_rendered_state(
+        "unused",
+        "unused",
+        manual_evidence=signed,
+        evidence_signing_key=KEY,
+        client=StaticPublicClient(response),
+    )
+    assert result["source"] == "manual_browser_evidence"
+    assert result["verified"] is True
+    assert result["status_code"] == 403
+    assert result["redirect_count"] == 0
+    assert result["public_http_observation"]["status_code"] == 403
+    assert result["public_http_observation"]["redirect_count"] == 0
 
 
 def test_verified_public_result_attaches_canonical_sanitized_observation():
