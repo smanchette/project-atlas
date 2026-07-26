@@ -53,6 +53,7 @@ from app.services.page_queue import create_city_service_page_queue
 from app.services.page_export import build_page_export_package, generate_suggested_slug, slugify
 from app.services import media_backup
 from app.services import program_backup
+from app.services import wordpress_http
 from app.services import wordpress_sandbox
 from app.services import wordpress_drafts
 from app.services import wordpress_draft_review
@@ -2537,7 +2538,7 @@ def test_wordpress_connection_test_uses_get_requests_only(
     assert requests[0][2] is False
     assert requests[1][2] is True
     assert requests[2][2] is True
-    assert client_headers["User-Agent"] == "Project-Atlas-WordPress/v0.59.96"
+    assert client_headers["User-Agent"] == wordpress_http.wordpress_user_agent()
     assert client_headers["Accept"] == "application/json"
     assert response.json()["atlas_status_checked"] is True
     assert response.json()["atlas_status_reachable"] is True

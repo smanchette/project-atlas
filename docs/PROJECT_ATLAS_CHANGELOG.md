@@ -116,6 +116,18 @@ Bootstrap, page, media, settings, payload, revision, rendering, and cache-purge
 state. Reconciliation performs one atomic update to Audit ID 3 and zero
 WordPress, plugin, or cache writes.
 
+## v0.59.98
+
+Prepared the Upgrade Audit ID 3 reconciliation contract for the exact
+v0.59.98 runtime and repository tag. The workflow remains fail-closed for
+v0.59.96, v0.59.97, future, malformed, stale-manifest, wrong-commit, and
+wrong-tag identities.
+
+Fresh signed browser evidence must be captured after the loaded v0.59.98
+runtime manifest was generated. The existing post-runtime Atlas Data backup,
+one-time handle, exact Audit ID 3, confirmation phrase, one Atlas audit update,
+and zero WordPress, plugin, and cache-write guarantees remain unchanged.
+
 ## Atlas Documentation Foundation v1.0
 
 The following governing documents were established:

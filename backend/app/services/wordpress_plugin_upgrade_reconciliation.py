@@ -63,7 +63,7 @@ RECONCILIATION_PHRASE = (
     "WITHOUT ANOTHER WORDPRESS WRITE"
 )
 HANDLE_TTL = timedelta(minutes=10)
-RELEASE_VERSION = "v0.59.96"
+RELEASE_VERSION = "v0.59.98"
 SOURCE_COMPATIBILITY_ID = "project-atlas-release-identity-v0.59.96"
 
 
@@ -256,14 +256,26 @@ def _inspect(session, request, audit):
         evidence,
         os.environ.get("ATLAS_BROWSER_EVIDENCE_HMAC_KEY", ""),
     )
+    try:
+        evidence_captured_after_runtime = _timestamp(
+            evidence.captured_at
+        ) >= _timestamp(release.get("generated_at"))
+    except (TypeError, ValueError):
+        evidence_captured_after_runtime = False
     evidence_valid = bool(
         evidence_valid
+        and evidence_captured_after_runtime
         and evidence.evidence_schema_version == 1
         and audit is not None
         and evidence.evidence_id != audit.browser_evidence_id
     )
     if evidence.evidence_schema_version != 1:
         evidence_reason = "Reconciliation requires fresh schema-v1 evidence."
+    elif not evidence_captured_after_runtime:
+        evidence_reason = (
+            "Reconciliation evidence must be captured after the loaded runtime "
+            "manifest was generated."
+        )
     elif audit is not None and evidence.evidence_id == audit.browser_evidence_id:
         evidence_reason = "Reconciliation evidence must be freshly captured."
 
@@ -330,7 +342,7 @@ def _inspect(session, request, audit):
     gates = [
         _gate(
             "runtime_identity",
-            "v0.59.96 runtime and independently expected identity are exact",
+            "v0.59.98 runtime and independently expected identity are exact",
             runtime_exact,
             "The loaded runtime identity is unavailable or differs.",
         ),
@@ -620,7 +632,7 @@ def _backup(request, release, audit):
         ),
         _gate(
             "atlas_data_backup_fresh",
-            "Atlas Data backup was created after the loaded v0.59.96 runtime",
+            "Atlas Data backup was created after the loaded v0.59.98 runtime",
             bool(
                 created_at
                 and runtime_generated_at

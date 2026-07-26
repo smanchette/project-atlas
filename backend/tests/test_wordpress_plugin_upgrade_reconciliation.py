@@ -3,9 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+import hashlib
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.models import (
@@ -70,15 +72,15 @@ def request(**changes):
         "operator": "Shawn Manchette",
         "manual_browser_evidence": evidence(),
         "expected_runtime_identity": WordPressDeploymentExpectedRuntimeIdentity(
-            atlas_version="v0.59.96",
+            atlas_version="v0.59.98",
             atlas_commit=COMMIT,
-            atlas_tag="v0.59.96",
+            atlas_tag="v0.59.98",
             manifest_sha256="b" * 64,
             source_compatibility_id="project-atlas-release-identity-v0.59.96",
         ),
         "repository_head": COMMIT,
         "repository_origin_main": COMMIT,
-        "repository_tag": "v0.59.96",
+        "repository_tag": "v0.59.98",
         "repository_branch": "main",
         "repository_working_tree_clean": True,
         "protected_paths_unchanged": True,
@@ -243,9 +245,9 @@ def configure(monkeypatch, current=None):
         lambda: {
             "release_status": "verified",
             "release": {
-                "atlas_version": "v0.59.96",
+                "atlas_version": "v0.59.98",
                 "atlas_commit": COMMIT,
-                "atlas_tag": "v0.59.96",
+                "atlas_tag": "v0.59.98",
                 "manifest_sha256": "b" * 64,
                 "source_compatibility_id": "project-atlas-release-identity-v0.59.96",
                 "runtime_identity_verified": True,
@@ -282,6 +284,190 @@ def configure(monkeypatch, current=None):
 
 def failed_codes(result):
     return {gate.code for gate in result.gate_results if not gate.passed}
+
+
+def test_reconciliation_release_identity_is_exactly_v05998():
+    assert reconciliation.AUDIT_ID == 3
+    assert reconciliation.RELEASE_VERSION == "v0.59.98"
+    assert reconciliation.RECONCILIATION_PHRASE == (
+        "RECONCILE PROJECT ATLAS METADATA BRIDGE UPGRADE AUDIT 3 "
+        "WITHOUT ANOTHER WORDPRESS WRITE"
+    )
+    assert request().repository_tag == "v0.59.98"
+    assert request().expected_runtime_identity.atlas_version == "v0.59.98"
+    assert request().expected_runtime_identity.atlas_tag == "v0.59.98"
+
+
+@pytest.mark.parametrize(
+    "repository_tag",
+    ["v0.59.96", "v0.59.97", "v0.59.99", "future", ""],
+)
+def test_reconciliation_schema_rejects_non_v05998_repository_tags(repository_tag):
+    with pytest.raises(ValidationError):
+        request(repository_tag=repository_tag)
+
+
+@pytest.mark.parametrize("release_version", ["v0.59.96", "v0.59.97", "v0.59.99"])
+def test_reconciliation_rejects_cross_release_expected_runtime(
+    monkeypatch, db, release_version
+):
+    configure(monkeypatch)
+    cross_release = request(
+        expected_runtime_identity=WordPressDeploymentExpectedRuntimeIdentity(
+            atlas_version=release_version,
+            atlas_commit=COMMIT,
+            atlas_tag=release_version,
+            manifest_sha256="b" * 64,
+            source_compatibility_id="project-atlas-release-identity-v0.59.96",
+        )
+    )
+    with Session(db) as session:
+        seed_reconciliation(session)
+        result = reconciliation.reconciliation_preflight(
+            session, 41, cross_release
+        )
+        assert not result.reconciliation_ready
+        assert "runtime_identity" in failed_codes(result)
+        assert not reconciliation._handles
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("atlas_version", "v0.59.97"),
+        ("atlas_commit", "f" * 40),
+        ("atlas_tag", "v0.59.97"),
+        ("manifest_integrity_verified", False),
+        ("expected_release_matched", False),
+    ],
+)
+def test_reconciliation_rejects_runtime_manifest_commit_or_tag_drift(
+    monkeypatch, db, field, value
+):
+    configure(monkeypatch)
+    release = {
+        "atlas_version": "v0.59.98",
+        "atlas_commit": COMMIT,
+        "atlas_tag": "v0.59.98",
+        "manifest_sha256": "b" * 64,
+        "source_compatibility_id": "project-atlas-release-identity-v0.59.96",
+        "runtime_identity_verified": True,
+        "manifest_integrity_verified": True,
+        "expected_release_matched": True,
+        "generated_at": (datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
+    }
+    release[field] = value
+    monkeypatch.setattr(
+        reconciliation,
+        "deployment_readiness",
+        lambda: {"release_status": "verified", "release": release},
+    )
+    with Session(db) as session:
+        seed_reconciliation(session)
+        result = reconciliation.reconciliation_preflight(session, 41, request())
+        assert not result.reconciliation_ready
+        assert "runtime_identity" in failed_codes(result)
+        assert not reconciliation._handles
+
+
+def test_reconciliation_rejects_evidence_captured_before_loaded_runtime(
+    monkeypatch, db
+):
+    configure(monkeypatch)
+    runtime_generated_at = datetime.now(UTC) - timedelta(minutes=1)
+    monkeypatch.setattr(
+        reconciliation,
+        "deployment_readiness",
+        lambda: {
+            "release_status": "verified",
+            "release": {
+                "atlas_version": "v0.59.98",
+                "atlas_commit": COMMIT,
+                "atlas_tag": "v0.59.98",
+                "manifest_sha256": "b" * 64,
+                "source_compatibility_id": (
+                    "project-atlas-release-identity-v0.59.96"
+                ),
+                "runtime_identity_verified": True,
+                "manifest_integrity_verified": True,
+                "expected_release_matched": True,
+                "generated_at": runtime_generated_at.isoformat(),
+            },
+        },
+    )
+    cross_release_evidence = evidence(
+        "orlando-cross-release-evidence",
+        runtime_generated_at - timedelta(minutes=1),
+    )
+    with Session(db) as session:
+        seed_reconciliation(session)
+        result = reconciliation.reconciliation_preflight(
+            session,
+            41,
+            request(manual_browser_evidence=cross_release_evidence),
+        )
+        assert not result.reconciliation_ready
+        assert "fresh_evidence" in failed_codes(result)
+        assert not reconciliation._handles
+
+
+def test_reconciliation_rejects_backup_created_before_loaded_runtime(
+    monkeypatch, db, tmp_path
+):
+    backup_path = tmp_path / "atlas-backup-cross-release.json"
+    backup_path.write_bytes(b"cross-release-backup")
+    runtime_generated_at = datetime.now(UTC)
+    backup_created_at = runtime_generated_at - timedelta(minutes=1)
+    with Session(db) as session:
+        seed_reconciliation(session)
+        audit = session.get(WordPressPluginUpgradeAudit, 3)
+        backup_payload = {
+            "metadata": {"created_at": backup_created_at.isoformat()},
+            "data": {
+                "wordpress_plugin_upgrade_audits": [
+                    {
+                        "id": 3,
+                        "status": audit.status,
+                        "wordpress_write_count": audit.wordpress_write_count,
+                        "atlas_write_count": audit.atlas_write_count,
+                        "transition_history": audit.transition_history,
+                        "reconciliation_reason": audit.reconciliation_reason,
+                    }
+                ]
+            },
+        }
+        monkeypatch.setattr(
+            reconciliation,
+            "resolve_backup_download",
+            lambda file_name: backup_path,
+        )
+        monkeypatch.setattr(
+            reconciliation,
+            "load_backup",
+            lambda path: backup_payload,
+        )
+        backup_request = request(
+            atlas_data_backup_file=backup_path.name,
+            atlas_data_backup_sha256=hashlib.sha256(
+                backup_path.read_bytes()
+            ).hexdigest(),
+            atlas_data_backup_size=backup_path.stat().st_size,
+            atlas_data_backup_created_at=backup_created_at,
+            atlas_data_backup_onedrive_path=(
+                rf"C:\Users\offic\OneDrive\Atlas\{backup_path.name}"
+            ),
+        )
+        _, gates = reconciliation._backup(
+            backup_request,
+            {"generated_at": runtime_generated_at.isoformat()},
+            audit,
+        )
+        by_code = {gate.code: gate for gate in gates}
+        assert by_code["atlas_data_backup_structure"].passed
+        assert by_code["atlas_data_backup_identity"].passed
+        assert not by_code["atlas_data_backup_fresh"].passed
+        assert by_code["atlas_data_backup_audit"].passed
+        assert by_code["atlas_data_backup_onedrive"].passed
 
 
 def test_reconciliation_preflight_is_fresh_read_only_and_zero_write(monkeypatch, db):
@@ -558,6 +744,49 @@ def test_reconciliation_apply_gate_drift_consumes_handle_and_leaves_no_pending_s
         preflight = reconciliation.reconciliation_preflight(session, 41, request())
         current["page_body_hash"] = "f" * 64
         monkeypatch.setattr(reconciliation, "_observe", lambda session, request: deepcopy(current))
+        with pytest.raises(HTTPException, match="gate changed"):
+            reconciliation.apply_reconciliation(
+                session,
+                41,
+                WordPressPluginUpgradeReconciliationApplyRequest(
+                    reconciliation_handle=preflight.reconciliation_handle,
+                    confirmation_phrase=reconciliation.RECONCILIATION_PHRASE,
+                ),
+            )
+        assert not reconciliation._handles
+        audit = session.get(WordPressPluginUpgradeAudit, 3)
+        assert audit.status == "verification_failed"
+        assert audit.atlas_write_count == 2
+
+
+def test_reconciliation_cross_release_handle_replay_fails_closed(monkeypatch, db):
+    configure(monkeypatch)
+    with Session(db) as session:
+        seed_reconciliation(session)
+        preflight = reconciliation.reconciliation_preflight(
+            session, 41, request()
+        )
+        assert preflight.reconciliation_ready
+        monkeypatch.setattr(
+            reconciliation,
+            "deployment_readiness",
+            lambda: {
+                "release_status": "verified",
+                "release": {
+                    "atlas_version": "v0.59.99",
+                    "atlas_commit": "f" * 40,
+                    "atlas_tag": "v0.59.99",
+                    "manifest_sha256": "e" * 64,
+                    "source_compatibility_id": (
+                        "project-atlas-release-identity-v0.59.96"
+                    ),
+                    "runtime_identity_verified": True,
+                    "manifest_integrity_verified": True,
+                    "expected_release_matched": True,
+                    "generated_at": datetime.now(UTC).isoformat(),
+                },
+            },
+        )
         with pytest.raises(HTTPException, match="gate changed"):
             reconciliation.apply_reconciliation(
                 session,
