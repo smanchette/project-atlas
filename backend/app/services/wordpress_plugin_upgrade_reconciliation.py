@@ -52,6 +52,7 @@ from app.services.wordpress_rendered_state import (
     EXPECTED_MEDIA_ALT,
     EXPECTED_MEDIA_URL,
     EXPECTED_URL,
+    acquire_rendered_state,
     validate_manual_browser_evidence,
 )
 
@@ -63,8 +64,37 @@ RECONCILIATION_PHRASE = (
     "WITHOUT ANOTHER WORDPRESS WRITE"
 )
 HANDLE_TTL = timedelta(minutes=10)
-RELEASE_VERSION = "v0.59.98"
+RELEASE_VERSION = "v0.59.99"
 SOURCE_COMPATIBILITY_ID = "project-atlas-release-identity-v0.59.96"
+HISTORICAL_CAPTURE_RELEASE_IDENTITY = {
+    "atlas_version": "v0.59.95",
+    "atlas_commit": "75da278f2c77df17a775244c56cff925d148aa2f",
+    "atlas_tag": "v0.59.95",
+    "manifest_sha256": (
+        "b83d06d462870d6f9b79f6c943c5923fbe1bf17c13e60261d27a4a1e2915cb7d"
+    ),
+    "source_compatibility_id": "project-atlas-release-identity-v0.59.95",
+}
+HISTORICAL_UNCOLLECTED_HEADER = "x-content-type-options"
+HISTORICAL_V05995_PUBLIC_RESPONSE_HEADER_ALLOWLIST = frozenset(
+    {
+        "age",
+        "cache-control",
+        "cf-cache-status",
+        "etag",
+        "expires",
+        "last-modified",
+        "server",
+        "via",
+        "x-cache",
+        "x-cache-enabled",
+        "x-proxy-cache",
+        "x-proxy-cache-info",
+        "x-sg-cache",
+    }
+)
+REQUIRED_CURRENT_CONTENT_TYPE_OPTION = "nosniff"
+REQUIRED_CURRENT_PUBLIC_OBSERVATIONS = 3
 
 
 @dataclass(frozen=True)
@@ -334,15 +364,22 @@ def _inspect(session, request, audit):
         for item in (audit.gate_results if audit else [])
         if item.get("passed") is False
     }
-    cache_comparison = (
-        upgrade.compare_upgrade_cache_boundary(audit.pre_snapshot, observed)
-        if audit and isinstance(audit.pre_snapshot, dict)
-        else {"compatible": False, "reason_code": "historical_snapshot_unavailable"}
+    repeated_public_observations = (
+        _acquire_repeated_public_observations()
+        if _exact_historical_capture(audit)
+        and _current_header_contract(observed).get("valid") is True
+        and rendered.get("verified") is True
+        else []
+    )
+    cache_comparison = _compare_reconciliation_cache_boundary(
+        audit,
+        observed,
+        repeated_public_observations,
     )
     gates = [
         _gate(
             "runtime_identity",
-            "v0.59.98 runtime and independently expected identity are exact",
+            "v0.59.99 runtime and independently expected identity are exact",
             runtime_exact,
             "The loaded runtime identity is unavailable or differs.",
         ),
@@ -563,6 +600,9 @@ def _inspect(session, request, audit):
         "plugin_status": _safe_plugin_status(plugin_status),
         "bootstrap_status": upgrade._safe_bootstrap_status(bootstrap_status),
         "cache_boundary_comparison": cache_comparison,
+        "current_public_observation_count": cache_comparison.get(
+            "current_public_observation_count", 0
+        ),
         "metadata_state_rows": len(states),
         "metadata_sync_audit_rows": len(sync_audits),
         "reconciliation_wordpress_write_count": 0,
@@ -571,6 +611,278 @@ def _inspect(session, request, audit):
         "reconciliation_atlas_write_count": 0,
     }
     return inspected, gates, backup
+
+
+def _acquire_repeated_public_observations() -> list[dict[str, Any]]:
+    """Acquire two additional credential-free observations from the exact URL."""
+
+    return [acquire_rendered_state("", "") for _ in range(2)]
+
+
+def _compare_reconciliation_cache_boundary(
+    audit: WordPressPluginUpgradeAudit | None,
+    observed: dict[str, Any],
+    repeated_public_observations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply the one historical-header exception authorized for Audit ID 3.
+
+    v0.59.95 did not collect ``x-content-type-options``. The current observation
+    must independently prove one canonical ``nosniff`` value three times. The
+    general upgrade comparator is then run after removing only that newly
+    collectable field from the current comparison copy.
+    """
+
+    if not _exact_historical_capture(audit):
+        return {
+            "compatible": False,
+            "reason_code": "historical_capture_identity_mismatch",
+            "current_public_observation_count": 0,
+        }
+    historical = audit.pre_snapshot
+    if _historical_header_values(historical):
+        return {
+            "compatible": False,
+            "reason_code": "historical_header_not_proven_uncollected",
+            "current_public_observation_count": 0,
+        }
+    current_header = _current_header_contract(observed)
+    if current_header.get("valid") is not True:
+        return {
+            "compatible": False,
+            "reason_code": current_header["reason_code"],
+            "current_public_observation_count": 1,
+        }
+    if len(repeated_public_observations) != REQUIRED_CURRENT_PUBLIC_OBSERVATIONS - 1:
+        return {
+            "compatible": False,
+            "reason_code": "current_public_observation_count_invalid",
+            "current_public_observation_count": 1 + len(repeated_public_observations),
+        }
+    rendered = observed.get("rendered", {})
+    stable_results = [
+        _compare_repeated_public_observation(rendered, candidate)
+        for candidate in repeated_public_observations
+    ]
+    failed = next(
+        (result for result in stable_results if result.get("compatible") is not True),
+        None,
+    )
+    if failed:
+        return {
+            **failed,
+            "current_public_observation_count": 1 + len(repeated_public_observations),
+        }
+
+    comparison_observed = deepcopy(observed)
+    _remove_current_historical_header(comparison_observed)
+    comparison = upgrade.compare_upgrade_cache_boundary(
+        historical,
+        comparison_observed,
+    )
+    if comparison.get("compatible") is not True:
+        return {
+            **comparison,
+            "current_public_observation_count": REQUIRED_CURRENT_PUBLIC_OBSERVATIONS,
+        }
+    return {
+        "compatible": True,
+        "reason_code": (
+            "exact_v05995_uncollected_x_content_type_options_compatible"
+        ),
+        "historical_header_collection": "not_collected_by_v0.59.95",
+        "current_header": REQUIRED_CURRENT_CONTENT_TYPE_OPTION,
+        "current_public_observation_count": REQUIRED_CURRENT_PUBLIC_OBSERVATIONS,
+        "stable_observations": stable_results,
+        "general_boundary_comparison": comparison,
+    }
+
+
+def _exact_historical_capture(
+    audit: WordPressPluginUpgradeAudit | None,
+) -> bool:
+    return bool(
+        audit
+        and audit.id == AUDIT_ID
+        and audit.status == "verification_failed"
+        and audit.transition_history == ["pending", "verification_failed"]
+        and audit.wordpress_write_count == 1
+        and audit.previous_version == upgrade.CURRENT_VERSION
+        and audit.target_version == upgrade.TARGET_VERSION
+        and audit.previous_artifact_sha256 == upgrade.CURRENT_ZIP_SHA256
+        and audit.target_artifact_sha256 == upgrade.ZIP_SHA256
+        and audit.release_identity == HISTORICAL_CAPTURE_RELEASE_IDENTITY
+        and HISTORICAL_UNCOLLECTED_HEADER
+        not in HISTORICAL_V05995_PUBLIC_RESPONSE_HEADER_ALLOWLIST
+        and isinstance(audit.pre_snapshot, dict)
+    )
+
+
+def _historical_header_values(snapshot: dict[str, Any]) -> list[Any]:
+    rendered = snapshot.get("rendered", {})
+    public = (
+        rendered.get("public_http_observation", {})
+        if isinstance(rendered, dict)
+        else {}
+    )
+    locations = (
+        snapshot.get("cache_headers", {}),
+        rendered.get("cache_headers", {}) if isinstance(rendered, dict) else {},
+        public.get("cache_headers", {}) if isinstance(public, dict) else {},
+        public.get("provider_signals", {}) if isinstance(public, dict) else {},
+    )
+    return [
+        location[HISTORICAL_UNCOLLECTED_HEADER]
+        for location in locations
+        if isinstance(location, dict)
+        and HISTORICAL_UNCOLLECTED_HEADER in location
+    ]
+
+
+def _current_header_contract(observed: dict[str, Any]) -> dict[str, Any]:
+    rendered = observed.get("rendered", {})
+    public = (
+        rendered.get("public_http_observation", {})
+        if isinstance(rendered, dict)
+        else {}
+    )
+    locations = (
+        observed.get("cache_headers"),
+        rendered.get("cache_headers") if isinstance(rendered, dict) else None,
+        public.get("cache_headers") if isinstance(public, dict) else None,
+        public.get("provider_signals") if isinstance(public, dict) else None,
+    )
+    if any(not isinstance(location, dict) for location in locations):
+        return {
+            "valid": False,
+            "reason_code": "current_header_observation_structure_mismatch",
+        }
+    if any(
+        location.get(HISTORICAL_UNCOLLECTED_HEADER)
+        != REQUIRED_CURRENT_CONTENT_TYPE_OPTION
+        for location in locations
+    ):
+        return {
+            "valid": False,
+            "reason_code": "current_x_content_type_options_not_exact_nosniff",
+        }
+    if not all(location == locations[0] for location in locations[1:]):
+        return {
+            "valid": False,
+            "reason_code": "current_header_observation_structure_mismatch",
+        }
+    return {"valid": True, "reason_code": "current_nosniff_exact"}
+
+
+def _compare_repeated_public_observation(
+    reference: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    reference_public = reference.get("public_http_observation", {})
+    candidate_public = candidate.get("public_http_observation", {})
+    if not isinstance(reference_public, dict) or not isinstance(candidate_public, dict):
+        return {
+            "compatible": False,
+            "reason_code": "repeated_public_observation_malformed",
+        }
+    exact_public_fields = (
+        "requested_url",
+        "origin",
+        "content_classification",
+        "provider_family",
+        "provider_verified",
+        "response_source",
+        "challenge_block_classification",
+        "privacy_classification",
+        "transport_category",
+        "transport_reason_code",
+        "content_type",
+        "body_sha256",
+        "final_url",
+        "status_code",
+        "redirect_count",
+    )
+    if any(
+        reference_public.get(field) != candidate_public.get(field)
+        for field in exact_public_fields
+    ):
+        return {
+            "compatible": False,
+            "reason_code": "repeated_public_transport_or_provider_drift",
+        }
+    if (
+        candidate.get("verified") is not True
+        or candidate.get("source") != "public"
+        or candidate.get("final_url") != EXPECTED_URL
+        or candidate.get("status_code") != 200
+        or candidate.get("redirect_count") != 0
+        or candidate.get("head_hash") != reference.get("head_hash")
+        or candidate.get("visible_hash") != reference.get("visible_hash")
+        or candidate.get("document_title") != reference.get("document_title")
+        or candidate.get("h1") != reference.get("h1")
+        or candidate.get("canonical") != reference.get("canonical")
+        or candidate.get("featured_image_url") != reference.get(
+            "featured_image_url"
+        )
+        or candidate.get("featured_image_alt") != reference.get(
+            "featured_image_alt"
+        )
+        or candidate.get("atlas_metadata_marker_present") is not False
+        or candidate.get("media32_reference_present") is not False
+        or any(
+            candidate.get(field)
+            for field in (
+                "admin_page_detected",
+                "login_page_detected",
+                "authenticated_context_detected",
+                "challenge_page_detected",
+                "error_page_detected",
+            )
+        )
+    ):
+        return {
+            "compatible": False,
+            "reason_code": "repeated_public_page_identity_drift",
+        }
+    candidate_wrapper = {
+        "cache_headers": candidate.get("cache_headers"),
+        "rendered": {
+            "cache_headers": candidate.get("cache_headers"),
+            "public_http_observation": candidate_public,
+        },
+    }
+    current_header = _current_header_contract(candidate_wrapper)
+    if current_header.get("valid") is not True:
+        return {
+            "compatible": False,
+            "reason_code": current_header["reason_code"],
+        }
+    cache = upgrade.compare_siteground_cache_boundaries(
+        reference.get("cache_headers", {}),
+        candidate.get("cache_headers", {}),
+    )
+    if cache.get("compatible") is not True:
+        return cache
+    return {
+        "compatible": True,
+        "reason_code": "current_anonymous_public_observation_stable",
+    }
+
+
+def _remove_current_historical_header(observed: dict[str, Any]) -> None:
+    rendered = observed.get("rendered", {})
+    public = (
+        rendered.get("public_http_observation", {})
+        if isinstance(rendered, dict)
+        else {}
+    )
+    for location in (
+        observed.get("cache_headers"),
+        rendered.get("cache_headers") if isinstance(rendered, dict) else None,
+        public.get("cache_headers") if isinstance(public, dict) else None,
+        public.get("provider_signals") if isinstance(public, dict) else None,
+    ):
+        if isinstance(location, dict):
+            location.pop(HISTORICAL_UNCOLLECTED_HEADER, None)
 
 
 def _backup(request, release, audit):
@@ -632,7 +944,7 @@ def _backup(request, release, audit):
         ),
         _gate(
             "atlas_data_backup_fresh",
-            "Atlas Data backup was created after the loaded v0.59.98 runtime",
+            "Atlas Data backup was created after the loaded v0.59.99 runtime",
             bool(
                 created_at
                 and runtime_generated_at

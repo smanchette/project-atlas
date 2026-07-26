@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import hashlib
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
@@ -72,15 +73,15 @@ def request(**changes):
         "operator": "Shawn Manchette",
         "manual_browser_evidence": evidence(),
         "expected_runtime_identity": WordPressDeploymentExpectedRuntimeIdentity(
-            atlas_version="v0.59.98",
+            atlas_version="v0.59.99",
             atlas_commit=COMMIT,
-            atlas_tag="v0.59.98",
+            atlas_tag="v0.59.99",
             manifest_sha256="b" * 64,
             source_compatibility_id="project-atlas-release-identity-v0.59.96",
         ),
         "repository_head": COMMIT,
         "repository_origin_main": COMMIT,
-        "repository_tag": "v0.59.98",
+        "repository_tag": "v0.59.99",
         "repository_branch": "main",
         "repository_working_tree_clean": True,
         "protected_paths_unchanged": True,
@@ -183,7 +184,9 @@ def seed_reconciliation(session):
             target_version=upgrade.TARGET_VERSION,
             previous_artifact_sha256=upgrade.CURRENT_ZIP_SHA256,
             target_artifact_sha256=upgrade.ZIP_SHA256,
-            release_identity={},
+            release_identity=deepcopy(
+                reconciliation.HISTORICAL_CAPTURE_RELEASE_IDENTITY
+            ),
             backup_evidence={},
             browser_evidence_id="orlando-historical-upgrade",
             browser_evidence_hashes={
@@ -234,20 +237,36 @@ def seed_reconciliation(session):
 
 def configure(monkeypatch, current=None):
     current = current or observation(upgrade.TARGET_VERSION)
-    current["rendered"]["browser_evidence_identifier"] = (
-        "orlando-fresh-upgrade-reconciliation"
+    current["cache_headers"]["x-content-type-options"] = "nosniff"
+    current["rendered"]["cache_headers"] = deepcopy(current["cache_headers"])
+    current["rendered"]["public_http_observation"]["cache_headers"] = deepcopy(
+        current["cache_headers"]
     )
-    current["rendered"]["evidence_schema_version"] = 1
+    current["rendered"]["public_http_observation"]["provider_signals"] = deepcopy(
+        current["cache_headers"]
+    )
+    current["rendered"].setdefault(
+        "browser_evidence_identifier",
+        "orlando-fresh-upgrade-reconciliation",
+    )
+    current["rendered"].setdefault("evidence_schema_version", 1)
     monkeypatch.setattr(reconciliation, "_observe", lambda session, request: deepcopy(current))
+    repeated = deepcopy(current["rendered"])
+    repeated["source"] = "public"
+    monkeypatch.setattr(
+        reconciliation,
+        "_acquire_repeated_public_observations",
+        lambda: [deepcopy(repeated), deepcopy(repeated)],
+    )
     monkeypatch.setattr(
         reconciliation,
         "deployment_readiness",
         lambda: {
             "release_status": "verified",
             "release": {
-                "atlas_version": "v0.59.98",
+                "atlas_version": "v0.59.99",
                 "atlas_commit": COMMIT,
-                "atlas_tag": "v0.59.98",
+                "atlas_tag": "v0.59.99",
                 "manifest_sha256": "b" * 64,
                 "source_compatibility_id": "project-atlas-release-identity-v0.59.96",
                 "runtime_identity_verified": True,
@@ -286,28 +305,28 @@ def failed_codes(result):
     return {gate.code for gate in result.gate_results if not gate.passed}
 
 
-def test_reconciliation_release_identity_is_exactly_v05998():
+def test_reconciliation_release_identity_is_exactly_v05999():
     assert reconciliation.AUDIT_ID == 3
-    assert reconciliation.RELEASE_VERSION == "v0.59.98"
+    assert reconciliation.RELEASE_VERSION == "v0.59.99"
     assert reconciliation.RECONCILIATION_PHRASE == (
         "RECONCILE PROJECT ATLAS METADATA BRIDGE UPGRADE AUDIT 3 "
         "WITHOUT ANOTHER WORDPRESS WRITE"
     )
-    assert request().repository_tag == "v0.59.98"
-    assert request().expected_runtime_identity.atlas_version == "v0.59.98"
-    assert request().expected_runtime_identity.atlas_tag == "v0.59.98"
+    assert request().repository_tag == "v0.59.99"
+    assert request().expected_runtime_identity.atlas_version == "v0.59.99"
+    assert request().expected_runtime_identity.atlas_tag == "v0.59.99"
 
 
 @pytest.mark.parametrize(
     "repository_tag",
-    ["v0.59.96", "v0.59.97", "v0.59.99", "future", ""],
+    ["v0.59.96", "v0.59.97", "v0.59.98", "future", ""],
 )
-def test_reconciliation_schema_rejects_non_v05998_repository_tags(repository_tag):
+def test_reconciliation_schema_rejects_non_v05999_repository_tags(repository_tag):
     with pytest.raises(ValidationError):
         request(repository_tag=repository_tag)
 
 
-@pytest.mark.parametrize("release_version", ["v0.59.96", "v0.59.97", "v0.59.99"])
+@pytest.mark.parametrize("release_version", ["v0.59.96", "v0.59.97", "v0.59.98"])
 def test_reconciliation_rejects_cross_release_expected_runtime(
     monkeypatch, db, release_version
 ):
@@ -346,9 +365,9 @@ def test_reconciliation_rejects_runtime_manifest_commit_or_tag_drift(
 ):
     configure(monkeypatch)
     release = {
-        "atlas_version": "v0.59.98",
+        "atlas_version": "v0.59.99",
         "atlas_commit": COMMIT,
-        "atlas_tag": "v0.59.98",
+        "atlas_tag": "v0.59.99",
         "manifest_sha256": "b" * 64,
         "source_compatibility_id": "project-atlas-release-identity-v0.59.96",
         "runtime_identity_verified": True,
@@ -381,9 +400,9 @@ def test_reconciliation_rejects_evidence_captured_before_loaded_runtime(
         lambda: {
             "release_status": "verified",
             "release": {
-                "atlas_version": "v0.59.98",
+                "atlas_version": "v0.59.99",
                 "atlas_commit": COMMIT,
-                "atlas_tag": "v0.59.98",
+                "atlas_tag": "v0.59.99",
                 "manifest_sha256": "b" * 64,
                 "source_compatibility_id": (
                     "project-atlas-release-identity-v0.59.96"
@@ -487,6 +506,261 @@ def test_reconciliation_preflight_is_fresh_read_only_and_zero_write(monkeypatch,
         assert result.expected_atlas_write_count == 1
         assert session.get(WordPressPluginUpgradeAudit, 3).model_dump() == before
         assert current["wordpress_request_methods"] == ["GET"]
+
+
+def test_reconciliation_accepts_real_evidence_backed_rendered_state(monkeypatch, db):
+    signed = evidence("orlando-real-acquire-rendered-state")
+
+    def public_response(request_value):
+        return httpx.Response(
+            200,
+            request=request_value,
+            headers={
+                "content-type": "text/html; charset=UTF-8",
+                "server": "nginx",
+                "x-cache-enabled": "True",
+                "x-proxy-cache": "HIT",
+                "x-content-type-options": "nosniff",
+            },
+            text=HTML,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(public_response)) as client:
+        rendered = reconciliation.acquire_rendered_state(
+            "unused",
+            "unused",
+            manual_evidence=signed,
+            evidence_signing_key=KEY,
+            client=client,
+        )
+    assert rendered["source"] == "manual_browser_evidence"
+    assert rendered["signature_validated"] is True
+    current = observation(upgrade.TARGET_VERSION)
+    current["rendered"] = rendered
+    current["cache_headers"] = deepcopy(rendered["cache_headers"])
+    configure(monkeypatch, current)
+
+    with Session(db) as session:
+        seed_reconciliation(session)
+        audit = session.get(WordPressPluginUpgradeAudit, 3)
+        pre_snapshot = deepcopy(audit.pre_snapshot)
+        post_snapshot = deepcopy(audit.post_snapshot)
+        for field in (
+            "document_title",
+            "h1",
+            "canonical",
+            "featured_image_url",
+            "featured_image_alt",
+            "metadata_inventory",
+            "atlas_metadata_marker_present",
+            "media32_reference_present",
+            "admin_page_detected",
+            "login_page_detected",
+            "authenticated_context_detected",
+            "challenge_page_detected",
+            "error_page_detected",
+            "admin_detection_signals",
+            "head_hash",
+            "visible_hash",
+        ):
+            pre_snapshot["rendered"][field] = deepcopy(rendered.get(field))
+            post_snapshot["rendered"][field] = deepcopy(rendered.get(field))
+        for field in ("content_type", "body_sha256"):
+            pre_snapshot["rendered"]["public_http_observation"][field] = deepcopy(
+                rendered["public_http_observation"].get(field)
+            )
+        audit.pre_snapshot = pre_snapshot
+        audit.post_snapshot = post_snapshot
+        audit.browser_evidence_hashes = {
+            **audit.browser_evidence_hashes,
+            "rendered_head": rendered["head_hash"],
+            "visible_content": rendered["visible_hash"],
+        }
+        session.add(audit)
+        session.commit()
+        preflight = reconciliation.reconciliation_preflight(
+            session,
+            41,
+            request(manual_browser_evidence=signed),
+        )
+        assert preflight.reconciliation_ready is True, [
+            (gate.code, gate.message)
+            for gate in preflight.gate_results
+            if not gate.passed
+        ]
+        assert (
+            preflight.inspected_state["cache_boundary_comparison"][
+                "current_public_observation_count"
+            ]
+            == 3
+        )
+
+
+@pytest.mark.parametrize(
+    "current_value",
+    [None, "NO-SNIFF", "nosniff, nosniff", "nosniff, deny", ""],
+)
+def test_reconciliation_rejects_noncanonical_current_nosniff(
+    monkeypatch, db, current_value
+):
+    current = configure(monkeypatch)
+    locations = (
+        current["cache_headers"],
+        current["rendered"]["cache_headers"],
+        current["rendered"]["public_http_observation"]["cache_headers"],
+        current["rendered"]["public_http_observation"]["provider_signals"],
+    )
+    for location in locations:
+        if current_value is None:
+            location.pop("x-content-type-options", None)
+        else:
+            location["x-content-type-options"] = current_value
+    monkeypatch.setattr(
+        reconciliation,
+        "_observe",
+        lambda session, request_value: deepcopy(current),
+    )
+    with Session(db) as session:
+        seed_reconciliation(session)
+        result = reconciliation.reconciliation_preflight(session, 41, request())
+        assert not result.reconciliation_ready
+        assert "cache_boundary" in failed_codes(result)
+        assert (
+            result.inspected_state["cache_boundary_comparison"]["reason_code"]
+            == "current_x_content_type_options_not_exact_nosniff"
+        )
+        assert not reconciliation._handles
+
+
+def test_reconciliation_rejects_wrong_historical_release_identity(monkeypatch, db):
+    configure(monkeypatch)
+    with Session(db) as session:
+        seed_reconciliation(session)
+        audit = session.get(WordPressPluginUpgradeAudit, 3)
+        audit.release_identity = {
+            **audit.release_identity,
+            "atlas_version": "v0.59.96",
+            "atlas_tag": "v0.59.96",
+        }
+        session.add(audit)
+        session.commit()
+        result = reconciliation.reconciliation_preflight(session, 41, request())
+        assert not result.reconciliation_ready
+        assert (
+            result.inspected_state["cache_boundary_comparison"]["reason_code"]
+            == "historical_capture_identity_mismatch"
+        )
+
+
+def test_historical_header_exception_is_rejected_for_another_audit(monkeypatch, db):
+    current = configure(monkeypatch)
+    with Session(db) as session:
+        seed_reconciliation(session)
+        audit_data = session.get(WordPressPluginUpgradeAudit, 3).model_dump()
+        audit_data["id"] = 4
+        audit = WordPressPluginUpgradeAudit(**audit_data)
+        repeated = deepcopy(current["rendered"])
+        repeated["source"] = "public"
+        result = reconciliation._compare_reconciliation_cache_boundary(
+            audit,
+            current,
+            [deepcopy(repeated), deepcopy(repeated)],
+        )
+        assert result == {
+            "compatible": False,
+            "reason_code": "historical_capture_identity_mismatch",
+            "current_public_observation_count": 0,
+        }
+
+
+def test_reconciliation_rejects_historical_header_that_was_collected(monkeypatch, db):
+    configure(monkeypatch)
+    with Session(db) as session:
+        seed_reconciliation(session)
+        audit = session.get(WordPressPluginUpgradeAudit, 3)
+        pre_snapshot = deepcopy(audit.pre_snapshot)
+        pre_snapshot["cache_headers"]["x-content-type-options"] = "nosniff"
+        audit.pre_snapshot = pre_snapshot
+        session.add(audit)
+        session.commit()
+        result = reconciliation.reconciliation_preflight(session, 41, request())
+        assert not result.reconciliation_ready
+        assert (
+            result.inspected_state["cache_boundary_comparison"]["reason_code"]
+            == "historical_header_not_proven_uncollected"
+        )
+
+
+def test_reconciliation_rejects_other_security_header_drift(monkeypatch, db):
+    current = configure(monkeypatch)
+    for location in (
+        current["cache_headers"],
+        current["rendered"]["cache_headers"],
+        current["rendered"]["public_http_observation"]["cache_headers"],
+        current["rendered"]["public_http_observation"]["provider_signals"],
+    ):
+        location["x-frame-options"] = "DENY"
+    monkeypatch.setattr(
+        reconciliation,
+        "_observe",
+        lambda session, request_value: deepcopy(current),
+    )
+    repeated = deepcopy(current["rendered"])
+    repeated["source"] = "public"
+    monkeypatch.setattr(
+        reconciliation,
+        "_acquire_repeated_public_observations",
+        lambda: [deepcopy(repeated), deepcopy(repeated)],
+    )
+    with Session(db) as session:
+        seed_reconciliation(session)
+        audit = session.get(WordPressPluginUpgradeAudit, 3)
+        for location in (
+            audit.pre_snapshot["cache_headers"],
+            audit.pre_snapshot["rendered"]["cache_headers"],
+        ):
+            location["x-frame-options"] = "SAMEORIGIN"
+        session.add(audit)
+        session.commit()
+        result = reconciliation.reconciliation_preflight(session, 41, request())
+        assert not result.reconciliation_ready
+        assert (
+            result.inspected_state["cache_boundary_comparison"]["reason_code"]
+            == "durable_header_changed:x-frame-options"
+        )
+
+
+def test_reconciliation_rejects_unstable_repeated_public_observation(monkeypatch, db):
+    current = configure(monkeypatch)
+    stable = deepcopy(current["rendered"])
+    stable["source"] = "public"
+    drifted = deepcopy(stable)
+    drifted["visible_hash"] = "f" * 64
+    monkeypatch.setattr(
+        reconciliation,
+        "_acquire_repeated_public_observations",
+        lambda: [deepcopy(stable), deepcopy(drifted)],
+    )
+    with Session(db) as session:
+        seed_reconciliation(session)
+        result = reconciliation.reconciliation_preflight(session, 41, request())
+        assert not result.reconciliation_ready
+        assert (
+            result.inspected_state["cache_boundary_comparison"]["reason_code"]
+            == "repeated_public_page_identity_drift"
+        )
+
+
+def test_general_upgrade_comparator_still_rejects_absent_to_present_header():
+    before = observation()
+    after = deepcopy(before)
+    after["cache_headers"]["x-content-type-options"] = "nosniff"
+    after["rendered"]["cache_headers"] = deepcopy(after["cache_headers"])
+    result = upgrade.compare_upgrade_cache_boundary(before, after)
+    assert result == {
+        "compatible": False,
+        "reason_code": "durable_header_changed:x-content-type-options",
+    }
 
 
 def test_reconciliation_accepts_legacy_null_transport_projection(monkeypatch, db):

@@ -947,7 +947,14 @@ def acquire_rendered_state(username: str, password: str, *, manual_evidence: dic
         if verified_bypass_url and bypass_independently_verified:
             routes.append((verified_bypass_url, "cache_bypass_verified", None))
         routes.append((EXPECTED_URL, "public_html_verified", None))
-        routes.append((EXPECTED_URL, "authenticated_html_verified", wordpress_basic_auth(username, password)))
+        if username and password:
+            routes.append(
+                (
+                    EXPECTED_URL,
+                    "authenticated_html_verified",
+                    wordpress_basic_auth(username, password),
+                )
+            )
         result = {"source": "none", "outcome": "unavailable", "verified": False}
         public_result: dict[str, Any] | None = None
         for url, outcome, auth in routes:

@@ -128,6 +128,21 @@ runtime manifest was generated. The existing post-runtime Atlas Data backup,
 one-time handle, exact Audit ID 3, confirmation phrase, one Atlas audit update,
 and zero WordPress, plugin, and cache-write guarantees remain unchanged.
 
+## v0.59.99
+
+Added an Audit-ID-3-only compatibility rule for the historical
+`x-content-type-options` observation gap. The rule proves the exact v0.59.95
+capture identity and historical non-collection, then requires three stable
+current anonymous public observations containing exactly one normalized
+`nosniff` value.
+
+The general cache-boundary comparator remains unchanged. Redirects, non-200
+responses, malformed or duplicate header values, provider or origin drift,
+other security-header differences, page identity, plugin inventories,
+payload, revision, backups, runtime identity, evidence, and one-time handles
+remain fail-closed. Reconciliation still performs one Atlas audit update and
+zero WordPress, plugin, or cache writes.
+
 ## Atlas Documentation Foundation v1.0
 
 The following governing documents were established:

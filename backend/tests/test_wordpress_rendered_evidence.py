@@ -207,6 +207,23 @@ def test_verified_public_result_attaches_canonical_sanitized_observation():
     assert "helper_signature" not in encoded
 
 
+def test_empty_credentials_never_attempt_authenticated_fallback():
+    response = httpx.Response(
+        403,
+        request=httpx.Request("GET", EXPECTED_URL),
+        headers={"Content-Type": "text/html", "Server": "nginx"},
+        text="Unavailable",
+    )
+    client = StaticPublicClient(response)
+    result = acquire_rendered_state("", "", client=client)
+    assert len(client.calls) == 1
+    assert client.calls[0][1].get("auth") is None
+    assert result["verified"] is False
+    assert result["public_http_observation"]["privacy_classification"] == (
+        "credential_free_public"
+    )
+
+
 def test_authenticated_success_retains_preceding_public_transport_observation():
     public = httpx.Response(
         403,

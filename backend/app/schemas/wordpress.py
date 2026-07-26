@@ -1396,7 +1396,7 @@ class WordPressPluginUpgradeReconciliationRequest(SQLModel):
     expected_runtime_identity: WordPressDeploymentExpectedRuntimeIdentity
     repository_head: str = Field(min_length=40, max_length=40)
     repository_origin_main: str = Field(min_length=40, max_length=40)
-    repository_tag: Literal["v0.59.98"]
+    repository_tag: Literal["v0.59.99"]
     repository_branch: Literal["main"]
     repository_working_tree_clean: bool
     protected_paths_unchanged: bool
