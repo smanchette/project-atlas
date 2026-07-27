@@ -162,6 +162,44 @@ Purpose:
 
 ---
 
+## Atlas Complete Website Blueprint v1.0
+
+Established `PROJECT_ATLAS_COMPLETE_WEBSITE_BLUEPRINT.md` as the permanent
+website-specific governing blueprint beneath the Constitution.
+
+The Blueprint defines the complete website lifecycle and the separation among
+business facts, content, presentation, media, intelligence, and operational
+data. It also establishes reusable Brand Assets, Website Identity, image,
+theme, optional customer-portal, and future intelligence capabilities while
+keeping Flo-Zone Pest And Termite Solutions Inc. as a reference implementation
+rather than a platform boundary.
+
+This was a documentation-only milestone. It did not implement or change
+application, WordPress, plugin, database, migration, audit, or runtime
+behavior.
+
+---
+
+## Atlas Product Specification v1.0
+
+Established `PROJECT_ATLAS_PRODUCT_SPECIFICATION.md` as the permanent
+capability specification for the Atlas platform.
+
+The Product Specification defines the responsibilities, boundaries,
+relationships, configuration surfaces, extension points, and implementation
+goals of the major Atlas subsystems. It preserves strict separation among
+business facts, knowledge, content, presentation, media, intelligence, and
+operational data while establishing long-term support for provider adapters,
+multiple applications and publishing systems, multi-tenant operation,
+white-label products, plugins, and an Extension SDK.
+
+Flo-Zone Pest And Termite Solutions Inc. remains the current reference
+implementation and is not a platform requirement. This was a
+documentation-only milestone and changed no application, WordPress, plugin,
+database, migration, audit, or runtime behavior.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.
