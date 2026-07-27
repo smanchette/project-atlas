@@ -21,6 +21,7 @@ from app.services.draft_generation import (
 )
 from app.services.page_export import build_page_export_package
 from app.services.page_qa import save_page_qa
+from app.services.website_context import build_website_context
 from app.services.wordpress_sandbox import build_wordpress_payload_preview
 
 REPAIRABLE_FIELDS = (
@@ -71,7 +72,10 @@ def repair_approved_page(
 
     validated_draft = DraftContent.model_validate(merged)
     page.draft_content = merged
-    page.content_body = render_content_body(validated_draft)
+    page.content_body = render_content_body(
+        validated_draft,
+        build_website_context(session, page_id=page_id),
+    )
     page.h1 = merged["h1"]
     page.qa_status = "not_run"
     page.qa_result = None

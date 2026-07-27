@@ -200,6 +200,40 @@ database, migration, audit, or runtime behavior.
 
 ---
 
+## Website Context and Business Identity Foundation
+
+Introduced additive first-class Brand, Website, and Website Identity ownership
+beneath the existing Business domain. Generated pages may bind directly to a
+website, while legacy records resolve the business's active website when the
+new relationship is absent.
+
+A single website-context service now supplies approved business, brand,
+website, identity, service, and page-geography information to reusable page
+queueing, draft generation, export, manual editing, approved-page repair, and
+preview workflows. Flo-Zone-specific presentation copy, geography labels,
+knowledge-block selections, customer audiences, domain identity, and company
+labels moved into Flo-Zone seed configuration. Existing locked WordPress and
+SiteGround safeguards remain unchanged.
+
+An isolated fictional company, brand, website, identity, service, and
+geography fixture proves that reusable workflows select the correct context
+without Flo-Zone name, service, location, URL, or branding leakage.
+
+Data backup format 0.42 includes the new ownership records while preserving
+support for earlier backups that contain none of them. Migration
+`20260727_0028` creates and backfills the new records and the optional generated
+page relationship. Rollback is structurally available only while no dependent
+website-context data must be preserved; operational rollback should therefore
+use a pre-migration Atlas Data backup rather than dropping populated ownership
+tables. The migration does not change WordPress, plugin, cache, audit, or
+runtime state.
+
+This milestone intentionally does not implement themes, navigation, provider
+abstraction, portals, intelligence, authentication, full Brand Assets, or live
+deployment for another company.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.

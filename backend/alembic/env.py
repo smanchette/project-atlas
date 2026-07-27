@@ -5,7 +5,7 @@ from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
 
 from app.core.config import get_settings
-from app.models import Business, City, County, GeneratedPage, ImageMetadata, KnowledgeBlock, Service, Setting
+from app.models import Brand, Business, City, County, GeneratedPage, ImageMetadata, KnowledgeBlock, Service, Setting, Website, WebsiteIdentity
 
 config = context.config
 config.set_main_option("sqlalchemy.url", get_settings().database_url)

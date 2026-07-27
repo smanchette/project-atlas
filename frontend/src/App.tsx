@@ -37,10 +37,14 @@ import WordPressPublishSafetySandboxPage from "./pages/WordPressPublishSafetySan
 import WordPressMediaSafetyPage from "./pages/WordPressMediaSafetyPage";
 import WordPressMetadataBridgeInstallPage from "./pages/WordPressMetadataBridgeInstallPage";
 import type { Business, City, County, FieldConfig, GeneratedPage, Service } from "./types";
+import type { Brand, Website, WebsiteIdentity } from "./types";
 
 const navItems = [
   { to: "/", label: "Dashboard", icon: Home },
   { to: "/businesses", label: "Business Profile", icon: Building2 },
+  { to: "/brands", label: "Brands", icon: Building2 },
+  { to: "/websites", label: "Websites", icon: Building2 },
+  { to: "/website-identities", label: "Website Identity", icon: Images },
   { to: "/services", label: "Services", icon: Wrench },
   { to: "/knowledge-blocks", label: "Knowledge Blocks", icon: BookOpenText },
   { to: "/counties", label: "Counties", icon: Map },
@@ -84,6 +88,35 @@ const serviceFields: FieldConfig<Service>[] = [
   { key: "status", label: "Status", required: true }
 ];
 
+const brandFields: FieldConfig<Brand>[] = [
+  { key: "business_id", label: "Business ID", type: "number", required: true },
+  { key: "brand_name", label: "Public Brand Name", required: true },
+  { key: "tagline", label: "Tagline" },
+  { key: "description", label: "Description", type: "textarea" },
+  { key: "status", label: "Status", required: true }
+];
+
+const websiteFields: FieldConfig<Website>[] = [
+  { key: "business_id", label: "Business ID", type: "number", required: true },
+  { key: "brand_id", label: "Brand ID", type: "number" },
+  { key: "website_name", label: "Website Name", required: true },
+  { key: "domain", label: "Domain", required: true },
+  { key: "public_url", label: "Public Site URL", type: "url", required: true },
+  { key: "locale", label: "Locale", required: true },
+  { key: "primary_language", label: "Primary Language", required: true },
+  { key: "status", label: "Status", required: true }
+];
+
+const websiteIdentityFields: FieldConfig<WebsiteIdentity>[] = [
+  { key: "website_id", label: "Website ID", type: "number", required: true },
+  { key: "display_name", label: "Website Display Name", required: true },
+  { key: "favicon_url", label: "Favicon URL", type: "url" },
+  { key: "browser_icon_url", label: "Browser Icon URL", type: "url" },
+  { key: "apple_touch_icon_url", label: "Apple Touch Icon URL", type: "url" },
+  { key: "social_identity_image_url", label: "Social / Open Graph Identity Image", type: "url" },
+  { key: "status", label: "Approval / Active State", required: true }
+];
+
 const countyFields: FieldConfig<County>[] = [
   { key: "state", label: "State", required: true },
   { key: "county_name", label: "County Name", required: true },
@@ -100,6 +133,7 @@ const cityFields: FieldConfig<City>[] = [
 
 const pageFields: FieldConfig<GeneratedPage>[] = [
   { key: "business_id", label: "Business ID", type: "number", required: true },
+  { key: "website_id", label: "Website ID", type: "number" },
   { key: "service_id", label: "Service ID", type: "number", required: true },
   { key: "city_id", label: "City ID", type: "number" },
   { key: "county_id", label: "County ID", type: "number" },
@@ -155,6 +189,39 @@ function DashboardShell() {
                 endpoint="/api/businesses"
                 fields={businessFields}
                 tableColumns={["id", "company_name", "brand_name", "main_city", "state", "phone"]}
+              />
+            }
+          />
+          <Route
+            path="/brands"
+            element={
+              <ModulePage<Brand>
+                title="Brands"
+                endpoint="/api/brands"
+                fields={brandFields}
+                tableColumns={["id", "business_id", "brand_name", "tagline", "status"]}
+              />
+            }
+          />
+          <Route
+            path="/websites"
+            element={
+              <ModulePage<Website>
+                title="Websites"
+                endpoint="/api/websites"
+                fields={websiteFields}
+                tableColumns={["id", "business_id", "brand_id", "website_name", "domain", "locale", "status"]}
+              />
+            }
+          />
+          <Route
+            path="/website-identities"
+            element={
+              <ModulePage<WebsiteIdentity>
+                title="Website Identity"
+                endpoint="/api/website-identities"
+                fields={websiteIdentityFields}
+                tableColumns={["id", "website_id", "display_name", "favicon_url", "status"]}
               />
             }
           />

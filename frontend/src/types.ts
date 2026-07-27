@@ -24,6 +24,89 @@ export type Business = {
   updated_at: string;
 };
 
+export type Brand = {
+  id: number;
+  business_id: number;
+  brand_name: string;
+  tagline?: string;
+  description?: string;
+  identity_settings: Record<string, unknown>;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type Website = {
+  id: number;
+  business_id: number;
+  brand_id?: number | null;
+  website_name: string;
+  domain: string;
+  public_url: string;
+  locale: string;
+  primary_language: string;
+  configuration: Record<string, unknown>;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WebsiteIdentity = {
+  id: number;
+  website_id: number;
+  display_name: string;
+  favicon_url?: string | null;
+  browser_icon_url?: string | null;
+  apple_touch_icon_url?: string | null;
+  social_identity_image_url?: string | null;
+  status: string;
+  approved_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WebsiteContext = {
+  business: {
+    id: number;
+    company_name: string;
+    business_type: string;
+    phone?: string | null;
+    email?: string | null;
+    main_city?: string | null;
+    state: string;
+    license_number?: string | null;
+    certified_operator?: string | null;
+    description?: string | null;
+  };
+  brand: {
+    id?: number | null;
+    public_name: string;
+    tagline?: string | null;
+    description?: string | null;
+    identity_settings: Record<string, unknown>;
+  };
+  website: {
+    id?: number | null;
+    website_name: string;
+    domain: string;
+    public_url: string;
+    locale: string;
+    primary_language: string;
+    configuration: Record<string, unknown>;
+    status: string;
+    legacy_fallback: boolean;
+  };
+  identity: {
+    id?: number | null;
+    display_name: string;
+    favicon_url?: string | null;
+    browser_icon_url?: string | null;
+    apple_touch_icon_url?: string | null;
+    social_identity_image_url?: string | null;
+    status: string;
+  };
+};
+
 export type Service = {
   id: number;
   business_id: number;
@@ -59,6 +142,7 @@ export type City = {
 export type GeneratedPage = {
   id: number;
   business_id: number;
+  website_id?: number | null;
   service_id: number;
   city_id?: number;
   county_id?: number;

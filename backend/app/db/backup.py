@@ -9,6 +9,7 @@ from sqlmodel import Session, SQLModel, select
 from app.db.session import create_db_and_tables, engine
 from app.models import (
     ApprovalAudit,
+    Brand,
     Business,
     City,
     County,
@@ -19,6 +20,8 @@ from app.models import (
     PageImageAssignment,
     Service,
     Setting,
+    Website,
+    WebsiteIdentity,
     WordPressDraftAudit,
     WordPressHeadingCorrectionAudit,
     WordPressDeploymentAudit,
@@ -38,7 +41,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.41"
+BACKUP_VERSION = "0.42"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -65,6 +68,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.39",
     "0.40",
     "0.41",
+    "0.42",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -79,6 +83,9 @@ SENSITIVE_SETTING_MARKERS = (
 
 BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "businesses": Business,
+    "brands": Brand,
+    "websites": Website,
+    "website_identities": WebsiteIdentity,
     "services": Service,
     "counties": County,
     "cities": City,
@@ -202,6 +209,53 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             )
             business_ids[old_id] = _required_id(restored)
 
+        brand_ids: dict[int, int] = {}
+        for record in data.get("brands", []):
+            old_id = _record_id(record, "brands")
+            business_id = _mapped_id(business_ids, record["business_id"], "brands.business_id")
+            restored = _upsert(
+                session,
+                Brand,
+                select(Brand).where(
+                    Brand.business_id == business_id,
+                    Brand.brand_name == record["brand_name"],
+                ),
+                {**record, "business_id": business_id},
+            )
+            brand_ids[old_id] = _required_id(restored)
+
+        website_ids: dict[int, int] = {}
+        for record in data.get("websites", []):
+            old_id = _record_id(record, "websites")
+            business_id = _mapped_id(business_ids, record["business_id"], "websites.business_id")
+            restored = _upsert(
+                session,
+                Website,
+                select(Website).where(
+                    Website.business_id == business_id,
+                    Website.domain == record["domain"],
+                ),
+                {
+                    **record,
+                    "business_id": business_id,
+                    "brand_id": _mapped_optional_id(brand_ids, record.get("brand_id"), "websites.brand_id"),
+                },
+            )
+            website_ids[old_id] = _required_id(restored)
+
+        for record in data.get("website_identities", []):
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "website_identities.website_id",
+            )
+            _upsert(
+                session,
+                WebsiteIdentity,
+                select(WebsiteIdentity).where(WebsiteIdentity.website_id == website_id),
+                {**record, "website_id": website_id},
+            )
+
         service_ids: dict[int, int] = {}
         for record in data["services"]:
             old_id = _record_id(record, "services")
@@ -247,6 +301,11 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 "service_id": _mapped_id(service_ids, record["service_id"], "generated_pages.service_id"),
                 "city_id": _mapped_optional_id(city_ids, record.get("city_id"), "generated_pages.city_id"),
                 "county_id": _mapped_optional_id(county_ids, record.get("county_id"), "generated_pages.county_id"),
+                "website_id": _mapped_optional_id(
+                    website_ids,
+                    record.get("website_id"),
+                    "generated_pages.website_id",
+                ),
             }
             restored = _upsert(
                 session,
@@ -804,6 +863,11 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "wordpress_metadata_lifecycle_audits" not in data:
         data["wordpress_metadata_lifecycle_audits"] = []
         counts["wordpress_metadata_lifecycle_audits"] = 0
+    if backup_version != "0.42":
+        for group in ("brands", "websites", "website_identities"):
+            if group not in data:
+                data[group] = []
+                counts[group] = 0
 
     for group in BACKUP_MODELS:
         records = data.get(group)

@@ -8,12 +8,16 @@ from app.api.page_export_routes import router as page_export_router
 from app.api.page_media_routes import router as page_media_router
 from app.api.qa_routes import router as qa_router
 from app.api.wordpress_routes import router as wordpress_router
+from app.api.website_context_routes import router as website_context_router
 from app.api.router_factory import build_crud_router
-from app.models import Business, City, County, GeneratedPage, ImageMetadata, KnowledgeBlock, Service, Setting
+from app.models import Brand, Business, City, County, GeneratedPage, ImageMetadata, KnowledgeBlock, Service, Setting, Website, WebsiteIdentity
 from app.schemas.entities import (
     BusinessCreate,
     BusinessRead,
     BusinessUpdate,
+    BrandCreate,
+    BrandRead,
+    BrandUpdate,
     CityCreate,
     CityRead,
     CityUpdate,
@@ -35,6 +39,12 @@ from app.schemas.entities import (
     SettingCreate,
     SettingRead,
     SettingUpdate,
+    WebsiteCreate,
+    WebsiteIdentityCreate,
+    WebsiteIdentityRead,
+    WebsiteIdentityUpdate,
+    WebsiteRead,
+    WebsiteUpdate,
 )
 
 api_router = APIRouter()
@@ -46,7 +56,38 @@ api_router.include_router(page_export_router)
 api_router.include_router(page_media_router)
 api_router.include_router(qa_router)
 api_router.include_router(wordpress_router)
+api_router.include_router(website_context_router)
 
+api_router.include_router(
+    build_crud_router(
+        model=Brand,
+        create_schema=BrandCreate,
+        read_schema=BrandRead,
+        update_schema=BrandUpdate,
+        prefix="/brands",
+        tags=["brands"],
+    )
+)
+api_router.include_router(
+    build_crud_router(
+        model=Website,
+        create_schema=WebsiteCreate,
+        read_schema=WebsiteRead,
+        update_schema=WebsiteUpdate,
+        prefix="/websites",
+        tags=["websites"],
+    )
+)
+api_router.include_router(
+    build_crud_router(
+        model=WebsiteIdentity,
+        create_schema=WebsiteIdentityCreate,
+        read_schema=WebsiteIdentityRead,
+        update_schema=WebsiteIdentityUpdate,
+        prefix="/website-identities",
+        tags=["website identities"],
+    )
+)
 api_router.include_router(
     build_crud_router(
         model=Business,

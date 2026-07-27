@@ -29,6 +29,59 @@ class Business(TimestampMixin, table=True):
     description: str | None = None
 
 
+class Brand(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint("business_id", "brand_name", name="uq_brand_business_name"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    business_id: int = Field(foreign_key="business.id", index=True)
+    brand_name: str = Field(index=True)
+    tagline: str | None = None
+    description: str | None = None
+    identity_settings: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    status: str = Field(default="active", index=True)
+
+
+class Website(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint("business_id", "domain", name="uq_website_business_domain"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    business_id: int = Field(foreign_key="business.id", index=True)
+    brand_id: int | None = Field(default=None, foreign_key="brand.id", index=True)
+    website_name: str = Field(index=True)
+    domain: str = Field(index=True)
+    public_url: str
+    locale: str = Field(default="en-US", max_length=20, index=True)
+    primary_language: str = Field(default="en", max_length=12, index=True)
+    configuration: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    status: str = Field(default="active", index=True)
+
+
+class WebsiteIdentity(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint("website_id", name="uq_websiteidentity_website"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    display_name: str
+    favicon_url: str | None = None
+    browser_icon_url: str | None = None
+    apple_touch_icon_url: str | None = None
+    social_identity_image_url: str | None = None
+    status: str = Field(default="draft", index=True)
+    approved_at: datetime | None = None
+
+
 class Service(TimestampMixin, table=True):
     id: int | None = Field(default=None, primary_key=True)
     business_id: int = Field(foreign_key="business.id", index=True)
@@ -62,6 +115,7 @@ class City(SQLModel, table=True):
 class GeneratedPage(TimestampMixin, table=True):
     id: int | None = Field(default=None, primary_key=True)
     business_id: int = Field(foreign_key="business.id", index=True)
+    website_id: int | None = Field(default=None, foreign_key="website.id", index=True)
     service_id: int = Field(foreign_key="service.id", index=True)
     city_id: int | None = Field(default=None, foreign_key="city.id", index=True)
     county_id: int | None = Field(default=None, foreign_key="county.id", index=True)

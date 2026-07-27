@@ -43,6 +43,100 @@ class BusinessRead(BusinessBase):
     updated_at: datetime
 
 
+class BrandBase(SQLModel):
+    business_id: int
+    brand_name: str
+    tagline: str | None = None
+    description: str | None = None
+    identity_settings: dict[str, Any] = Field(default_factory=dict)
+    status: str = "active"
+
+
+class BrandCreate(BrandBase):
+    pass
+
+
+class BrandUpdate(SQLModel):
+    business_id: int | None = None
+    brand_name: str | None = None
+    tagline: str | None = None
+    description: str | None = None
+    identity_settings: dict[str, Any] | None = None
+    status: str | None = None
+
+
+class BrandRead(BrandBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class WebsiteBase(SQLModel):
+    business_id: int
+    brand_id: int | None = None
+    website_name: str
+    domain: str
+    public_url: str
+    locale: str = "en-US"
+    primary_language: str = "en"
+    configuration: dict[str, Any] = Field(default_factory=dict)
+    status: str = "active"
+
+
+class WebsiteCreate(WebsiteBase):
+    pass
+
+
+class WebsiteUpdate(SQLModel):
+    business_id: int | None = None
+    brand_id: int | None = None
+    website_name: str | None = None
+    domain: str | None = None
+    public_url: str | None = None
+    locale: str | None = None
+    primary_language: str | None = None
+    configuration: dict[str, Any] | None = None
+    status: str | None = None
+
+
+class WebsiteRead(WebsiteBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class WebsiteIdentityBase(SQLModel):
+    website_id: int
+    display_name: str
+    favicon_url: str | None = None
+    browser_icon_url: str | None = None
+    apple_touch_icon_url: str | None = None
+    social_identity_image_url: str | None = None
+    status: str = "draft"
+    approved_at: datetime | None = None
+
+
+class WebsiteIdentityCreate(WebsiteIdentityBase):
+    pass
+
+
+class WebsiteIdentityUpdate(SQLModel):
+    website_id: int | None = None
+    display_name: str | None = None
+    favicon_url: str | None = None
+    browser_icon_url: str | None = None
+    apple_touch_icon_url: str | None = None
+    social_identity_image_url: str | None = None
+    status: str | None = None
+    approved_at: datetime | None = None
+
+
+class WebsiteIdentityRead(WebsiteIdentityBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+
 class ServiceBase(SQLModel):
     business_id: int
     service_name: str
@@ -125,6 +219,7 @@ class CityRead(CityBase):
 
 class GeneratedPageBase(SQLModel):
     business_id: int
+    website_id: int | None = None
     service_id: int
     city_id: int | None = None
     county_id: int | None = None
@@ -158,6 +253,7 @@ class GeneratedPageCreate(GeneratedPageBase):
 
 class GeneratedPageUpdate(SQLModel):
     business_id: int | None = None
+    website_id: int | None = None
     service_id: int | None = None
     city_id: int | None = None
     county_id: int | None = None

@@ -28,6 +28,7 @@ from app.schemas.page_export import (
     PageExportPackage,
 )
 from app.services.draft_generation import FORBIDDEN_PHRASES
+from app.services.website_context import build_website_context
 
 
 CONTENT_SECTION_KEYS = (
@@ -67,6 +68,7 @@ def build_page_export_package(session: Session, page_id: int) -> PageExportPacka
         raise HTTPException(status_code=409, detail="Page export requires business, service, city, and county data")
 
     draft = page.draft_content or {}
+    website_context = build_website_context(session, page_id=page_id)
     suggested_slug = generate_suggested_slug(service, city)
     url_slug = page.page_slug or suggested_slug
     conflicts = _slug_conflicts(session, page.id or page_id, suggested_slug)
@@ -83,7 +85,7 @@ def build_page_export_package(session: Session, page_id: int) -> PageExportPacka
     )
     media = _media_references(session, page.id or page_id)
     faqs = _faq_items(draft.get("faq_items"))
-    canonical_url = _canonical_url(business.website, url_slug)
+    canonical_url = _canonical_url(website_context.website.public_url, url_slug)
     warnings = _readiness_warnings(
         session,
         page,
@@ -113,7 +115,7 @@ def build_page_export_package(session: Session, page_id: int) -> PageExportPacka
         service=service.service_name,
         business_name=business.company_name,
         phone=business.phone,
-        website=business.website,
+        website=website_context.website.public_url,
         email=business.email,
         license_number=business.license_number,
         certified_operator=business.certified_operator,
@@ -126,6 +128,12 @@ def build_page_export_package(session: Session, page_id: int) -> PageExportPacka
             faqs=faqs,
             page_title=page_title,
             canonical_url=canonical_url,
+            website_url=website_context.website.public_url,
+            license_label=str(website_context.website.configuration.get("license_label") or "License"),
+            operator_title=str(
+                website_context.website.configuration.get("certified_operator_title")
+                or "Certified Operator"
+            ),
         ),
         canonical_url_preview=canonical_url,
         slug_conflicts=conflicts,
@@ -282,8 +290,11 @@ def _json_ld(
     faqs: list[dict[str, str]],
     page_title: str,
     canonical_url: str,
+    website_url: str,
+    license_label: str,
+    operator_title: str,
 ) -> dict[str, Any]:
-    website = _website_base(business.website)
+    website = _website_base(website_url)
     business_id = f"{website}/#business" if website else "#business"
     graph: list[dict[str, Any]] = [
         _without_empty(
@@ -297,7 +308,7 @@ def _json_ld(
                 "identifier": (
                     {
                         "@type": "PropertyValue",
-                        "propertyID": "Florida License",
+                        "propertyID": license_label,
                         "value": business.license_number,
                     }
                     if business.license_number
@@ -307,7 +318,7 @@ def _json_ld(
                     {
                         "@type": "Person",
                         "name": business.certified_operator,
-                        "jobTitle": "Certified Operator",
+                        "jobTitle": operator_title,
                     }
                     if business.certified_operator
                     else None

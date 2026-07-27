@@ -16,6 +16,7 @@ from app.services.draft_generation import (
     validate_safe_content,
 )
 from app.services.page_qa import save_page_qa
+from app.services.website_context import build_website_context
 
 
 EDITABLE_FIELD_MAP = {
@@ -92,7 +93,10 @@ def save_manual_draft(
 
     page.draft_content = merged
     page.h1 = merged["h1"]
-    page.content_body = render_content_body(validated_draft)
+    page.content_body = render_content_body(
+        validated_draft,
+        build_website_context(session, page_id=page_id),
+    )
     page.qa_status = "not_run"
     page.qa_result = None
     page.qa_checked_at = None

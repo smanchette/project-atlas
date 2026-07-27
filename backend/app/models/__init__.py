@@ -1,5 +1,6 @@
 from app.models.entities import (
     ApprovalAudit,
+    Brand,
     Business,
     City,
     County,
@@ -10,6 +11,8 @@ from app.models.entities import (
     PageImageAssignment,
     Service,
     Setting,
+    Website,
+    WebsiteIdentity,
     WordPressDraftAudit,
     WordPressHeadingCorrectionAudit,
     WordPressDeploymentAudit,
@@ -30,6 +33,7 @@ from app.models.entities import (
 
 __all__ = [
     "ApprovalAudit",
+    "Brand",
     "Business",
     "City",
     "County",
@@ -40,6 +44,8 @@ __all__ = [
     "PageImageAssignment",
     "Service",
     "Setting",
+    "Website",
+    "WebsiteIdentity",
     "WordPressDraftAudit",
     "WordPressHeadingCorrectionAudit",
     "WordPressDeploymentAudit",

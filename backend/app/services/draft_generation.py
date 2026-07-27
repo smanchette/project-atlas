@@ -7,6 +7,8 @@ from sqlmodel import Session, select
 from app.core.config import get_settings
 from app.models import Business, City, County, GeneratedPage, KnowledgeBlock, Service, Setting
 from app.schemas.generation import BatchCandidate, BatchPreviewResponse, DraftContent, FAQItem
+from app.schemas.website_context import WebsiteContextRead
+from app.services.website_context import build_website_context, website_config_value
 
 FORBIDDEN_PHRASES = (
     "100% guaranteed",
@@ -58,6 +60,7 @@ class GenerationContext:
     knowledge_blocks: list[KnowledgeBlock]
     settings: dict[str, str]
     customer_types: list[str]
+    website_context: WebsiteContextRead
 
 
 def load_generation_context(session: Session, page_id: int) -> GenerationContext:
@@ -95,11 +98,16 @@ def load_generation_context(session: Session, page_id: int) -> GenerationContext
         setting.setting_key: setting.setting_value or ""
         for setting in setting_records
     }
-    configured_customers = [
-        value.strip()
-        for value in settings.get("target_customer_types", "").split(",")
-        if value.strip()
-    ]
+    website_context = build_website_context(session, page_id=page_id)
+    website_customers = website_context.website.configuration.get("target_customer_types")
+    if isinstance(website_customers, list):
+        configured_customers = [str(value).strip() for value in website_customers if str(value).strip()]
+    else:
+        configured_customers = [
+            value.strip()
+            for value in str(website_customers or settings.get("target_customer_types", "")).split(",")
+            if value.strip()
+        ]
 
     return GenerationContext(
         page=page,
@@ -110,6 +118,7 @@ def load_generation_context(session: Session, page_id: int) -> GenerationContext
         knowledge_blocks=knowledge_blocks,
         settings=settings,
         customer_types=configured_customers or list(DEFAULT_CUSTOMERS),
+        website_context=website_context,
     )
 
 
@@ -133,7 +142,7 @@ def assemble_generation_prompt(context: GenerationContext) -> str:
         "Create a structured local service page draft for human review. Do not publish it.\n\n"
         f"Business: {business.company_name}\n"
         f"Phone: {business.phone or 'Not provided'}\n"
-        f"Website: {business.website or 'Not provided'}\n"
+        f"Website: {context.website_context.website.public_url or 'Not provided'}\n"
         f"Email: {business.email or 'Not provided'}\n"
         f"License: {business.license_number or 'Not provided'}\n"
         f"Certified operator: {business.certified_operator or 'Not provided'}\n"
@@ -158,61 +167,85 @@ class DeterministicMockProvider:
         city = context.city.city_name
         county = _county_label(context.county.county_name)
         service = context.service.service_name
+        website = context.website_context
+        short_brand_name = website_config_value(website, "short_brand_name", website.brand.public_name)
+        state_name = website_config_value(website, "state_name", context.city.state)
+        license_label = website_config_value(website, "license_label", "License")
         customer_text = ", ".join(context.customer_types[:-1]) + f", and {context.customer_types[-1]}"
+        values = {
+            "company_name": business.company_name,
+            "short_brand_name": short_brand_name,
+            "service_name": service,
+            "service_lower": service.lower(),
+            "city": city,
+            "county": county,
+            "state_name": state_name,
+            "phone_or_brand": business.phone or short_brand_name,
+        }
+        description_template = website_config_value(
+            website,
+            "draft_meta_description_template",
+            "{company_name} provides {service_lower} in {city}, {state_name}.",
+        )
+        intro_suffix = website_config_value(
+            website,
+            "draft_intro_suffix",
+            "Service recommendations and scope depend on the property and the approved service plan.",
+        )
+        process_template = website_config_value(
+            website,
+            "draft_process_template",
+            "A {service_lower} project begins with assessment, planning, and clear customer instructions. "
+            "Timing and access requirements depend on the approved service plan.",
+        )
+        realtor_template = website_config_value(
+            website,
+            "draft_realtor_template",
+            "Realtors and property managers in {city} can help projects stay on schedule by coordinating "
+            "occupants, access, and service requirements early.",
+        )
 
         return DraftContent(
-            title=f"{service} in {city}, FL",
-            meta_title=f"{service} in {city}, FL | Flo-Zone",
-            meta_description=(
-                f"Flo-Zone helps property owners and real estate professionals coordinate {service.lower()} "
-                f"in {city}, Florida. Call {business.phone or 'Flo-Zone'}."
-            ),
-            h1=f"{service} in {city}, Florida",
+            title=f"{service} in {city}, {context.city.state}",
+            meta_title=f"{service} in {city}, {context.city.state} | {short_brand_name}",
+            meta_description=description_template.format(**values),
+            h1=f"{service} in {city}, {state_name}",
             intro=(
                 f"{business.company_name} provides {service.lower()} for {customer_text} in {city} and "
-                f"throughout {county}. Whole-structure fumigation is commonly used when active drywood "
-                "termite colonies may be hidden inside wood or concealed building spaces."
+                f"throughout {county}. {intro_suffix}"
             ),
             why_it_matters=_knowledge_answer(
                 context,
-                "why-fumigation-is-most-complete-drywood-termite-treatment",
+                website_config_value(website, "why_knowledge_slug"),
                 (
-                    "Drywood termite activity can be difficult to reach when it is spread through concealed wood. "
-                    "Whole-structure fumigation may reach areas that are not accessible to spot treatment."
+                    f"{service} can address service needs identified during assessment. "
+                    "The appropriate scope depends on the property and the approved service plan."
                 ),
             ),
             signs_section=_knowledge_answer(
                 context,
-                "how-to-know-if-you-have-drywood-termites",
+                website_config_value(website, "signs_knowledge_slug"),
                 (
-                    "Possible signs include dry pellets or frass, kick-out holes, shed wings, swarmers, and "
-                    "damaged wood. An inspection can help determine the next step."
+                    f"Possible signs and service needs vary by property. A qualified assessment can help "
+                    f"determine whether {service.lower()} is an appropriate next step."
                 ),
             ),
-            process_section=(
-                f"A {service.lower()} project begins with inspection and job-specific planning. The structure is "
-                "covered and sealed so fumigant gas can move through concealed spaces. Many jobs are completed "
-                "over about 2-3 days, but timing may vary with the structure, treatment plan, aeration, and "
-                "clearance testing. Re-entry is allowed only after the licensed fumigator has cleared the structure."
-            ),
+            process_section=process_template.format(**values),
             prep_section=_knowledge_answer(
                 context,
-                "flo-zone-fumigation-preparation-checklist",
+                website_config_value(website, "prep_knowledge_slug"),
                 (
                     "Occupants, pets, plants, and specified consumable items must be removed or prepared as "
-                    "directed. Customers should follow every preparation and re-entry instruction from Flo-Zone."
+                    f"directed. Customers should follow every preparation and re-entry instruction from {short_brand_name}."
                 ),
             ),
-            realtor_property_manager_section=(
-                f"Realtors and property managers in {city} can help projects stay on schedule by addressing termite "
-                "concerns early, coordinating occupants and access, providing keys, and communicating preparation "
-                "and downtime requirements. Multi-story or difficult-access structures may require lift planning."
-            ),
+            realtor_property_manager_section=realtor_template.format(**values),
             faq_items=_faq_items(context),
             call_to_action=(
-                f"To discuss drywood termite tenting in {city}, contact {business.company_name} at "
-                f"{business.phone or 'the office'} or {business.email or business.website or 'through the company website'}. "
-                f"Florida license {business.license_number or 'information available on request'}; "
+                f"To discuss {service.lower()} in {city}, contact {business.company_name} at "
+                f"{business.phone or 'the office'} or "
+                f"{business.email or website.website.public_url or 'through the company website'}. "
+                f"{license_label} {business.license_number or 'information available on request'}; "
                 f"certified operator {business.certified_operator or 'information available on request'}."
             ),
             internal_notes=(
@@ -251,7 +284,7 @@ def generate_page_draft(
     page.meta_description = draft.meta_description
     page.h1 = draft.h1
     page.draft_content = draft.model_dump(mode="json")
-    page.content_body = render_content_body(draft)
+    page.content_body = render_content_body(draft, context.website_context)
     page.generation_status = "generated"
     page.generated_at = datetime.now(UTC)
     page.qa_status = "not_run"
@@ -347,20 +380,26 @@ def validate_safe_content(value: Any) -> None:
         raise UnsafeContentError(f"Generated draft contains unsafe wording: {', '.join(found)}")
 
 
-def render_content_body(draft: DraftContent) -> str:
+def render_content_body(
+    draft: DraftContent,
+    website_context: WebsiteContextRead | None = None,
+) -> str:
+    def heading(key: str, default: str) -> str:
+        return website_config_value(website_context, key, default) if website_context else default
+
     faq_text = "\n\n".join(
         f"### {item.question}\n{item.answer}"
         for item in draft.faq_items
     )
     return (
         f"{draft.intro}\n\n"
-        f"## Why Drywood Termites Matter\n{draft.why_it_matters}\n\n"
-        f"## Signs to Watch For\n{draft.signs_section}\n\n"
-        f"## Tenting Process\n{draft.process_section}\n\n"
-        f"## Preparation\n{draft.prep_section}\n\n"
-        f"## Realtors and Property Managers\n{draft.realtor_property_manager_section}\n\n"
+        f"## {heading('content_heading_why', 'Why This Service Matters')}\n{draft.why_it_matters}\n\n"
+        f"## {heading('content_heading_signs', 'What to Look For')}\n{draft.signs_section}\n\n"
+        f"## {heading('content_heading_process', 'The Service Process')}\n{draft.process_section}\n\n"
+        f"## {heading('content_heading_prep', 'Preparing for Service')}\n{draft.prep_section}\n\n"
+        f"## {heading('content_heading_professionals', 'For Property Professionals')}\n{draft.realtor_property_manager_section}\n\n"
         f"## Frequently Asked Questions\n{faq_text}\n\n"
-        f"## Contact Flo-Zone\n{draft.call_to_action}"
+        f"## {heading('content_heading_contact', 'Contact the Company')}\n{draft.call_to_action}"
     )
 
 
@@ -381,13 +420,11 @@ def _county_label(county_name: str) -> str:
 
 
 def _faq_items(context: GenerationContext) -> list[FAQItem]:
+    configured = context.website_context.website.configuration.get("faq_knowledge_slugs")
     preferred_slugs = (
-        "what-is-drywood-termite-tenting",
-        "when-is-tenting-needed",
-        "how-long-does-fumigation-take",
-        "is-tenting-safe",
-        "what-does-tenting-not-prevent",
-        "reentry-and-clearance-explanation",
+        tuple(str(value) for value in configured)
+        if isinstance(configured, list)
+        else tuple(block.slug for block in context.knowledge_blocks)
     )
     by_slug = {block.slug: block for block in context.knowledge_blocks}
     return [

@@ -3,11 +3,11 @@ import { AlertTriangle, ArrowLeft, CheckCircle2, Image, Phone, ShieldCheck } fro
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { apiRequest } from "../api";
-import type { ApprovalAudit, AssignedMedia, Business, City, County, GeneratedPage, GeneratedPageRevision, PageQAResult, Service } from "../types";
+import type { ApprovalAudit, AssignedMedia, City, County, GeneratedPage, GeneratedPageRevision, PageQAResult, Service, WebsiteContext } from "../types";
 
 type PreviewData = {
   page: GeneratedPage;
-  business: Business;
+  context: WebsiteContext;
   service: Service;
   city: City | null;
   county: County | null;
@@ -36,14 +36,14 @@ function GeneratedPagePreview() {
 
       try {
         const page = await apiRequest<GeneratedPage>(`/api/generated-pages/${pageId}`);
-        const [business, service, city, county, media] = await Promise.all([
-          apiRequest<Business>(`/api/businesses/${page.business_id}`),
+        const [context, service, city, county, media] = await Promise.all([
+          apiRequest<WebsiteContext>(`/api/generated-pages/${pageId}/website-context`),
           apiRequest<Service>(`/api/services/${page.service_id}`),
           page.city_id ? apiRequest<City>(`/api/cities/${page.city_id}`) : Promise.resolve(null),
           page.county_id ? apiRequest<County>(`/api/counties/${page.county_id}`) : Promise.resolve(null),
           apiRequest<AssignedMedia[]>(`/api/generated-pages/${page.id}/media`)
         ]);
-        setData({ page, business, service, city, county, media });
+        setData({ page, context, service, city, county, media });
         if (showQa) {
           const [qa, history, revisions] = await Promise.all([
             apiRequest<PageQAResult>(`/api/generated-pages/${page.id}/qa`),
@@ -81,8 +81,12 @@ function GeneratedPagePreview() {
     return <PreviewState message="Generate a structured draft before opening its customer-facing preview." />;
   }
 
-  const { business, service, city, county, media } = data;
-  const phone = business.phone ?? "(844) 600-8368";
+  const { context, service, city, county, media } = data;
+  const { business, brand, website } = context;
+  const config = website.configuration;
+  const configText = (key: string, fallback: string) =>
+    typeof config[key] === "string" ? String(config[key]) : fallback;
+  const phone = business.phone ?? "Contact us";
   const phoneHref = `tel:${phone.replace(/[^\d+]/g, "")}`;
   const location = city ? `${city.city_name}, ${city.state}` : business.main_city ?? business.state;
   const heroAssignment = media.find((assignment) => assignment.image_role === "hero");
@@ -119,10 +123,12 @@ function GeneratedPagePreview() {
       <header className="previewSiteHeader">
         <div className="previewContainer previewHeaderInner">
           <div className="previewBrand">
-            <span className="previewBrandMark">FZ</span>
+            <span className="previewBrandMark">
+              {typeof brand.identity_settings.brand_mark === "string" ? brand.identity_settings.brand_mark : brand.public_name.slice(0, 2).toUpperCase()}
+            </span>
             <div>
-              <strong>{business.brand_name ?? business.company_name}</strong>
-              <span>Drywood termite specialists</span>
+              <strong>{context.identity.display_name}</strong>
+              <span>{brand.tagline ?? business.business_type}</span>
             </div>
           </div>
           <a className="previewPhoneLink" href={phoneHref}>
@@ -164,7 +170,7 @@ function GeneratedPagePreview() {
             </div>
             <div className="previewTrustLine">
               <ShieldCheck size={19} aria-hidden="true" />
-              <span>Licensed Florida pest control operator</span>
+              <span>{configText("preview_trust_line", `Licensed ${business.business_type}`)}</span>
             </div>
           </div>
         </section>
@@ -172,8 +178,8 @@ function GeneratedPagePreview() {
         <section className="previewBand">
           <div className="previewContainer previewIntroGrid">
             <div>
-              <p className="previewSectionLabel">Local Drywood Termite Service</p>
-              <h2>Why drywood termite activity matters in {city?.city_name ?? location}</h2>
+              <p className="previewSectionLabel">{configText("preview_service_label", "Local Service")}</p>
+              <h2>Why {configText("preview_why_subject", service.service_name.toLowerCase())} matters in {city?.city_name ?? location}</h2>
               <p>{draft.intro}</p>
               <p>{draft.service_explanation || draft.why_it_matters}</p>
             </div>
@@ -183,7 +189,7 @@ function GeneratedPagePreview() {
               <div className="previewImagePlaceholder">
                 <Image size={28} aria-hidden="true" />
                 <strong>Service image placeholder</strong>
-                <span>Inspection or tenting photography will appear here.</span>
+                <span>{service.service_name} photography will appear here.</span>
               </div>
             )}
           </div>
@@ -192,7 +198,7 @@ function GeneratedPagePreview() {
         <section className="previewBand previewBandMuted">
           <div className="previewContainer previewTextSection">
             <p className="previewSectionLabel">What to Look For</p>
-            <h2>Signs of drywood termites</h2>
+            <h2>{configText("preview_signs_heading", `Signs related to ${service.service_name.toLowerCase()}`)}</h2>
             <p>{draft.signs_section}</p>
           </div>
         </section>
@@ -200,13 +206,13 @@ function GeneratedPagePreview() {
         <section className="previewBand">
           <div className="previewContainer previewTwoColumn">
             <article>
-              <p className="previewSectionLabel">Treatment</p>
-              <h2>How the tenting process works</h2>
+              <p className="previewSectionLabel">{configText("preview_treatment_label", "Service")}</p>
+              <h2>{configText("preview_process_heading", `How ${service.service_name.toLowerCase()} works`)}</h2>
               <p>{draft.process_section}</p>
             </article>
             <article>
-              <p className="previewSectionLabel">Before Fumigation</p>
-              <h2>Preparing the property</h2>
+              <p className="previewSectionLabel">{configText("preview_preparation_label", "Before Service")}</p>
+              <h2>{configText("preview_preparation_heading", "Preparing the property")}</h2>
               <p>{draft.prep_section}</p>
             </article>
           </div>
@@ -225,7 +231,7 @@ function GeneratedPagePreview() {
 
         <section className="previewBand">
           <div className="previewContainer previewTextSection">
-            <p className="previewSectionLabel">Why Flo-Zone</p>
+            <p className="previewSectionLabel">{configText("preview_why_label", `Why ${brand.public_name}`)}</p>
             <h2>Careful coordination from preparation through clearance</h2>
             <p>{draft.why_choose_section || draft.realtor_property_manager_section}</p>
           </div>
@@ -233,8 +239,8 @@ function GeneratedPagePreview() {
 
         <section className="previewBand previewBandMuted">
           <div className="previewContainer">
-            <p className="previewSectionLabel">Service Gallery</p>
-            <h2>Drywood termite tenting project views</h2>
+            <p className="previewSectionLabel">{configText("preview_gallery_label", "Service Gallery")}</p>
+            <h2>{configText("preview_gallery_heading", `${service.service_name} project views`)}</h2>
             {supportAssignments.length ? (
               <MediaGallery assignments={supportAssignments} className="previewSupportGallery" />
             ) : (
@@ -250,7 +256,7 @@ function GeneratedPagePreview() {
         <section className="previewBand">
           <div className="previewContainer previewFaqSection">
             <p className="previewSectionLabel">Frequently Asked Questions</p>
-            <h2>Drywood termite tenting questions</h2>
+            <h2>{configText("preview_faq_heading", `${service.service_name} questions`)}</h2>
             <div className="previewFaqList">
               {draft.faq_items.map((item) => (
                 <details key={item.question}>
@@ -265,7 +271,7 @@ function GeneratedPagePreview() {
         <section className="previewFinalCta" id="estimate">
           <div className="previewContainer previewFinalCtaInner">
             <div>
-              <p className="previewSectionLabel">Talk With Flo-Zone</p>
+              <p className="previewSectionLabel">{configText("preview_contact_label", `Talk With ${brand.public_name}`)}</p>
               <h2>Request service information for {city?.city_name ?? location}</h2>
               <p>{draft.call_to_action}</p>
             </div>
@@ -286,7 +292,9 @@ function GeneratedPagePreview() {
         <div className="previewContainer previewFooterInner">
           <strong>{business.company_name}</strong>
           <span>
-            {business.license_number ? `Florida License ${business.license_number}` : "Florida licensed operator"}
+            {business.license_number
+              ? `${configText("license_label", "License")} ${business.license_number}`
+              : configText("preview_trust_line", `Licensed ${business.business_type}`)}
             {business.certified_operator ? ` | Certified Operator: ${business.certified_operator}` : ""}
           </span>
           {county && <span>Serving {county.county_name} and surrounding target markets.</span>}

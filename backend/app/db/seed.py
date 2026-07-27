@@ -4,6 +4,7 @@ from app.db.city_data import COUNTY_CITY_MAP, priority_for_city, slugify_city_na
 from app.db.knowledge_block_data import KNOWLEDGE_BLOCKS
 from app.db.session import create_db_and_tables, engine
 from app.models import (
+    Brand,
     Business,
     City,
     County,
@@ -13,6 +14,8 @@ from app.models import (
     PageImageAssignment,
     Service,
     Setting,
+    Website,
+    WebsiteIdentity,
 )
 from app.services.page_queue import create_city_service_page_queue
 
@@ -22,6 +25,7 @@ FLO_ZONE_COMPANY_NAME = "Flo-Zone Pest And Termite Solutions Inc"
 
 def seed_database(session: Session) -> None:
     business = upsert_business(session)
+    website = upsert_website_foundation(session, business)
     service = upsert_service(session, business)
     cities = upsert_counties_and_cities(session)
     upsert_knowledge_blocks(session, business, service)
@@ -31,6 +35,7 @@ def seed_database(session: Session) -> None:
         session,
         business_company_name=FLO_ZONE_COMPANY_NAME,
         service_slug="drywood-termite-tenting",
+        website_id=website.id,
     )
     if seed_hero_assignment:
         upsert_initial_hero_assignment(session, business, service, cities["Orlando"], image)
@@ -63,6 +68,144 @@ def upsert_business(session: Session) -> Business:
     session.commit()
     session.refresh(business)
     return business
+
+
+def upsert_website_foundation(session: Session, business: Business) -> Website:
+    brand = session.exec(
+        select(Brand).where(
+            Brand.business_id == business.id,
+            Brand.brand_name == "Flo-Zone",
+        )
+    ).first()
+    brand_payload = {
+        "business_id": business.id,
+        "brand_name": "Flo-Zone",
+        "tagline": "Drywood termite specialists",
+        "description": "Public-facing brand for Flo-Zone Pest And Termite Solutions Inc.",
+        "identity_settings": {"brand_mark": "FZ"},
+        "status": "active",
+    }
+    if brand:
+        for key, value in brand_payload.items():
+            setattr(brand, key, value)
+    else:
+        brand = Brand(**brand_payload)
+    session.add(brand)
+    session.commit()
+    session.refresh(brand)
+
+    website = session.exec(
+        select(Website).where(
+            Website.business_id == business.id,
+            Website.domain == "www.flo-zonetenting.com",
+        )
+    ).first()
+    website_payload = {
+        "business_id": business.id,
+        "brand_id": brand.id,
+        "website_name": "Flo-Zone Tenting",
+        "domain": "www.flo-zonetenting.com",
+        "public_url": "https://www.Flo-ZoneTenting.com",
+        "locale": "en-US",
+        "primary_language": "en",
+        "status": "active",
+        "configuration": {
+            "short_brand_name": "Flo-Zone",
+            "state_name": "Florida",
+            "state_slug": "fl",
+            "license_label": "Florida License",
+            "target_customer_types": [
+                "homeowners",
+                "realtors",
+                "property managers",
+                "investors",
+                "commercial clients",
+            ],
+            "market_state_codes": ["FL"],
+            "preview_trust_line": "Licensed Florida pest control operator",
+            "preview_service_label": "Local Drywood Termite Service",
+            "preview_why_subject": "drywood termite activity",
+            "preview_signs_heading": "Signs of drywood termites",
+            "preview_treatment_label": "Treatment",
+            "preview_process_heading": "How the tenting process works",
+            "preview_preparation_label": "Before Fumigation",
+            "preview_preparation_heading": "Preparing the property",
+            "preview_why_label": "Why Flo-Zone",
+            "preview_gallery_label": "Service Gallery",
+            "preview_contact_label": "Talk With Flo-Zone",
+            "preview_gallery_heading": "Drywood termite tenting project views",
+            "preview_faq_heading": "Drywood termite tenting questions",
+            "page_meta_description_template": (
+                "{company_name} helps homeowners, realtors, property managers, investors, "
+                "and commercial clients with {service_lower} in {city}, {state_name}."
+            ),
+            "draft_meta_description_template": (
+                "{short_brand_name} helps property owners and real estate professionals coordinate "
+                "{service_lower} in {city}, {state_name}. Call {phone_or_brand}."
+            ),
+            "draft_intro_suffix": (
+                "Whole-structure fumigation is commonly used when active drywood termite colonies "
+                "may be hidden inside wood or concealed building spaces."
+            ),
+            "draft_process_template": (
+                "A {service_lower} project begins with inspection and job-specific planning. The structure is "
+                "covered and sealed so fumigant gas can move through concealed spaces. Many jobs are completed "
+                "over about 2-3 days, but timing may vary with the structure, treatment plan, aeration, and "
+                "clearance testing. Re-entry is allowed only after the licensed fumigator has cleared the structure."
+            ),
+            "draft_realtor_template": (
+                "Realtors and property managers in {city} can help projects stay on schedule by addressing termite "
+                "concerns early, coordinating occupants and access, providing keys, and communicating preparation "
+                "and downtime requirements. Multi-story or difficult-access structures may require lift planning."
+            ),
+            "why_knowledge_slug": "why-fumigation-is-most-complete-drywood-termite-treatment",
+            "signs_knowledge_slug": "how-to-know-if-you-have-drywood-termites",
+            "prep_knowledge_slug": "flo-zone-fumigation-preparation-checklist",
+            "faq_knowledge_slugs": [
+                "what-is-drywood-termite-tenting",
+                "when-is-tenting-needed",
+                "how-long-does-fumigation-take",
+                "is-tenting-safe",
+                "what-does-tenting-not-prevent",
+                "reentry-and-clearance-explanation",
+            ],
+            "content_heading_why": "Why Drywood Termites Matter",
+            "content_heading_signs": "Signs to Watch For",
+            "content_heading_process": "Tenting Process",
+            "content_heading_prep": "Preparation",
+            "content_heading_professionals": "Realtors and Property Managers",
+            "content_heading_contact": "Contact Flo-Zone",
+        },
+    }
+    if website:
+        for key, value in website_payload.items():
+            setattr(website, key, value)
+    else:
+        website = Website(**website_payload)
+    session.add(website)
+    session.commit()
+    session.refresh(website)
+
+    identity = session.exec(
+        select(WebsiteIdentity).where(WebsiteIdentity.website_id == website.id)
+    ).first()
+    identity_payload = {
+        "website_id": website.id,
+        "display_name": "Flo-Zone Tenting",
+        "favicon_url": None,
+        "browser_icon_url": None,
+        "apple_touch_icon_url": None,
+        "social_identity_image_url": None,
+        "status": "active",
+    }
+    if identity:
+        for key, value in identity_payload.items():
+            setattr(identity, key, value)
+    else:
+        identity = WebsiteIdentity(**identity_payload)
+    session.add(identity)
+    session.commit()
+    return website
 
 
 def upsert_service(session: Session, business: Business) -> Service:

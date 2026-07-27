@@ -105,6 +105,18 @@ Build legitimate coverage throughout Orange, Seminole, Volusia, Lake, and Flagle
 
 Turn the Flo-Zone process into a reusable workflow for a new company.
 
+### Foundation implemented locally
+
+The Website Context and Business Identity Foundation now provides additive
+Business-to-Brand-to-Website ownership, one Website Identity record per
+website, and one website-scoped context for page queueing, draft generation,
+export, editing, repair, and preview. Flo-Zone remains seeded reference data,
+and an isolated fictional-company fixture proves that reusable workflows can
+select another website without source customization or identity leakage.
+
+This foundation does not complete company onboarding, site planning, themes,
+navigation, provider abstraction, or second-company deployment.
+
 ### Inputs
 
 - Company identity
