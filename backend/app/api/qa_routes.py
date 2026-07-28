@@ -20,6 +20,7 @@ from app.schemas.qa import (
 )
 from app.services.approval_audit import approve_page_with_audit
 from app.services.approval_queue import build_approval_queue
+from app.services.website_scope import require_page_website
 from app.services.page_qa import (
     get_page_qa,
     preview_qa_batch,
@@ -32,9 +33,10 @@ router = APIRouter(prefix="/generated-pages", tags=["page QA"])
 
 @router.get("/approval-queue", response_model=ApprovalQueueResponse)
 def read_approval_queue(
+    website_id: int | None = None,
     session: Session = Depends(get_session),
 ) -> ApprovalQueueResponse:
-    return build_approval_queue(session)
+    return build_approval_queue(session, website_id=website_id)
 
 
 @router.post("/qa/batch-preview", response_model=QABatchResponse)
@@ -130,6 +132,14 @@ def approve_ready_page(
     payload: ApprovalRequest | None = None,
     session: Session = Depends(get_session),
 ) -> GeneratedPage:
+    page = session.get(GeneratedPage, page_id)
+    if not page:
+        raise HTTPException(status_code=404, detail="Generated page not found")
+    require_page_website(
+        session,
+        page,
+        expected_website_id=payload.website_id if payload else None,
+    )
     return approve_page_with_audit(
         session,
         page_id,

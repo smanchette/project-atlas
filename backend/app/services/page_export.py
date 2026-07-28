@@ -29,6 +29,7 @@ from app.schemas.page_export import (
 )
 from app.services.draft_generation import FORBIDDEN_PHRASES
 from app.services.website_context import build_website_context
+from app.services.website_scope import require_page_website, require_single_website_selection
 
 
 CONTENT_SECTION_KEYS = (
@@ -60,6 +61,7 @@ def build_page_export_package(session: Session, page_id: int) -> PageExportPacka
     page = session.get(GeneratedPage, page_id)
     if not page:
         raise HTTPException(status_code=404, detail="Generated page not found")
+    require_page_website(session, page)
     business = session.get(Business, page.business_id)
     service = session.get(Service, page.service_id)
     city = session.get(City, page.city_id) if page.city_id else None
@@ -71,7 +73,12 @@ def build_page_export_package(session: Session, page_id: int) -> PageExportPacka
     website_context = build_website_context(session, page_id=page_id)
     suggested_slug = generate_suggested_slug(service, city)
     url_slug = page.page_slug or suggested_slug
-    conflicts = _slug_conflicts(session, page.id or page_id, suggested_slug)
+    conflicts = _slug_conflicts(
+        session,
+        page.id or page_id,
+        page.website_id or 0,
+        suggested_slug,
+    )
     meta_title = _text(draft.get("meta_title") or page.meta_title)
     meta_description = _text(draft.get("meta_description") or page.meta_description)
     page_title = _text(draft.get("title") or page.page_title)
@@ -142,8 +149,13 @@ def build_page_export_package(session: Session, page_id: int) -> PageExportPacka
     )
 
 
-def preview_bulk_export(session: Session, page_ids: list[int]) -> BulkExportPreview:
-    packages = build_selected_packages(session, page_ids)
+def preview_bulk_export(
+    session: Session,
+    page_ids: list[int],
+    *,
+    website_id: int | None = None,
+) -> BulkExportPreview:
+    packages = build_selected_packages(session, page_ids, website_id=website_id)
     candidates = [
         BulkExportCandidate(
             page_id=package.page_id,
@@ -164,8 +176,22 @@ def preview_bulk_export(session: Session, page_ids: list[int]) -> BulkExportPrev
     )
 
 
-def build_selected_packages(session: Session, page_ids: list[int]) -> list[PageExportPackage]:
+def build_selected_packages(
+    session: Session,
+    page_ids: list[int],
+    *,
+    website_id: int | None = None,
+) -> list[PageExportPackage]:
     unique_ids = list(dict.fromkeys(page_ids))
+    pages = [session.get(GeneratedPage, page_id) for page_id in unique_ids]
+    if any(page is None for page in pages):
+        raise HTTPException(status_code=404, detail="One or more generated pages were not found")
+    require_single_website_selection(
+        session,
+        [page for page in pages if page is not None],
+        website_id=website_id,
+        operation="Bulk export",
+    )
     packages = [build_page_export_package(session, page_id) for page_id in unique_ids]
     if len(packages) != len(unique_ids):
         raise HTTPException(status_code=404, detail="One or more generated pages were not found")
@@ -178,10 +204,16 @@ def package_json(package: PageExportPackage) -> bytes:
     ).encode("utf-8")
 
 
-def _slug_conflicts(session: Session, page_id: int, suggested_slug: str) -> list[int]:
+def _slug_conflicts(
+    session: Session,
+    page_id: int,
+    website_id: int,
+    suggested_slug: str,
+) -> list[int]:
     pages = session.exec(
         select(GeneratedPage).where(
             GeneratedPage.id != page_id,
+            GeneratedPage.website_id == website_id,
             GeneratedPage.page_slug == suggested_slug,
         )
     ).all()

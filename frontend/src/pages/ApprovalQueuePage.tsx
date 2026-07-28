@@ -15,7 +15,13 @@ import {
 import { Link } from "react-router-dom";
 
 import { apiRequest, requestBulkPageExport } from "../api";
-import type { ApprovalQueueItem, ApprovalQueueResponse, BulkExportPreview, QABatchResponse } from "../types";
+import type {
+  ApprovalQueueItem,
+  ApprovalQueueResponse,
+  BulkExportPreview,
+  QABatchResponse,
+  Website
+} from "../types";
 
 type QueueFilter =
   | "all"
@@ -41,6 +47,8 @@ const filterOptions: { value: QueueFilter; label: string }[] = [
 ];
 
 function ApprovalQueuePage() {
+  const [websites, setWebsites] = useState<Website[]>([]);
+  const [selectedWebsiteId, setSelectedWebsiteId] = useState<number | null>(null);
   const [queue, setQueue] = useState<ApprovalQueueResponse>({ total_count: 0, items: [] });
   const [filter, setFilter] = useState<QueueFilter>("all");
   const [sortKey, setSortKey] = useState<SortKey>("city");
@@ -53,10 +61,15 @@ function ApprovalQueuePage() {
   const [error, setError] = useState<string | null>(null);
 
   async function loadQueue() {
+    if (!selectedWebsiteId) return;
     setLoading(true);
     setError(null);
     try {
-      setQueue(await apiRequest<ApprovalQueueResponse>("/api/generated-pages/approval-queue"));
+      setQueue(
+        await apiRequest<ApprovalQueueResponse>(
+          `/api/generated-pages/approval-queue?website_id=${selectedWebsiteId}`
+        )
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load the approval queue.");
     } finally {
@@ -65,8 +78,21 @@ function ApprovalQueuePage() {
   }
 
   useEffect(() => {
-    loadQueue();
+    apiRequest<Website[]>("/api/websites")
+      .then((items) => {
+        setWebsites(items);
+        setSelectedWebsiteId((current) => current ?? items[0]?.id ?? null);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "Unable to load websites."));
   }, []);
+
+  useEffect(() => {
+    if (selectedWebsiteId) {
+      setSelectedIds(new Set());
+      setExportPreview(null);
+      loadQueue();
+    }
+  }, [selectedWebsiteId]);
 
   const visibleItems = useMemo(
     () => queue.items.filter((item) => matchesFilter(item, filter)).sort(sorters[sortKey]),
@@ -114,7 +140,11 @@ function ApprovalQueuePage() {
     try {
       const result = await apiRequest<QABatchResponse>("/api/generated-pages/qa/batch-run", {
         method: "POST",
-        body: JSON.stringify({ page_ids: Array.from(selectedIds), confirm: true })
+        body: JSON.stringify({
+          page_ids: Array.from(selectedIds),
+          website_id: selectedWebsiteId,
+          confirm: true
+        })
       });
       setMessage(`QA updated for ${result.saved_count} selected page${result.saved_count === 1 ? "" : "s"}.`);
       setSelectedIds(new Set());
@@ -150,7 +180,7 @@ function ApprovalQueuePage() {
       setExportPreview(
         await apiRequest<BulkExportPreview>("/api/generated-pages/export/bulk-preview", {
           method: "POST",
-          body: JSON.stringify({ page_ids: Array.from(selectedIds) })
+          body: JSON.stringify({ page_ids: Array.from(selectedIds), website_id: selectedWebsiteId })
         })
       );
     } catch (err) {
@@ -165,7 +195,10 @@ function ApprovalQueuePage() {
     setExportWorking(true);
     setError(null);
     try {
-      const download = await requestBulkPageExport(Array.from(selectedIds));
+      const download = await requestBulkPageExport(
+        Array.from(selectedIds),
+        selectedWebsiteId ?? undefined
+      );
       downloadBlob(download.blob, download.fileName);
       setMessage(`${download.fileName} downloaded. No media binaries were included.`);
     } catch (err) {
@@ -206,6 +239,19 @@ function ApprovalQueuePage() {
       <p className="helperText">
         Review readiness across generated pages. This workspace cannot approve or publish pages.
       </p>
+      <label className="fieldLabel">
+        Website
+        <select
+          value={selectedWebsiteId ?? ""}
+          onChange={(event) => setSelectedWebsiteId(Number(event.target.value))}
+        >
+          {websites.map((website) => (
+            <option key={website.id} value={website.id}>
+              {website.website_name} — {website.domain}
+            </option>
+          ))}
+        </select>
+      </label>
 
       {error && <div className="alert">{error}</div>}
       {message && <div className="successMessage">{message}</div>}

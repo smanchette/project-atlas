@@ -12,12 +12,26 @@ from app.schemas.wordpress import (
 )
 from app.services.page_export import build_page_export_package
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
+from app.services.website_scope import require_single_website_selection
 
 
-def build_wordpress_draft_queue(session: Session) -> WordPressDraftQueueResponse:
+def build_wordpress_draft_queue(
+    session: Session,
+    *,
+    website_id: int | None = None,
+) -> WordPressDraftQueueResponse:
     settings = read_wordpress_settings(session)
     has_password = bool(get_wordpress_application_password())
-    pages = session.exec(select(GeneratedPage).order_by(GeneratedPage.id)).all()
+    statement = select(GeneratedPage)
+    if website_id is not None:
+        statement = statement.where(GeneratedPage.website_id == website_id)
+    pages = list(session.exec(statement.order_by(GeneratedPage.id)).all())
+    require_single_website_selection(
+        session,
+        pages,
+        website_id=website_id,
+        operation="WordPress draft queue",
+    )
     cities = {item.id: item for item in session.exec(select(City)).all()}
     counties = {item.id: item for item in session.exec(select(County)).all()}
     services = {item.id: item for item in session.exec(select(Service)).all()}
@@ -98,6 +112,7 @@ def _queue_item(
     )
     return WordPressDraftQueueItem(
         page_id=page.id or 0,
+        website_id=page.website_id,
         page_title=page.page_title,
         city=city.city_name if city else None,
         county=county.county_name if county else None,

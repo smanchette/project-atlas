@@ -11,6 +11,7 @@ import {
   ListChecks,
   Map,
   MapPin,
+  ClipboardList,
   Plug,
   ShieldCheck,
   Settings,
@@ -27,6 +28,7 @@ import GeneratedPagePreview from "./pages/GeneratedPagePreview";
 import ExportPackagePage from "./pages/ExportPackagePage";
 import KnowledgeBlocksPage from "./pages/KnowledgeBlocksPage";
 import MediaLibraryPage from "./pages/MediaLibraryPage";
+import SitePlansPage from "./pages/SitePlansPage";
 import ModulePage from "./pages/ModulePage";
 import WordPressDraftReviewPage from "./pages/WordPressDraftReviewPage";
 import WordPressDraftQualityReviewPage from "./pages/WordPressDraftQualityReviewPage";
@@ -45,6 +47,7 @@ const navItems = [
   { to: "/brands", label: "Brands", icon: Building2 },
   { to: "/websites", label: "Websites", icon: Building2 },
   { to: "/website-identities", label: "Website Identity", icon: Images },
+  { to: "/site-plans", label: "Site Plans", icon: ClipboardList },
   { to: "/services", label: "Services", icon: Wrench },
   { to: "/knowledge-blocks", label: "Knowledge Blocks", icon: BookOpenText },
   { to: "/counties", label: "Counties", icon: Map },
@@ -225,6 +228,7 @@ function DashboardShell() {
               />
             }
           />
+          <Route path="/site-plans" element={<SitePlansPage />} />
           <Route
             path="/services"
             element={

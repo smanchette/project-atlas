@@ -21,6 +21,8 @@ from app.schemas.qa import (
     QACheckItem,
 )
 from app.services.draft_generation import FORBIDDEN_PHRASES
+from app.services.website_context import build_website_context
+from app.services.website_scope import require_page_website, require_single_website_selection
 
 PLACEHOLDER_PATTERNS = (
     "lorem ipsum",
@@ -75,7 +77,9 @@ def evaluate_page_qa(session: Session, page_id: int) -> PageQAResult:
     if not page:
         raise HTTPException(status_code=404, detail="Generated page not found")
 
-    business = session.get(Business, page.business_id)
+    require_page_website(session, page)
+    website_context = build_website_context(session, page_id=page_id)
+    business = website_context.business
     service = session.get(Service, page.service_id)
     city = session.get(City, page.city_id) if page.city_id else None
     draft = page.draft_content or {}
@@ -339,7 +343,19 @@ def run_qa_batch(session: Session, payload: QABatchRequest) -> QABatchResponse:
 
 
 def _filtered_pages(session: Session, payload: QABatchRequest) -> list[GeneratedPage]:
+    if payload.page_ids:
+        requested = [session.get(GeneratedPage, page_id) for page_id in payload.page_ids]
+        if any(page is None for page in requested):
+            raise HTTPException(status_code=404, detail="One or more generated pages were not found")
+        require_single_website_selection(
+            session,
+            [page for page in requested if page is not None],
+            website_id=payload.website_id,
+            operation="Batch QA",
+        )
     statement = select(GeneratedPage)
+    if payload.website_id is not None:
+        statement = statement.where(GeneratedPage.website_id == payload.website_id)
     if payload.page_ids:
         statement = statement.where(GeneratedPage.id.in_(payload.page_ids))
     if payload.county_ids:
@@ -348,7 +364,14 @@ def _filtered_pages(session: Session, payload: QABatchRequest) -> list[Generated
         statement = statement.where(GeneratedPage.city_id.in_(payload.city_ids))
     if payload.page_status:
         statement = statement.where(GeneratedPage.status == payload.page_status)
-    return list(session.exec(statement.order_by(GeneratedPage.id)).all())
+    pages = list(session.exec(statement.order_by(GeneratedPage.id)).all())
+    require_single_website_selection(
+        session,
+        pages,
+        website_id=payload.website_id,
+        operation="Batch QA",
+    )
+    return pages
 
 
 def _batch_response(

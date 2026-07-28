@@ -17,7 +17,8 @@ import type {
   WordPressDraftDryRun,
   WordPressDraftQueueGroup,
   WordPressDraftQueueItem,
-  WordPressDraftQueueResponse
+  WordPressDraftQueueResponse,
+  Website
 } from "../types";
 
 const groups: { key: WordPressDraftQueueGroup; label: string }[] = [
@@ -32,6 +33,8 @@ const groups: { key: WordPressDraftQueueGroup; label: string }[] = [
 ];
 
 function WordPressDraftQueuePage() {
+  const [websites, setWebsites] = useState<Website[]>([]);
+  const [selectedWebsiteId, setSelectedWebsiteId] = useState<number | null>(null);
   const [queue, setQueue] = useState<WordPressDraftQueueResponse | null>(null);
   const [selectedPageId, setSelectedPageId] = useState<number | null>(null);
   const [dryRun, setDryRun] = useState<WordPressDraftDryRun | null>(null);
@@ -42,14 +45,30 @@ function WordPressDraftQueuePage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    loadQueue();
+    apiRequest<Website[]>("/api/websites")
+      .then((items) => {
+        setWebsites(items);
+        setSelectedWebsiteId((current) => current ?? items[0]?.id ?? null);
+      })
+      .catch((err) => setError(messageFrom(err, "Unable to load websites.")));
   }, []);
 
+  useEffect(() => {
+    if (selectedWebsiteId) {
+      setSelectedPageId(null);
+      setDryRun(null);
+      loadQueue();
+    }
+  }, [selectedWebsiteId]);
+
   async function loadQueue(selectPageId?: number) {
+    if (!selectedWebsiteId) return;
     setBusy("load");
     setError(null);
     try {
-      const response = await apiRequest<WordPressDraftQueueResponse>("/api/wordpress/draft-queue");
+      const response = await apiRequest<WordPressDraftQueueResponse>(
+        `/api/wordpress/draft-queue?website_id=${selectedWebsiteId}`
+      );
       setQueue(response);
       setSelectedPageId((current) => {
         if (selectPageId) return selectPageId;
@@ -152,6 +171,20 @@ function WordPressDraftQueuePage() {
           <span>Media is not uploaded yet. Existing WordPress drafts are skipped. Backend restart clears the application password from memory.</span>
         </div>
       </div>
+
+      <label className="fieldLabel">
+        Website
+        <select
+          value={selectedWebsiteId ?? ""}
+          onChange={(event) => setSelectedWebsiteId(Number(event.target.value))}
+        >
+          {websites.map((website) => (
+            <option key={website.id} value={website.id}>
+              {website.website_name} — {website.domain}
+            </option>
+          ))}
+        </select>
+      </label>
 
       {message && <div className="successAlert">{message}</div>}
       {error && <div className="alert">{error}</div>}

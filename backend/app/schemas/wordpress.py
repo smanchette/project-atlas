@@ -727,6 +727,7 @@ class WordPressDraftQualityReviewList(SQLModel):
 
 class WordPressDraftQueueItem(SQLModel):
     page_id: int
+    website_id: int
     page_title: str
     city: str | None = None
     county: str | None = None

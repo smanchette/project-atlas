@@ -729,9 +729,10 @@ def draft_review_list(
 
 @router.get("/draft-queue", response_model=WordPressDraftQueueResponse)
 def draft_queue(
+    website_id: int | None = None,
     session: Session = Depends(get_session),
 ) -> WordPressDraftQueueResponse:
-    return build_wordpress_draft_queue(session)
+    return build_wordpress_draft_queue(session, website_id=website_id)
 
 
 @router.get("/draft-quality-review", response_model=WordPressDraftQualityReviewList)

@@ -4184,3 +4184,78 @@ th {
     grid-template-columns: 1fr;
   }
 }
+.sitePlanForm {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+  align-items: end;
+}
+
+.sitePlanCards {
+  display: grid;
+  gap: 1rem;
+}
+
+.plannedPageCard code {
+  color: var(--muted-text, #64748b);
+}
+
+.plannedPageCard .panelHeader > div:last-child {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+  flex-direction: column;
+}
+
+.confidenceBadge {
+  border-radius: 999px;
+  padding: 0.25rem 0.65rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  background: #e2e8f0;
+}
+
+.confidenceBadge.high {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.confidenceBadge.medium {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.confidenceBadge.low {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.planningAnswers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.planningAnswers div {
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  padding: 0.8rem;
+}
+
+.planningAnswers dt {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.planningAnswers dd {
+  margin: 0.35rem 0 0;
+}
+
+.planningRecommendations {
+  margin: 1rem 0;
+  padding: 0.9rem;
+  border-radius: 0.75rem;
+  background: #f8fafc;
+}

@@ -111,13 +111,16 @@ export function requestPageExport(pageId: number): Promise<{ blob: Blob; fileNam
   );
 }
 
-export function requestBulkPageExport(pageIds: number[]): Promise<{ blob: Blob; fileName: string }> {
+export function requestBulkPageExport(
+  pageIds: number[],
+  websiteId?: number
+): Promise<{ blob: Blob; fileName: string }> {
   return requestFileDownload(
     "/api/generated-pages/export/bulk",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ page_ids: pageIds })
+      body: JSON.stringify({ page_ids: pageIds, website_id: websiteId })
     },
     "atlas-page-exports.zip"
   );

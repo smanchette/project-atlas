@@ -4,6 +4,7 @@ from app.db.city_data import slugify_city_name
 from app.models import Business, City, GeneratedPage, Service
 from app.schemas.website_context import WebsiteContextRead
 from app.services.website_context import build_website_context
+from app.services.site_planning import backfill_existing_generated_pages
 
 PAGE_TYPE_CITY_SERVICE = "city_service"
 
@@ -87,6 +88,7 @@ def create_city_service_page_queue(
         page = session.exec(
             select(GeneratedPage).where(
                 GeneratedPage.business_id == business.id,
+                GeneratedPage.website_id == context.website.id,
                 GeneratedPage.service_id == service.id,
                 GeneratedPage.city_id == city.id,
                 GeneratedPage.page_type == PAGE_TYPE_CITY_SERVICE,
@@ -112,4 +114,5 @@ def create_city_service_page_queue(
         created_count += 1
 
     session.commit()
+    backfill_existing_generated_pages(session)
     return created_count

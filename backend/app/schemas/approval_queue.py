@@ -9,6 +9,7 @@ HeroImageStatus = Literal["missing", "unreviewed", "missing_alt_text", "reviewed
 
 class ApprovalQueueItem(SQLModel):
     page_id: int
+    website_id: int
     page_title: str
     city_id: int | None = None
     city_name: str

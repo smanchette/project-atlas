@@ -82,6 +82,80 @@ class WebsiteIdentity(TimestampMixin, table=True):
     approved_at: datetime | None = None
 
 
+class SitePlan(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint("website_id", "plan_key", name="uq_siteplan_website_key"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    plan_key: str = Field(default="primary", max_length=80, index=True)
+    plan_name: str
+    status: str = Field(default="draft", index=True)
+    version: int = Field(default=1, ge=1)
+
+
+class PlannedPage(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint("website_id", "intended_slug", name="uq_plannedpage_website_slug"),
+        UniqueConstraint("generated_page_id", name="uq_plannedpage_generated_page"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    page_type: str = Field(index=True)
+    working_name: str
+    intended_slug: str = Field(index=True)
+    service_id: int | None = Field(default=None, foreign_key="service.id", index=True)
+    city_id: int | None = Field(default=None, foreign_key="city.id", index=True)
+    county_id: int | None = Field(default=None, foreign_key="county.id", index=True)
+    parent_planned_page_id: int | None = Field(
+        default=None,
+        foreign_key="plannedpage.id",
+        index=True,
+    )
+    planning_status: str = Field(default="planned", index=True)
+    generated_page_id: int | None = Field(
+        default=None,
+        foreign_key="generatedpage.id",
+        index=True,
+    )
+
+
+class PlanningRecord(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint("planned_page_id", name="uq_planningrecord_planned_page"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    planned_page_id: int = Field(foreign_key="plannedpage.id", index=True)
+    generated_answers: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    operator_overrides: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    source_snapshot: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    confidence_score: float = Field(default=0.0, ge=0, le=1)
+    confidence_level: str = Field(default="low", index=True)
+    missing_information: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    improvement_recommendations: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    generated_at: datetime = Field(default_factory=utc_now, nullable=False)
+    reviewed_at: datetime | None = None
+
+
 class Service(TimestampMixin, table=True):
     id: int | None = Field(default=None, primary_key=True)
     business_id: int = Field(foreign_key="business.id", index=True)
@@ -113,6 +187,10 @@ class City(SQLModel, table=True):
 
 
 class GeneratedPage(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint("website_id", "page_slug", name="uq_generatedpage_website_slug"),
+    )
+
     id: int | None = Field(default=None, primary_key=True)
     business_id: int = Field(foreign_key="business.id", index=True)
     website_id: int | None = Field(default=None, foreign_key="website.id", index=True)
@@ -121,7 +199,7 @@ class GeneratedPage(TimestampMixin, table=True):
     county_id: int | None = Field(default=None, foreign_key="county.id", index=True)
     page_type: str = Field(index=True)
     page_title: str
-    page_slug: str = Field(index=True, unique=True)
+    page_slug: str = Field(index=True)
     meta_title: str | None = None
     meta_description: str | None = None
     h1: str | None = None

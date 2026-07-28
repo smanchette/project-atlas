@@ -31,11 +31,16 @@ def resolve_website_for_business(
         if not website or website.business_id != business.id:
             raise WebsiteContextError("Website does not belong to the selected business.")
         return website
-    return session.exec(
+    websites = list(session.exec(
         select(Website)
         .where(Website.business_id == business.id, Website.status == "active")
         .order_by(Website.id)
-    ).first()
+    ).all())
+    if len(websites) > 1:
+        raise WebsiteContextError(
+            "Explicit Website selection is required because this business has multiple active Websites."
+        )
+    return websites[0] if websites else None
 
 
 def build_website_context(

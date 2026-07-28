@@ -9,6 +9,7 @@ from app.models import Business, City, County, GeneratedPage, KnowledgeBlock, Se
 from app.schemas.generation import BatchCandidate, BatchPreviewResponse, DraftContent, FAQItem
 from app.schemas.website_context import WebsiteContextRead
 from app.services.website_context import build_website_context, website_config_value
+from app.services.website_scope import require_page_website, require_single_website_selection
 
 FORBIDDEN_PHRASES = (
     "100% guaranteed",
@@ -267,10 +268,18 @@ def generate_page_draft(
     session: Session,
     page_id: int,
     *,
+    expected_website_id: int | None = None,
     allow_overwrite: bool = False,
     provider: DraftProvider | None = None,
     commit: bool = True,
 ) -> GeneratedPage:
+    scoped_page = session.get(GeneratedPage, page_id)
+    if scoped_page:
+        require_page_website(
+            session,
+            scoped_page,
+            expected_website_id=expected_website_id,
+        )
     context = load_generation_context(session, page_id)
     _ensure_page_can_generate(context.page, allow_overwrite=allow_overwrite)
     prompt = assemble_generation_prompt(context)
@@ -304,15 +313,23 @@ def generate_page_draft(
 def preview_batch(
     session: Session,
     *,
+    website_id: int | None = None,
     county_ids: list[int] | None = None,
     city_ids: list[int] | None = None,
     status: str | None = None,
 ) -> BatchPreviewResponse:
     pages = _filtered_city_service_pages(
         session,
+        website_id=website_id,
         county_ids=county_ids or [],
         city_ids=city_ids or [],
         status=status,
+    )
+    require_single_website_selection(
+        session,
+        pages,
+        website_id=website_id,
+        operation="Batch generation",
     )
     candidates: list[BatchCandidate] = []
     for page in pages:
@@ -345,6 +362,7 @@ def preview_batch(
 def generate_batch(
     session: Session,
     *,
+    website_id: int | None = None,
     county_ids: list[int] | None = None,
     city_ids: list[int] | None = None,
     status: str | None = None,
@@ -352,6 +370,7 @@ def generate_batch(
 ) -> list[int]:
     preview = preview_batch(
         session,
+        website_id=website_id,
         county_ids=county_ids,
         city_ids=city_ids,
         status=status,
@@ -362,6 +381,7 @@ def generate_batch(
             generate_page_draft(
                 session,
                 page_id,
+                expected_website_id=website_id,
                 provider=provider,
                 allow_overwrite=False,
                 commit=False,
@@ -448,11 +468,14 @@ def _iter_strings(value: Any):
 def _filtered_city_service_pages(
     session: Session,
     *,
+    website_id: int | None,
     county_ids: list[int],
     city_ids: list[int],
     status: str | None,
 ) -> list[GeneratedPage]:
     statement = select(GeneratedPage).where(GeneratedPage.page_type == "city_service")
+    if website_id is not None:
+        statement = statement.where(GeneratedPage.website_id == website_id)
     if county_ids:
         statement = statement.where(GeneratedPage.county_id.in_(county_ids))
     if city_ids:

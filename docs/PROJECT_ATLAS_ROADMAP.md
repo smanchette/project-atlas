@@ -117,6 +117,23 @@ select another website without source customization or identity leakage.
 This foundation does not complete company onboarding, site planning, themes,
 navigation, provider abstraction, or second-company deployment.
 
+### Website-scoped planning foundation implemented locally
+
+Website-owned Site Plans and Planned Pages now define the planning boundary
+before content generation. Initial page types cover Home, About, Contact,
+Service, County or service area, City or local area, City-Service, and
+Informational or FAQ pages. Each Planned Page has an automatically generated,
+operator-reviewable Planning Record based on approved Website Context and
+knowledge. Confidence and missing-information recommendations remain advisory
+and nonblocking.
+
+Existing Flo-Zone generated pages are backfilled without changing their
+content or lifecycle history. Page slugs, queueing, batch generation, QA,
+approval, WordPress-draft review, and bulk export now enforce Website
+boundaries. Content generation for the new page types, navigation
+construction, component and theme systems, media provenance, and provider
+abstraction remain future milestones.
+
 ### Inputs
 
 - Company identity

@@ -33,6 +33,7 @@ class PageQAResult(SQLModel):
 
 
 class QABatchRequest(SQLModel):
+    website_id: int | None = None
     page_ids: list[int] = Field(default_factory=list)
     county_ids: list[int] = Field(default_factory=list)
     city_ids: list[int] = Field(default_factory=list)
@@ -66,6 +67,7 @@ class PageReviewUpdate(SQLModel):
 
 class ApprovalRequest(SQLModel):
     approved_by: str | None = None
+    website_id: int | None = None
 
 
 class ApprovalAuditRead(SQLModel):

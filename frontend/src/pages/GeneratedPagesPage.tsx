@@ -3,7 +3,7 @@ import { AlertTriangle, ArrowDown, ArrowUp, CheckCircle2, CircleCheck, Clipboard
 import { Link, useSearchParams } from "react-router-dom";
 
 import { ApiError, apiRequest, listItems } from "../api";
-import type { ApprovalAudit, ApprovalHistorySummary, AssignedMedia, City, County, GeneratedPage, GeneratedPageRevision, ImageMetadata, ManualDraftFields, ManualDraftSaveResponse, PageQAResult, QABatchResponse } from "../types";
+import type { ApprovalAudit, ApprovalHistorySummary, AssignedMedia, City, County, GeneratedPage, GeneratedPageRevision, ImageMetadata, ManualDraftFields, ManualDraftSaveResponse, PageQAResult, QABatchResponse, Website } from "../types";
 
 type BatchCandidate = {
   page_id: number;
@@ -40,6 +40,8 @@ function GeneratedPagesPage() {
   const [cities, setCities] = useState<City[]>([]);
   const [counties, setCounties] = useState<County[]>([]);
   const [images, setImages] = useState<ImageMetadata[]>([]);
+  const [websites, setWebsites] = useState<Website[]>([]);
+  const [websiteFilter, setWebsiteFilter] = useState("");
   const [selectedPageId, setSelectedPageId] = useState<number | null>(null);
   const [mediaAssignments, setMediaAssignments] = useState<AssignedMedia[]>([]);
   const [qaResult, setQaResult] = useState<PageQAResult | null>(null);
@@ -81,17 +83,20 @@ function GeneratedPagesPage() {
     setLoading(true);
     setError(null);
     try {
-      const [pageData, cityData, countyData, imageData, approvalSummary] = await Promise.all([
+      const [pageData, cityData, countyData, imageData, approvalSummary, websiteData] = await Promise.all([
         listItems<GeneratedPage>("/api/generated-pages"),
         listItems<City>("/api/cities"),
         listItems<County>("/api/counties"),
         listItems<ImageMetadata>("/api/image-metadata"),
-        listItems<ApprovalHistorySummary>("/api/generated-pages/approval-history-summary")
+        listItems<ApprovalHistorySummary>("/api/generated-pages/approval-history-summary"),
+        listItems<Website>("/api/websites")
       ]);
       setPages(pageData);
       setCities(cityData);
       setCounties(countyData);
       setImages(imageData);
+      setWebsites(websiteData);
+      setWebsiteFilter((current) => current || String(websiteData[0]?.id ?? ""));
       setApprovalCounts(new Map(approvalSummary.map((item) => [item.generated_page_id, item.approval_count])));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load generated pages.");
@@ -175,6 +180,7 @@ function GeneratedPagesPage() {
     : [];
 
   const filteredPages = pages.filter((page) => {
+    const websiteMatches = websiteFilter !== "" && String(page.website_id) === websiteFilter;
     const countyMatches = countyFilter === "all" || String(page.county_id) === countyFilter;
     const cityMatches = cityFilter === "all" || String(page.city_id) === cityFilter;
     const statusMatches = statusFilter === "all" || page.status === statusFilter;
@@ -186,15 +192,17 @@ function GeneratedPagesPage() {
       (qaFilter === "has_warnings" && warningCount > 0) ||
       (qaFilter === "has_blockers" && blockerCount > 0) ||
       (qaFilter === "not_run" && page.qa_status === "not_run");
-    return countyMatches && cityMatches && statusMatches && qaMatches;
+    return websiteMatches && countyMatches && cityMatches && statusMatches && qaMatches;
   });
 
-  const cityServiceCount = pages.filter((page) => page.page_type === "city_service").length;
+  const websitePages = pages.filter((page) => String(page.website_id) === websiteFilter);
+  const cityServiceCount = websitePages.filter((page) => page.page_type === "city_service").length;
   const cityOptions = countyFilter === "all" ? cities : cities.filter((city) => String(city.county_id) === countyFilter);
-  const statusOptions = Array.from(new Set(pages.map((page) => page.status))).sort();
+  const statusOptions = Array.from(new Set(websitePages.map((page) => page.status))).sort();
 
   function batchPayload(confirm = false) {
     return {
+      website_id: Number(websiteFilter),
       county_ids: countyFilter === "all" ? [] : [Number(countyFilter)],
       city_ids: cityFilter === "all" ? [] : [Number(cityFilter)],
       status: statusFilter === "all" ? null : statusFilter,
@@ -486,7 +494,7 @@ function GeneratedPagesPage() {
     try {
       await apiRequest(`/api/generated-pages/${page.id}/generate-draft`, {
         method: "POST",
-        body: JSON.stringify({ allow_overwrite: false })
+        body: JSON.stringify({ allow_overwrite: false, website_id: page.website_id })
       });
       setSelectedPageId(page.id);
       setMessage(`${page.page_title} draft generated.`);
@@ -505,7 +513,7 @@ function GeneratedPagesPage() {
     try {
       await apiRequest<GeneratedPage>(`/api/generated-pages/${page.id}/approve`, {
         method: "POST",
-        body: JSON.stringify({ approved_by: page.last_reviewed_by ?? null })
+        body: JSON.stringify({ approved_by: page.last_reviewed_by ?? null, website_id: page.website_id })
       });
       setMessage(`${page.page_title} marked approved.`);
       await loadData();
@@ -540,6 +548,7 @@ function GeneratedPagesPage() {
 
   function qaBatchPayload(confirm = false) {
     return {
+      website_id: Number(websiteFilter),
       county_ids: countyFilter === "all" ? [] : [Number(countyFilter)],
       city_ids: cityFilter === "all" ? [] : [Number(cityFilter)],
       page_status: statusFilter === "all" ? null : statusFilter,
@@ -623,6 +632,23 @@ function GeneratedPagesPage() {
         </div>
 
         <div className="filterBar generatedPageFilters">
+          <label>
+            <span>Website</span>
+            <select
+              value={websiteFilter}
+              onChange={(event) => {
+                setWebsiteFilter(event.target.value);
+                setSelectedPageId(null);
+                clearBatchPreview();
+              }}
+            >
+              {websites.map((website) => (
+                <option key={website.id} value={website.id}>
+                  {website.website_name}
+                </option>
+              ))}
+            </select>
+          </label>
           <label>
             <span>County</span>
             <select

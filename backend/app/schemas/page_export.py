@@ -64,6 +64,7 @@ class PageExportPackage(SQLModel):
 
 class BulkExportRequest(SQLModel):
     page_ids: list[int] = Field(min_length=1)
+    website_id: int | None = None
 
 
 class BulkExportCandidate(SQLModel):

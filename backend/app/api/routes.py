@@ -9,6 +9,7 @@ from app.api.page_media_routes import router as page_media_router
 from app.api.qa_routes import router as qa_router
 from app.api.wordpress_routes import router as wordpress_router
 from app.api.website_context_routes import router as website_context_router
+from app.api.site_plan_routes import router as site_plan_router
 from app.api.router_factory import build_crud_router
 from app.models import Brand, Business, City, County, GeneratedPage, ImageMetadata, KnowledgeBlock, Service, Setting, Website, WebsiteIdentity
 from app.schemas.entities import (
@@ -57,6 +58,7 @@ api_router.include_router(page_media_router)
 api_router.include_router(qa_router)
 api_router.include_router(wordpress_router)
 api_router.include_router(website_context_router)
+api_router.include_router(site_plan_router)
 
 api_router.include_router(
     build_crud_router(

@@ -27,7 +27,11 @@ def bulk_export_preview(
     payload: BulkExportRequest,
     session: Session = Depends(get_session),
 ) -> BulkExportPreview:
-    return preview_bulk_export(session, payload.page_ids)
+    return preview_bulk_export(
+        session,
+        payload.page_ids,
+        website_id=payload.website_id,
+    )
 
 
 @router.post("/export/bulk")
@@ -35,7 +39,11 @@ def download_bulk_export(
     payload: BulkExportRequest,
     session: Session = Depends(get_session),
 ) -> StreamingResponse:
-    packages = build_selected_packages(session, payload.page_ids)
+    packages = build_selected_packages(
+        session,
+        payload.page_ids,
+        website_id=payload.website_id,
+    )
     content = BytesIO()
     used_names: set[str] = set()
     with ZipFile(content, mode="w", compression=ZIP_DEFLATED, compresslevel=6) as archive:

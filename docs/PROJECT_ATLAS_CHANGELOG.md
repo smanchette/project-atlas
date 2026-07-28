@@ -234,6 +234,37 @@ deployment for another company.
 
 ---
 
+## Website-Scoped Site Plan and Page-Type Architecture Foundation
+
+Added Website-owned Site Plans, Planned Pages, and pre-generation Planning
+Records. Planning supports Home, About, Contact, Service, County or service
+area, City or local area, City-Service, and Informational or FAQ page types.
+Atlas-generated answers use approved Website Context and knowledge while
+operator overrides remain separate and identifiable. Confidence, missing
+information, and improvement recommendations are advisory and do not block
+generation.
+
+Website ownership now governs slug uniqueness, existing-page lookup, batch
+generation, approval and WordPress-draft queues, QA context, and bulk export.
+Mixed-Website and invalid cross-business relationships fail closed, and
+Businesses with multiple active Websites require explicit Website selection.
+
+Migration `20260728_0029` creates the planning records and backfills existing
+Flo-Zone generated pages into a primary Flo-Zone Site Plan without modifying
+their IDs, content, titles, headings, slugs, hashes, approvals, media,
+WordPress references, or audit and deployment history. Data backup format
+0.43 includes the planning records and remains compatible with prior supported
+formats.
+
+The local Site Plan screen exposes planned-page relationships, status,
+generated-page state, Atlas answers, operator overrides, confidence, and
+nonblocking recommendations. This milestone does not add generation for new
+page types, navigation construction, component or theme systems, media
+redesign, provider abstraction, production publishing, or external-system
+activity.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.

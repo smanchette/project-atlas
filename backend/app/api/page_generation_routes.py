@@ -30,6 +30,7 @@ def generate_single_draft(
         page = generate_page_draft(
             session,
             page_id,
+            expected_website_id=payload.website_id,
             allow_overwrite=payload.allow_overwrite,
         )
     except UnsafeContentError as exc:
@@ -52,6 +53,7 @@ def generate_batch_preview(
 ) -> BatchPreviewResponse:
     return preview_batch(
         session,
+        website_id=payload.website_id,
         county_ids=payload.county_ids,
         city_ids=payload.city_ids,
         status=payload.status,
@@ -69,12 +71,14 @@ def generate_confirmed_batch(
     try:
         preview = preview_batch(
             session,
+            website_id=payload.website_id,
             county_ids=payload.county_ids,
             city_ids=payload.city_ids,
             status=payload.status,
         )
         page_ids = generate_batch(
             session,
+            website_id=payload.website_id,
             county_ids=payload.county_ids,
             city_ids=payload.city_ids,
             status=payload.status,

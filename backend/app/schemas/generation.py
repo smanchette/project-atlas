@@ -27,9 +27,11 @@ class DraftContent(SQLModel):
 
 class GenerateDraftRequest(SQLModel):
     allow_overwrite: bool = False
+    website_id: int | None = None
 
 
 class BatchGenerationRequest(SQLModel):
+    website_id: int | None = None
     county_ids: list[int] = Field(default_factory=list)
     city_ids: list[int] = Field(default_factory=list)
     status: str | None = None

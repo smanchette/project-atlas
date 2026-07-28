@@ -65,6 +65,67 @@ export type WebsiteIdentity = {
   updated_at: string;
 };
 
+export type PageType =
+  | "home"
+  | "about"
+  | "contact"
+  | "service"
+  | "county"
+  | "city"
+  | "city_service"
+  | "informational"
+  | "faq";
+
+export type PlanningRecord = {
+  id: number;
+  planned_page_id: number;
+  generated_answers: Record<string, unknown>;
+  operator_overrides: Record<string, unknown>;
+  effective_answers: Record<string, unknown>;
+  source_snapshot: Record<string, unknown>;
+  confidence_score: number;
+  confidence_level: "low" | "medium" | "high";
+  missing_information: string[];
+  improvement_recommendations: string[];
+  generated_at: string;
+  reviewed_at?: string | null;
+  updated_at: string;
+};
+
+export type PlannedPage = {
+  id: number;
+  website_id: number;
+  site_plan_id: number;
+  page_type: PageType;
+  working_name: string;
+  intended_slug: string;
+  service_id?: number | null;
+  city_id?: number | null;
+  county_id?: number | null;
+  parent_planned_page_id?: number | null;
+  planning_status: string;
+  generated_page_id?: number | null;
+  generated_page_status?: string | null;
+  planning_record: PlanningRecord;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SitePlan = {
+  id: number;
+  website_id: number;
+  plan_key: string;
+  plan_name: string;
+  status: string;
+  version: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SitePlanDetail = SitePlan & {
+  planned_pages: PlannedPage[];
+};
+
 export type WebsiteContext = {
   business: {
     id: number;
@@ -232,6 +293,7 @@ export type ApprovalHistorySummary = {
 
 export type ApprovalQueueItem = {
   page_id: number;
+  website_id: number;
   page_title: string;
   city_id?: number | null;
   city_name: string;
@@ -640,6 +702,7 @@ export type WordPressDraftQueueGroup =
 
 export type WordPressDraftQueueItem = {
   page_id: number;
+  website_id: number;
   page_title: string;
   city?: string | null;
   county?: string | null;

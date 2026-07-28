@@ -18,8 +18,11 @@ from app.models import (
     ImageMetadata,
     KnowledgeBlock,
     PageImageAssignment,
+    PlannedPage,
+    PlanningRecord,
     Service,
     Setting,
+    SitePlan,
     Website,
     WebsiteIdentity,
     WordPressDraftAudit,
@@ -41,7 +44,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.42"
+BACKUP_VERSION = "0.43"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -69,6 +72,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.40",
     "0.41",
     "0.42",
+    "0.43",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -90,6 +94,9 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "counties": County,
     "cities": City,
     "generated_pages": GeneratedPage,
+    "site_plans": SitePlan,
+    "planned_pages": PlannedPage,
+    "planning_records": PlanningRecord,
     "approval_audits": ApprovalAudit,
     "page_revisions": GeneratedPageRevision,
     "wordpress_draft_audits": WordPressDraftAudit,
@@ -310,10 +317,106 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             restored = _upsert(
                 session,
                 GeneratedPage,
-                select(GeneratedPage).where(GeneratedPage.page_slug == record["page_slug"]),
+                select(GeneratedPage).where(
+                    GeneratedPage.website_id == restored_record["website_id"],
+                    GeneratedPage.page_slug == record["page_slug"],
+                ),
                 restored_record,
             )
             generated_page_ids[old_id] = _required_id(restored)
+
+        site_plan_ids: dict[int, int] = {}
+        for record in data.get("site_plans", []):
+            old_id = _record_id(record, "site_plans")
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "site_plans.website_id",
+            )
+            restored = _upsert(
+                session,
+                SitePlan,
+                select(SitePlan).where(
+                    SitePlan.website_id == website_id,
+                    SitePlan.plan_key == record["plan_key"],
+                ),
+                {**record, "website_id": website_id},
+            )
+            site_plan_ids[old_id] = _required_id(restored)
+
+        planned_page_ids: dict[int, int] = {}
+        pending_planned_records: list[tuple[dict[str, Any], PlannedPage]] = []
+        for record in data.get("planned_pages", []):
+            old_id = _record_id(record, "planned_pages")
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "planned_pages.website_id",
+            )
+            restored_record = {
+                **record,
+                "website_id": website_id,
+                "site_plan_id": _mapped_id(
+                    site_plan_ids,
+                    record["site_plan_id"],
+                    "planned_pages.site_plan_id",
+                ),
+                "service_id": _mapped_optional_id(
+                    service_ids,
+                    record.get("service_id"),
+                    "planned_pages.service_id",
+                ),
+                "city_id": _mapped_optional_id(
+                    city_ids,
+                    record.get("city_id"),
+                    "planned_pages.city_id",
+                ),
+                "county_id": _mapped_optional_id(
+                    county_ids,
+                    record.get("county_id"),
+                    "planned_pages.county_id",
+                ),
+                "generated_page_id": _mapped_optional_id(
+                    generated_page_ids,
+                    record.get("generated_page_id"),
+                    "planned_pages.generated_page_id",
+                ),
+                "parent_planned_page_id": None,
+            }
+            restored = _upsert(
+                session,
+                PlannedPage,
+                select(PlannedPage).where(
+                    PlannedPage.website_id == website_id,
+                    PlannedPage.intended_slug == record["intended_slug"],
+                ),
+                restored_record,
+            )
+            planned_page_ids[old_id] = _required_id(restored)
+            pending_planned_records.append((record, restored))
+        for record, restored in pending_planned_records:
+            restored.parent_planned_page_id = _mapped_optional_id(
+                planned_page_ids,
+                record.get("parent_planned_page_id"),
+                "planned_pages.parent_planned_page_id",
+            )
+            session.add(restored)
+        session.flush()
+
+        for record in data.get("planning_records", []):
+            planned_page_id = _mapped_id(
+                planned_page_ids,
+                record["planned_page_id"],
+                "planning_records.planned_page_id",
+            )
+            _upsert(
+                session,
+                PlanningRecord,
+                select(PlanningRecord).where(
+                    PlanningRecord.planned_page_id == planned_page_id
+                ),
+                {**record, "planned_page_id": planned_page_id},
+            )
 
         for record in data["approval_audits"]:
             page_id = _mapped_id(
@@ -863,8 +966,13 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "wordpress_metadata_lifecycle_audits" not in data:
         data["wordpress_metadata_lifecycle_audits"] = []
         counts["wordpress_metadata_lifecycle_audits"] = 0
-    if backup_version != "0.42":
+    if backup_version != "0.42" and backup_version != "0.43":
         for group in ("brands", "websites", "website_identities"):
+            if group not in data:
+                data[group] = []
+                counts[group] = 0
+    if backup_version != "0.43":
+        for group in ("site_plans", "planned_pages", "planning_records"):
             if group not in data:
                 data[group] = []
                 counts[group] = 0
@@ -981,7 +1089,10 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         "services": ("service_slug",),
         "counties": ("state", "county_name"),
         "cities": ("city_slug",),
-        "generated_pages": ("page_slug",),
+        "generated_pages": ("website_id", "page_slug"),
+        "site_plans": ("website_id", "plan_key"),
+        "planned_pages": ("website_id", "intended_slug"),
+        "planning_records": ("planned_page_id",),
         "approval_audits": ("generated_page_id", "approved_at", "draft_hash_at_approval"),
         "page_revisions": ("generated_page_id", "created_at", "draft_hash_after"),
         "wordpress_draft_audits": ("generated_page_id", "attempted_at", "payload_hash"),
@@ -1009,7 +1120,13 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         ids: set[int] = set()
         for record in data[group]:
             record_id = _record_id(record, group)
-            key = tuple(record.get(field) for field in fields)
+            if group == "generated_pages":
+                owner = record.get("website_id")
+                if owner is None:
+                    owner = f"legacy-business:{record.get('business_id')}"
+                key = (owner, record.get("page_slug"))
+            else:
+                key = tuple(record.get(field) for field in fields)
             if any(value is None or value == "" for value in key):
                 raise BackupValidationError(f"Backup record in '{group}' is missing a stable key.")
             if record_id in ids or key in seen:
@@ -1028,6 +1145,20 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
             ("service_id", "services", False),
             ("city_id", "cities", True),
             ("county_id", "counties", True),
+            ("website_id", "websites", True),
+        ),
+        "site_plans": (("website_id", "websites", False),),
+        "planned_pages": (
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+            ("service_id", "services", True),
+            ("city_id", "cities", True),
+            ("county_id", "counties", True),
+            ("parent_planned_page_id", "planned_pages", True),
+            ("generated_page_id", "generated_pages", True),
+        ),
+        "planning_records": (
+            ("planned_page_id", "planned_pages", False),
         ),
         "image_metadata": (
             ("business_id", "businesses", False),

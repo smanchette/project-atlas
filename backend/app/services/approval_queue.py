@@ -16,10 +16,24 @@ from app.models import (
     Service,
 )
 from app.schemas.approval_queue import ApprovalQueueItem, ApprovalQueueResponse
+from app.services.website_scope import require_single_website_selection
 
 
-def build_approval_queue(session: Session) -> ApprovalQueueResponse:
-    pages = list(session.exec(select(GeneratedPage).order_by(GeneratedPage.id)).all())
+def build_approval_queue(
+    session: Session,
+    *,
+    website_id: int | None = None,
+) -> ApprovalQueueResponse:
+    statement = select(GeneratedPage)
+    if website_id is not None:
+        statement = statement.where(GeneratedPage.website_id == website_id)
+    pages = list(session.exec(statement.order_by(GeneratedPage.id)).all())
+    require_single_website_selection(
+        session,
+        pages,
+        website_id=website_id,
+        operation="Approval queue",
+    )
     cities = {item.id: item for item in session.exec(select(City)).all()}
     counties = {item.id: item for item in session.exec(select(County)).all()}
     services = {item.id: item for item in session.exec(select(Service)).all()}
@@ -90,6 +104,7 @@ def _queue_item(
 
     return ApprovalQueueItem(
         page_id=page.id or 0,
+        website_id=page.website_id,
         page_title=page.page_title,
         city_id=page.city_id,
         city_name=city.city_name if city else "",
