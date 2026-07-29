@@ -16,6 +16,7 @@ PageType = Literal[
     "informational",
     "faq",
 ]
+DraftReadinessStatus = Literal["ready", "blocked", "unsupported"]
 
 
 class SitePlanCreate(SQLModel):
@@ -62,6 +63,52 @@ class PlanningRecordOverrideUpdate(SQLModel):
     operator_overrides: dict[str, Any] = Field(default_factory=dict)
 
 
+class DraftReadinessRead(SQLModel):
+    status: DraftReadinessStatus
+    page_type_supported: bool
+    required_information: list[dict[str, Any]] = Field(default_factory=list)
+    blocking_reasons: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+
+
+class DraftSection(SQLModel):
+    key: str
+    heading: str
+    body: str
+
+
+class PlannedPageDraftContent(SQLModel):
+    schema_version: str = "planned-page-draft-v1"
+    page_type: PageType
+    title: str
+    meta_title: str
+    meta_description: str
+    h1: str
+    intro: str
+    sections: list[DraftSection] = Field(default_factory=list)
+    faq_items: list[dict[str, str]] = Field(default_factory=list)
+    call_to_action: str
+    internal_notes: str
+    planning_record_id: int
+    planning_generated_at: datetime
+    operator_override_keys: list[str] = Field(default_factory=list)
+    status: str = "draft"
+
+
+class PlannedPageDraftRequest(SQLModel):
+    website_id: int
+    allow_overwrite: bool = False
+
+
+class PlannedPageDraftResponse(SQLModel):
+    planned_page_id: int
+    generated_page_id: int
+    generation_status: str
+    planning_status: str
+    readiness: DraftReadinessRead
+    draft_content: PlannedPageDraftContent
+
+
 class PlannedPageCreate(SQLModel):
     website_id: int
     site_plan_id: int
@@ -102,6 +149,8 @@ class PlannedPageRead(SQLModel):
     planning_status: str
     generated_page_id: int | None = None
     generated_page_status: str | None = None
+    generated_draft: dict[str, Any] | None = None
+    draft_readiness: DraftReadinessRead
     planning_record: PlanningRecordRead
     created_at: datetime
     updated_at: datetime

@@ -92,6 +92,14 @@ export type PlanningRecord = {
   updated_at: string;
 };
 
+export type DraftReadiness = {
+  status: "ready" | "blocked" | "unsupported";
+  page_type_supported: boolean;
+  required_information: Array<{ key: string; available: boolean }>;
+  blocking_reasons: string[];
+  recommendations: string[];
+};
+
 export type PlannedPage = {
   id: number;
   website_id: number;
@@ -106,6 +114,8 @@ export type PlannedPage = {
   planning_status: string;
   generated_page_id?: number | null;
   generated_page_status?: string | null;
+  generated_draft?: Record<string, unknown> | null;
+  draft_readiness: DraftReadiness;
   planning_record: PlanningRecord;
   created_at: string;
   updated_at: string;
@@ -204,7 +214,7 @@ export type GeneratedPage = {
   id: number;
   business_id: number;
   website_id?: number | null;
-  service_id: number;
+  service_id: number | null;
   city_id?: number;
   county_id?: number;
   page_type: string;

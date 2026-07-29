@@ -194,7 +194,7 @@ class GeneratedPage(TimestampMixin, table=True):
     id: int | None = Field(default=None, primary_key=True)
     business_id: int = Field(foreign_key="business.id", index=True)
     website_id: int | None = Field(default=None, foreign_key="website.id", index=True)
-    service_id: int = Field(foreign_key="service.id", index=True)
+    service_id: int | None = Field(default=None, foreign_key="service.id", index=True)
     city_id: int | None = Field(default=None, foreign_key="city.id", index=True)
     county_id: int | None = Field(default=None, foreign_key="county.id", index=True)
     page_type: str = Field(index=True)

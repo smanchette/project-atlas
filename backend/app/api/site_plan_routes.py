@@ -2,8 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 
 from app.db.session import get_session
+from app.models import PlannedPage
 from app.schemas.site_plans import (
     PlannedPageCreate,
+    PlannedPageDraftRequest,
+    PlannedPageDraftResponse,
     PlannedPageRead,
     PlannedPageUpdate,
     PlanningRecordOverrideUpdate,
@@ -12,6 +15,10 @@ from app.schemas.site_plans import (
     SitePlanDetail,
     SitePlanRead,
     SitePlanUpdate,
+)
+from app.services.planned_page_drafting import (
+    PlannedPageDraftingError,
+    draft_planned_page,
 )
 from app.services.site_planning import (
     SitePlanningError,
@@ -79,6 +86,37 @@ def edit_planned_page(
     session: Session = Depends(get_session),
 ):
     return _call(update_planned_page, session, planned_page_id, payload)
+
+
+@router.post(
+    "/planned-pages/{planned_page_id}/draft",
+    response_model=PlannedPageDraftResponse,
+)
+def create_or_refresh_planned_page_draft(
+    planned_page_id: int,
+    payload: PlannedPageDraftRequest,
+    session: Session = Depends(get_session),
+):
+    try:
+        generated, readiness = draft_planned_page(
+            session,
+            planned_page_id,
+            expected_website_id=payload.website_id,
+            allow_overwrite=payload.allow_overwrite,
+        )
+    except PlannedPageDraftingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    planned = session.get(PlannedPage, planned_page_id)
+    if not planned or not generated.draft_content:
+        raise HTTPException(status_code=500, detail="Draft linkage was not persisted.")
+    return PlannedPageDraftResponse(
+        planned_page_id=planned_page_id,
+        generated_page_id=generated.id or 0,
+        generation_status=generated.generation_status,
+        planning_status=planned.planning_status,
+        readiness=readiness,
+        draft_content=generated.draft_content,
+    )
 
 
 @router.post(

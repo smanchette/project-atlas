@@ -8,10 +8,21 @@ import type { ApprovalAudit, AssignedMedia, City, County, GeneratedPage, Generat
 type PreviewData = {
   page: GeneratedPage;
   context: WebsiteContext;
-  service: Service;
+  service: Service | null;
   city: City | null;
   county: County | null;
   media: AssignedMedia[];
+};
+
+type PlannedPagePreviewDraft = {
+  schema_version: "planned-page-draft-v1";
+  page_type: string;
+  title: string;
+  h1: string;
+  intro: string;
+  sections: Array<{ key: string; heading: string; body: string }>;
+  faq_items: Array<{ question: string; answer: string }>;
+  call_to_action: string;
 };
 
 function GeneratedPagePreview() {
@@ -38,7 +49,9 @@ function GeneratedPagePreview() {
         const page = await apiRequest<GeneratedPage>(`/api/generated-pages/${pageId}`);
         const [context, service, city, county, media] = await Promise.all([
           apiRequest<WebsiteContext>(`/api/generated-pages/${pageId}/website-context`),
-          apiRequest<Service>(`/api/services/${page.service_id}`),
+          page.service_id
+            ? apiRequest<Service>(`/api/services/${page.service_id}`)
+            : Promise.resolve(null),
           page.city_id ? apiRequest<City>(`/api/cities/${page.city_id}`) : Promise.resolve(null),
           page.county_id ? apiRequest<County>(`/api/counties/${page.county_id}`) : Promise.resolve(null),
           apiRequest<AssignedMedia[]>(`/api/generated-pages/${page.id}/media`)
@@ -82,6 +95,12 @@ function GeneratedPagePreview() {
   }
 
   const { context, service, city, county, media } = data;
+  if (isPlannedPageDraft(draft)) {
+    return <PlannedPagePreview draft={draft} context={context} />;
+  }
+  if (!service) {
+    return <PreviewState message="This legacy service-page draft is missing its Service relationship." error />;
+  }
   const { business, brand, website } = context;
   const config = website.configuration;
   const configText = (key: string, fallback: string) =>
@@ -298,6 +317,118 @@ function GeneratedPagePreview() {
             {business.certified_operator ? ` | Certified Operator: ${business.certified_operator}` : ""}
           </span>
           {county && <span>Serving {county.county_name} and surrounding target markets.</span>}
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+function isPlannedPageDraft(draft: GeneratedPage["draft_content"]): draft is GeneratedPage["draft_content"] & PlannedPagePreviewDraft {
+  return (
+    typeof draft === "object"
+    && draft !== null
+    && "schema_version" in draft
+    && draft.schema_version === "planned-page-draft-v1"
+  );
+}
+
+function PlannedPagePreview({
+  draft,
+  context
+}: {
+  draft: PlannedPagePreviewDraft;
+  context: WebsiteContext;
+}) {
+  const { business, brand } = context;
+  const phone = business.phone ?? "Contact us";
+  const phoneHref = `tel:${phone.replace(/[^\d+]/g, "")}`;
+
+  return (
+    <div className="servicePreview">
+      <div className="previewReviewBar">
+        <div className="previewReviewInner">
+          <Link to="/site-plans" className="previewBackLink">
+            <ArrowLeft size={16} aria-hidden="true" />
+            Back to Site Plans
+          </Link>
+          <span>{draft.page_type.replace(/_/g, " ")} draft preview</span>
+          <strong>Not published</strong>
+        </div>
+      </div>
+
+      <header className="previewSiteHeader">
+        <div className="previewContainer previewHeaderInner">
+          <div className="previewBrand">
+            <span className="previewBrandMark">
+              {typeof brand.identity_settings.brand_mark === "string"
+                ? brand.identity_settings.brand_mark
+                : brand.public_name.slice(0, 2).toUpperCase()}
+            </span>
+            <div>
+              <strong>{context.identity.display_name}</strong>
+              <span>{brand.tagline ?? business.business_type}</span>
+            </div>
+          </div>
+          <a className="previewPhoneLink" href={phoneHref}>
+            <Phone size={18} aria-hidden="true" />
+            <span>{phone}</span>
+          </a>
+        </div>
+      </header>
+
+      <main>
+        <section className="previewHero">
+          <div className="previewContainer previewHeroContent">
+            <p className="previewKicker">{draft.page_type.replace(/_/g, " ")} page</p>
+            <h1>{draft.h1}</h1>
+            <p>{draft.intro}</p>
+          </div>
+        </section>
+
+        {draft.sections.map((section, index) => (
+          <section className={index % 2 ? "previewBand previewBandMuted" : "previewBand"} key={section.key}>
+            <div className="previewContainer previewTextSection">
+              <h2>{section.heading}</h2>
+              <p>{section.body}</p>
+            </div>
+          </section>
+        ))}
+
+        {draft.faq_items.length > 0 && (
+          <section className="previewBand previewBandMuted">
+            <div className="previewContainer previewFaqSection">
+              <p className="previewSectionLabel">Frequently Asked Questions</p>
+              <div className="previewFaqList">
+                {draft.faq_items.map((item) => (
+                  <details key={item.question}>
+                    <summary>{item.question}</summary>
+                    <p>{item.answer}</p>
+                  </details>
+                ))}
+              </div>
+            </div>
+          </section>
+        )}
+
+        <section className="previewFinalCta">
+          <div className="previewContainer previewFinalCtaInner">
+            <div>
+              <p className="previewSectionLabel">Next Step</p>
+              <h2>{draft.title}</h2>
+              <p>{draft.call_to_action}</p>
+            </div>
+            <a className="previewButton previewButtonLight" href={phoneHref}>
+              <Phone size={18} aria-hidden="true" />
+              Call {phone}
+            </a>
+          </div>
+        </section>
+      </main>
+
+      <footer className="previewFooter">
+        <div className="previewContainer previewFooterInner">
+          <strong>{business.company_name}</strong>
+          <span>Local Atlas draft preview</span>
         </div>
       </footer>
     </div>

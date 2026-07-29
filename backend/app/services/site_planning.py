@@ -224,6 +224,8 @@ def update_planning_overrides(
 
 
 def planned_page_read(session: Session, page: PlannedPage) -> PlannedPageRead:
+    from app.services.planned_page_drafting import evaluate_draft_readiness
+
     record = session.exec(
         select(PlanningRecord).where(PlanningRecord.planned_page_id == page.id)
     ).first()
@@ -239,6 +241,8 @@ def planned_page_read(session: Session, page: PlannedPage) -> PlannedPageRead:
     return PlannedPageRead(
         **page.model_dump(),
         generated_page_status=generated.generation_status if generated else None,
+        generated_draft=generated.draft_content if generated else None,
+        draft_readiness=evaluate_draft_readiness(session, page, record=record),
         planning_record=record_read,
     )
 
@@ -371,21 +375,59 @@ def _planning_material(
 
     facts = {
         "company_information": bool(business.company_name and business.description),
+        "company_description": bool(business.description),
         "contact_information": bool(business.phone or business.email),
+        "preferred_contact_methods": bool(business.phone or business.email),
         "website_identity": bool(context.identity.display_name),
+        "primary_services": any(
+            item.status == "active"
+            and (item.short_description or item.long_description)
+            for item in context.services
+        ),
         "service_information": bool(
             service and (service.short_description or service.long_description)
         ),
         "service_area": bool(city or county or business.main_city),
+        "primary_action": bool(business.phone or business.email),
+        "trust_information": bool(
+            business.license_number
+            or business.certified_operator
+            or context.brand.description
+        ),
         "license": bool(business.license_number),
         "certified_operator": bool(business.certified_operator),
         "approved_knowledge": bool(knowledge),
+        "approved_questions_and_answers": bool(knowledge)
+        and all(
+            item.question and item.short_answer and item.long_answer
+            for item in knowledge
+        ),
     }
-    required_keys = ["company_information", "website_identity"]
-    if page.page_type in {"home", "contact", "service", "county", "city", "city_service"}:
+    required_keys = ["website_identity"]
+    if page.page_type == "home":
+        required_keys.extend(
+            ["company_information", "primary_services", "service_area", "primary_action"]
+        )
+    if page.page_type == "about":
+        required_keys.extend(
+            ["company_description", "trust_information", "contact_information"]
+        )
+    if page.page_type == "contact":
+        required_keys.extend(
+            ["contact_information", "service_area", "preferred_contact_methods"]
+        )
+    if page.page_type == "service":
+        required_keys.extend(["service_information", "primary_action"])
+    if page.page_type == "informational":
+        required_keys.append("approved_knowledge")
+    if page.page_type == "faq":
+        required_keys.append("approved_questions_and_answers")
+    if page.page_type == "city_service":
+        required_keys.extend(
+            ["contact_information", "service_information", "approved_knowledge"]
+        )
+    if page.page_type in {"county", "city"}:
         required_keys.append("contact_information")
-    if page.page_type in {"service", "city_service"}:
-        required_keys.extend(["service_information", "approved_knowledge"])
     if page.page_type in {"county", "city", "city_service"}:
         required_keys.append("service_area")
     missing_required = [key for key in required_keys if not facts[key]]
@@ -544,9 +586,15 @@ def _confidence_level(score: float) -> str:
 def _missing_label(key: str) -> str:
     return {
         "company_information": "Add an approved company description.",
+        "company_description": "Add an approved company description.",
         "contact_information": "Add approved customer contact information.",
+        "preferred_contact_methods": "Identify an approved customer contact method.",
         "website_identity": "Complete and approve Website Identity information.",
+        "primary_services": "Add at least one active service with an approved description.",
         "service_information": "Add approved service details.",
         "service_area": "Confirm the legitimate service area.",
+        "primary_action": "Add an approved contact method for the primary call to action.",
+        "trust_information": "Add approved license, operator, or company trust information.",
         "approved_knowledge": "Add approved supporting knowledge.",
+        "approved_questions_and_answers": "Add at least one approved question and answer.",
     }.get(key, f"Complete approved information for {key.replace('_', ' ')}.")

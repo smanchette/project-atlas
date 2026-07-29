@@ -220,7 +220,7 @@ class CityRead(CityBase):
 class GeneratedPageBase(SQLModel):
     business_id: int
     website_id: int | None = None
-    service_id: int
+    service_id: int | None = None
     city_id: int | None = None
     county_id: int | None = None
     page_type: str
@@ -248,7 +248,7 @@ class GeneratedPageBase(SQLModel):
 
 
 class GeneratedPageCreate(GeneratedPageBase):
-    pass
+    service_id: int
 
 
 class GeneratedPageUpdate(SQLModel):

@@ -19,6 +19,16 @@ def get_record(session: Session, model: type[ModelT], record_id: int) -> ModelT:
 
 
 def create_record(session: Session, model: type[ModelT], payload: SQLModel) -> ModelT:
+    from app.models import GeneratedPage
+
+    if model is GeneratedPage:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "New Generated Pages must originate from a Website-owned Planned Page. "
+                "Use the Site Plan drafting workflow."
+            ),
+        )
     _validate_relationships(session, model, payload.model_dump())
     record = model.model_validate(payload)
     session.add(record)

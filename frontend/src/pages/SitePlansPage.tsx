@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ClipboardList, RefreshCw, Save } from "lucide-react";
+import { ClipboardList, FilePlus2, RefreshCw, Save } from "lucide-react";
 
 import { apiRequest } from "../api";
 import type {
@@ -206,6 +206,30 @@ export default function SitePlansPage() {
     }
   }
 
+  async function draftPage(page: PlannedPage) {
+    if (!websiteId) return;
+    setWorking(true);
+    try {
+      await apiRequest(`/api/site-plans/planned-pages/${page.id}/draft`, {
+        method: "POST",
+        body: JSON.stringify({
+          website_id: websiteId,
+          allow_overwrite: Boolean(page.generated_page_id)
+        })
+      });
+      await loadPlans(websiteId);
+      setMessage(
+        page.generated_page_id
+          ? "Reviewable draft refreshed from the current Planning Record."
+          : "Reviewable draft created from the current Planning Record."
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Unable to create draft.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
   return (
     <div className="pageStack sitePlanPage">
       <section className="panel">
@@ -327,6 +351,9 @@ export default function SitePlansPage() {
                     <span className={`confidenceBadge ${page.planning_record.confidence_level}`}>
                       {Math.round(page.planning_record.confidence_score * 100)}% confidence
                     </span>
+                    <span className={`confidenceBadge ${readinessTone(page)}`}>
+                      {readinessLabel(page)}
+                    </span>
                   </div>
                 </div>
                 <dl className="planningAnswers">
@@ -355,10 +382,20 @@ export default function SitePlansPage() {
                     <dd>{relationshipText(page)}</dd>
                   </div>
                   <div>
-                    <dt>Generated Page</dt>
-                    <dd>{page.generated_page_id ? `#${page.generated_page_id} · ${page.generated_page_status}` : "Not generated"}</dd>
+                    <dt>Draft status</dt>
+                    <dd>{page.generated_page_id ? `Generated Page #${page.generated_page_id} · ${page.generated_page_status}` : "Not drafted"}</dd>
                   </div>
                 </dl>
+                {page.draft_readiness.blocking_reasons.length > 0 && (
+                  <div className="planningRecommendations">
+                    <strong>Draft readiness blockers</strong>
+                    <ul>
+                      {page.draft_readiness.blocking_reasons.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 <div className="planningRecommendations">
                   <strong>Missing information and recommendations</strong>
                   {page.planning_record.improvement_recommendations.length ? (
@@ -389,6 +426,17 @@ export default function SitePlansPage() {
                   />
                 </label>
                 <div className="editorActions">
+                  <button
+                    className="primaryButton buttonWithIcon"
+                    disabled={working || page.draft_readiness.status !== "ready"}
+                    onClick={() => draftPage(page)}
+                  >
+                    {page.generated_page_id ? (
+                      <><RefreshCw size={16} aria-hidden="true" /> Refresh Draft</>
+                    ) : (
+                      <><FilePlus2 size={16} aria-hidden="true" /> Create Draft</>
+                    )}
+                  </button>
                   <button className="secondaryButton buttonWithIcon" disabled={working} onClick={() => refreshRecord(page.id)}>
                     <RefreshCw size={16} aria-hidden="true" /> Refresh Atlas Answers
                   </button>
@@ -396,6 +444,7 @@ export default function SitePlansPage() {
                     <Save size={16} aria-hidden="true" /> Save Override
                   </button>
                 </div>
+                {page.generated_draft && <DraftSummary draft={page.generated_draft} />}
               </article>
             ))}
           </section>
@@ -403,6 +452,44 @@ export default function SitePlansPage() {
       )}
     </div>
   );
+}
+
+function DraftSummary({ draft }: { draft: Record<string, unknown> }) {
+  const sections = Array.isArray(draft.sections)
+    ? draft.sections as Array<{ key?: string; heading?: string; body?: string }>
+    : [];
+  const faqs = Array.isArray(draft.faq_items) ? draft.faq_items : [];
+  return (
+    <div className="planningRecommendations">
+      <strong>Reviewable draft</strong>
+      <p><strong>{String(draft.h1 ?? draft.title ?? "Untitled draft")}</strong></p>
+      <p>{String(draft.intro ?? "")}</p>
+      {sections.length > 0 && (
+        <ul>
+          {sections.map((section) => (
+            <li key={section.key ?? section.heading}>
+              <strong>{section.heading ?? section.key}</strong>: {section.body}
+            </li>
+          ))}
+        </ul>
+      )}
+      {faqs.length > 0 && (
+        <p>{faqs.length} approved FAQ item{faqs.length === 1 ? "" : "s"} included.</p>
+      )}
+    </div>
+  );
+}
+
+function readinessLabel(page: PlannedPage) {
+  if (page.draft_readiness.status === "ready") return "Ready to draft";
+  if (page.draft_readiness.status === "unsupported") return "Drafting deferred";
+  return "Draft blocked";
+}
+
+function readinessTone(page: PlannedPage) {
+  if (page.draft_readiness.status === "ready") return "high";
+  if (page.draft_readiness.status === "unsupported") return "medium";
+  return "low";
 }
 
 function RelationSelect({
