@@ -17,6 +17,12 @@ PageType = Literal[
     "faq",
 ]
 DraftReadinessStatus = Literal["ready", "blocked", "unsupported"]
+WebsiteReadinessItemStatus = Literal[
+    "ready",
+    "needs_attention",
+    "not_assessed",
+    "deferred",
+]
 
 
 class SitePlanCreate(SQLModel):
@@ -158,3 +164,32 @@ class PlannedPageRead(SQLModel):
 
 class SitePlanDetail(SitePlanRead):
     planned_pages: list[PlannedPageRead]
+
+
+class WebsiteReadinessItem(SQLModel):
+    key: str
+    label: str
+    status: WebsiteReadinessItemStatus
+    message: str
+    affected_planned_page_ids: list[int] = Field(default_factory=list)
+
+
+class WebsiteReadinessCategory(SQLModel):
+    key: Literal[
+        "business_readiness",
+        "content_readiness",
+        "website_readiness",
+        "future_readiness",
+    ]
+    label: str
+    status: WebsiteReadinessItemStatus
+    items: list[WebsiteReadinessItem] = Field(default_factory=list)
+
+
+class WebsiteReadinessReport(SQLModel):
+    website_id: int
+    site_plan_id: int
+    site_plan_version: int
+    review_ready: bool
+    evaluated_at: datetime
+    categories: list[WebsiteReadinessCategory]

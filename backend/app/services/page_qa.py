@@ -21,6 +21,7 @@ from app.schemas.qa import (
     QACheckItem,
 )
 from app.services.draft_generation import FORBIDDEN_PHRASES
+from app.services.page_type_review import review_contract_for, valid_faqs
 from app.services.website_context import build_website_context
 from app.services.website_scope import require_page_website, require_single_website_selection
 
@@ -37,16 +38,16 @@ PLACEHOLDER_PATTERNS = (
 )
 
 CHECK_REMEDIATION = {
-    "title": ("content", "Add a clear page title for the city and service."),
-    "meta_title": ("content", "Add a concise SEO title that names the service and city."),
-    "meta_description": ("content", "Add a useful meta description with the service, city, and customer value."),
-    "h1": ("content", "Add one clear H1 naming the service and city."),
-    "intro": ("content", "Add an introductory paragraph tailored to the service area."),
+    "title": ("content", "Add a clear title appropriate to this page type."),
+    "meta_title": ("content", "Add a concise SEO title appropriate to this page type."),
+    "meta_description": ("content", "Add a useful summary grounded in approved information."),
+    "h1": ("content", "Add one clear H1 appropriate to this page type."),
+    "intro": ("content", "Add an introduction that fulfills the page's Planning Record."),
     "why_it_matters": ("content", "Explain why this service matters for local property owners."),
     "signs_section": ("content", "Add practical signs customers can look for."),
     "process_section": ("content", "Describe the service process with careful, non-absolute wording."),
     "prep_section": ("content", "Add preparation and re-entry guidance appropriate to the service."),
-    "call_to_action": ("content", "Add a clear contact call to action with the business phone number."),
+    "call_to_action": ("content", "Add the approved primary visitor action for this page."),
     "faqs": ("content", "Add at least one complete customer question and answer."),
     "city_name": ("city_county_info", "Add the assigned city name naturally to the page content."),
     "service_name": ("content", "Name the assigned service naturally in the page content."),
@@ -80,9 +81,13 @@ def evaluate_page_qa(session: Session, page_id: int) -> PageQAResult:
     require_page_website(session, page)
     website_context = build_website_context(session, page_id=page_id)
     business = website_context.business
-    service = session.get(Service, page.service_id)
+    service = session.get(Service, page.service_id) if page.service_id else None
     city = session.get(City, page.city_id) if page.city_id else None
     draft = page.draft_content or {}
+    try:
+        contract = review_contract_for(page)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     public_text = " ".join(_iter_strings(draft))
     public_text_lower = public_text.lower()
     checks: list[QACheckItem] = []
@@ -97,51 +102,103 @@ def evaluate_page_qa(session: Session, page_id: int) -> PageQAResult:
     )
     _required(checks, "h1", "H1", draft.get("h1") or page.h1)
     _required(checks, "intro", "Introduction", draft.get("intro"))
-    _required(checks, "why_it_matters", "Why it matters section", draft.get("why_it_matters"))
-    _required(checks, "signs_section", "Signs section", draft.get("signs_section"))
-    _required(checks, "process_section", "Process section", draft.get("process_section"))
-    _required(checks, "prep_section", "Preparation section", draft.get("prep_section"))
     _required(checks, "call_to_action", "Call to action", draft.get("call_to_action"))
 
-    faqs = draft.get("faq_items")
-    faq_valid = (
-        isinstance(faqs, list)
-        and len(faqs) > 0
-        and all(
-            isinstance(item, dict)
-            and _has_text(item.get("question"))
-            and _has_text(item.get("answer"))
-            for item in faqs
+    if contract.schema == "planned-page-draft-v1":
+        _check(
+            checks,
+            key="draft_schema",
+            label="Page-type draft contract",
+            passed=(
+                draft.get("schema_version") == contract.schema
+                and draft.get("page_type") == page.page_type
+            ),
+            pass_message=f"{page.page_type} uses the approved {contract.schema} contract.",
+            fail_message="Draft schema or page type does not match the Generated Page.",
         )
-    )
-    _check(
-        checks,
-        key="faqs",
-        label="FAQs",
-        passed=faq_valid,
-        pass_message=f"{len(faqs)} complete FAQ items found." if isinstance(faqs, list) else "FAQs found.",
-        fail_message="At least one complete FAQ question and answer is required.",
-    )
-
-    city_present = bool(city and city.city_name.lower() in public_text_lower)
-    _check(
-        checks,
-        key="city_name",
-        label="City name present",
-        passed=city_present,
-        pass_message=f"{city.city_name} appears in the draft." if city else "City appears in the draft.",
-        fail_message="The assigned city name is missing from the draft.",
-    )
-
-    service_present = bool(service and service.service_name.lower() in public_text_lower)
-    _check(
-        checks,
-        key="service_name",
-        label="Service name present",
-        passed=service_present,
-        pass_message=f"{service.service_name} appears in the draft." if service else "Service appears in the draft.",
-        fail_message="The assigned service name is missing from the draft.",
-    )
+        sections = {
+            str(item.get("key")): item
+            for item in draft.get("sections", [])
+            if isinstance(item, dict) and _has_text(item.get("key"))
+        }
+        for section_key in contract.required_section_keys:
+            section = sections.get(section_key)
+            _required(
+                checks,
+                f"section_{section_key}",
+                f"{section_key.replace('_', ' ').title()} section",
+                section.get("body") if section else None,
+            )
+        if contract.require_faqs:
+            faqs = draft.get("faq_items")
+            _check(
+                checks,
+                key="faqs",
+                label="FAQs",
+                passed=valid_faqs(faqs),
+                pass_message=(
+                    f"{len(faqs)} complete FAQ items found."
+                    if isinstance(faqs, list)
+                    else "FAQs found."
+                ),
+                fail_message="At least one complete FAQ question and answer is required.",
+            )
+        if contract.require_service:
+            service_present = bool(service and service.service_name.lower() in public_text_lower)
+            _check(
+                checks,
+                key="service_name",
+                label="Service name present",
+                passed=service_present,
+                pass_message=(
+                    f"{service.service_name} appears in the draft."
+                    if service
+                    else "Service appears in the draft."
+                ),
+                fail_message="The assigned service name is missing from the draft.",
+            )
+    else:
+        _required(checks, "why_it_matters", "Why it matters section", draft.get("why_it_matters"))
+        _required(checks, "signs_section", "Signs section", draft.get("signs_section"))
+        _required(checks, "process_section", "Process section", draft.get("process_section"))
+        _required(checks, "prep_section", "Preparation section", draft.get("prep_section"))
+        faqs = draft.get("faq_items")
+        _check(
+            checks,
+            key="faqs",
+            label="FAQs",
+            passed=valid_faqs(faqs),
+            pass_message=(
+                f"{len(faqs)} complete FAQ items found."
+                if isinstance(faqs, list)
+                else "FAQs found."
+            ),
+            fail_message="At least one complete FAQ question and answer is required.",
+        )
+        city_present = bool(city and city.city_name.lower() in public_text_lower)
+        _check(
+            checks,
+            key="city_name",
+            label="City name present",
+            passed=city_present,
+            pass_message=(
+                f"{city.city_name} appears in the draft." if city else "City appears in the draft."
+            ),
+            fail_message="The assigned city name is missing from the draft.",
+        )
+        service_present = bool(service and service.service_name.lower() in public_text_lower)
+        _check(
+            checks,
+            key="service_name",
+            label="Service name present",
+            passed=service_present,
+            pass_message=(
+                f"{service.service_name} appears in the draft."
+                if service
+                else "Service appears in the draft."
+            ),
+            fail_message="The assigned service name is missing from the draft.",
+        )
 
     phone_present = bool(
         business
@@ -156,24 +213,27 @@ def evaluate_page_qa(session: Session, page_id: int) -> PageQAResult:
         fail_message="Business phone number is missing from the draft.",
     )
 
-    required_operator_values = [
-        value
-        for value in (
-            business.license_number if business else None,
-            business.certified_operator if business else None,
+    if contract.schema == "legacy-city-service-v1":
+        required_operator_values = [
+            value
+            for value in (
+                business.license_number if business else None,
+                business.certified_operator if business else None,
+            )
+            if _has_text(value)
+        ]
+        operator_present = all(
+            value.lower() in public_text_lower for value in required_operator_values
         )
-        if _has_text(value)
-    ]
-    operator_present = all(value.lower() in public_text_lower for value in required_operator_values)
-    _check(
-        checks,
-        key="license_operator",
-        label="License and operator information",
-        passed=operator_present,
-        pass_message="Configured license and operator information appears in the draft.",
-        fail_message="Configured license or certified operator information is missing.",
-        severity="warning",
-    )
+        _check(
+            checks,
+            key="license_operator",
+            label="License and operator information",
+            passed=operator_present,
+            pass_message="Configured license and operator information appears in the draft.",
+            fail_message="Configured license or certified operator information is missing.",
+            severity="warning",
+        )
 
     unsafe_found = [phrase for phrase in FORBIDDEN_PHRASES if phrase in public_text_lower]
     _check(
@@ -203,73 +263,73 @@ def evaluate_page_qa(session: Session, page_id: int) -> PageQAResult:
         fail_message=f"Placeholder copy found: {', '.join(placeholder_found)}.",
     )
 
-    assignments = session.exec(
-        select(PageImageAssignment).where(
-            PageImageAssignment.generated_page_id == page.id,
-            PageImageAssignment.status == "active",
+    if contract.media_policy == "required":
+        assignments = session.exec(
+            select(PageImageAssignment).where(
+                PageImageAssignment.generated_page_id == page.id,
+                PageImageAssignment.status == "active",
+            )
+        ).all()
+        assignment_images = [
+            (assignment, session.get(ImageMetadata, assignment.image_metadata_id))
+            for assignment in assignments
+        ]
+        hero_pair = next(
+            (
+                pair
+                for pair in assignment_images
+                if pair[0].image_role == "hero" and pair[1] is not None
+            ),
+            None,
         )
-    ).all()
-    assignment_images = [
-        (assignment, session.get(ImageMetadata, assignment.image_metadata_id))
-        for assignment in assignments
-    ]
-    hero_pair = next(
-        (
-            pair
-            for pair in assignment_images
-            if pair[0].image_role == "hero" and pair[1] is not None
-        ),
-        None,
-    )
-    _check(
-        checks,
-        key="hero_assigned",
-        label="Hero image assigned",
-        passed=hero_pair is not None,
-        pass_message="A hero image is assigned.",
-        fail_message="A reviewed hero image must be assigned.",
-    )
-
-    hero_reviewed = bool(hero_pair and hero_pair[1] and hero_pair[1].review_status == "reviewed")
-    _check(
-        checks,
-        key="hero_reviewed",
-        label="Hero image reviewed",
-        passed=hero_reviewed,
-        pass_message="Hero image is reviewed.",
-        fail_message="Hero image is missing or not reviewed.",
-    )
-
-    hero_alt = ""
-    if hero_pair and hero_pair[1]:
-        hero_alt = (
-            hero_pair[0].override_alt_text
-            or hero_pair[1].reviewed_alt_text
-            or hero_pair[1].alt_text
-            or ""
+        _check(
+            checks,
+            key="hero_assigned",
+            label="Hero image assigned",
+            passed=hero_pair is not None,
+            pass_message="A hero image is assigned.",
+            fail_message="A reviewed hero image must be assigned.",
         )
-    _check(
-        checks,
-        key="hero_alt_text",
-        label="Hero alt text present",
-        passed=_has_text(hero_alt),
-        pass_message="Hero image has reviewed or page-specific alt text.",
-        fail_message="Hero image alt text is missing.",
-    )
-
-    unreviewed_count = sum(
-        1
-        for _, image in assignment_images
-        if image is None or image.review_status != "reviewed"
-    )
-    _check(
-        checks,
-        key="assigned_images_reviewed",
-        label="All assigned images reviewed",
-        passed=unreviewed_count == 0,
-        pass_message="All assigned images are reviewed.",
-        fail_message=f"{unreviewed_count} assigned image(s) are unreviewed or missing.",
-    )
+        hero_reviewed = bool(
+            hero_pair and hero_pair[1] and hero_pair[1].review_status == "reviewed"
+        )
+        _check(
+            checks,
+            key="hero_reviewed",
+            label="Hero image reviewed",
+            passed=hero_reviewed,
+            pass_message="Hero image is reviewed.",
+            fail_message="Hero image is missing or not reviewed.",
+        )
+        hero_alt = ""
+        if hero_pair and hero_pair[1]:
+            hero_alt = (
+                hero_pair[0].override_alt_text
+                or hero_pair[1].reviewed_alt_text
+                or hero_pair[1].alt_text
+                or ""
+            )
+        _check(
+            checks,
+            key="hero_alt_text",
+            label="Hero alt text present",
+            passed=_has_text(hero_alt),
+            pass_message="Hero image has reviewed or page-specific alt text.",
+            fail_message="Hero image alt text is missing.",
+        )
+        unreviewed_count = sum(
+            1
+            for _, image in assignment_images
+            if image is None or image.review_status != "reviewed"
+        )
+        _check(
+            checks,
+            key="assigned_images_reviewed",
+            label="All assigned images reviewed",
+            passed=unreviewed_count == 0,
+            pass_message="All assigned images are reviewed.",
+            fail_message=f"{unreviewed_count} assigned image(s) are unreviewed or missing.",
+        )
 
     _check(
         checks,

@@ -28,21 +28,15 @@ from app.schemas.page_export import (
     PageExportPackage,
 )
 from app.services.draft_generation import FORBIDDEN_PHRASES
+from app.services.page_type_review import (
+    draft_content_sections,
+    review_contract_for,
+    validate_draft_contract,
+)
 from app.services.website_context import build_website_context
 from app.services.website_scope import require_page_website, require_single_website_selection
 
 
-CONTENT_SECTION_KEYS = (
-    "intro",
-    "why_it_matters",
-    "signs_section",
-    "process_section",
-    "prep_section",
-    "realtor_property_manager_section",
-    "service_explanation",
-    "local_city_section",
-    "why_choose_section",
-)
 EXPORT_UNSAFE_PHRASES = tuple(dict.fromkeys((*FORBIDDEN_PHRASES, "guaranteed")))
 
 
@@ -63,15 +57,29 @@ def build_page_export_package(session: Session, page_id: int) -> PageExportPacka
         raise HTTPException(status_code=404, detail="Generated page not found")
     require_page_website(session, page)
     business = session.get(Business, page.business_id)
-    service = session.get(Service, page.service_id)
+    service = session.get(Service, page.service_id) if page.service_id else None
     city = session.get(City, page.city_id) if page.city_id else None
     county = session.get(County, page.county_id) if page.county_id else None
-    if not business or not service or not city or not county:
-        raise HTTPException(status_code=409, detail="Page export requires business, service, city, and county data")
+    if not business:
+        raise HTTPException(status_code=409, detail="Page export requires Business data")
+    try:
+        contract = review_contract_for(page)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if contract.require_service and not service:
+        raise HTTPException(status_code=409, detail="Page export requires Service data")
+    if contract.require_city and not city:
+        raise HTTPException(status_code=409, detail="Page export requires City data")
+    if contract.require_county and not county:
+        raise HTTPException(status_code=409, detail="Page export requires County data")
 
     draft = page.draft_content or {}
     website_context = build_website_context(session, page_id=page_id)
-    suggested_slug = generate_suggested_slug(service, city)
+    suggested_slug = (
+        generate_suggested_slug(service, city)
+        if contract.schema == "legacy-city-service-v1" and service and city
+        else slugify(page.page_slug)
+    )
     url_slug = page.page_slug or suggested_slug
     conflicts = _slug_conflicts(
         session,
@@ -100,6 +108,7 @@ def build_page_export_package(session: Session, page_id: int) -> PageExportPacka
         seo=seo,
         media=media,
         slug_conflicts=conflicts,
+        contract=contract,
     )
     return PageExportPackage(
         page_id=page.id or page_id,
@@ -109,17 +118,13 @@ def build_page_export_package(session: Session, page_id: int) -> PageExportPacka
         url_slug=url_slug,
         h1=h1,
         seo=seo,
-        content_sections={
-            key: _text(draft.get(key))
-            for key in CONTENT_SECTION_KEYS
-            if _text(draft.get(key))
-        },
+        content_sections=draft_content_sections(contract, draft),
         faq_items=faqs,
         cta_block=_text(draft.get("call_to_action")),
-        city=city.city_name,
-        county=county.county_name,
-        state=city.state,
-        service=service.service_name,
+        city=city.city_name if city else None,
+        county=county.county_name if county else None,
+        state=(city.state if city else county.state if county else business.state),
+        service=service.service_name if service else None,
         business_name=business.company_name,
         phone=business.phone,
         website=website_context.website.public_url,
@@ -127,20 +132,30 @@ def build_page_export_package(session: Session, page_id: int) -> PageExportPacka
         license_number=business.license_number,
         certified_operator=business.certified_operator,
         assigned_media=media,
-        json_ld=_json_ld(
-            business=business,
-            service=service,
-            city=city,
-            county=county,
-            faqs=faqs,
-            page_title=page_title,
-            canonical_url=canonical_url,
-            website_url=website_context.website.public_url,
-            license_label=str(website_context.website.configuration.get("license_label") or "License"),
-            operator_title=str(
-                website_context.website.configuration.get("certified_operator_title")
-                or "Certified Operator"
-            ),
+        json_ld=(
+            _json_ld(
+                business=business,
+                service=service,
+                city=city,
+                county=county,
+                faqs=faqs,
+                page_title=page_title,
+                canonical_url=canonical_url,
+                website_url=website_context.website.public_url,
+                license_label=str(website_context.website.configuration.get("license_label") or "License"),
+                operator_title=str(
+                    website_context.website.configuration.get("certified_operator_title")
+                    or "Certified Operator"
+                ),
+            )
+            if contract.schema == "legacy-city-service-v1" and service and city and county
+            else _generic_json_ld(
+                business=business,
+                faqs=faqs,
+                page_title=page_title,
+                canonical_url=canonical_url,
+                website_url=website_context.website.public_url,
+            )
         ),
         canonical_url_preview=canonical_url,
         slug_conflicts=conflicts,
@@ -261,6 +276,7 @@ def _readiness_warnings(
     seo: ExportSEO,
     media: list[ExportMediaReference],
     slug_conflicts: list[int],
+    contract,
 ) -> list[ExportWarning]:
     warnings: list[ExportWarning] = []
     if page.status != "approved":
@@ -280,8 +296,16 @@ def _readiness_warnings(
     ):
         _warn(warnings, "qa_stale", "blocker", "The draft was edited after the latest QA check.")
 
+    contract_errors = validate_draft_contract(page, draft)
+    for error in contract_errors:
+        _warn(
+            warnings,
+            f"contract_{error['field'].replace('.', '_')}",
+            "blocker",
+            error["message"],
+        )
     heroes = [item for item in media if item.image_role == "hero"]
-    if not heroes:
+    if contract.media_policy == "required" and not heroes:
         _warn(warnings, "hero_missing", "blocker", "A hero image is not assigned.")
     if any(not item.alt_text.strip() for item in media):
         _warn(warnings, "alt_text_missing", "blocker", "One or more assigned images are missing alt text.")
@@ -311,6 +335,54 @@ def _readiness_warnings(
             f"Unsafe wording appears in the draft: {', '.join(unsafe)}.",
         )
     return warnings
+
+
+def _generic_json_ld(
+    *,
+    business: Business,
+    faqs: list[dict[str, str]],
+    page_title: str,
+    canonical_url: str,
+    website_url: str,
+) -> dict[str, Any]:
+    website = _website_base(website_url)
+    business_id = f"{website}/#business" if website else "#business"
+    graph: list[dict[str, Any]] = [
+        _without_empty(
+            {
+                "@type": "LocalBusiness",
+                "@id": business_id,
+                "name": business.company_name,
+                "url": website or None,
+                "telephone": business.phone,
+                "email": business.email,
+            }
+        ),
+        {
+            "@type": "WebPage",
+            "name": page_title,
+            "url": canonical_url,
+            "about": {"@id": business_id},
+        },
+    ]
+    if faqs:
+        graph.append(
+            {
+                "@type": "FAQPage",
+                "mainEntity": [
+                    {
+                        "@type": "Question",
+                        "name": item["question"],
+                        "acceptedAnswer": {
+                            "@type": "Answer",
+                            "text": item["answer"],
+                        },
+                    }
+                    for item in faqs
+                ],
+            }
+        )
+    return {"@context": "https://schema.org", "@graph": graph}
 
 
 def _json_ld(

@@ -9,6 +9,7 @@ from app.models import GeneratedPage, GeneratedPageRevision
 from app.schemas.generation import DraftContent
 from app.schemas.page_editor import ManualDraftSaveRequest
 from app.schemas.qa import PageQAResult
+from app.schemas.site_plans import PlannedPageDraftContent
 from app.services.approval_audit import draft_content_hash
 from app.services.draft_generation import (
     UnsafeContentError,
@@ -16,6 +17,8 @@ from app.services.draft_generation import (
     validate_safe_content,
 )
 from app.services.page_qa import save_page_qa
+from app.services.page_type_review import review_contract_for, validate_draft_contract
+from app.services.planned_page_drafting import render_planned_page_content
 from app.services.website_context import build_website_context
 
 
@@ -65,19 +68,44 @@ def save_manual_draft(
         raise HTTPException(status_code=409, detail="Generate a structured draft before editing")
 
     before = deepcopy(page.draft_content)
-    editable = _normalized_editable_fields(payload)
-    merged = _merge_editable_fields(before, editable)
-    _validate_merged_draft(merged)
-
-    changed_fields = [
-        field
-        for field, draft_key in EDITABLE_FIELD_MAP.items()
-        if _normalized_value(before.get(draft_key)) != _normalized_value(merged.get(draft_key))
-    ]
+    contract = review_contract_for(page)
+    if contract.schema == "planned-page-draft-v1":
+        merged = _normalized_planned_draft(page, before, payload.draft)
+        changed_fields = [
+            field
+            for field in (
+                "title",
+                "meta_title",
+                "meta_description",
+                "h1",
+                "intro",
+                "sections",
+                "faq_items",
+                "call_to_action",
+            )
+            if _normalized_value(before.get(field))
+            != _normalized_value(merged.get(field))
+        ]
+        rendered_content = render_planned_page_content(
+            PlannedPageDraftContent.model_validate(merged)
+        )
+    else:
+        editable = _normalized_editable_fields(payload.draft)
+        merged = _merge_editable_fields(before, editable)
+        _validate_merged_draft(merged)
+        changed_fields = [
+            field
+            for field, draft_key in EDITABLE_FIELD_MAP.items()
+            if _normalized_value(before.get(draft_key))
+            != _normalized_value(merged.get(draft_key))
+        ]
+        rendered_content = render_content_body(
+            DraftContent.model_validate(merged),
+            build_website_context(session, page_id=page_id),
+        )
     if not changed_fields:
         raise HTTPException(status_code=400, detail="No draft changes were provided")
 
-    validated_draft = DraftContent.model_validate(merged)
     changed_at = datetime.now(UTC)
     revision = GeneratedPageRevision(
         generated_page_id=page.id or page_id,
@@ -93,10 +121,10 @@ def save_manual_draft(
 
     page.draft_content = merged
     page.h1 = merged["h1"]
-    page.content_body = render_content_body(
-        validated_draft,
-        build_website_context(session, page_id=page_id),
-    )
+    page.page_title = merged["title"]
+    page.meta_title = merged["meta_title"]
+    page.meta_description = merged["meta_description"]
+    page.content_body = rendered_content
     page.qa_status = "not_run"
     page.qa_result = None
     page.qa_checked_at = None
@@ -112,12 +140,29 @@ def save_manual_draft(
     return page, revision, qa_result
 
 
-def _normalized_editable_fields(payload: ManualDraftSaveRequest) -> dict[str, Any]:
-    raw = payload.draft.model_dump(mode="json")
+def _normalized_editable_fields(raw: dict[str, Any]) -> dict[str, Any]:
     errors: list[dict[str, str]] = []
     normalized: dict[str, Any] = {}
+    missing = sorted(set(EDITABLE_FIELD_MAP) - set(raw))
+    errors.extend(
+        {
+            "field": field,
+            "message": f"{field.replace('_', ' ').title()} is required.",
+        }
+        for field in missing
+    )
+    unexpected = sorted(set(raw) - set(EDITABLE_FIELD_MAP))
+    errors.extend(
+        {"field": field, "message": "This field is not editable."}
+        for field in unexpected
+    )
     for field, value in raw.items():
+        if field not in EDITABLE_FIELD_MAP:
+            continue
         if field == "faq_items":
+            if not isinstance(value, list):
+                errors.append({"field": field, "message": "FAQ items must be a list."})
+                continue
             faq_items = []
             for index, item in enumerate(value):
                 question = item["question"].strip()
@@ -131,7 +176,7 @@ def _normalized_editable_fields(payload: ManualDraftSaveRequest) -> dict[str, An
                 errors.append({"field": "faq_items", "message": "At least one FAQ is required."})
             normalized[field] = faq_items
         else:
-            text = value.strip()
+            text = value.strip() if isinstance(value, str) else ""
             if not text:
                 errors.append({"field": field, "message": f"{field.replace('_', ' ').title()} is required."})
             normalized[field] = text
@@ -141,6 +186,59 @@ def _normalized_editable_fields(payload: ManualDraftSaveRequest) -> dict[str, An
             detail={"message": "Draft validation failed.", "errors": errors},
         )
     return normalized
+
+
+def _normalized_planned_draft(
+    page: GeneratedPage,
+    before: dict[str, Any],
+    raw: dict[str, Any],
+) -> dict[str, Any]:
+    editable_fields = {
+        "title",
+        "meta_title",
+        "meta_description",
+        "h1",
+        "intro",
+        "sections",
+        "faq_items",
+        "call_to_action",
+    }
+    unexpected = sorted(set(raw) - editable_fields)
+    if unexpected:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Draft validation failed.",
+                "errors": [
+                    {
+                        "field": field,
+                        "message": "This field is not editable for the planned-page contract.",
+                    }
+                    for field in unexpected
+                ],
+            },
+        )
+    merged = deepcopy(before)
+    for field in editable_fields:
+        if field in raw:
+            merged[field] = deepcopy(raw[field])
+    errors = validate_draft_contract(page, merged)
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Draft validation failed.", "errors": errors},
+        )
+    try:
+        validate_safe_content(merged)
+    except UnsafeContentError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Draft contains unsafe wording.",
+                "errors": [{"field": "safety_wording", "message": str(exc)}],
+            },
+        ) from exc
+    return merged
 
 
 def _merge_editable_fields(before: dict[str, Any], editable: dict[str, Any]) -> dict[str, Any]:

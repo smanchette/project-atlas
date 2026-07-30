@@ -357,15 +357,15 @@ function ApprovalQueuePage() {
                     <td>
                       <input
                         type="checkbox"
-                        aria-label={`Select ${item.city_name}`}
+                        aria-label={`Select ${item.city_name || item.page_title}`}
                         checked={selectedIds.has(item.page_id)}
                         onChange={() => toggleSelected(item.page_id)}
                       />
                     </td>
                     <td className="queuePageIdentity">
-                      <strong>{item.city_name}</strong>
-                      <span>{item.county_name}</span>
-                      <small>{item.service_name}</small>
+                      <strong>{item.city_name || item.page_title}</strong>
+                      {item.county_name && <span>{item.county_name}</span>}
+                      {item.service_name && <small>{item.service_name}</small>}
                       <small>Page: {humanize(item.page_status)}</small>
                     </td>
                     <td>

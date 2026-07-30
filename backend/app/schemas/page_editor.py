@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from sqlmodel import Field, SQLModel
 
@@ -11,21 +12,10 @@ class ManualFAQItem(SQLModel):
     answer: str = Field(min_length=1)
 
 
-class ManualDraftFields(SQLModel):
-    hero_headline: str = Field(min_length=1)
-    hero_subheadline: str = Field(min_length=1)
-    intro: str = Field(min_length=1)
-    service_explanation: str = Field(min_length=1)
-    local_city_section: str = Field(min_length=1)
-    process_section: str = Field(min_length=1)
-    prep_reentry_section: str = Field(min_length=1)
-    why_choose_section: str = Field(min_length=1)
-    faq_items: list[ManualFAQItem] = Field(min_length=1)
-    call_to_action: str = Field(min_length=1)
-
-
 class ManualDraftSaveRequest(SQLModel):
-    draft: ManualDraftFields
+    # The service validates this mapping against the Generated Page's single
+    # authoritative page-type review contract.
+    draft: dict[str, Any]
     created_by: str | None = None
     reason: str | None = None
 

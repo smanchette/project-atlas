@@ -104,12 +104,18 @@ def _validate_relationships(
 
     if model is GeneratedPage:
         business = session.get(Business, values.get("business_id"))
-        service = session.get(Service, values.get("service_id"))
+        page_type = values.get("page_type")
+        service_id = values.get("service_id")
+        service = session.get(Service, service_id) if service_id else None
         website_id = values.get("website_id")
         website = session.get(Website, website_id) if website_id else None
-        if not business or not service:
-            conflict("Generated Page requires an existing business and service.")
-        if service.business_id != business.id:
+        if not business:
+            conflict("Generated Page requires an existing business.")
+        if page_type in {"service", "city_service"} and not service:
+            conflict(f"{page_type.replace('_', ' ').title()} Generated Pages require a Service.")
+        if service_id and not service:
+            conflict("Generated Page service does not exist.")
+        if service and service.business_id != business.id:
             conflict("Generated Page service does not belong to its business.")
         if website_id and not website:
             conflict("Generated Page website does not exist.")
@@ -134,6 +140,12 @@ def _validate_relationships(
             conflict("Generated Page county does not exist.")
         if city and county and city.county_id != county.id:
             conflict("Generated Page city does not belong to its county.")
+        if page_type == "county" and not county:
+            conflict("County Generated Pages require a County.")
+        if page_type == "city" and not city:
+            conflict("City Generated Pages require a City.")
+        if page_type == "city_service" and (not city or not county):
+            conflict("City Service Generated Pages require City and County relationships.")
         slug = str(values.get("page_slug") or "").strip()
         if website_id and slug:
             statement = select(GeneratedPage).where(

@@ -15,7 +15,7 @@ class ApprovalQueueItem(SQLModel):
     city_name: str
     county_id: int | None = None
     county_name: str
-    service_id: int
+    service_id: int | None = None
     service_name: str
     page_status: str
     qa_status: str

@@ -136,6 +136,40 @@ export type SitePlanDetail = SitePlan & {
   planned_pages: PlannedPage[];
 };
 
+export type WebsiteReadinessItemStatus =
+  | "ready"
+  | "needs_attention"
+  | "not_assessed"
+  | "deferred";
+
+export type WebsiteReadinessItem = {
+  key: string;
+  label: string;
+  status: WebsiteReadinessItemStatus;
+  message: string;
+  affected_planned_page_ids: number[];
+};
+
+export type WebsiteReadinessCategory = {
+  key:
+    | "business_readiness"
+    | "content_readiness"
+    | "website_readiness"
+    | "future_readiness";
+  label: string;
+  status: WebsiteReadinessItemStatus;
+  items: WebsiteReadinessItem[];
+};
+
+export type WebsiteReadinessReport = {
+  website_id: number;
+  site_plan_id: number;
+  site_plan_version: number;
+  review_ready: boolean;
+  evaluated_at: string;
+  categories: WebsiteReadinessCategory[];
+};
+
 export type WebsiteContext = {
   business: {
     id: number;
@@ -309,7 +343,7 @@ export type ApprovalQueueItem = {
   city_name: string;
   county_id?: number | null;
   county_name: string;
-  service_id: number;
+  service_id: number | null;
   service_name: string;
   page_status: string;
   qa_status: "not_run" | "ready" | "needs_review" | "blocked";
@@ -750,7 +784,7 @@ export type WordPressDraftQueueResponse = {
   items: WordPressDraftQueueItem[];
 };
 
-export type DraftContent = {
+export type LegacyDraftContent = {
   title: string;
   meta_title: string;
   meta_description: string;
@@ -771,6 +805,32 @@ export type DraftContent = {
   why_choose_section?: string;
 };
 
+export type PlannedPageDraftSection = {
+  key: string;
+  heading: string;
+  body: string;
+};
+
+export type PlannedPageDraftContent = {
+  schema_version: "planned-page-draft-v1";
+  page_type: PageType;
+  title: string;
+  meta_title: string;
+  meta_description: string;
+  h1: string;
+  intro: string;
+  sections: PlannedPageDraftSection[];
+  faq_items: { question: string; answer: string }[];
+  call_to_action: string;
+  internal_notes: string;
+  planning_record_id: number;
+  planning_generated_at: string;
+  operator_override_keys: string[];
+  status: string;
+};
+
+export type DraftContent = LegacyDraftContent | PlannedPageDraftContent;
+
 export type ManualDraftFields = {
   hero_headline: string;
   hero_subheadline: string;
@@ -780,6 +840,18 @@ export type ManualDraftFields = {
   process_section: string;
   prep_reentry_section: string;
   why_choose_section: string;
+  faq_items: { question: string; answer: string }[];
+  call_to_action: string;
+};
+
+export type PlannedManualDraftFields = {
+  schema_version: "planned-page-draft-v1";
+  title: string;
+  meta_title: string;
+  meta_description: string;
+  h1: string;
+  intro: string;
+  sections: PlannedPageDraftSection[];
   faq_items: { question: string; answer: string }[];
   call_to_action: string;
 };

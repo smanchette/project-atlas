@@ -3,7 +3,7 @@ import { AlertTriangle, ArrowDown, ArrowUp, CheckCircle2, CircleCheck, Clipboard
 import { Link, useSearchParams } from "react-router-dom";
 
 import { ApiError, apiRequest, listItems } from "../api";
-import type { ApprovalAudit, ApprovalHistorySummary, AssignedMedia, City, County, GeneratedPage, GeneratedPageRevision, ImageMetadata, ManualDraftFields, ManualDraftSaveResponse, PageQAResult, QABatchResponse, Website } from "../types";
+import type { ApprovalAudit, ApprovalHistorySummary, AssignedMedia, City, County, DraftContent, GeneratedPage, GeneratedPageRevision, ImageMetadata, ManualDraftFields, ManualDraftSaveResponse, PageQAResult, PlannedManualDraftFields, PlannedPageDraftContent, QABatchResponse, Website } from "../types";
 
 type BatchCandidate = {
   page_id: number;
@@ -34,6 +34,8 @@ type EditorValidationError = {
   message: string;
 };
 
+type EditableDraft = ManualDraftFields | PlannedManualDraftFields;
+
 function GeneratedPagesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [pages, setPages] = useState<GeneratedPage[]>([]);
@@ -63,8 +65,8 @@ function GeneratedPagesPage() {
   const [working, setWorking] = useState(false);
   const [generatingPageId, setGeneratingPageId] = useState<number | null>(null);
   const [editorPageId, setEditorPageId] = useState<number | null>(null);
-  const [editorDraft, setEditorDraft] = useState<ManualDraftFields | null>(null);
-  const [editorBaseline, setEditorBaseline] = useState<ManualDraftFields | null>(null);
+  const [editorDraft, setEditorDraft] = useState<EditableDraft | null>(null);
+  const [editorBaseline, setEditorBaseline] = useState<EditableDraft | null>(null);
   const [editorCreatedBy, setEditorCreatedBy] = useState("");
   const [editorReason, setEditorReason] = useState("");
   const [editorErrors, setEditorErrors] = useState<EditorValidationError[]>([]);
@@ -284,12 +286,15 @@ function GeneratedPagesPage() {
     setError(null);
     setEditorErrors([]);
     try {
+      const requestDraft = isPlannedEditorDraft(editorDraft)
+        ? plannedDraftPayload(editorDraft)
+        : editorDraft;
       const result = await apiRequest<ManualDraftSaveResponse>(
         `/api/generated-pages/${editorPage.id}/${runQa ? "draft-and-qa" : "draft"}`,
         {
           method: "PUT",
           body: JSON.stringify({
-            draft: editorDraft,
+            draft: requestDraft,
             created_by: editorCreatedBy || null,
             reason: editorReason || null
           })
@@ -1406,14 +1411,14 @@ function PageEditorPanel({
   onClose
 }: {
   page: GeneratedPage | null;
-  draft: ManualDraftFields | null;
+  draft: EditableDraft | null;
   qaResult: PageQAResult | null;
   createdBy: string;
   reason: string;
   errors: EditorValidationError[];
   saving: boolean;
   dirty: boolean;
-  onDraftChange: (draft: ManualDraftFields) => void;
+  onDraftChange: (draft: EditableDraft) => void;
   onCreatedByChange: (value: string) => void;
   onReasonChange: (value: string) => void;
   onSave: () => Promise<void>;
@@ -1426,6 +1431,26 @@ function PageEditorPanel({
         <h2>Safe Page Editor</h2>
         <p>Choose Edit Draft on a draft page to make manual structured changes.</p>
       </section>
+    );
+  }
+
+  if (isPlannedEditorDraft(draft)) {
+    return (
+      <PlannedPageEditorPanel
+        page={page}
+        draft={draft}
+        createdBy={createdBy}
+        reason={reason}
+        errors={errors}
+        saving={saving}
+        dirty={dirty}
+        onDraftChange={onDraftChange}
+        onCreatedByChange={onCreatedByChange}
+        onReasonChange={onReasonChange}
+        onSave={onSave}
+        onSaveAndQa={onSaveAndQa}
+        onClose={onClose}
+      />
     );
   }
 
@@ -1550,7 +1575,7 @@ function PageEditorPanel({
           onChange={(value) => updateField("prep_reentry_section", value)}
         />
         <EditorTextField
-          label="Why Choose Flo-Zone"
+          label="Why Choose This Business"
           value={draft.why_choose_section}
           field="why_choose_section"
           errors={errors}
@@ -1687,6 +1712,130 @@ function EditorTextField({
       )}
       <EditorHints hints={hints} errors={relatedErrors} />
     </label>
+  );
+}
+
+function PlannedPageEditorPanel({
+  page,
+  draft,
+  createdBy,
+  reason,
+  errors,
+  saving,
+  dirty,
+  onDraftChange,
+  onCreatedByChange,
+  onReasonChange,
+  onSave,
+  onSaveAndQa,
+  onClose
+}: {
+  page: GeneratedPage;
+  draft: PlannedManualDraftFields;
+  createdBy: string;
+  reason: string;
+  errors: EditorValidationError[];
+  saving: boolean;
+  dirty: boolean;
+  onDraftChange: (draft: EditableDraft) => void;
+  onCreatedByChange: (value: string) => void;
+  onReasonChange: (value: string) => void;
+  onSave: () => Promise<void>;
+  onSaveAndQa: () => Promise<void>;
+  onClose: () => void;
+}) {
+  function updateField(
+    field: "title" | "meta_title" | "meta_description" | "h1" | "intro" | "call_to_action",
+    value: string
+  ) {
+    onDraftChange({ ...draft, [field]: value });
+  }
+
+  function updateSection(index: number, field: "heading" | "body", value: string) {
+    onDraftChange({
+      ...draft,
+      sections: draft.sections.map((section, sectionIndex) =>
+        sectionIndex === index ? { ...section, [field]: value } : section
+      )
+    });
+  }
+
+  function updateFaq(index: number, field: "question" | "answer", value: string) {
+    onDraftChange({
+      ...draft,
+      faq_items: draft.faq_items.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, [field]: value } : item
+      )
+    });
+  }
+
+  return (
+    <section className="panel pageEditorPanel">
+      <div className="panelHeader editorHeader">
+        <div>
+          <p className="eyebrow">Page-Type Contract Editing</p>
+          <h2>Safe Page Editor</h2>
+          <p>{page.page_title}</p>
+        </div>
+        <div className="editorHeaderActions">
+          {dirty && <span className="unsavedBadge">Unsaved changes</span>}
+          <button className="iconButton" type="button" onClick={onClose} aria-label="Close draft editor">
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+      <div className="editorSafetyNotice">
+        Section keys and page type are contract-controlled. Editing changes content only and records a revision.
+      </div>
+      {errors.length > 0 && (
+        <div className="editorValidationAlert" role="alert">
+          <strong>Draft was not saved.</strong>
+          <ul>{errors.map((item, index) => <li key={`${item.field}-${index}`}>{item.message}</li>)}</ul>
+        </div>
+      )}
+      <div className="editorFields">
+        <EditorTextField label="Page Title" value={draft.title} field="title" errors={errors} hints={[]} onChange={(value) => updateField("title", value)} compact />
+        <EditorTextField label="Meta Title" value={draft.meta_title} field="meta_title" errors={errors} hints={[]} onChange={(value) => updateField("meta_title", value)} compact />
+        <EditorTextField label="Meta Description" value={draft.meta_description} field="meta_description" errors={errors} hints={[]} onChange={(value) => updateField("meta_description", value)} />
+        <EditorTextField label="H1" value={draft.h1} field="h1" errors={errors} hints={[]} onChange={(value) => updateField("h1", value)} compact />
+        <EditorTextField label="Introduction" value={draft.intro} field="intro" errors={errors} hints={[]} onChange={(value) => updateField("intro", value)} />
+        {draft.sections.map((section, index) => (
+          <section className="editorFaqSection" key={section.key}>
+            <div className="editorFieldHeader">
+              <div>
+                <h3>{humanize(section.key)}</h3>
+                <small>Contract key: {section.key}</small>
+              </div>
+            </div>
+            <EditorTextField label="Section Heading" value={section.heading} field={`sections.${index}.heading`} errors={errors} hints={[]} onChange={(value) => updateSection(index, "heading", value)} compact />
+            <EditorTextField label="Section Body" value={section.body} field={`sections.${index}.body`} errors={errors} hints={[]} onChange={(value) => updateSection(index, "body", value)} />
+          </section>
+        ))}
+        {draft.faq_items.length > 0 && (
+          <section className="editorFaqSection">
+            <div className="editorFieldHeader"><h3>Frequently Asked Questions</h3></div>
+            <div className="editorFaqList">
+              {draft.faq_items.map((item, index) => (
+                <article key={index}>
+                  <strong>FAQ {index + 1}</strong>
+                  <label><span>Question</span><input value={item.question} onChange={(event) => updateFaq(index, "question", event.target.value)} /></label>
+                  <label><span>Answer</span><textarea value={item.answer} onChange={(event) => updateFaq(index, "answer", event.target.value)} /></label>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
+        <EditorTextField label="Call to Action" value={draft.call_to_action} field="call_to_action" errors={errors} hints={[]} onChange={(value) => updateField("call_to_action", value)} />
+      </div>
+      <div className="editorMetadata">
+        <label><span>Edited By</span><input value={createdBy} onChange={(event) => onCreatedByChange(event.target.value)} /></label>
+        <label><span>Revision Reason</span><input value={reason} onChange={(event) => onReasonChange(event.target.value)} /></label>
+      </div>
+      <div className="editorActions">
+        <button className="secondaryButton buttonWithIcon" type="button" disabled={saving || !dirty} onClick={onSave}><Save size={16} />Save Draft</button>
+        <button className="primaryButton buttonWithIcon" type="button" disabled={saving || !dirty} onClick={onSaveAndQa}><ShieldCheck size={16} />Save Draft + Run QA</button>
+      </div>
+    </section>
   );
 }
 
@@ -1916,6 +2065,32 @@ function DraftReview({
 
       {!draft ? (
         <p>No structured draft has been generated for this page.</p>
+      ) : isPlannedDraftContent(draft) ? (
+        <div className="draftSections">
+          <DraftField label="Page Type" value={humanize(draft.page_type)} />
+          <DraftField label="Meta Title" value={draft.meta_title} />
+          <DraftField label="Meta Description" value={draft.meta_description} />
+          <DraftField label="H1" value={draft.h1} />
+          <DraftField label="Introduction" value={draft.intro} />
+          {draft.sections.map((section) => (
+            <DraftField key={section.key} label={section.heading} value={section.body} />
+          ))}
+          {draft.faq_items.length > 0 && (
+            <section className="draftField">
+              <h3>Frequently Asked Questions</h3>
+              <div className="faqReview">
+                {draft.faq_items.map((item) => (
+                  <div key={item.question}>
+                    <strong>{item.question}</strong>
+                    <p>{item.answer}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+          <DraftField label="Call to Action" value={draft.call_to_action} />
+          <DraftField label="Internal Notes" value={draft.internal_notes} muted />
+        </div>
       ) : (
         <div className="draftSections">
           <DraftField label="Meta Title" value={draft.meta_title} />
@@ -1955,7 +2130,7 @@ function DraftField({ label, value, muted = false }: { label: string; value: str
   );
 }
 
-function manualDraftFromPage(page: GeneratedPage): ManualDraftFields {
+function manualDraftFromPage(page: GeneratedPage): EditableDraft {
   const draft = page.draft_content;
   if (!draft) {
     return {
@@ -1971,6 +2146,19 @@ function manualDraftFromPage(page: GeneratedPage): ManualDraftFields {
       call_to_action: ""
     };
   }
+  if (isPlannedDraftContent(draft)) {
+    return {
+      schema_version: "planned-page-draft-v1",
+      title: draft.title,
+      meta_title: draft.meta_title,
+      meta_description: draft.meta_description,
+      h1: draft.h1,
+      intro: draft.intro,
+      sections: draft.sections.map((section) => ({ ...section })),
+      faq_items: draft.faq_items.map((item) => ({ ...item })),
+      call_to_action: draft.call_to_action
+    };
+  }
   return {
     hero_headline: draft.h1,
     hero_subheadline: draft.hero_subheadline || draft.meta_description,
@@ -1981,8 +2169,29 @@ function manualDraftFromPage(page: GeneratedPage): ManualDraftFields {
     prep_reentry_section: draft.prep_section,
     why_choose_section:
       draft.why_choose_section ||
-      "Choose Flo-Zone for licensed service, clear preparation guidance, and careful project coordination.",
+      "Explain the approved reasons customers may choose this business.",
     faq_items: draft.faq_items.map((item) => ({ ...item })),
+    call_to_action: draft.call_to_action
+  };
+}
+
+function isPlannedEditorDraft(draft: EditableDraft): draft is PlannedManualDraftFields {
+  return "schema_version" in draft && draft.schema_version === "planned-page-draft-v1";
+}
+
+function isPlannedDraftContent(draft: DraftContent): draft is PlannedPageDraftContent {
+  return "schema_version" in draft && draft.schema_version === "planned-page-draft-v1";
+}
+
+function plannedDraftPayload(draft: PlannedManualDraftFields) {
+  return {
+    title: draft.title,
+    meta_title: draft.meta_title,
+    meta_description: draft.meta_description,
+    h1: draft.h1,
+    intro: draft.intro,
+    sections: draft.sections,
+    faq_items: draft.faq_items,
     call_to_action: draft.call_to_action
   };
 }

@@ -13,6 +13,7 @@ import { apiRequest } from "../api";
 import type {
   ApprovedPageRepairResponse,
   GeneratedPage,
+  LegacyDraftContent,
   WordPressDraftQualityReviewItem,
   WordPressDraftQualityReviewList,
   WordPressManualQualityReviewStatus,
@@ -227,10 +228,11 @@ function QualityDetail({
         const page = await apiRequest<GeneratedPage>(`/api/generated-pages/${item.page_id}`);
         if (!active) return;
         setRepairPage(page);
-        setRepairIntro(page.draft_content?.intro ?? "");
-        setRepairWhyItMatters(page.draft_content?.why_it_matters ?? "");
-        setRepairRealtorSection(page.draft_content?.realtor_property_manager_section ?? "");
-        setRepairInternalNotes(page.draft_content?.internal_notes ?? "");
+        const draft = legacyDraft(page);
+        setRepairIntro(draft?.intro ?? "");
+        setRepairWhyItMatters(draft?.why_it_matters ?? "");
+        setRepairRealtorSection(draft?.realtor_property_manager_section ?? "");
+        setRepairInternalNotes(draft?.internal_notes ?? "");
         setRepairReason("Atlas-only approved page content repair");
       } catch (err) {
         if (active) {
@@ -253,12 +255,12 @@ function QualityDetail({
     reviewerNotes !== (item.manual_review.reviewer_notes ?? "") ||
     reviewedBy !== (item.manual_review.reviewed_by ?? "");
   const hasRepairChanges = Boolean(
-    repairPage?.draft_content &&
+    legacyDraft(repairPage) &&
     (
-      repairIntro !== (repairPage.draft_content.intro ?? "") ||
-      repairWhyItMatters !== (repairPage.draft_content.why_it_matters ?? "") ||
-      repairRealtorSection !== (repairPage.draft_content.realtor_property_manager_section ?? "") ||
-      repairInternalNotes !== (repairPage.draft_content.internal_notes ?? "")
+      repairIntro !== (legacyDraft(repairPage)?.intro ?? "") ||
+      repairWhyItMatters !== (legacyDraft(repairPage)?.why_it_matters ?? "") ||
+      repairRealtorSection !== (legacyDraft(repairPage)?.realtor_property_manager_section ?? "") ||
+      repairInternalNotes !== (legacyDraft(repairPage)?.internal_notes ?? "")
     )
   );
 
@@ -286,7 +288,7 @@ function QualityDetail({
   }
 
   async function saveAtlasRepair() {
-    if (!repairPage?.draft_content) return;
+    if (!legacyDraft(repairPage)) return;
     setRepairing(true);
     setRepairResult(null);
     onError("");
@@ -309,10 +311,11 @@ function QualityDetail({
       );
       setRepairResult(result);
       setRepairPage(result.page);
-      setRepairIntro(result.page.draft_content?.intro ?? "");
-      setRepairWhyItMatters(result.page.draft_content?.why_it_matters ?? "");
-      setRepairRealtorSection(result.page.draft_content?.realtor_property_manager_section ?? "");
-      setRepairInternalNotes(result.page.draft_content?.internal_notes ?? "");
+      const draft = legacyDraft(result.page);
+      setRepairIntro(draft?.intro ?? "");
+      setRepairWhyItMatters(draft?.why_it_matters ?? "");
+      setRepairRealtorSection(draft?.realtor_property_manager_section ?? "");
+      setRepairInternalNotes(draft?.internal_notes ?? "");
       const updatedQuality = await apiRequest<WordPressDraftQualityReviewItem>(`/api/wordpress/draft-quality-review/${item.page_id}`);
       onRepaired(updatedQuality);
     } catch (err) {
@@ -426,6 +429,8 @@ function QualityDetail({
         </div>
         {!repairPage?.draft_content ? (
           <p>Loading Atlas draft content...</p>
+        ) : !legacyDraft(repairPage) ? (
+          <p>This legacy approved-page repair is not applicable to page-type contract drafts.</p>
         ) : (
           <>
             <div className="manualQualityFields atlasRepairFields">
@@ -521,6 +526,11 @@ function readinessTone(item: WordPressDraftQualityReviewItem): "ready" | "warnin
 
 function humanize(value: string) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function legacyDraft(page: GeneratedPage | null): LegacyDraftContent | null {
+  const draft = page?.draft_content;
+  return draft && !("schema_version" in draft) ? draft : null;
 }
 
 function formatDateTime(value?: string | null) {

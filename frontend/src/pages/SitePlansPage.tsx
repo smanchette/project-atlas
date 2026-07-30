@@ -10,7 +10,8 @@ import type {
   Service,
   SitePlan,
   SitePlanDetail,
-  Website
+  Website,
+  WebsiteReadinessReport
 } from "../types";
 
 const PAGE_TYPES: Array<{ value: PageType; label: string }> = [
@@ -53,6 +54,7 @@ export default function SitePlansPage() {
   const [websiteId, setWebsiteId] = useState<number | null>(null);
   const [plans, setPlans] = useState<SitePlan[]>([]);
   const [plan, setPlan] = useState<SitePlanDetail | null>(null);
+  const [readiness, setReadiness] = useState<WebsiteReadinessReport | null>(null);
   const [draft, setDraft] = useState<DraftPage>(EMPTY_PAGE);
   const [purposeOverrides, setPurposeOverrides] = useState<Record<number, string>>({});
   const [message, setMessage] = useState("");
@@ -97,8 +99,12 @@ export default function SitePlansPage() {
       );
       setPlans(rows);
       if (rows[0]) {
-        const detail = await apiRequest<SitePlanDetail>(`/api/site-plans/${rows[0].id}`);
+        const [detail, readinessReport] = await Promise.all([
+          apiRequest<SitePlanDetail>(`/api/site-plans/${rows[0].id}`),
+          apiRequest<WebsiteReadinessReport>(`/api/site-plans/${rows[0].id}/readiness`)
+        ]);
         setPlan(detail);
+        setReadiness(readinessReport);
         setPurposeOverrides(
           Object.fromEntries(
             detail.planned_pages.map((page) => [
@@ -109,6 +115,7 @@ export default function SitePlansPage() {
         );
       } else {
         setPlan(null);
+        setReadiness(null);
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Unable to load Site Plans.");
@@ -337,6 +344,8 @@ export default function SitePlansPage() {
             </div>
           </section>
 
+          {readiness && <WebsiteReadinessPanel report={readiness} />}
+
           <section className="sitePlanCards">
             {plan.planned_pages.map((page) => (
               <article className="panel plannedPageCard" key={page.id}>
@@ -452,6 +461,55 @@ export default function SitePlansPage() {
       )}
     </div>
   );
+}
+
+function WebsiteReadinessPanel({ report }: { report: WebsiteReadinessReport }) {
+  return (
+    <section className="panel websiteReadinessPanel">
+      <div className="panelHeader">
+        <div>
+          <p className="eyebrow">Website-Scoped Review</p>
+          <h2>Website Readiness</h2>
+          <p>Current review dimensions are evaluated independently from deferred future systems.</p>
+        </div>
+        <span className={`readinessStatus ${report.review_ready ? "ready" : "needs_attention"}`}>
+          {report.review_ready ? "Review ready" : "Needs attention"}
+        </span>
+      </div>
+      <div className="readinessCategoryGrid">
+        {report.categories.map((category) => (
+          <article className="readinessCategory" key={category.key}>
+            <div className="readinessCategoryHeader">
+              <h3>{category.label}</h3>
+              <span className={`readinessStatus ${category.status}`}>
+                {humanizeReadiness(category.status)}
+              </span>
+            </div>
+            <ul className="readinessItemList">
+              {category.items.map((item) => (
+                <li key={item.key}>
+                  <div>
+                    <strong>{item.label}</strong>
+                    <span className={`readinessStatus ${item.status}`}>
+                      {humanizeReadiness(item.status)}
+                    </span>
+                  </div>
+                  <p>{item.message}</p>
+                  {item.affected_planned_page_ids.length > 0 && (
+                    <small>Planned Page IDs: {item.affected_planned_page_ids.join(", ")}</small>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function humanizeReadiness(value: string) {
+  return value.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
 function DraftSummary({ draft }: { draft: Record<string, unknown> }) {

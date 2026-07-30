@@ -618,6 +618,11 @@ def _render_common_draft(draft: PlannedPageDraftContent) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
+def render_planned_page_content(draft: PlannedPageDraftContent) -> str:
+    """Render the approved planned-page contract for local review consumers."""
+    return _render_common_draft(draft)
+
+
 def _knowledge_body(knowledge: list[KnowledgeBlock]) -> str:
     return "\n\n".join(
         f"### {item.title}\n{item.long_answer}"

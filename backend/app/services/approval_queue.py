@@ -16,6 +16,7 @@ from app.models import (
     Service,
 )
 from app.schemas.approval_queue import ApprovalQueueItem, ApprovalQueueResponse
+from app.services.page_type_review import review_contract_for
 from app.services.website_scope import require_single_website_selection
 
 
@@ -80,7 +81,11 @@ def _queue_item(
             or _utc_timestamp(latest_revision_at) > _utc_timestamp(page.qa_checked_at)
         )
     )
-    missing_media = hero_image_status != "reviewed"
+    try:
+        media_required = review_contract_for(page).media_policy == "required"
+    except ValueError:
+        media_required = True
+    missing_media = media_required and hero_image_status != "reviewed"
     approved_but_unpublished = page.status == "approved" and not page.wordpress_url
     is_ready_for_approval = bool(
         page.status == "draft"

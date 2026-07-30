@@ -44,10 +44,10 @@ class PageExportPackage(SQLModel):
     content_sections: dict[str, str]
     faq_items: list[dict[str, str]]
     cta_block: str
-    city: str
-    county: str
-    state: str
-    service: str
+    city: str | None = None
+    county: str | None = None
+    state: str | None = None
+    service: str | None = None
     business_name: str
     phone: str | None = None
     website: str | None = None

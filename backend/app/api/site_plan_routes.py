@@ -14,6 +14,7 @@ from app.schemas.site_plans import (
     SitePlanCreate,
     SitePlanDetail,
     SitePlanRead,
+    WebsiteReadinessReport,
     SitePlanUpdate,
 )
 from app.services.planned_page_drafting import (
@@ -30,6 +31,10 @@ from app.services.site_planning import (
     update_planned_page,
     update_planning_overrides,
     update_site_plan,
+)
+from app.services.website_readiness import (
+    WebsiteReadinessError,
+    evaluate_website_readiness,
 )
 
 router = APIRouter(prefix="/site-plans", tags=["site plans"])
@@ -66,6 +71,17 @@ def edit_site_plan(
     session: Session = Depends(get_session),
 ):
     return _call(update_site_plan, session, plan_id, payload)
+
+
+@router.get("/{plan_id}/readiness", response_model=WebsiteReadinessReport)
+def read_site_plan_readiness(
+    plan_id: int,
+    session: Session = Depends(get_session),
+):
+    try:
+        return evaluate_website_readiness(session, plan_id)
+    except WebsiteReadinessError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/{plan_id}/planned-pages", response_model=PlannedPageRead, status_code=201)
