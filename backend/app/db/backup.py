@@ -16,15 +16,24 @@ from app.models import (
     GeneratedPage,
     GeneratedPageRevision,
     ImageMetadata,
+    InternalLinkIntent,
     KnowledgeBlock,
+    NavigationItem,
+    NavigationSet,
     PageImageAssignment,
     PlannedPage,
     PlanningRecord,
+    SiteConnectionPlanningRecord,
     Service,
     Setting,
     SitePlan,
     Website,
+    WebsiteCityCoverageDecision,
+    WebsiteCountyCoverageDecision,
+    WebsiteCoveragePlanningRecord,
     WebsiteIdentity,
+    WebsiteServiceCityCoverageDecision,
+    WebsiteServiceCoverageDecision,
     WordPressDraftAudit,
     WordPressHeadingCorrectionAudit,
     WordPressDeploymentAudit,
@@ -44,7 +53,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.43"
+BACKUP_VERSION = "0.45"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -73,6 +82,8 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.41",
     "0.42",
     "0.43",
+    "0.44",
+    "0.45",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -97,6 +108,15 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "site_plans": SitePlan,
     "planned_pages": PlannedPage,
     "planning_records": PlanningRecord,
+    "site_connection_planning_records": SiteConnectionPlanningRecord,
+    "website_coverage_planning_records": WebsiteCoveragePlanningRecord,
+    "website_service_coverage_decisions": WebsiteServiceCoverageDecision,
+    "website_county_coverage_decisions": WebsiteCountyCoverageDecision,
+    "website_city_coverage_decisions": WebsiteCityCoverageDecision,
+    "website_service_city_coverage_decisions": WebsiteServiceCityCoverageDecision,
+    "navigation_sets": NavigationSet,
+    "navigation_items": NavigationItem,
+    "internal_link_intents": InternalLinkIntent,
     "approval_audits": ApprovalAudit,
     "page_revisions": GeneratedPageRevision,
     "wordpress_draft_audits": WordPressDraftAudit,
@@ -305,7 +325,11 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             restored_record = {
                 **record,
                 "business_id": _mapped_id(business_ids, record["business_id"], "generated_pages.business_id"),
-                "service_id": _mapped_id(service_ids, record["service_id"], "generated_pages.service_id"),
+                "service_id": _mapped_optional_id(
+                    service_ids,
+                    record.get("service_id"),
+                    "generated_pages.service_id",
+                ),
                 "city_id": _mapped_optional_id(city_ids, record.get("city_id"), "generated_pages.city_id"),
                 "county_id": _mapped_optional_id(county_ids, record.get("county_id"), "generated_pages.county_id"),
                 "website_id": _mapped_optional_id(
@@ -417,6 +441,296 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 ),
                 {**record, "planned_page_id": planned_page_id},
             )
+
+        for record in data.get("website_coverage_planning_records", []):
+            site_plan_id = _mapped_id(
+                site_plan_ids,
+                record["site_plan_id"],
+                "website_coverage_planning_records.site_plan_id",
+            )
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "website_coverage_planning_records.website_id",
+            )
+            _upsert(
+                session,
+                WebsiteCoveragePlanningRecord,
+                select(WebsiteCoveragePlanningRecord).where(
+                    WebsiteCoveragePlanningRecord.site_plan_id == site_plan_id
+                ),
+                {**record, "site_plan_id": site_plan_id, "website_id": website_id},
+            )
+
+        for record in data.get("website_service_coverage_decisions", []):
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "website_service_coverage_decisions.website_id",
+            )
+            service_id = _mapped_id(
+                service_ids,
+                record["service_id"],
+                "website_service_coverage_decisions.service_id",
+            )
+            _upsert(
+                session,
+                WebsiteServiceCoverageDecision,
+                select(WebsiteServiceCoverageDecision).where(
+                    WebsiteServiceCoverageDecision.website_id == website_id,
+                    WebsiteServiceCoverageDecision.service_id == service_id,
+                ),
+                {**record, "website_id": website_id, "service_id": service_id},
+            )
+
+        for record in data.get("website_county_coverage_decisions", []):
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "website_county_coverage_decisions.website_id",
+            )
+            county_id = _mapped_id(
+                county_ids,
+                record["county_id"],
+                "website_county_coverage_decisions.county_id",
+            )
+            _upsert(
+                session,
+                WebsiteCountyCoverageDecision,
+                select(WebsiteCountyCoverageDecision).where(
+                    WebsiteCountyCoverageDecision.website_id == website_id,
+                    WebsiteCountyCoverageDecision.county_id == county_id,
+                ),
+                {**record, "website_id": website_id, "county_id": county_id},
+            )
+
+        for record in data.get("website_city_coverage_decisions", []):
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "website_city_coverage_decisions.website_id",
+            )
+            city_id = _mapped_id(
+                city_ids,
+                record["city_id"],
+                "website_city_coverage_decisions.city_id",
+            )
+            _upsert(
+                session,
+                WebsiteCityCoverageDecision,
+                select(WebsiteCityCoverageDecision).where(
+                    WebsiteCityCoverageDecision.website_id == website_id,
+                    WebsiteCityCoverageDecision.city_id == city_id,
+                ),
+                {**record, "website_id": website_id, "city_id": city_id},
+            )
+
+        for record in data.get("website_service_city_coverage_decisions", []):
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "website_service_city_coverage_decisions.website_id",
+            )
+            service_id = _mapped_id(
+                service_ids,
+                record["service_id"],
+                "website_service_city_coverage_decisions.service_id",
+            )
+            city_id = _mapped_id(
+                city_ids,
+                record["city_id"],
+                "website_service_city_coverage_decisions.city_id",
+            )
+            _upsert(
+                session,
+                WebsiteServiceCityCoverageDecision,
+                select(WebsiteServiceCityCoverageDecision).where(
+                    WebsiteServiceCityCoverageDecision.website_id == website_id,
+                    WebsiteServiceCityCoverageDecision.service_id == service_id,
+                    WebsiteServiceCityCoverageDecision.city_id == city_id,
+                ),
+                {
+                    **record,
+                    "website_id": website_id,
+                    "service_id": service_id,
+                    "city_id": city_id,
+                },
+            )
+
+        navigation_set_ids: dict[int, int] = {}
+        for record in data.get("navigation_sets", []):
+            old_id = _record_id(record, "navigation_sets")
+            site_plan_id = _mapped_id(
+                site_plan_ids,
+                record["site_plan_id"],
+                "navigation_sets.site_plan_id",
+            )
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "navigation_sets.website_id",
+            )
+            restored = _upsert(
+                session,
+                NavigationSet,
+                select(NavigationSet).where(
+                    NavigationSet.site_plan_id == site_plan_id,
+                    NavigationSet.set_type == record["set_type"],
+                ),
+                {
+                    **record,
+                    "site_plan_id": site_plan_id,
+                    "website_id": website_id,
+                },
+            )
+            navigation_set_ids[old_id] = _required_id(restored)
+
+        for record in data.get("site_connection_planning_records", []):
+            site_plan_id = _mapped_id(
+                site_plan_ids,
+                record["site_plan_id"],
+                "site_connection_planning_records.site_plan_id",
+            )
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "site_connection_planning_records.website_id",
+            )
+            _upsert(
+                session,
+                SiteConnectionPlanningRecord,
+                select(SiteConnectionPlanningRecord).where(
+                    SiteConnectionPlanningRecord.site_plan_id == site_plan_id
+                ),
+                {
+                    **record,
+                    "site_plan_id": site_plan_id,
+                    "website_id": website_id,
+                },
+            )
+
+        navigation_item_ids: dict[int, int] = {}
+        pending_navigation_items: list[
+            tuple[dict[str, Any], NavigationItem]
+        ] = []
+        for record in data.get("navigation_items", []):
+            old_id = _record_id(record, "navigation_items")
+            restored = _upsert(
+                session,
+                NavigationItem,
+                select(NavigationItem).where(
+                    NavigationItem.navigation_set_id
+                    == _mapped_id(
+                        navigation_set_ids,
+                        record["navigation_set_id"],
+                        "navigation_items.navigation_set_id",
+                    ),
+                    NavigationItem.target_planned_page_id
+                    == _mapped_id(
+                        planned_page_ids,
+                        record["target_planned_page_id"],
+                        "navigation_items.target_planned_page_id",
+                    ),
+                ),
+                {
+                    **record,
+                    "website_id": _mapped_id(
+                        website_ids,
+                        record["website_id"],
+                        "navigation_items.website_id",
+                    ),
+                    "site_plan_id": _mapped_id(
+                        site_plan_ids,
+                        record["site_plan_id"],
+                        "navigation_items.site_plan_id",
+                    ),
+                    "navigation_set_id": _mapped_id(
+                        navigation_set_ids,
+                        record["navigation_set_id"],
+                        "navigation_items.navigation_set_id",
+                    ),
+                    "target_planned_page_id": _mapped_id(
+                        planned_page_ids,
+                        record["target_planned_page_id"],
+                        "navigation_items.target_planned_page_id",
+                    ),
+                    "parent_navigation_item_id": None,
+                },
+            )
+            navigation_item_ids[old_id] = _required_id(restored)
+            pending_navigation_items.append((record, restored))
+        for record, restored in pending_navigation_items:
+            restored.parent_navigation_item_id = _mapped_optional_id(
+                navigation_item_ids,
+                record.get("parent_navigation_item_id"),
+                "navigation_items.parent_navigation_item_id",
+            )
+            session.add(restored)
+        session.flush()
+
+        for record in data.get("internal_link_intents", []):
+            site_plan_id = _mapped_id(
+                site_plan_ids,
+                record["site_plan_id"],
+                "internal_link_intents.site_plan_id",
+            )
+            source_id = _mapped_id(
+                planned_page_ids,
+                record["source_planned_page_id"],
+                "internal_link_intents.source_planned_page_id",
+            )
+            target_id = _mapped_id(
+                planned_page_ids,
+                record["target_planned_page_id"],
+                "internal_link_intents.target_planned_page_id",
+            )
+            _upsert(
+                session,
+                InternalLinkIntent,
+                select(InternalLinkIntent).where(
+                    InternalLinkIntent.site_plan_id == site_plan_id,
+                    InternalLinkIntent.source_planned_page_id == source_id,
+                    InternalLinkIntent.target_planned_page_id == target_id,
+                    InternalLinkIntent.relationship_type
+                    == record["relationship_type"],
+                ),
+                {
+                    **record,
+                    "website_id": _mapped_id(
+                        website_ids,
+                        record["website_id"],
+                        "internal_link_intents.website_id",
+                    ),
+                    "site_plan_id": site_plan_id,
+                    "source_planned_page_id": source_id,
+                    "target_planned_page_id": target_id,
+                },
+            )
+
+        if payload["metadata"]["version"] not in {"0.44", "0.45"}:
+            from app.services.site_connections import (
+                ensure_site_connection_foundation,
+            )
+
+            for restored_plan_id in site_plan_ids.values():
+                restored_plan = session.get(SitePlan, restored_plan_id)
+                if restored_plan:
+                    ensure_site_connection_foundation(
+                        session,
+                        restored_plan,
+                        commit=False,
+                    )
+        if payload["metadata"]["version"] != "0.45":
+            from app.services.site_coverage import ensure_coverage_foundation
+
+            for restored_plan_id in site_plan_ids.values():
+                restored_plan = session.get(SitePlan, restored_plan_id)
+                if restored_plan:
+                    ensure_coverage_foundation(
+                        session,
+                        restored_plan,
+                        commit=False,
+                    )
 
         for record in data["approval_audits"]:
             page_id = _mapped_id(
@@ -971,8 +1285,29 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version != "0.43":
+    if backup_version not in {"0.43", "0.44", "0.45"}:
         for group in ("site_plans", "planned_pages", "planning_records"):
+            if group not in data:
+                data[group] = []
+                counts[group] = 0
+    if backup_version not in {"0.44", "0.45"}:
+        for group in (
+            "site_connection_planning_records",
+            "navigation_sets",
+            "navigation_items",
+            "internal_link_intents",
+        ):
+            if group not in data:
+                data[group] = []
+                counts[group] = 0
+    if backup_version != "0.45":
+        for group in (
+            "website_coverage_planning_records",
+            "website_service_coverage_decisions",
+            "website_county_coverage_decisions",
+            "website_city_coverage_decisions",
+            "website_service_city_coverage_decisions",
+        ):
             if group not in data:
                 data[group] = []
                 counts[group] = 0
@@ -985,6 +1320,26 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             raise BackupValidationError(f"Backup count mismatch for '{group}'.")
         if not all(isinstance(record, dict) for record in records):
             raise BackupValidationError(f"Backup data group '{group}' contains an invalid record.")
+
+    for group in (
+        "website_service_coverage_decisions",
+        "website_county_coverage_decisions",
+        "website_city_coverage_decisions",
+        "website_service_city_coverage_decisions",
+    ):
+        for record in data[group]:
+            if record.get("status") not in {"included", "excluded", "deferred"}:
+                raise BackupValidationError(
+                    f"Backup contains an invalid coverage status in '{group}'."
+                )
+            if (
+                not isinstance(record.get("decision_version"), int)
+                or record["decision_version"] < 1
+                or not str(record.get("decided_by") or "").strip()
+            ):
+                raise BackupValidationError(
+                    f"Backup contains invalid coverage provenance in '{group}'."
+                )
 
     _validate_unique_records(data)
     _validate_backup_references(data)
@@ -1093,6 +1448,24 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         "site_plans": ("website_id", "plan_key"),
         "planned_pages": ("website_id", "intended_slug"),
         "planning_records": ("planned_page_id",),
+        "site_connection_planning_records": ("site_plan_id",),
+        "website_coverage_planning_records": ("site_plan_id",),
+        "website_service_coverage_decisions": ("website_id", "service_id"),
+        "website_county_coverage_decisions": ("website_id", "county_id"),
+        "website_city_coverage_decisions": ("website_id", "city_id"),
+        "website_service_city_coverage_decisions": (
+            "website_id",
+            "service_id",
+            "city_id",
+        ),
+        "navigation_sets": ("site_plan_id", "set_type"),
+        "navigation_items": ("navigation_set_id", "target_planned_page_id"),
+        "internal_link_intents": (
+            "site_plan_id",
+            "source_planned_page_id",
+            "target_planned_page_id",
+            "relationship_type",
+        ),
         "approval_audits": ("generated_page_id", "approved_at", "draft_hash_at_approval"),
         "page_revisions": ("generated_page_id", "created_at", "draft_hash_after"),
         "wordpress_draft_audits": ("generated_page_id", "attempted_at", "payload_hash"),
@@ -1142,7 +1515,7 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
         "cities": (("county_id", "counties", False),),
         "generated_pages": (
             ("business_id", "businesses", False),
-            ("service_id", "services", False),
+            ("service_id", "services", True),
             ("city_id", "cities", True),
             ("county_id", "counties", True),
             ("website_id", "websites", True),
@@ -1159,6 +1532,48 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
         ),
         "planning_records": (
             ("planned_page_id", "planned_pages", False),
+        ),
+        "site_connection_planning_records": (
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+        ),
+        "website_coverage_planning_records": (
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+        ),
+        "website_service_coverage_decisions": (
+            ("website_id", "websites", False),
+            ("service_id", "services", False),
+        ),
+        "website_county_coverage_decisions": (
+            ("website_id", "websites", False),
+            ("county_id", "counties", False),
+        ),
+        "website_city_coverage_decisions": (
+            ("website_id", "websites", False),
+            ("city_id", "cities", False),
+        ),
+        "website_service_city_coverage_decisions": (
+            ("website_id", "websites", False),
+            ("service_id", "services", False),
+            ("city_id", "cities", False),
+        ),
+        "navigation_sets": (
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+        ),
+        "navigation_items": (
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+            ("navigation_set_id", "navigation_sets", False),
+            ("target_planned_page_id", "planned_pages", False),
+            ("parent_navigation_item_id", "navigation_items", True),
+        ),
+        "internal_link_intents": (
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+            ("source_planned_page_id", "planned_pages", False),
+            ("target_planned_page_id", "planned_pages", False),
         ),
         "image_metadata": (
             ("business_id", "businesses", False),

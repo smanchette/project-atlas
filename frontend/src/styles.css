@@ -4325,3 +4325,180 @@ th {
   background: #fef3c7;
   color: #92400e;
 }
+
+.siteConnectionPanel {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.connectionDiagnostics,
+.connectionPlanningGrid,
+.suggestionLists {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.connectionDiagnostics article,
+.connectionPlanningGrid > section {
+  border: 1px solid #dbe4ee;
+  border-radius: 0.85rem;
+  padding: 1rem;
+  background: #fff;
+}
+
+.coveragePlanningPanel {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.coverageCountGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.75rem;
+}
+
+.coverageCountGrid > div {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.8rem;
+  border: 1px solid #dbe4ee;
+  border-radius: 0.7rem;
+  background: #f8fafc;
+}
+
+.coverageCountGrid strong {
+  font-size: 1.35rem;
+}
+
+.coverageCountGrid span {
+  color: #64748b;
+  text-transform: capitalize;
+}
+
+.coverageDecisionGroup,
+.coverageInventoryList {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.coverageDecisionRow {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.25fr) minmax(110px, 0.55fr) minmax(160px, 1fr) minmax(130px, 0.7fr) auto;
+  gap: 0.65rem;
+  align-items: center;
+  padding: 0.75rem;
+  border: 1px solid #dbe4ee;
+  border-radius: 0.7rem;
+}
+
+.coverageDecisionRow .checkboxLabel {
+  grid-column: 1 / -1;
+}
+
+.coverageCandidateIdentity {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.coverageCandidateIdentity small {
+  color: #64748b;
+  text-transform: capitalize;
+}
+
+.coverageInventoryList article {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) auto;
+  gap: 0.35rem 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid #dbe4ee;
+  border-radius: 0.7rem;
+}
+
+.coverageInventoryList article > div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.coverageInventoryList article p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #64748b;
+}
+
+@media (max-width: 900px) {
+  .coverageDecisionRow {
+    grid-template-columns: 1fr;
+  }
+}
+
+.connectionDiagnostics article > div,
+.connectionSuggestionSummary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.connectionDiagnostics p,
+.connectionSuggestionSummary p,
+.connectionRecord p {
+  margin: 0.35rem 0 0;
+}
+
+.connectionSuggestionSummary {
+  border-radius: 0.85rem;
+  padding: 1rem;
+  background: #f8fafc;
+}
+
+.suggestionLists ul {
+  margin: 0.75rem 0;
+  padding-left: 1.25rem;
+}
+
+.connectionForm,
+.connectionRecordList {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.connectionForm {
+  margin: 1rem 0;
+}
+
+.connectionForm label {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.connectionRecordList > div {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.connectionRecord {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  gap: 0.65rem;
+  align-items: center;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.7rem;
+  padding: 0.75rem;
+}
+
+.navigationRecord {
+  grid-template-columns: minmax(160px, 1fr) minmax(120px, 1fr) 90px minmax(120px, 1fr) auto auto;
+}
+
+.connectionRecord small {
+  display: block;
+  color: #64748b;
+}
+
+@media (max-width: 800px) {
+  .connectionRecord,
+  .navigationRecord {
+    grid-template-columns: 1fr;
+  }
+}

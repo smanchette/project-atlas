@@ -1,15 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
-import { ClipboardList, FilePlus2, RefreshCw, Save } from "lucide-react";
+import { ClipboardList, FilePlus2, RefreshCw, Save, Trash2 } from "lucide-react";
 
 import { apiRequest } from "../api";
+import CoveragePlanningPanel from "../components/CoveragePlanningPanel";
 import type {
   City,
+  CoverageInventoryPreview,
+  CoveragePolicy,
   County,
+  InternalLinkIntent,
+  NavigationItem,
   PageType,
   PlannedPage,
   Service,
   SitePlan,
   SitePlanDetail,
+  SiteConnectionPlan,
   Website,
   WebsiteReadinessReport
 } from "../types";
@@ -55,6 +61,10 @@ export default function SitePlansPage() {
   const [plans, setPlans] = useState<SitePlan[]>([]);
   const [plan, setPlan] = useState<SitePlanDetail | null>(null);
   const [readiness, setReadiness] = useState<WebsiteReadinessReport | null>(null);
+  const [connections, setConnections] = useState<SiteConnectionPlan | null>(null);
+  const [coveragePolicy, setCoveragePolicy] = useState<CoveragePolicy | null>(null);
+  const [coverageInventory, setCoverageInventory] =
+    useState<CoverageInventoryPreview | null>(null);
   const [draft, setDraft] = useState<DraftPage>(EMPTY_PAGE);
   const [purposeOverrides, setPurposeOverrides] = useState<Record<number, string>>({});
   const [message, setMessage] = useState("");
@@ -99,12 +109,20 @@ export default function SitePlansPage() {
       );
       setPlans(rows);
       if (rows[0]) {
-        const [detail, readinessReport] = await Promise.all([
+        const [detail, readinessReport, connectionPlan, policy, inventory] = await Promise.all([
           apiRequest<SitePlanDetail>(`/api/site-plans/${rows[0].id}`),
-          apiRequest<WebsiteReadinessReport>(`/api/site-plans/${rows[0].id}/readiness`)
+          apiRequest<WebsiteReadinessReport>(`/api/site-plans/${rows[0].id}/readiness`),
+          apiRequest<SiteConnectionPlan>(`/api/site-plans/${rows[0].id}/connections`),
+          apiRequest<CoveragePolicy>(`/api/site-plans/${rows[0].id}/coverage`),
+          apiRequest<CoverageInventoryPreview>(
+            `/api/site-plans/${rows[0].id}/coverage/inventory`
+          )
         ]);
         setPlan(detail);
         setReadiness(readinessReport);
+        setConnections(connectionPlan);
+        setCoveragePolicy(policy);
+        setCoverageInventory(inventory);
         setPurposeOverrides(
           Object.fromEntries(
             detail.planned_pages.map((page) => [
@@ -116,6 +134,9 @@ export default function SitePlansPage() {
       } else {
         setPlan(null);
         setReadiness(null);
+        setConnections(null);
+        setCoveragePolicy(null);
+        setCoverageInventory(null);
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Unable to load Site Plans.");
@@ -345,6 +366,27 @@ export default function SitePlansPage() {
           </section>
 
           {readiness && <WebsiteReadinessPanel report={readiness} />}
+          {coveragePolicy && coverageInventory && websiteId && (
+            <CoveragePlanningPanel
+              key={`coverage-${plan.id}`}
+              planId={plan.id}
+              policy={coveragePolicy}
+              inventory={coverageInventory}
+              working={working}
+              reload={() => loadPlans(websiteId)}
+              reportMessage={setMessage}
+            />
+          )}
+          {connections && websiteId && (
+            <SiteConnectionPanel
+              key={plan.id}
+              plan={plan}
+              connections={connections}
+              websiteId={websiteId}
+              reload={() => loadPlans(websiteId)}
+              reportMessage={setMessage}
+            />
+          )}
 
           <section className="sitePlanCards">
             {plan.planned_pages.map((page) => (
@@ -459,6 +501,446 @@ export default function SitePlansPage() {
           </section>
         </>
       )}
+    </div>
+  );
+}
+
+function SiteConnectionPanel({
+  plan,
+  connections,
+  websiteId,
+  reload,
+  reportMessage
+}: {
+  plan: SitePlanDetail;
+  connections: SiteConnectionPlan;
+  websiteId: number;
+  reload: () => Promise<void>;
+  reportMessage: (message: string) => void;
+}) {
+  const eligiblePages = plan.planned_pages.filter(
+    (page) => page.page_type !== "county" && page.page_type !== "city"
+  );
+  const firstSet = connections.navigation_sets[0];
+  const [navSetId, setNavSetId] = useState(String(firstSet?.id ?? ""));
+  const [navTargetId, setNavTargetId] = useState("");
+  const [navParentId, setNavParentId] = useState("");
+  const [navLabel, setNavLabel] = useState("");
+  const [navPosition, setNavPosition] = useState("0");
+  const [linkSourceId, setLinkSourceId] = useState("");
+  const [linkTargetId, setLinkTargetId] = useState("");
+  const [linkType, setLinkType] = useState<InternalLinkIntent["relationship_type"]>("conversion");
+  const [linkPurpose, setLinkPurpose] = useState("");
+  const [anchorGuidance, setAnchorGuidance] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const selectedSet = connections.navigation_sets.find(
+    (item) => item.id === Number(navSetId)
+  );
+  const parentOptions = connections.navigation_items.filter(
+    (item) => item.navigation_set_id === selectedSet?.id
+  );
+  const pageName = (id: number) =>
+    plan.planned_pages.find((page) => page.id === id)?.working_name ?? `Planned Page #${id}`;
+
+  async function refreshSuggestions() {
+    setBusy(true);
+    try {
+      await apiRequest(
+        `/api/site-plans/${plan.id}/connections/suggestions/refresh`,
+        { method: "POST" }
+      );
+      await reload();
+      reportMessage("Atlas connection suggestions refreshed; operator decisions were unchanged.");
+    } catch (error) {
+      reportMessage(error instanceof Error ? error.message : "Unable to refresh suggestions.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addNavigationItem() {
+    const target = eligiblePages.find((page) => page.id === Number(navTargetId));
+    if (!selectedSet || !target) return;
+    setBusy(true);
+    try {
+      await apiRequest(`/api/site-plans/${plan.id}/navigation-items`, {
+        method: "POST",
+        body: JSON.stringify({
+          website_id: websiteId,
+          site_plan_id: plan.id,
+          navigation_set_id: selectedSet.id,
+          target_planned_page_id: target.id,
+          parent_navigation_item_id: numberOrNull(navParentId),
+          label: navLabel.trim() || target.working_name,
+          position: Number(navPosition) || 0,
+          status: "active"
+        })
+      });
+      setNavTargetId("");
+      setNavParentId("");
+      setNavLabel("");
+      setNavPosition("0");
+      await reload();
+      reportMessage("Operator navigation decision added.");
+    } catch (error) {
+      reportMessage(error instanceof Error ? error.message : "Unable to add navigation item.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeNavigationItem(itemId: number) {
+    setBusy(true);
+    try {
+      await apiRequest(`/api/site-plans/navigation-items/${itemId}`, {
+        method: "DELETE"
+      });
+      await reload();
+      reportMessage("Navigation item removed.");
+    } catch (error) {
+      reportMessage(error instanceof Error ? error.message : "Unable to remove navigation item.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addInternalLink() {
+    if (!linkSourceId || !linkTargetId || !linkPurpose.trim()) return;
+    setBusy(true);
+    try {
+      await apiRequest(`/api/site-plans/${plan.id}/internal-link-intents`, {
+        method: "POST",
+        body: JSON.stringify({
+          website_id: websiteId,
+          site_plan_id: plan.id,
+          source_planned_page_id: Number(linkSourceId),
+          target_planned_page_id: Number(linkTargetId),
+          purpose: linkPurpose,
+          relationship_type: linkType,
+          anchor_guidance: anchorGuidance.trim() || null,
+          approval_state: "proposed"
+        })
+      });
+      setLinkTargetId("");
+      setLinkPurpose("");
+      setAnchorGuidance("");
+      await reload();
+      reportMessage("Proposed internal-link decision added; no content was modified.");
+    } catch (error) {
+      reportMessage(error instanceof Error ? error.message : "Unable to add internal-link intent.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateInternalLink(
+    intent: InternalLinkIntent,
+    approvalState: InternalLinkIntent["approval_state"]
+  ) {
+    setBusy(true);
+    try {
+      await apiRequest(`/api/site-plans/internal-link-intents/${intent.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ approval_state: approvalState })
+      });
+      await reload();
+      reportMessage(`Internal-link decision marked ${approvalState}.`);
+    } catch (error) {
+      reportMessage(error instanceof Error ? error.message : "Unable to update internal-link intent.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeInternalLink(intentId: number) {
+    setBusy(true);
+    try {
+      await apiRequest(`/api/site-plans/internal-link-intents/${intentId}`, {
+        method: "DELETE"
+      });
+      await reload();
+      reportMessage("Internal-link decision removed.");
+    } catch (error) {
+      reportMessage(error instanceof Error ? error.message : "Unable to remove internal-link intent.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="panel siteConnectionPanel">
+      <div className="panelHeader">
+        <div>
+          <p className="eyebrow">Website Experience Planning</p>
+          <h2>Navigation and Internal Links</h2>
+          <p>Atlas suggestions remain separate from operator decisions. No draft content or CMS menu is changed here.</p>
+        </div>
+        <span className={`readinessStatus ${connections.ready ? "ready" : "needs_attention"}`}>
+          {connections.ready ? "Ready" : "Needs attention"}
+        </span>
+      </div>
+
+      <div className="connectionDiagnostics">
+        {connections.diagnostics.map((diagnostic) => (
+          <article key={diagnostic.key}>
+            <div>
+              <strong>{diagnostic.label}</strong>
+              <span className={`readinessStatus ${diagnostic.status}`}>
+                {humanizeReadiness(diagnostic.status)}
+              </span>
+            </div>
+            <p>{diagnostic.message}</p>
+            {diagnostic.affected_planned_page_ids.length > 0 && (
+              <small>Planned Page IDs: {diagnostic.affected_planned_page_ids.join(", ")}</small>
+            )}
+          </article>
+        ))}
+      </div>
+
+      <div className="connectionSuggestionSummary">
+        <div>
+          <strong>Atlas-generated suggestions</strong>
+          <p>
+            {connections.planning_record.generated_navigation_suggestions.length} navigation and{" "}
+            {connections.planning_record.generated_internal_link_suggestions.length} internal-link suggestions.
+          </p>
+        </div>
+        <button className="secondaryButton buttonWithIcon" disabled={busy} onClick={refreshSuggestions}>
+          <RefreshCw size={16} aria-hidden="true" /> Refresh Suggestions
+        </button>
+      </div>
+      <details>
+        <summary>Review Atlas suggestions</summary>
+        <div className="suggestionLists">
+          <ul>
+            {connections.planning_record.generated_navigation_suggestions.map((suggestion) => (
+              <li key={String(suggestion.suggestion_key)}>
+                {String(suggestion.set_type)} · {pageName(Number(suggestion.target_planned_page_id))} · {String(suggestion.rationale)}
+              </li>
+            ))}
+          </ul>
+          <ul>
+            {connections.planning_record.generated_internal_link_suggestions.map((suggestion) => (
+              <li key={String(suggestion.suggestion_key)}>
+                {pageName(Number(suggestion.source_planned_page_id))} → {pageName(Number(suggestion.target_planned_page_id))}: {String(suggestion.purpose)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      </details>
+
+      <div className="connectionPlanningGrid">
+        <section>
+          <h3>Operator navigation decisions</h3>
+          <div className="connectionForm">
+            <label>
+              <span>Navigation set</span>
+              <select value={navSetId} onChange={(event) => {
+                setNavSetId(event.target.value);
+                setNavParentId("");
+              }}>
+                {connections.navigation_sets.map((item) => (
+                  <option key={item.id} value={item.id}>{item.label}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Target page</span>
+              <select value={navTargetId} onChange={(event) => {
+                const value = event.target.value;
+                setNavTargetId(value);
+                const target = eligiblePages.find((page) => page.id === Number(value));
+                if (target) setNavLabel(target.working_name);
+              }}>
+                <option value="">Select a supported Planned Page</option>
+                {eligiblePages.map((page) => (
+                  <option key={page.id} value={page.id}>{page.working_name}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Label</span>
+              <input value={navLabel} onChange={(event) => setNavLabel(event.target.value)} />
+            </label>
+            <label>
+              <span>Parent item</span>
+              <select value={navParentId} onChange={(event) => setNavParentId(event.target.value)}>
+                <option value="">Top level</option>
+                {parentOptions.map((item) => (
+                  <option key={item.id} value={item.id}>{item.label}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Position</span>
+              <input type="number" min="0" value={navPosition} onChange={(event) => setNavPosition(event.target.value)} />
+            </label>
+            <button className="primaryButton" disabled={busy || !navTargetId} onClick={addNavigationItem}>
+              Add Navigation Item
+            </button>
+          </div>
+          <div className="connectionRecordList">
+            {connections.navigation_sets.map((navSet) => (
+              <div key={navSet.id}>
+                <strong>{navSet.label}</strong>
+                {connections.navigation_items
+                  .filter((item) => item.navigation_set_id === navSet.id)
+                  .map((item) => (
+                    <NavigationItemEditor
+                      key={item.id}
+                      item={item}
+                      items={connections.navigation_items.filter(
+                        (candidate) =>
+                          candidate.navigation_set_id === navSet.id &&
+                          candidate.id !== item.id
+                      )}
+                      pageName={pageName}
+                      disabled={busy}
+                      onSaved={async () => {
+                        await reload();
+                        reportMessage("Navigation label, order, or hierarchy updated.");
+                      }}
+                      onError={reportMessage}
+                      onRemove={() => removeNavigationItem(item.id)}
+                    />
+                  ))}
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section>
+          <h3>Operator internal-link decisions</h3>
+          <div className="connectionForm">
+            <label>
+              <span>Source page</span>
+              <select value={linkSourceId} onChange={(event) => setLinkSourceId(event.target.value)}>
+                <option value="">Select source</option>
+                {eligiblePages.map((page) => <option key={page.id} value={page.id}>{page.working_name}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>Target page</span>
+              <select value={linkTargetId} onChange={(event) => setLinkTargetId(event.target.value)}>
+                <option value="">Select target</option>
+                {eligiblePages.map((page) => <option key={page.id} value={page.id}>{page.working_name}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>Relationship</span>
+              <select value={linkType} onChange={(event) => setLinkType(event.target.value as InternalLinkIntent["relationship_type"])}>
+                <option value="conversion">Conversion</option>
+                <option value="hierarchy">Hierarchy</option>
+                <option value="related_content">Related content</option>
+                <option value="supporting_information">Supporting information</option>
+              </select>
+            </label>
+            <label>
+              <span>Purpose</span>
+              <input value={linkPurpose} onChange={(event) => setLinkPurpose(event.target.value)} />
+            </label>
+            <label>
+              <span>Anchor guidance</span>
+              <input value={anchorGuidance} onChange={(event) => setAnchorGuidance(event.target.value)} />
+            </label>
+            <button className="primaryButton" disabled={busy || !linkSourceId || !linkTargetId || !linkPurpose.trim()} onClick={addInternalLink}>
+              Add Proposed Link
+            </button>
+          </div>
+          <div className="connectionRecordList">
+            {connections.internal_link_intents.map((intent) => (
+              <div className="connectionRecord" key={intent.id}>
+                <div>
+                  <strong>{pageName(intent.source_planned_page_id)} → {pageName(intent.target_planned_page_id)}</strong>
+                  <p>{intent.relationship_type}: {intent.purpose}</p>
+                </div>
+                <select
+                  aria-label={`Approval state for internal link ${intent.id}`}
+                  value={intent.approval_state}
+                  disabled={busy}
+                  onChange={(event) =>
+                    updateInternalLink(
+                      intent,
+                      event.target.value as InternalLinkIntent["approval_state"]
+                    )
+                  }
+                >
+                  <option value="proposed">Proposed</option>
+                  <option value="approved">Approved</option>
+                  <option value="rejected">Rejected</option>
+                </select>
+                <button className="iconButton" disabled={busy} onClick={() => removeInternalLink(intent.id)} aria-label={`Remove internal link ${intent.id}`}>
+                  <Trash2 size={16} aria-hidden="true" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function NavigationItemEditor({
+  item,
+  items,
+  pageName,
+  disabled,
+  onSaved,
+  onError,
+  onRemove
+}: {
+  item: NavigationItem;
+  items: NavigationItem[];
+  pageName: (id: number) => string;
+  disabled: boolean;
+  onSaved: () => Promise<void>;
+  onError: (message: string) => void;
+  onRemove: () => void;
+}) {
+  const [label, setLabel] = useState(item.label);
+  const [position, setPosition] = useState(String(item.position));
+  const [parentId, setParentId] = useState(String(item.parent_navigation_item_id ?? ""));
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    try {
+      await apiRequest(`/api/site-plans/navigation-items/${item.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          label,
+          position: Number(position) || 0,
+          parent_navigation_item_id: numberOrNull(parentId)
+        })
+      });
+      await onSaved();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Unable to update navigation item.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="connectionRecord navigationRecord">
+      <div>
+        <strong>{pageName(item.target_planned_page_id)}</strong>
+        <small>Navigation Item #{item.id}</small>
+      </div>
+      <input aria-label={`Label for navigation item ${item.id}`} value={label} onChange={(event) => setLabel(event.target.value)} />
+      <input aria-label={`Position for navigation item ${item.id}`} type="number" min="0" value={position} onChange={(event) => setPosition(event.target.value)} />
+      <select aria-label={`Parent for navigation item ${item.id}`} value={parentId} onChange={(event) => setParentId(event.target.value)}>
+        <option value="">Top level</option>
+        {items.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}
+      </select>
+      <button className="secondaryButton buttonWithIcon" disabled={disabled || saving} onClick={save}>
+        <Save size={15} aria-hidden="true" /> Save
+      </button>
+      <button className="iconButton" disabled={disabled || saving} onClick={onRemove} aria-label={`Remove navigation item ${item.id}`}>
+        <Trash2 size={16} aria-hidden="true" />
+      </button>
     </div>
   );
 }

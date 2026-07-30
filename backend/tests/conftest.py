@@ -7,7 +7,7 @@ import tempfile
 import uuid
 
 import pytest
-from sqlalchemy import delete, inspect
+from sqlalchemy import delete, inspect, text
 
 
 TEST_RUN_ID = uuid.uuid4().hex
@@ -70,4 +70,58 @@ def isolate_wordpress_audit_state() -> None:
         for model in models:
             if model.__tablename__ in available:
                 session.exec(delete(model))
+        # Several legacy tests remove temporary Site Plans directly. Keep the
+        # shared disposable test database free of connection-planning rows
+        # whose owning plan was intentionally removed by those tests.
+        if {
+            "internallinkintent",
+            "navigationitem",
+            "navigationset",
+            "siteconnectionplanningrecord",
+            "siteplan",
+        } <= available:
+            session.exec(
+                text(
+                    "DELETE FROM internallinkintent "
+                    "WHERE site_plan_id NOT IN (SELECT id FROM siteplan)"
+                )
+            )
+            session.exec(
+                text(
+                    "DELETE FROM navigationitem "
+                    "WHERE site_plan_id NOT IN (SELECT id FROM siteplan)"
+                )
+            )
+            session.exec(
+                text(
+                    "DELETE FROM navigationset "
+                    "WHERE site_plan_id NOT IN (SELECT id FROM siteplan)"
+                )
+            )
+            session.exec(
+                text(
+                    "DELETE FROM siteconnectionplanningrecord "
+                    "WHERE site_plan_id NOT IN (SELECT id FROM siteplan)"
+                )
+            )
+        if "websitecoverageplanningrecord" in available and "siteplan" in available:
+            session.exec(
+                text(
+                    "DELETE FROM websitecoverageplanningrecord "
+                    "WHERE site_plan_id NOT IN (SELECT id FROM siteplan)"
+                )
+            )
+        for table in (
+            "websiteservicecitycoveragedecision",
+            "websitecitycoveragedecision",
+            "websitecountycoveragedecision",
+            "websiteservicecoveragedecision",
+        ):
+            if table in available and "website" in available:
+                session.exec(
+                    text(
+                        f"DELETE FROM {table} "
+                        "WHERE website_id NOT IN (SELECT id FROM website)"
+                    )
+                )
         session.commit()

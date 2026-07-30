@@ -156,6 +156,241 @@ class PlanningRecord(TimestampMixin, table=True):
     reviewed_at: datetime | None = None
 
 
+class SiteConnectionPlanningRecord(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "site_plan_id",
+            name="uq_siteconnectionplanningrecord_site_plan",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    generated_navigation_suggestions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    generated_internal_link_suggestions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    source_snapshot: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    generated_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class NavigationSet(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "site_plan_id",
+            "set_type",
+            name="uq_navigationset_site_plan_type",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    set_type: str = Field(max_length=24, index=True)
+    label: str
+    status: str = Field(default="draft", max_length=24, index=True)
+    version: int = Field(default=1, ge=1)
+
+
+class NavigationItem(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "navigation_set_id",
+            "target_planned_page_id",
+            name="uq_navigationitem_set_target",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    navigation_set_id: int = Field(foreign_key="navigationset.id", index=True)
+    target_planned_page_id: int = Field(foreign_key="plannedpage.id", index=True)
+    parent_navigation_item_id: int | None = Field(
+        default=None,
+        foreign_key="navigationitem.id",
+        index=True,
+    )
+    label: str
+    position: int = Field(default=0, ge=0)
+    status: str = Field(default="active", max_length=24, index=True)
+
+
+class InternalLinkIntent(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "site_plan_id",
+            "source_planned_page_id",
+            "target_planned_page_id",
+            "relationship_type",
+            name="uq_internallinkintent_plan_edge_type",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    source_planned_page_id: int = Field(foreign_key="plannedpage.id", index=True)
+    target_planned_page_id: int = Field(foreign_key="plannedpage.id", index=True)
+    purpose: str
+    relationship_type: str = Field(max_length=40, index=True)
+    anchor_guidance: str | None = None
+    approval_state: str = Field(default="proposed", max_length=24, index=True)
+
+
+class WebsiteCoveragePlanningRecord(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "site_plan_id",
+            name="uq_websitecoverageplanningrecord_site_plan",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    generated_service_candidates: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    generated_county_candidates: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    generated_city_candidates: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    generated_matrix_candidates: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    source_snapshot: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    generated_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class WebsiteServiceCoverageDecision(TimestampMixin, table=True):
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('included','excluded','deferred')",
+            name="ck_websiteservicecoveragedecision_status",
+        ),
+        CheckConstraint(
+            "decision_version >= 1",
+            name="ck_websiteservicecoveragedecision_version",
+        ),
+        UniqueConstraint(
+            "website_id",
+            "service_id",
+            name="uq_websiteservicecoveragedecision_website_service",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    service_id: int = Field(foreign_key="service.id", index=True)
+    status: str = Field(max_length=24, index=True)
+    rationale: str | None = None
+    decided_by: str
+    decision_version: int = Field(default=1, ge=1)
+    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class WebsiteCountyCoverageDecision(TimestampMixin, table=True):
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('included','excluded','deferred')",
+            name="ck_websitecountycoveragedecision_status",
+        ),
+        CheckConstraint(
+            "decision_version >= 1",
+            name="ck_websitecountycoveragedecision_version",
+        ),
+        UniqueConstraint(
+            "website_id",
+            "county_id",
+            name="uq_websitecountycoveragedecision_website_county",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    county_id: int = Field(foreign_key="county.id", index=True)
+    status: str = Field(max_length=24, index=True)
+    page_appropriate: bool = Field(default=False, index=True)
+    rationale: str | None = None
+    decided_by: str
+    decision_version: int = Field(default=1, ge=1)
+    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class WebsiteCityCoverageDecision(TimestampMixin, table=True):
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('included','excluded','deferred')",
+            name="ck_websitecitycoveragedecision_status",
+        ),
+        CheckConstraint(
+            "decision_version >= 1",
+            name="ck_websitecitycoveragedecision_version",
+        ),
+        UniqueConstraint(
+            "website_id",
+            "city_id",
+            name="uq_websitecitycoveragedecision_website_city",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    city_id: int = Field(foreign_key="city.id", index=True)
+    status: str = Field(max_length=24, index=True)
+    rationale: str | None = None
+    decided_by: str
+    decision_version: int = Field(default=1, ge=1)
+    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class WebsiteServiceCityCoverageDecision(TimestampMixin, table=True):
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('included','excluded','deferred')",
+            name="ck_websiteservicecitycoveragedecision_status",
+        ),
+        CheckConstraint(
+            "decision_version >= 1",
+            name="ck_websiteservicecitycoveragedecision_version",
+        ),
+        UniqueConstraint(
+            "website_id",
+            "service_id",
+            "city_id",
+            name="uq_websiteservicecitycoveragedecision_website_service_city",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    service_id: int = Field(foreign_key="service.id", index=True)
+    city_id: int = Field(foreign_key="city.id", index=True)
+    status: str = Field(max_length=24, index=True)
+    rationale: str | None = None
+    decided_by: str
+    decision_version: int = Field(default=1, ge=1)
+    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
 class Service(TimestampMixin, table=True):
     id: int | None = Field(default=None, primary_key=True)
     business_id: int = Field(foreign_key="business.id", index=True)

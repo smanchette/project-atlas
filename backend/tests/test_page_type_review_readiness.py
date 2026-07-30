@@ -220,7 +220,17 @@ def test_planned_page_contract_supports_edit_qa_export_and_readiness() -> None:
                 "Website Readiness",
                 "Future Readiness",
             ]
-            assert report.review_ready is True
+            assert report.review_ready is False
+            website_readiness = next(
+                category
+                for category in report.categories
+                if category.key == "website_readiness"
+            )
+            assert any(
+                item.key == "site_connections_orphaned_pages"
+                and item.status == "needs_attention"
+                for item in website_readiness.items
+            )
             future = report.categories[-1]
             assert future.status == "deferred"
             assert all(

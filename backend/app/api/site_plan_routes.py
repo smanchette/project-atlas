@@ -17,6 +17,50 @@ from app.schemas.site_plans import (
     WebsiteReadinessReport,
     SitePlanUpdate,
 )
+from app.schemas.site_connections import (
+    InternalLinkIntentCreate,
+    InternalLinkIntentRead,
+    InternalLinkIntentUpdate,
+    NavigationItemCreate,
+    NavigationItemRead,
+    NavigationItemUpdate,
+    SiteConnectionPlanRead,
+    SiteConnectionPlanningRecordRead,
+)
+from app.schemas.site_coverage import (
+    CityCoverageDecisionRead,
+    CountyCoverageDecisionRead,
+    CountyCoverageDecisionUpdate,
+    CoverageDecisionUpdate,
+    CoverageInventoryPreview,
+    CoveragePlanningRecordRead,
+    CoveragePolicyRead,
+    CoverageReconciliationResult,
+    ServiceCityCoverageDecisionRead,
+    ServiceCoverageDecisionRead,
+)
+from app.services.site_coverage import (
+    SiteCoverageError,
+    decide_city,
+    decide_county,
+    decide_service,
+    decide_service_city,
+    preview_expected_inventory,
+    read_coverage_policy,
+    reconcile_expected_inventory,
+    refresh_coverage_candidates,
+)
+from app.services.site_connections import (
+    SiteConnectionError,
+    create_internal_link_intent,
+    create_navigation_item,
+    delete_internal_link_intent,
+    delete_navigation_item,
+    read_site_connection_plan,
+    refresh_site_connection_suggestions,
+    update_internal_link_intent,
+    update_navigation_item,
+)
 from app.services.planned_page_drafting import (
     PlannedPageDraftingError,
     draft_planned_page,
@@ -82,6 +126,231 @@ def read_site_plan_readiness(
         return evaluate_website_readiness(session, plan_id)
     except WebsiteReadinessError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{plan_id}/connections", response_model=SiteConnectionPlanRead)
+def read_site_connections(
+    plan_id: int,
+    session: Session = Depends(get_session),
+):
+    return _connection_call(read_site_connection_plan, session, plan_id)
+
+
+@router.post(
+    "/{plan_id}/connections/suggestions/refresh",
+    response_model=SiteConnectionPlanningRecordRead,
+)
+def refresh_site_connections(
+    plan_id: int,
+    session: Session = Depends(get_session),
+):
+    return _connection_call(
+        refresh_site_connection_suggestions,
+        session,
+        plan_id,
+    )
+
+
+@router.post(
+    "/{plan_id}/navigation-items",
+    response_model=NavigationItemRead,
+    status_code=201,
+)
+def add_navigation_item(
+    plan_id: int,
+    payload: NavigationItemCreate,
+    session: Session = Depends(get_session),
+):
+    if payload.site_plan_id != plan_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Route and payload Site Plan IDs do not match.",
+        )
+    return _connection_call(create_navigation_item, session, payload)
+
+
+@router.patch(
+    "/navigation-items/{item_id}",
+    response_model=NavigationItemRead,
+)
+def edit_navigation_item(
+    item_id: int,
+    payload: NavigationItemUpdate,
+    session: Session = Depends(get_session),
+):
+    return _connection_call(update_navigation_item, session, item_id, payload)
+
+
+@router.delete("/navigation-items/{item_id}")
+def remove_navigation_item(
+    item_id: int,
+    session: Session = Depends(get_session),
+):
+    _connection_call(delete_navigation_item, session, item_id)
+    return {"ok": True}
+
+
+@router.post(
+    "/{plan_id}/internal-link-intents",
+    response_model=InternalLinkIntentRead,
+    status_code=201,
+)
+def add_internal_link_intent(
+    plan_id: int,
+    payload: InternalLinkIntentCreate,
+    session: Session = Depends(get_session),
+):
+    if payload.site_plan_id != plan_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Route and payload Site Plan IDs do not match.",
+        )
+    return _connection_call(create_internal_link_intent, session, payload)
+
+
+@router.patch(
+    "/internal-link-intents/{intent_id}",
+    response_model=InternalLinkIntentRead,
+)
+def edit_internal_link_intent(
+    intent_id: int,
+    payload: InternalLinkIntentUpdate,
+    session: Session = Depends(get_session),
+):
+    return _connection_call(
+        update_internal_link_intent,
+        session,
+        intent_id,
+        payload,
+    )
+
+
+@router.delete("/internal-link-intents/{intent_id}")
+def remove_internal_link_intent(
+    intent_id: int,
+    session: Session = Depends(get_session),
+):
+    _connection_call(delete_internal_link_intent, session, intent_id)
+    return {"ok": True}
+
+
+@router.get("/{plan_id}/coverage", response_model=CoveragePolicyRead)
+def read_site_coverage(
+    plan_id: int,
+    session: Session = Depends(get_session),
+):
+    return _coverage_call(read_coverage_policy, session, plan_id)
+
+
+@router.post(
+    "/{plan_id}/coverage/candidates/refresh",
+    response_model=CoveragePlanningRecordRead,
+)
+def refresh_site_coverage_candidates(
+    plan_id: int,
+    session: Session = Depends(get_session),
+):
+    return _coverage_call(refresh_coverage_candidates, session, plan_id)
+
+
+@router.put(
+    "/{plan_id}/coverage/services/{service_id}",
+    response_model=ServiceCoverageDecisionRead,
+)
+def update_site_coverage_service(
+    plan_id: int,
+    service_id: int,
+    payload: CoverageDecisionUpdate,
+    session: Session = Depends(get_session),
+):
+    return _coverage_call(
+        decide_service,
+        session,
+        plan_id,
+        service_id,
+        payload,
+    )
+
+
+@router.put(
+    "/{plan_id}/coverage/counties/{county_id}",
+    response_model=CountyCoverageDecisionRead,
+)
+def update_site_coverage_county(
+    plan_id: int,
+    county_id: int,
+    payload: CountyCoverageDecisionUpdate,
+    session: Session = Depends(get_session),
+):
+    return _coverage_call(
+        decide_county,
+        session,
+        plan_id,
+        county_id,
+        payload,
+    )
+
+
+@router.put(
+    "/{plan_id}/coverage/cities/{city_id}",
+    response_model=CityCoverageDecisionRead,
+)
+def update_site_coverage_city(
+    plan_id: int,
+    city_id: int,
+    payload: CoverageDecisionUpdate,
+    session: Session = Depends(get_session),
+):
+    return _coverage_call(
+        decide_city,
+        session,
+        plan_id,
+        city_id,
+        payload,
+    )
+
+
+@router.put(
+    "/{plan_id}/coverage/services/{service_id}/cities/{city_id}",
+    response_model=ServiceCityCoverageDecisionRead,
+)
+def update_site_coverage_service_city(
+    plan_id: int,
+    service_id: int,
+    city_id: int,
+    payload: CoverageDecisionUpdate,
+    session: Session = Depends(get_session),
+):
+    return _coverage_call(
+        decide_service_city,
+        session,
+        plan_id,
+        service_id,
+        city_id,
+        payload,
+    )
+
+
+@router.get(
+    "/{plan_id}/coverage/inventory",
+    response_model=CoverageInventoryPreview,
+)
+def preview_site_coverage_inventory(
+    plan_id: int,
+    session: Session = Depends(get_session),
+):
+    return _coverage_call(preview_expected_inventory, session, plan_id)
+
+
+@router.post(
+    "/{plan_id}/coverage/reconcile",
+    response_model=CoverageReconciliationResult,
+)
+def reconcile_site_coverage_inventory(
+    plan_id: int,
+    session: Session = Depends(get_session),
+):
+    return _coverage_call(reconcile_expected_inventory, session, plan_id)
 
 
 @router.post("/{plan_id}/planned-pages", response_model=PlannedPageRead, status_code=201)
@@ -167,4 +436,18 @@ def _call(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
     except SitePlanningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _connection_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except SiteConnectionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _coverage_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except SiteCoverageError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

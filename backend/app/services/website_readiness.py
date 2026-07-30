@@ -60,7 +60,7 @@ def evaluate_website_readiness(
     categories = [
         _business_category(context, planned_pages),
         _content_category(planned_pages, generated_by_id, records_by_page),
-        _website_category(plan, planned_pages, generated_by_id),
+        _website_category(session, plan, planned_pages, generated_by_id),
         _future_category(),
     ]
     current_categories = categories[:3]
@@ -250,6 +250,7 @@ def _content_category(
 
 
 def _website_category(
+    session: Session,
     plan: SitePlan,
     pages: list[PlannedPage],
     generated_by_id: dict[int, GeneratedPage],
@@ -340,6 +341,151 @@ def _website_category(
             affected_planned_page_ids=h1_conflicts,
         ),
     ]
+    from app.services.site_connections import evaluate_site_connection_diagnostics
+
+    connection_diagnostics = evaluate_site_connection_diagnostics(session, plan)
+    items.extend(
+        WebsiteReadinessItem(
+            key=f"site_connections_{diagnostic.key}",
+            label=diagnostic.label,
+            status=diagnostic.status,
+            message=diagnostic.message,
+            affected_planned_page_ids=diagnostic.affected_planned_page_ids,
+        )
+        for diagnostic in connection_diagnostics
+    )
+    from app.services.site_coverage import (
+        SiteCoverageError,
+        preview_expected_inventory,
+    )
+
+    try:
+        coverage = preview_expected_inventory(session, plan.id or 0)
+    except SiteCoverageError as exc:
+        items.append(
+            WebsiteReadinessItem(
+                key="coverage_foundation",
+                label="Approved Website coverage policy",
+                status="needs_attention",
+                message=str(exc),
+            )
+        )
+    else:
+        by_disposition = {
+            disposition: [
+                item
+                for item in coverage.items
+                if item.disposition == disposition
+            ]
+            for disposition in (
+                "missing",
+                "pending_decision",
+                "unsupported_extra",
+                "unexplained_historical",
+            )
+        }
+        missing_core = [
+            item
+            for item in by_disposition["missing"]
+            if item.page_type in {"home", "about", "contact", "faq"}
+        ]
+        missing_services = [
+            item
+            for item in by_disposition["missing"]
+            if item.page_type == "service"
+        ]
+        missing_matrix = [
+            item
+            for item in by_disposition["missing"]
+            if item.page_type == "city_service"
+        ]
+        missing_counties = [
+            item
+            for item in by_disposition["missing"]
+            if item.page_type == "county"
+        ]
+        coverage_items = (
+            (
+                "coverage_core_pages",
+                "Core-page coverage",
+                missing_core,
+                "Home, About, Contact, and FAQ coverage is complete.",
+                "One or more required core pages are missing.",
+            ),
+            (
+                "coverage_service_pages",
+                "Approved Service-page coverage",
+                missing_services,
+                "Every included Website service has a Planned Service page.",
+                "One or more included Website services lack a Planned Service page.",
+            ),
+            (
+                "coverage_city_service_matrix",
+                "Approved City-Service matrix coverage",
+                missing_matrix + by_disposition["pending_decision"],
+                "Every operator-included Service × City combination is planned and no candidate awaits a decision.",
+                "City-Service coverage is missing or awaiting an operator decision.",
+            ),
+            (
+                "coverage_county_pages",
+                "County and service-area coverage",
+                missing_counties,
+                "Every included County marked page-appropriate is planned.",
+                "One or more page-appropriate County decisions lack a Planned Page.",
+            ),
+            (
+                "coverage_unsupported_extras",
+                "Unsupported coverage combinations",
+                by_disposition["unsupported_extra"],
+                "No Planned Page is outside the approved expected inventory.",
+                "One or more Planned Pages are outside the approved expected inventory.",
+            ),
+            (
+                "coverage_unexplained_historical",
+                "Unexplained historical combinations",
+                by_disposition["unexplained_historical"],
+                "Every historical coverage page has an explicit included operator decision.",
+                "Historical pages remain visible without silently becoming operator approval.",
+            ),
+        )
+        items.extend(
+            WebsiteReadinessItem(
+                key=key,
+                label=label,
+                status="ready" if not affected else "needs_attention",
+                message=pass_message if not affected else fail_message,
+                affected_planned_page_ids=sorted(
+                    {
+                        item.planned_page_id
+                        for item in affected
+                        if item.planned_page_id is not None
+                    }
+                ),
+            )
+            for key, label, affected, pass_message, fail_message in coverage_items
+        )
+        items.extend(
+            [
+                WebsiteReadinessItem(
+                    key="coverage_excluded",
+                    label="Explicitly excluded coverage",
+                    status="ready",
+                    message=(
+                        f"{coverage.counts.excluded} coverage item(s) are explicitly excluded "
+                        "and are not expected pages."
+                    ),
+                ),
+                WebsiteReadinessItem(
+                    key="coverage_deferred",
+                    label="Explicitly deferred coverage",
+                    status="ready",
+                    message=(
+                        f"{coverage.counts.deferred} coverage item(s) remain explicitly deferred "
+                        "and visible for later review."
+                    ),
+                ),
+            ]
+        )
     return _category("website_readiness", "Website Readiness", items)
 
 
@@ -352,12 +498,6 @@ def _future_category() -> WebsiteReadinessCategory:
             message=message,
         )
         for key, label, status, message in (
-            (
-                "navigation",
-                "Navigation and internal links",
-                "deferred",
-                "Deferred to a separately approved Navigation milestone; not a current failure.",
-            ),
             (
                 "media",
                 "Media planning and provenance",

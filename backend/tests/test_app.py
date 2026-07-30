@@ -225,7 +225,7 @@ def test_backup_export_contains_metadata_counts_and_all_data_groups(tmp_path: Pa
 
     assert backup_path.is_file()
     assert payload["metadata"]["app"] == "Project Atlas"
-    assert payload["metadata"]["version"] == "0.43"
+    assert payload["metadata"]["version"] == "0.45"
     assert isinstance(payload["metadata"]["created_at"], str)
     assert payload["metadata"]["table_counts"] == before_counts
     assert set(payload["data"]) == set(BACKUP_MODELS)
@@ -1744,7 +1744,7 @@ def test_backup_restore_preserves_review_notes_and_approval_audits_idempotently(
                 session.delete(record)
             session.commit()
 
-        assert payload["metadata"]["version"] == "0.43"
+        assert payload["metadata"]["version"] == "0.45"
     assert payload["data"]["approval_audits"]
     exported_page = next(
         record
@@ -2128,7 +2128,7 @@ def test_backup_restore_preserves_page_revisions_idempotently(tmp_path: Path) ->
                 revisions=restored_revisions,
             )
 
-    assert payload_json["metadata"]["version"] == "0.43"
+    assert payload_json["metadata"]["version"] == "0.45"
     assert payload_json["data"]["page_revisions"]
     assert len(restored_revisions) == 1
     assert restored_after["hero_subheadline"].endswith("Reviewed for backup.")
@@ -4785,7 +4785,7 @@ def test_backup_restore_preserves_wordpress_audits_and_safe_references_idempoten
                 audits=restored_audits,
             )
 
-    assert payload["metadata"]["version"] == "0.43"
+    assert payload["metadata"]["version"] == "0.45"
     assert payload["data"]["wordpress_draft_audits"]
     assert payload["data"]["generated_pages"][0].get("wordpress_post_id") is not None or any(
         item.get("wordpress_post_id") == 911

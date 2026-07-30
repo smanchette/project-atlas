@@ -89,6 +89,12 @@ def create_site_plan(session: Session, payload: SitePlanCreate) -> SitePlan:
         raise SitePlanningError("A Site Plan with this key already exists for the Website.")
     plan = SitePlan(**payload.model_dump())
     session.add(plan)
+    session.flush()
+    from app.services.site_connections import ensure_site_connection_foundation
+    from app.services.site_coverage import ensure_coverage_foundation
+
+    ensure_site_connection_foundation(session, plan, commit=False)
+    ensure_coverage_foundation(session, plan, commit=False)
     session.commit()
     session.refresh(plan)
     return plan
@@ -136,6 +142,9 @@ def create_planned_page(session: Session, payload: PlannedPageCreate) -> Planned
     session.flush()
     record = _new_planning_record(session, page)
     session.add(record)
+    from app.services.site_connections import refresh_site_connection_suggestions
+
+    refresh_site_connection_suggestions(session, page.site_plan_id, commit=False)
     session.commit()
     session.refresh(page)
     return planned_page_read(session, page)
@@ -160,6 +169,9 @@ def update_planned_page(
     session.add(page)
     session.flush()
     refresh_planning_record(session, page.id or planned_page_id, commit=False)
+    from app.services.site_connections import refresh_site_connection_suggestions
+
+    refresh_site_connection_suggestions(session, page.site_plan_id, commit=False)
     session.commit()
     session.refresh(page)
     return planned_page_read(session, page)
@@ -273,6 +285,11 @@ def ensure_primary_site_plan(session: Session, website: Website) -> SitePlan:
     )
     session.add(plan)
     session.flush()
+    from app.services.site_connections import ensure_site_connection_foundation
+    from app.services.site_coverage import ensure_coverage_foundation
+
+    ensure_site_connection_foundation(session, plan, commit=False)
+    ensure_coverage_foundation(session, plan, commit=False)
     return plan
 
 

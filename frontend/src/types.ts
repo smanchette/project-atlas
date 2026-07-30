@@ -170,6 +170,157 @@ export type WebsiteReadinessReport = {
   categories: WebsiteReadinessCategory[];
 };
 
+export type NavigationSetType = "primary" | "utility" | "footer";
+
+export type NavigationSet = {
+  id: number;
+  website_id: number;
+  site_plan_id: number;
+  set_type: NavigationSetType;
+  label: string;
+  status: "draft" | "active" | "disabled";
+  version: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type NavigationItem = {
+  id: number;
+  website_id: number;
+  site_plan_id: number;
+  navigation_set_id: number;
+  target_planned_page_id: number;
+  parent_navigation_item_id?: number | null;
+  label: string;
+  position: number;
+  status: "draft" | "active" | "disabled";
+  created_at: string;
+  updated_at: string;
+};
+
+export type InternalLinkIntent = {
+  id: number;
+  website_id: number;
+  site_plan_id: number;
+  source_planned_page_id: number;
+  target_planned_page_id: number;
+  purpose: string;
+  relationship_type:
+    | "conversion"
+    | "hierarchy"
+    | "related_content"
+    | "supporting_information";
+  anchor_guidance?: string | null;
+  approval_state: "proposed" | "approved" | "rejected";
+  created_at: string;
+  updated_at: string;
+};
+
+export type SiteConnectionPlanningRecord = {
+  id: number;
+  website_id: number;
+  site_plan_id: number;
+  generated_navigation_suggestions: Array<Record<string, unknown>>;
+  generated_internal_link_suggestions: Array<Record<string, unknown>>;
+  source_snapshot: Record<string, unknown>;
+  generated_at: string;
+  updated_at: string;
+};
+
+export type SiteConnectionDiagnostic = {
+  key: string;
+  label: string;
+  status: "ready" | "needs_attention";
+  message: string;
+  affected_planned_page_ids: number[];
+  affected_record_ids: number[];
+};
+
+export type SiteConnectionPlan = {
+  website_id: number;
+  site_plan_id: number;
+  navigation_sets: NavigationSet[];
+  navigation_items: NavigationItem[];
+  internal_link_intents: InternalLinkIntent[];
+  planning_record: SiteConnectionPlanningRecord;
+  diagnostics: SiteConnectionDiagnostic[];
+  ready: boolean;
+};
+
+export type CoverageDecisionStatus = "included" | "excluded" | "deferred";
+
+export type CoverageDecision = {
+  id: number;
+  website_id: number;
+  status: CoverageDecisionStatus;
+  rationale?: string | null;
+  decided_by: string;
+  decision_version: number;
+  decided_at: string;
+  updated_at: string;
+};
+
+export type CoveragePlanningRecord = {
+  id: number;
+  website_id: number;
+  site_plan_id: number;
+  generated_service_candidates: Array<Record<string, unknown>>;
+  generated_county_candidates: Array<Record<string, unknown>>;
+  generated_city_candidates: Array<Record<string, unknown>>;
+  generated_matrix_candidates: Array<Record<string, unknown>>;
+  source_snapshot: Record<string, unknown>;
+  generated_at: string;
+  updated_at: string;
+};
+
+export type CoveragePolicy = {
+  website_id: number;
+  site_plan_id: number;
+  planning_record: CoveragePlanningRecord;
+  service_decisions: Array<CoverageDecision & { service_id: number }>;
+  county_decisions: Array<
+    CoverageDecision & { county_id: number; page_appropriate: boolean }
+  >;
+  city_decisions: Array<CoverageDecision & { city_id: number }>;
+  matrix_decisions: Array<
+    CoverageDecision & { service_id: number; city_id: number }
+  >;
+};
+
+export type CoverageInventoryDisposition =
+  | "matching"
+  | "missing"
+  | "excluded"
+  | "deferred"
+  | "pending_decision"
+  | "unsupported_extra"
+  | "unexplained_historical"
+  | "relationship_conflict"
+  | "slug_conflict";
+
+export type CoverageInventoryItem = {
+  inventory_key: string;
+  page_type: string;
+  working_name: string;
+  intended_slug: string;
+  service_id?: number | null;
+  city_id?: number | null;
+  county_id?: number | null;
+  disposition: CoverageInventoryDisposition;
+  planned_page_id?: number | null;
+  generated_page_id?: number | null;
+  reason: string;
+};
+
+export type CoverageInventoryPreview = {
+  website_id: number;
+  site_plan_id: number;
+  counts: Record<string, number>;
+  items: CoverageInventoryItem[];
+  reconciliation_ready: boolean;
+  blocking_reasons: string[];
+};
+
 export type WebsiteContext = {
   business: {
     id: number;

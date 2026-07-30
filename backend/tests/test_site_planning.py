@@ -16,7 +16,12 @@ from app.models import (
     Service,
     SitePlan,
     Website,
+    WebsiteCityCoverageDecision,
+    WebsiteCountyCoverageDecision,
+    WebsiteCoveragePlanningRecord,
     WebsiteIdentity,
+    WebsiteServiceCityCoverageDecision,
+    WebsiteServiceCoverageDecision,
 )
 from app.schemas.qa import QABatchRequest
 from app.schemas.site_plans import PlannedPageCreate
@@ -53,6 +58,21 @@ def _remove_temporary_secondary_websites():
         )
         for website in websites:
             brand_id = website.brand_id
+            for record in session.exec(
+                select(WebsiteServiceCityCoverageDecision).where(
+                    WebsiteServiceCityCoverageDecision.website_id == website.id
+                )
+            ).all():
+                session.delete(record)
+            for model in (
+                WebsiteServiceCoverageDecision,
+                WebsiteCountyCoverageDecision,
+                WebsiteCityCoverageDecision,
+            ):
+                for record in session.exec(
+                    select(model).where(model.website_id == website.id)
+                ).all():
+                    session.delete(record)
             planned_pages = list(
                 session.exec(
                     select(PlannedPage).where(PlannedPage.website_id == website.id)
@@ -74,6 +94,12 @@ def _remove_temporary_secondary_websites():
             for plan in session.exec(
                 select(SitePlan).where(SitePlan.website_id == website.id)
             ).all():
+                for coverage in session.exec(
+                    select(WebsiteCoveragePlanningRecord).where(
+                        WebsiteCoveragePlanningRecord.site_plan_id == plan.id
+                    )
+                ).all():
+                    session.delete(coverage)
                 session.delete(plan)
             for identity in session.exec(
                 select(WebsiteIdentity).where(WebsiteIdentity.website_id == website.id)
