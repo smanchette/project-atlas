@@ -53,6 +53,12 @@ from app.schemas.bulk_drafting import (
     WebsiteDraftGenerationRequest,
     WebsiteDraftGenerationRunRead,
 )
+from app.schemas.page_composition import (
+    PageCompositionDecisionUpdate,
+    PageCompositionRead,
+    SemanticComponentDefinitionRead,
+    SitePlanCompositionRefreshResult,
+)
 from app.services.bulk_drafting import (
     BulkDraftingError,
     list_generation_runs,
@@ -110,8 +116,53 @@ from app.services.website_readiness import (
     WebsiteReadinessError,
     evaluate_website_readiness,
 )
+from app.services.page_composition import (
+    PageCompositionError,
+    list_component_registry,
+    read_composition_for_generated_page,
+    read_site_plan_compositions,
+    refresh_site_plan_compositions,
+    update_operator_composition_decisions,
+)
 
 router = APIRouter(prefix="/site-plans", tags=["site plans"])
+
+
+@router.get("/components/registry", response_model=list[SemanticComponentDefinitionRead])
+def read_semantic_component_registry(session: Session = Depends(get_session)):
+    return _composition_call(list_component_registry, session)
+
+
+@router.get(
+    "/generated-pages/{generated_page_id}/composition",
+    response_model=PageCompositionRead,
+)
+def read_generated_page_composition(
+    generated_page_id: int,
+    session: Session = Depends(get_session),
+):
+    return _composition_call(
+        read_composition_for_generated_page,
+        session,
+        generated_page_id,
+    )
+
+
+@router.patch(
+    "/compositions/{composition_id}/operator-decisions",
+    response_model=PageCompositionRead,
+)
+def edit_composition_decisions(
+    composition_id: int,
+    payload: PageCompositionDecisionUpdate,
+    session: Session = Depends(get_session),
+):
+    return _composition_call(
+        update_operator_composition_decisions,
+        session,
+        composition_id,
+        payload,
+    )
 
 
 @router.get("", response_model=list[SitePlanRead])
@@ -156,6 +207,25 @@ def read_site_plan_readiness(
         return evaluate_website_readiness(session, plan_id)
     except WebsiteReadinessError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{plan_id}/compositions", response_model=list[PageCompositionRead])
+def read_page_compositions(
+    plan_id: int,
+    session: Session = Depends(get_session),
+):
+    return _composition_call(read_site_plan_compositions, session, plan_id)
+
+
+@router.post(
+    "/{plan_id}/compositions/refresh",
+    response_model=SitePlanCompositionRefreshResult,
+)
+def refresh_page_compositions(
+    plan_id: int,
+    session: Session = Depends(get_session),
+):
+    return _composition_call(refresh_site_plan_compositions, session, plan_id)
 
 
 @router.get("/{plan_id}/connections", response_model=SiteConnectionPlanRead)
@@ -656,4 +726,11 @@ def _bulk_drafting_call(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
     except (BulkDraftingError, DraftingEligibilityError, SiteCoverageError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _composition_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except PageCompositionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

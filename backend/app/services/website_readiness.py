@@ -612,6 +612,35 @@ def _website_category(
                 ),
             ]
         )
+    from app.services.page_composition import composition_diagnostics
+
+    missing_compositions, stale_compositions = composition_diagnostics(session, plan)
+    items.extend(
+        [
+            WebsiteReadinessItem(
+                key="semantic_component_compositions",
+                label="Semantic page compositions",
+                status="ready" if not missing_compositions else "needs_attention",
+                message=(
+                    "Every generated Planned Page has a Website-scoped semantic composition."
+                    if not missing_compositions
+                    else "One or more generated Planned Pages lack a semantic composition."
+                ),
+                affected_planned_page_ids=missing_compositions,
+            ),
+            WebsiteReadinessItem(
+                key="semantic_component_freshness",
+                label="Composition contract and source freshness",
+                status="ready" if not stale_compositions else "needs_attention",
+                message=(
+                    "Every semantic composition matches current approved sources and component contracts."
+                    if not stale_compositions
+                    else "One or more compositions are stale, invalid, or cross a protected boundary."
+                ),
+                affected_planned_page_ids=stale_compositions,
+            ),
+        ]
+    )
     return _category("website_readiness", "Website Readiness", items)
 
 
@@ -631,16 +660,28 @@ def _future_category() -> WebsiteReadinessCategory:
                 "Deferred to a separately approved Media and Brand Assets milestone; not a current failure.",
             ),
             (
+                "brand_assets",
+                "Brand Assets Manager",
+                "deferred",
+                "Deferred to a separately approved Brand Assets milestone; not a current failure.",
+            ),
+            (
+                "media_ingestion",
+                "Media ingestion and generation",
+                "deferred",
+                "Deferred to a separately approved media milestone; not a current failure.",
+            ),
+            (
                 "theme",
                 "Theme and design system",
                 "deferred",
                 "Deferred to a separately approved presentation milestone; not a current failure.",
             ),
             (
-                "components",
-                "Component registry",
+                "complete_site_preview",
+                "Complete-site preview",
                 "not_assessed",
-                "Not assessed in this foundation and excluded from current readiness.",
+                "Not assessed; this milestone verifies page compositions only.",
             ),
             (
                 "publication",

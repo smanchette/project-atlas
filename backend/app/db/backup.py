@@ -24,12 +24,14 @@ from app.models import (
     KnowledgeBlock,
     NavigationItem,
     NavigationSet,
+    PageComposition,
     PageImageAssignment,
     PlannedPage,
     PlanningRecord,
     PreDraftDistinctnessBrief,
     SiteConnectionPlanningRecord,
     Service,
+    SemanticComponentDefinition,
     Setting,
     SitePlan,
     SupportingPageAuthorization,
@@ -60,7 +62,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.48"
+BACKUP_VERSION = "0.49"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -94,6 +96,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.46",
     "0.47",
     "0.48",
+    "0.49",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -134,6 +137,8 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "navigation_sets": NavigationSet,
     "navigation_items": NavigationItem,
     "internal_link_intents": InternalLinkIntent,
+    "semantic_component_definitions": SemanticComponentDefinition,
+    "page_compositions": PageComposition,
     "approval_audits": ApprovalAudit,
     "page_revisions": GeneratedPageRevision,
     "wordpress_draft_audits": WordPressDraftAudit,
@@ -954,12 +959,52 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 },
             )
 
+        for record in data.get("semantic_component_definitions", []):
+            _upsert(
+                session,
+                SemanticComponentDefinition,
+                select(SemanticComponentDefinition).where(
+                    SemanticComponentDefinition.component_key == record["component_key"],
+                    SemanticComponentDefinition.contract_version == record["contract_version"],
+                ),
+                record,
+            )
+
+        for record in data.get("page_compositions", []):
+            planned_page_id = _mapped_id(
+                planned_page_ids,
+                record["planned_page_id"],
+                "page_compositions.planned_page_id",
+            )
+            _upsert(
+                session,
+                PageComposition,
+                select(PageComposition).where(
+                    PageComposition.planned_page_id == planned_page_id
+                ),
+                {
+                    **record,
+                    "website_id": _mapped_id(
+                        website_ids, record["website_id"], "page_compositions.website_id"
+                    ),
+                    "site_plan_id": _mapped_id(
+                        site_plan_ids, record["site_plan_id"], "page_compositions.site_plan_id"
+                    ),
+                    "planned_page_id": planned_page_id,
+                    "generated_page_id": _mapped_id(
+                        generated_page_ids,
+                        record["generated_page_id"],
+                        "page_compositions.generated_page_id",
+                    ),
+                },
+            )
         if payload["metadata"]["version"] not in {
             "0.44",
             "0.45",
             "0.46",
             "0.47",
             "0.48",
+            "0.49",
         }:
             from app.services.site_connections import (
                 ensure_site_connection_foundation,
@@ -978,6 +1023,7 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             "0.46",
             "0.47",
             "0.48",
+            "0.49",
         }:
             from app.services.site_coverage import ensure_coverage_foundation
 
@@ -1437,6 +1483,24 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 restored_record,
             )
 
+        if data.get("page_compositions"):
+            from app.services.page_composition import refresh_site_plan_compositions
+
+            composition_plan_ids = {
+                _mapped_id(
+                    site_plan_ids,
+                    record["site_plan_id"],
+                    "page_compositions.site_plan_id",
+                )
+                for record in data["page_compositions"]
+            }
+            for restored_plan_id in sorted(composition_plan_ids):
+                refresh_site_plan_compositions(
+                    session,
+                    restored_plan_id,
+                    commit=False,
+                )
+
         session.commit()
     except Exception as exc:
         session.rollback()
@@ -1543,12 +1607,12 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48"}:
+    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49"}:
         for group in ("site_plans", "planned_pages", "planning_records"):
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48"}:
+    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49"}:
         for group in (
             "site_connection_planning_records",
             "navigation_sets",
@@ -1558,7 +1622,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.45", "0.46", "0.47", "0.48"}:
+    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49"}:
         for group in (
             "website_coverage_planning_records",
             "website_service_coverage_decisions",
@@ -1569,7 +1633,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.46", "0.47", "0.48"}:
+    if backup_version not in {"0.46", "0.47", "0.48", "0.49"}:
         for group in (
             "drafting_eligibility_assessments",
             "drafting_eligibility_dispositions",
@@ -1577,7 +1641,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.47", "0.48"}:
+    if backup_version not in {"0.47", "0.48", "0.49"}:
         for group in (
             "supporting_page_authorizations",
             "pre_draft_distinctness_briefs",
@@ -1585,7 +1649,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version != "0.48":
+    if backup_version not in {"0.48", "0.49"}:
         for group in (
             "website_draft_generation_runs",
             "website_draft_generation_items",
@@ -1596,6 +1660,10 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "website_service_county_coverage_decisions" not in data:
         data.setdefault("website_service_county_coverage_decisions", [])
         counts.setdefault("website_service_county_coverage_decisions", 0)
+    if backup_version != "0.49":
+        for group in ("semantic_component_definitions", "page_compositions"):
+            data.setdefault(group, [])
+            counts.setdefault(group, 0)
 
     for group in BACKUP_MODELS:
         records = data.get(group)
@@ -1797,6 +1865,8 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
             "target_planned_page_id",
             "relationship_type",
         ),
+        "semantic_component_definitions": ("component_key", "contract_version"),
+        "page_compositions": ("planned_page_id",),
         "approval_audits": ("generated_page_id", "approved_at", "draft_hash_at_approval"),
         "page_revisions": ("generated_page_id", "created_at", "draft_hash_after"),
         "wordpress_draft_audits": ("generated_page_id", "attempted_at", "payload_hash"),
@@ -1943,6 +2013,12 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
             ("site_plan_id", "site_plans", False),
             ("source_planned_page_id", "planned_pages", False),
             ("target_planned_page_id", "planned_pages", False),
+        ),
+        "page_compositions": (
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+            ("planned_page_id", "planned_pages", False),
+            ("generated_page_id", "generated_pages", False),
         ),
         "image_metadata": (
             ("business_id", "businesses", False),

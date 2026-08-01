@@ -992,6 +992,59 @@ export type PlannedPageDraftContent = {
 
 export type DraftContent = LegacyDraftContent | PlannedPageDraftContent;
 
+export type SemanticComponentDefinition = {
+  id: number;
+  component_key: string;
+  contract_version: number;
+  purpose: string;
+  required_inputs: string[];
+  customer_outcome: string;
+  compatible_page_types: string[];
+  supported_variants: string[];
+  accessibility_requirements: string[];
+  status: string;
+};
+
+export type PageComponentInstance = {
+  instance_key: string;
+  component_key: string;
+  contract_version: number;
+  region: "header" | "main" | "footer" | string;
+  position: number;
+  variant: string;
+  input_bindings: Record<string, unknown>;
+  resolved_data: Record<string, unknown>;
+};
+
+export type PageComposition = {
+  id: number;
+  website_id: number;
+  site_plan_id: number;
+  planned_page_id: number;
+  generated_page_id: number;
+  composition_version: number;
+  generated_components: Record<string, unknown>[];
+  operator_decisions: Record<string, unknown>[];
+  effective_components: PageComponentInstance[];
+  source_snapshot: Record<string, unknown>;
+  source_hash: string;
+  status: "current" | "stale" | string;
+  validation_errors: string[];
+  generated_at: string;
+  decided_by?: string | null;
+  decided_at?: string | null;
+};
+
+export type SitePlanCompositionRefreshResult = {
+  website_id: number;
+  site_plan_id: number;
+  created: number;
+  refreshed: number;
+  unchanged: number;
+  blocked: Array<{ planned_page_id: number; reason: string }>;
+  compositions: PageComposition[];
+};
+
 export type ManualDraftFields = {
   hero_headline: string;
   hero_subheadline: string;

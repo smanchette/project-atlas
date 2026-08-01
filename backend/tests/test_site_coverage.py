@@ -554,7 +554,14 @@ def test_coverage_readiness_preserves_navigation_and_future_dimensions():
             for category in report.categories
             if category.key == "future_readiness"
         )
-        assert {"media", "theme", "components", "publication"} <= {
+        assert {
+            "brand_assets",
+            "complete_site_preview",
+            "media",
+            "media_ingestion",
+            "theme",
+            "publication",
+        } <= {
             item.key for item in future.items
         }
         assert all(item.status in {"deferred", "not_assessed"} for item in future.items)

@@ -2251,6 +2251,93 @@ th {
   color: #d5dfdb;
 }
 
+/* Neutral Atlas base presentation for semantic component compositions. */
+.semanticNavigation {
+  background: #ffffff;
+  border-bottom: 1px solid #d7e0dc;
+}
+
+.semanticNavigation-utility_navigation {
+  background: #f4f7f5;
+  font-size: 0.875rem;
+}
+
+.semanticNavigation-footer_navigation {
+  background: #163a32;
+  border-color: rgba(255, 255, 255, 0.15);
+  color: #ffffff;
+}
+
+.semanticNavigation ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  list-style: none;
+  margin: 0;
+  padding: 0.7rem 0;
+}
+
+.semanticNavigation a {
+  color: inherit;
+  font-weight: 650;
+  text-decoration-thickness: 0.12em;
+  text-underline-offset: 0.22em;
+}
+
+.semanticNavigation a:focus-visible,
+.atlasBasePresentation a:focus-visible,
+.atlasBasePresentation summary:focus-visible {
+  outline: 3px solid #f2b84b;
+  outline-offset: 3px;
+}
+
+.semanticDestinationGrid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.semanticDestinationGrid article {
+  background: #ffffff;
+  border: 1px solid #d7e0dc;
+  border-radius: 0.75rem;
+  padding: 1.25rem;
+}
+
+.semanticDestinationGrid h3 {
+  margin-top: 0;
+}
+
+.compositionSummaryGrid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin-top: 1rem;
+}
+
+.compositionSummaryGrid article {
+  align-items: flex-start;
+  background: #f6f8f7;
+  border: 1px solid #d7e0dc;
+  border-radius: 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 1rem;
+}
+
+.compositionSummaryGrid span:not(.readinessStatus) {
+  color: #52615d;
+  font-size: 0.85rem;
+}
+
+@media (max-width: 720px) {
+  .semanticNavigation ul {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 .previewFooterInner {
   display: flex;
   flex-wrap: wrap;

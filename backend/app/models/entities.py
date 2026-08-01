@@ -246,6 +246,80 @@ class InternalLinkIntent(TimestampMixin, table=True):
     approval_state: str = Field(default="proposed", max_length=24, index=True)
 
 
+class SemanticComponentDefinition(TimestampMixin, table=True):
+    """Versioned, reusable presentation contract that never owns business facts."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "component_key",
+            "contract_version",
+            name="uq_semanticcomponentdefinition_key_version",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    component_key: str = Field(max_length=80, index=True)
+    contract_version: int = Field(default=1, ge=1)
+    purpose: str
+    required_inputs: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    customer_outcome: str
+    compatible_page_types: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    supported_variants: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    accessibility_requirements: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    status: str = Field(default="active", max_length=24, index=True)
+
+
+class PageComposition(TimestampMixin, table=True):
+    """Website-owned composition choices bound to approved Atlas source records."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "planned_page_id",
+            name="uq_pagecomposition_planned_page",
+        ),
+        UniqueConstraint(
+            "generated_page_id",
+            name="uq_pagecomposition_generated_page",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    planned_page_id: int = Field(foreign_key="plannedpage.id", index=True)
+    generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
+    composition_version: int = Field(default=1, ge=1)
+    generated_components: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    operator_decisions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    source_snapshot: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    source_hash: str = Field(max_length=64, index=True)
+    status: str = Field(default="current", max_length=24, index=True)
+    generated_at: datetime = Field(default_factory=utc_now, nullable=False)
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+
+
 class WebsiteCoveragePlanningRecord(TimestampMixin, table=True):
     __table_args__ = (
         UniqueConstraint(

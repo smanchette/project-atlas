@@ -234,9 +234,11 @@ def test_operator_decisions_make_navigation_and_conversion_paths_ready():
         )
         assert "navigation" not in {item.key for item in future.items}
         assert {
+            "brand_assets",
+            "complete_site_preview",
             "media",
+            "media_ingestion",
             "theme",
-            "components",
             "publication",
         } <= {item.key for item in future.items}
 

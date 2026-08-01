@@ -12,12 +12,14 @@ import type {
   County,
   InternalLinkIntent,
   NavigationItem,
+  PageComposition,
   PageType,
   PlannedPage,
   Service,
   SitePlan,
   SitePlanDetail,
   SiteConnectionPlan,
+  SitePlanCompositionRefreshResult,
   Website,
   WebsiteReadinessReport
 } from "../types";
@@ -69,6 +71,7 @@ export default function SitePlansPage() {
     useState<CoverageInventoryPreview | null>(null);
   const [eligibility, setEligibility] =
     useState<DraftingEligibilityManifest | null>(null);
+  const [compositions, setCompositions] = useState<PageComposition[]>([]);
   const [draft, setDraft] = useState<DraftPage>(EMPTY_PAGE);
   const [purposeOverrides, setPurposeOverrides] = useState<Record<number, string>>({});
   const [message, setMessage] = useState("");
@@ -113,7 +116,7 @@ export default function SitePlansPage() {
       );
       setPlans(rows);
       if (rows[0]) {
-        const [detail, readinessReport, connectionPlan, policy, inventory, eligibilityManifest] = await Promise.all([
+        const [detail, readinessReport, connectionPlan, policy, inventory, eligibilityManifest, compositionRows] = await Promise.all([
           apiRequest<SitePlanDetail>(`/api/site-plans/${rows[0].id}`),
           apiRequest<WebsiteReadinessReport>(`/api/site-plans/${rows[0].id}/readiness`),
           apiRequest<SiteConnectionPlan>(`/api/site-plans/${rows[0].id}/connections`),
@@ -124,6 +127,7 @@ export default function SitePlansPage() {
           apiRequest<DraftingEligibilityManifest>(
             `/api/site-plans/${rows[0].id}/drafting-eligibility`
           ),
+          apiRequest<PageComposition[]>(`/api/site-plans/${rows[0].id}/compositions`),
         ]);
         setPlan(detail);
         setReadiness(readinessReport);
@@ -131,6 +135,7 @@ export default function SitePlansPage() {
         setCoveragePolicy(policy);
         setCoverageInventory(inventory);
         setEligibility(eligibilityManifest);
+        setCompositions(compositionRows);
         setPurposeOverrides(
           Object.fromEntries(
             detail.planned_pages.map((page) => [
@@ -146,6 +151,7 @@ export default function SitePlansPage() {
         setCoveragePolicy(null);
         setCoverageInventory(null);
         setEligibility(null);
+        setCompositions([]);
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Unable to load Site Plans.");
@@ -375,6 +381,16 @@ export default function SitePlansPage() {
           </section>
 
           {readiness && <WebsiteReadinessPanel report={readiness} />}
+          {websiteId && (
+            <CompositionFoundationPanel
+              plan={plan}
+              compositions={compositions}
+              working={working}
+              setWorking={setWorking}
+              reload={() => loadPlans(websiteId)}
+              reportMessage={setMessage}
+            />
+          )}
           {coveragePolicy && coverageInventory && websiteId && (
             <CoveragePlanningPanel
               key={`coverage-${plan.id}`}
@@ -1011,6 +1027,83 @@ function WebsiteReadinessPanel({ report }: { report: WebsiteReadinessReport }) {
 
 function humanizeReadiness(value: string) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function CompositionFoundationPanel({
+  plan,
+  compositions,
+  working,
+  setWorking,
+  reload,
+  reportMessage
+}: {
+  plan: SitePlanDetail;
+  compositions: PageComposition[];
+  working: boolean;
+  setWorking: (value: boolean) => void;
+  reload: () => Promise<void>;
+  reportMessage: (message: string) => void;
+}) {
+  async function refresh() {
+    setWorking(true);
+    try {
+      const result = await apiRequest<SitePlanCompositionRefreshResult>(
+        `/api/site-plans/${plan.id}/compositions/refresh`,
+        { method: "POST" }
+      );
+      reportMessage(
+        `Semantic compositions: ${result.created} created, ${result.refreshed} refreshed, ` +
+        `${result.unchanged} unchanged, ${result.blocked.length} blocked.`
+      );
+      await reload();
+    } catch (error) {
+      reportMessage(error instanceof Error ? error.message : "Unable to refresh semantic compositions.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  const generatedCount = plan.planned_pages.filter((page) => page.generated_page_id).length;
+  const current = compositions.filter(
+    (item) => item.status === "current" && item.validation_errors.length === 0
+  );
+  return (
+    <section className="panel compositionFoundationPanel">
+      <div className="panelHeader">
+        <div>
+          <p className="eyebrow">Reusable Presentation Layer</p>
+          <h2>Semantic Page Compositions</h2>
+          <p>
+            Atlas suggestions remain separate from operator decisions and bind to exact
+            Website Context, draft, navigation, and internal-link sources.
+          </p>
+        </div>
+        <span className={`readinessStatus ${current.length === generatedCount ? "ready" : "needs_attention"}`}>
+          {current.length} of {generatedCount} current
+        </span>
+      </div>
+      <div className="panelActions">
+        <button className="secondaryButton buttonWithIcon" disabled={working} onClick={refresh}>
+          <RefreshCw size={16} aria-hidden="true" /> Refresh compositions
+        </button>
+      </div>
+      <div className="compositionSummaryGrid">
+        {compositions.map((composition) => {
+          const page = plan.planned_pages.find((item) => item.id === composition.planned_page_id);
+          return (
+            <article key={composition.id}>
+              <strong>{page?.working_name ?? `Planned Page ${composition.planned_page_id}`}</strong>
+              <span>{composition.effective_components.length} semantic components</span>
+              <span>{composition.operator_decisions.length} operator decision(s)</span>
+              <span className={`readinessStatus ${composition.validation_errors.length ? "needs_attention" : "ready"}`}>
+                {composition.validation_errors.length ? "Stale or invalid" : "Current"}
+              </span>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
 }
 
 function DraftSummary({ draft }: { draft: Record<string, unknown> }) {

@@ -1085,7 +1085,7 @@ def test_migration_and_program_backup_include_dedicated_audit():
     assert 'revision = "20260719_0023"' in migration
     assert 'down_revision = "20260717_0022"' in migration
     assert "wordpressbootstrapestablishmentaudit" in migration
-    assert backup_service.BACKUP_VERSION == "0.48"
+    assert backup_service.BACKUP_VERSION == "0.49"
     assert backup_service.BACKUP_MODELS["wordpress_bootstrap_establishment_audits"] is WordPressBootstrapEstablishmentAudit
 
 

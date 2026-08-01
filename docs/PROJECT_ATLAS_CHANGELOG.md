@@ -265,6 +265,32 @@ activity.
 
 ---
 
+## Website-Scoped Semantic Component Registry and Page Composition Foundation
+
+Established versioned semantic component contracts as Atlas's reusable,
+fact-free presentation boundary. Every contract records its purpose, exact
+approved input requirements, customer outcome, compatible page types,
+variants, and accessibility obligations. Components consume approved Atlas
+records; they do not own business facts, content, media, or operational data.
+
+Added Website-, Site-Plan-, Planned-Page-, and Generated-Page-scoped
+compositions. Atlas-generated component suggestions remain separate from
+operator composition decisions, and compositions bind to exact draft,
+Website Context, navigation, and internal-link source identities. Unknown,
+incompatible, stale, cross-Website, or missing-input compositions fail closed.
+The local Generated Page preview now renders through these contracts using one
+neutral Atlas base presentation, including operator-approved navigation and
+internal links without inserting links into stored content.
+
+Migration `20260801_0037` adds the registry and composition records. Atlas Data
+backup format 0.49 preserves both while remaining compatible with earlier
+supported backups. Website Readiness now assesses semantic composition
+coverage and freshness. Themes, Brand Assets, media ingestion or generation,
+complete-site preview, publication, WordPress rendering, and SiteGround remain
+deferred.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.
