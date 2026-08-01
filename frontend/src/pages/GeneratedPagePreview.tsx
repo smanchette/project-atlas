@@ -3,7 +3,7 @@ import { AlertTriangle, ArrowLeft, CheckCircle2, Image, Phone, ShieldCheck } fro
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { apiRequest } from "../api";
-import type { ApprovalAudit, AssignedMedia, City, County, GeneratedPage, GeneratedPageRevision, PageQAResult, Service, WebsiteContext } from "../types";
+import type { ApprovalAudit, AssignedMedia, City, County, GeneratedPage, GeneratedPageRevision, PageQAResult, PlannedPageDraftContent, Service, WebsiteContext } from "../types";
 
 type PreviewData = {
   page: GeneratedPage;
@@ -14,16 +14,7 @@ type PreviewData = {
   media: AssignedMedia[];
 };
 
-type PlannedPagePreviewDraft = {
-  schema_version: "planned-page-draft-v1";
-  page_type: string;
-  title: string;
-  h1: string;
-  intro: string;
-  sections: Array<{ key: string; heading: string; body: string }>;
-  faq_items: Array<{ question: string; answer: string }>;
-  call_to_action: string;
-};
+type PlannedPagePreviewDraft = PlannedPageDraftContent;
 
 function GeneratedPagePreview() {
   const { id } = useParams();
@@ -96,7 +87,7 @@ function GeneratedPagePreview() {
 
   const { context, service, city, county, media } = data;
   if (isPlannedPageDraft(draft)) {
-    return <PlannedPagePreview draft={draft} context={context} />;
+    return <PlannedPagePreview draft={draft} context={context} service={service} county={county} />;
   }
   if (!service) {
     return <PreviewState message="This legacy service-page draft is missing its Service relationship." error />;
@@ -323,7 +314,7 @@ function GeneratedPagePreview() {
   );
 }
 
-function isPlannedPageDraft(draft: GeneratedPage["draft_content"]): draft is GeneratedPage["draft_content"] & PlannedPagePreviewDraft {
+function isPlannedPageDraft(draft: GeneratedPage["draft_content"]): draft is PlannedPagePreviewDraft {
   return (
     typeof draft === "object"
     && draft !== null
@@ -334,10 +325,14 @@ function isPlannedPageDraft(draft: GeneratedPage["draft_content"]): draft is Gen
 
 function PlannedPagePreview({
   draft,
-  context
+  context,
+  service,
+  county
 }: {
   draft: PlannedPagePreviewDraft;
   context: WebsiteContext;
+  service: Service | null;
+  county: County | null;
 }) {
   const { business, brand } = context;
   const phone = business.phone ?? "Contact us";
@@ -379,20 +374,86 @@ function PlannedPagePreview({
       <main>
         <section className="previewHero">
           <div className="previewContainer previewHeroContent">
-            <p className="previewKicker">{draft.page_type.replace(/_/g, " ")} page</p>
+            <p className="previewKicker">
+              {draft.page_type === "county" && service && county
+                ? `${service.service_name} | ${county.county_name}`
+                : `${draft.page_type.replace(/_/g, " ")} page`}
+            </p>
             <h1>{draft.h1}</h1>
             <p>{draft.intro}</p>
+            <div className="previewHeroActions">
+              <a className="previewButton previewButtonPrimary" href={phoneHref}>
+                <Phone size={18} aria-hidden="true" />
+                Call {phone}
+              </a>
+              <a className="previewButton previewButtonSecondary" href="#estimate">
+                Request an Estimate
+              </a>
+            </div>
+            <div className="previewTrustLine">
+              <ShieldCheck size={19} aria-hidden="true" />
+              <span>
+                {business.license_number
+                  ? `Licensed ${business.business_type} | ${business.license_number}`
+                  : `Established ${business.business_type}`}
+              </span>
+            </div>
           </div>
         </section>
 
-        {draft.sections.map((section, index) => (
+        {draft.page_type === "county" && (draft.image_placements ?? []).length > 0 && (
+          <section className="previewBand">
+            <div className="previewContainer previewMediaGallery previewSupportGallery">
+              {(draft.image_placements ?? []).map((placement) => (
+                <div className="previewImagePlaceholder" key={placement.key}>
+                  <Image size={28} aria-hidden="true" />
+                  <strong>{placement.purpose}</strong>
+                  <span>Image placement ready for future approved media.</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {draft.sections
+          .filter(
+            (section) =>
+              draft.page_type !== "county"
+              || !["cities_served", "related_city_services"].includes(section.key)
+          )
+          .map((section, index) => (
           <section className={index % 2 ? "previewBand previewBandMuted" : "previewBand"} key={section.key}>
             <div className="previewContainer previewTextSection">
               <h2>{section.heading}</h2>
               <p>{section.body}</p>
             </div>
           </section>
-        ))}
+          ))}
+
+        {(draft.related_pages ?? []).length > 0 && (
+          <section className="previewBand previewBandMuted">
+            <div className="previewContainer">
+              <p className="previewSectionLabel">
+                {draft.page_type === "county" && service
+                  ? `${service.service_name} Near You`
+                  : "Service Near You"}
+              </p>
+              <h2>
+                {draft.page_type === "county" && county
+                  ? `Cities We Serve in ${county.county_name}`
+                  : "Explore Local Service Pages"}
+              </h2>
+              <div className="previewFaqList">
+                {(draft.related_pages ?? []).map((page) => (
+                  <article key={page.slug}>
+                    <strong>{page.label}</strong>
+                    <p>Learn more about service options for this community.</p>
+                  </article>
+                ))}
+              </div>
+            </div>
+          </section>
+        )}
 
         {draft.faq_items.length > 0 && (
           <section className="previewBand previewBandMuted">
@@ -410,17 +471,22 @@ function PlannedPagePreview({
           </section>
         )}
 
-        <section className="previewFinalCta">
+        <section className="previewFinalCta" id="estimate">
           <div className="previewContainer previewFinalCtaInner">
             <div>
               <p className="previewSectionLabel">Next Step</p>
               <h2>{draft.title}</h2>
               <p>{draft.call_to_action}</p>
             </div>
-            <a className="previewButton previewButtonLight" href={phoneHref}>
-              <Phone size={18} aria-hidden="true" />
-              Call {phone}
-            </a>
+            <div className="previewFinalActions">
+              <a className="previewButton previewButtonLight" href={phoneHref}>
+                <Phone size={18} aria-hidden="true" />
+                Call {phone}
+              </a>
+              <a className="previewButton previewButtonOutline" href={`mailto:${business.email ?? ""}`}>
+                Request an Estimate
+              </a>
+            </div>
           </div>
         </section>
       </main>
@@ -428,7 +494,11 @@ function PlannedPagePreview({
       <footer className="previewFooter">
         <div className="previewContainer previewFooterInner">
           <strong>{business.company_name}</strong>
-          <span>Local Atlas draft preview</span>
+          <span>
+            {business.license_number
+              ? `License ${business.license_number}`
+              : business.business_type}
+          </span>
         </div>
       </footer>
     </div>

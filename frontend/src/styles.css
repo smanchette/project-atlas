@@ -4502,3 +4502,44 @@ th {
     grid-template-columns: 1fr;
   }
 }
+.eligibilityPanel {
+  display: grid;
+  gap: 1rem;
+}
+
+.eligibilityCounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.eligibilityRows {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.eligibilityRow {
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1fr) minmax(18rem, 1fr);
+  padding: 1rem;
+}
+
+.eligibilityDecision {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.eligibilityDecision div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+@media (max-width: 800px) {
+  .eligibilityRow {
+    grid-template-columns: 1fr;
+  }
+}

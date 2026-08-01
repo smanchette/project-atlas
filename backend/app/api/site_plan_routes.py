@@ -37,7 +37,35 @@ from app.schemas.site_coverage import (
     CoveragePolicyRead,
     CoverageReconciliationResult,
     ServiceCityCoverageDecisionRead,
+    ServiceCountyCoverageDecisionRead,
     ServiceCoverageDecisionRead,
+    SupportingPageAuthorizationRead,
+)
+from app.schemas.drafting_eligibility import (
+    CandidateDraftInput,
+    CandidateDraftValidationResult,
+    DraftingBatchManifest,
+    DraftingEligibilityManifest,
+    EligibilityDispositionRead,
+    EligibilityDispositionUpdate,
+)
+from app.schemas.bulk_drafting import (
+    WebsiteDraftGenerationRequest,
+    WebsiteDraftGenerationRunRead,
+)
+from app.services.bulk_drafting import (
+    BulkDraftingError,
+    list_generation_runs,
+    read_generation_run,
+    resume_generation,
+    start_or_resume_generation,
+)
+from app.services.drafting_eligibility import (
+    DraftingEligibilityError,
+    assess_site_plan,
+    read_manifest,
+    record_disposition,
+    validate_candidate_drafts,
 )
 from app.services.site_coverage import (
     SiteCoverageError,
@@ -45,6 +73,8 @@ from app.services.site_coverage import (
     decide_county,
     decide_service,
     decide_service_city,
+    decide_service_county,
+    decide_supporting_page,
     preview_expected_inventory,
     read_coverage_policy,
     reconcile_expected_inventory,
@@ -331,6 +361,46 @@ def update_site_coverage_service_city(
     )
 
 
+@router.put(
+    "/{plan_id}/coverage/services/{service_id}/counties/{county_id}",
+    response_model=ServiceCountyCoverageDecisionRead,
+)
+def update_site_coverage_service_county(
+    plan_id: int,
+    service_id: int,
+    county_id: int,
+    payload: CoverageDecisionUpdate,
+    session: Session = Depends(get_session),
+):
+    return _coverage_call(
+        decide_service_county,
+        session,
+        plan_id,
+        service_id,
+        county_id,
+        payload,
+    )
+
+
+@router.put(
+    "/{plan_id}/coverage/supporting-pages/{planned_page_id}",
+    response_model=SupportingPageAuthorizationRead,
+)
+def update_supporting_page_authorization(
+    plan_id: int,
+    planned_page_id: int,
+    payload: CoverageDecisionUpdate,
+    session: Session = Depends(get_session),
+):
+    return _coverage_call(
+        decide_supporting_page,
+        session,
+        plan_id,
+        planned_page_id,
+        payload,
+    )
+
+
 @router.get(
     "/{plan_id}/coverage/inventory",
     response_model=CoverageInventoryPreview,
@@ -432,6 +502,128 @@ def edit_page_planning_overrides(
     )
 
 
+@router.get(
+    "/{plan_id}/drafting-eligibility",
+    response_model=DraftingEligibilityManifest,
+)
+def read_drafting_eligibility(
+    plan_id: int,
+    session: Session = Depends(get_session),
+):
+    return _eligibility_call(read_manifest, session, plan_id)
+
+
+@router.post(
+    "/{plan_id}/drafting-eligibility/assess",
+    response_model=DraftingEligibilityManifest,
+)
+def refresh_drafting_eligibility(
+    plan_id: int,
+    session: Session = Depends(get_session),
+):
+    return _eligibility_call(assess_site_plan, session, plan_id)
+
+
+@router.get(
+    "/{plan_id}/drafting-batch-manifest",
+    response_model=DraftingBatchManifest,
+)
+def read_drafting_batch_manifest(
+    plan_id: int,
+    session: Session = Depends(get_session),
+):
+    return _eligibility_call(read_manifest, session, plan_id).batch_manifest
+
+
+@router.post(
+    "/{plan_id}/drafting-candidates/validate",
+    response_model=CandidateDraftValidationResult,
+)
+def validate_drafting_candidates(
+    plan_id: int,
+    payload: list[CandidateDraftInput],
+    session: Session = Depends(get_session),
+):
+    return _eligibility_call(
+        validate_candidate_drafts,
+        session,
+        plan_id,
+        payload,
+    )
+
+
+@router.put(
+    "/drafting-eligibility/{assessment_id}/disposition",
+    response_model=EligibilityDispositionRead,
+)
+def edit_drafting_eligibility_disposition(
+    assessment_id: int,
+    payload: EligibilityDispositionUpdate,
+    session: Session = Depends(get_session),
+):
+    return _eligibility_call(
+        record_disposition, session, assessment_id, payload
+    )
+
+
+@router.get(
+    "/{plan_id}/draft-generation/runs",
+    response_model=list[WebsiteDraftGenerationRunRead],
+)
+def read_website_draft_generation_runs(
+    plan_id: int,
+    session: Session = Depends(get_session),
+):
+    return _bulk_drafting_call(list_generation_runs, session, plan_id)
+
+
+@router.get(
+    "/draft-generation/runs/{run_id}",
+    response_model=WebsiteDraftGenerationRunRead,
+)
+def read_website_draft_generation_run(
+    run_id: int,
+    session: Session = Depends(get_session),
+):
+    return _bulk_drafting_call(read_generation_run, session, run_id)
+
+
+@router.post(
+    "/{plan_id}/draft-generation/start",
+    response_model=WebsiteDraftGenerationRunRead,
+)
+def start_website_draft_generation(
+    plan_id: int,
+    payload: WebsiteDraftGenerationRequest,
+    session: Session = Depends(get_session),
+):
+    return _bulk_drafting_call(
+        start_or_resume_generation,
+        session,
+        plan_id,
+        website_id=payload.website_id,
+        draft_limit=payload.draft_limit,
+    )
+
+
+@router.post(
+    "/draft-generation/runs/{run_id}/resume",
+    response_model=WebsiteDraftGenerationRunRead,
+)
+def resume_website_draft_generation(
+    run_id: int,
+    payload: WebsiteDraftGenerationRequest,
+    session: Session = Depends(get_session),
+):
+    return _bulk_drafting_call(
+        resume_generation,
+        session,
+        run_id,
+        website_id=payload.website_id,
+        draft_limit=payload.draft_limit,
+    )
+
+
 def _call(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
@@ -450,4 +642,18 @@ def _coverage_call(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
     except SiteCoverageError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _eligibility_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except (DraftingEligibilityError, SiteCoverageError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _bulk_drafting_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except (BulkDraftingError, DraftingEligibilityError, SiteCoverageError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

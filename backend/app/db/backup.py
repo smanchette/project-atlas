@@ -13,6 +13,10 @@ from app.models import (
     Business,
     City,
     County,
+    DraftingEligibilityAssessment,
+    DraftingEligibilityDisposition,
+    WebsiteDraftGenerationItem,
+    WebsiteDraftGenerationRun,
     GeneratedPage,
     GeneratedPageRevision,
     ImageMetadata,
@@ -23,16 +27,19 @@ from app.models import (
     PageImageAssignment,
     PlannedPage,
     PlanningRecord,
+    PreDraftDistinctnessBrief,
     SiteConnectionPlanningRecord,
     Service,
     Setting,
     SitePlan,
+    SupportingPageAuthorization,
     Website,
     WebsiteCityCoverageDecision,
     WebsiteCountyCoverageDecision,
     WebsiteCoveragePlanningRecord,
     WebsiteIdentity,
     WebsiteServiceCityCoverageDecision,
+    WebsiteServiceCountyCoverageDecision,
     WebsiteServiceCoverageDecision,
     WordPressDraftAudit,
     WordPressHeadingCorrectionAudit,
@@ -53,7 +60,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.45"
+BACKUP_VERSION = "0.48"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -84,6 +91,9 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.43",
     "0.44",
     "0.45",
+    "0.46",
+    "0.47",
+    "0.48",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -114,6 +124,13 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "website_county_coverage_decisions": WebsiteCountyCoverageDecision,
     "website_city_coverage_decisions": WebsiteCityCoverageDecision,
     "website_service_city_coverage_decisions": WebsiteServiceCityCoverageDecision,
+    "website_service_county_coverage_decisions": WebsiteServiceCountyCoverageDecision,
+    "supporting_page_authorizations": SupportingPageAuthorization,
+    "pre_draft_distinctness_briefs": PreDraftDistinctnessBrief,
+    "drafting_eligibility_assessments": DraftingEligibilityAssessment,
+    "drafting_eligibility_dispositions": DraftingEligibilityDisposition,
+    "website_draft_generation_runs": WebsiteDraftGenerationRun,
+    "website_draft_generation_items": WebsiteDraftGenerationItem,
     "navigation_sets": NavigationSet,
     "navigation_items": NavigationItem,
     "internal_link_intents": InternalLinkIntent,
@@ -557,6 +574,236 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 },
             )
 
+        for record in data.get("website_service_county_coverage_decisions", []):
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "website_service_county_coverage_decisions.website_id",
+            )
+            service_id = _mapped_id(
+                service_ids,
+                record["service_id"],
+                "website_service_county_coverage_decisions.service_id",
+            )
+            county_id = _mapped_id(
+                county_ids,
+                record["county_id"],
+                "website_service_county_coverage_decisions.county_id",
+            )
+            _upsert(
+                session,
+                WebsiteServiceCountyCoverageDecision,
+                select(WebsiteServiceCountyCoverageDecision).where(
+                    WebsiteServiceCountyCoverageDecision.website_id == website_id,
+                    WebsiteServiceCountyCoverageDecision.service_id == service_id,
+                    WebsiteServiceCountyCoverageDecision.county_id == county_id,
+                ),
+                {
+                    **record,
+                    "website_id": website_id,
+                    "service_id": service_id,
+                    "county_id": county_id,
+                },
+            )
+        for record in data.get("supporting_page_authorizations", []):
+            website_id = _mapped_id(
+                website_ids, record["website_id"],
+                "supporting_page_authorizations.website_id",
+            )
+            site_plan_id = _mapped_id(
+                site_plan_ids, record["site_plan_id"],
+                "supporting_page_authorizations.site_plan_id",
+            )
+            planned_page_id = _mapped_id(
+                planned_page_ids, record["planned_page_id"],
+                "supporting_page_authorizations.planned_page_id",
+            )
+            _upsert(
+                session,
+                SupportingPageAuthorization,
+                select(SupportingPageAuthorization).where(
+                    SupportingPageAuthorization.planned_page_id
+                    == planned_page_id
+                ),
+                {
+                    **record,
+                    "website_id": website_id,
+                    "site_plan_id": site_plan_id,
+                    "planned_page_id": planned_page_id,
+                },
+            )
+
+        for record in data.get("pre_draft_distinctness_briefs", []):
+            website_id = _mapped_id(
+                website_ids, record["website_id"],
+                "pre_draft_distinctness_briefs.website_id",
+            )
+            site_plan_id = _mapped_id(
+                site_plan_ids, record["site_plan_id"],
+                "pre_draft_distinctness_briefs.site_plan_id",
+            )
+            planned_page_id = _mapped_id(
+                planned_page_ids, record["planned_page_id"],
+                "pre_draft_distinctness_briefs.planned_page_id",
+            )
+            _upsert(
+                session,
+                PreDraftDistinctnessBrief,
+                select(PreDraftDistinctnessBrief).where(
+                    PreDraftDistinctnessBrief.planned_page_id
+                    == planned_page_id
+                ),
+                {
+                    **record,
+                    "website_id": website_id,
+                    "site_plan_id": site_plan_id,
+                    "planned_page_id": planned_page_id,
+                },
+            )
+
+        assessment_ids: dict[int, int] = {}
+        for record in data.get("drafting_eligibility_assessments", []):
+            old_id = _record_id(record, "drafting_eligibility_assessments")
+            website_id = _mapped_id(
+                website_ids, record["website_id"],
+                "drafting_eligibility_assessments.website_id",
+            )
+            site_plan_id = _mapped_id(
+                site_plan_ids, record["site_plan_id"],
+                "drafting_eligibility_assessments.site_plan_id",
+            )
+            planned_page_id = _mapped_id(
+                planned_page_ids, record["planned_page_id"],
+                "drafting_eligibility_assessments.planned_page_id",
+            )
+            restored = _upsert(
+                session,
+                DraftingEligibilityAssessment,
+                select(DraftingEligibilityAssessment).where(
+                    DraftingEligibilityAssessment.planned_page_id
+                    == planned_page_id
+                ),
+                {
+                    **record,
+                    "website_id": website_id,
+                    "site_plan_id": site_plan_id,
+                    "planned_page_id": planned_page_id,
+                },
+            )
+            assessment_ids[old_id] = _required_id(restored)
+
+        for record in data.get("drafting_eligibility_dispositions", []):
+            website_id = _mapped_id(
+                website_ids, record["website_id"],
+                "drafting_eligibility_dispositions.website_id",
+            )
+            site_plan_id = _mapped_id(
+                site_plan_ids, record["site_plan_id"],
+                "drafting_eligibility_dispositions.site_plan_id",
+            )
+            planned_page_id = _mapped_id(
+                planned_page_ids, record["planned_page_id"],
+                "drafting_eligibility_dispositions.planned_page_id",
+            )
+            assessment_id = _mapped_id(
+                assessment_ids, record["assessment_id"],
+                "drafting_eligibility_dispositions.assessment_id",
+            )
+            _upsert(
+                session,
+                DraftingEligibilityDisposition,
+                select(DraftingEligibilityDisposition).where(
+                    DraftingEligibilityDisposition.planned_page_id
+                    == planned_page_id
+                ),
+                {
+                    **record,
+                    "website_id": website_id,
+                    "site_plan_id": site_plan_id,
+                    "planned_page_id": planned_page_id,
+                    "assessment_id": assessment_id,
+                },
+            )
+
+        generation_run_ids: dict[int, int] = {}
+        for record in data.get("website_draft_generation_runs", []):
+            old_id = _record_id(record, "website_draft_generation_runs")
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "website_draft_generation_runs.website_id",
+            )
+            site_plan_id = _mapped_id(
+                site_plan_ids,
+                record["site_plan_id"],
+                "website_draft_generation_runs.site_plan_id",
+            )
+            restored = _upsert(
+                session,
+                WebsiteDraftGenerationRun,
+                select(WebsiteDraftGenerationRun).where(
+                    WebsiteDraftGenerationRun.site_plan_id == site_plan_id,
+                    WebsiteDraftGenerationRun.manifest_hash
+                    == record["manifest_hash"],
+                ),
+                {
+                    **record,
+                    "website_id": website_id,
+                    "site_plan_id": site_plan_id,
+                },
+            )
+            generation_run_ids[old_id] = _required_id(restored)
+
+        for record in data.get("website_draft_generation_items", []):
+            run_id = _mapped_id(
+                generation_run_ids,
+                record["run_id"],
+                "website_draft_generation_items.run_id",
+            )
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "website_draft_generation_items.website_id",
+            )
+            site_plan_id = _mapped_id(
+                site_plan_ids,
+                record["site_plan_id"],
+                "website_draft_generation_items.site_plan_id",
+            )
+            planned_page_id = _mapped_optional_id(
+                planned_page_ids,
+                record.get("planned_page_id"),
+                "website_draft_generation_items.planned_page_id",
+            )
+            generated_page_id = _mapped_optional_id(
+                generated_page_ids,
+                record.get("generated_page_id"),
+                "website_draft_generation_items.generated_page_id",
+            )
+            assessment_id = _mapped_optional_id(
+                assessment_ids,
+                record.get("assessment_id"),
+                "website_draft_generation_items.assessment_id",
+            )
+            _upsert(
+                session,
+                WebsiteDraftGenerationItem,
+                select(WebsiteDraftGenerationItem).where(
+                    WebsiteDraftGenerationItem.run_id == run_id,
+                    WebsiteDraftGenerationItem.inventory_key
+                    == record["inventory_key"],
+                ),
+                {
+                    **record,
+                    "run_id": run_id,
+                    "website_id": website_id,
+                    "site_plan_id": site_plan_id,
+                    "planned_page_id": planned_page_id,
+                    "generated_page_id": generated_page_id,
+                    "assessment_id": assessment_id,
+                },
+            )
+
         navigation_set_ids: dict[int, int] = {}
         for record in data.get("navigation_sets", []):
             old_id = _record_id(record, "navigation_sets")
@@ -707,7 +954,13 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 },
             )
 
-        if payload["metadata"]["version"] not in {"0.44", "0.45"}:
+        if payload["metadata"]["version"] not in {
+            "0.44",
+            "0.45",
+            "0.46",
+            "0.47",
+            "0.48",
+        }:
             from app.services.site_connections import (
                 ensure_site_connection_foundation,
             )
@@ -720,7 +973,12 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                         restored_plan,
                         commit=False,
                     )
-        if payload["metadata"]["version"] != "0.45":
+        if payload["metadata"]["version"] not in {
+            "0.45",
+            "0.46",
+            "0.47",
+            "0.48",
+        }:
             from app.services.site_coverage import ensure_coverage_foundation
 
             for restored_plan_id in site_plan_ids.values():
@@ -1285,12 +1543,12 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.43", "0.44", "0.45"}:
+    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48"}:
         for group in ("site_plans", "planned_pages", "planning_records"):
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.44", "0.45"}:
+    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48"}:
         for group in (
             "site_connection_planning_records",
             "navigation_sets",
@@ -1300,7 +1558,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version != "0.45":
+    if backup_version not in {"0.45", "0.46", "0.47", "0.48"}:
         for group in (
             "website_coverage_planning_records",
             "website_service_coverage_decisions",
@@ -1311,6 +1569,33 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
+    if backup_version not in {"0.46", "0.47", "0.48"}:
+        for group in (
+            "drafting_eligibility_assessments",
+            "drafting_eligibility_dispositions",
+        ):
+            if group not in data:
+                data[group] = []
+                counts[group] = 0
+    if backup_version not in {"0.47", "0.48"}:
+        for group in (
+            "supporting_page_authorizations",
+            "pre_draft_distinctness_briefs",
+        ):
+            if group not in data:
+                data[group] = []
+                counts[group] = 0
+    if backup_version != "0.48":
+        for group in (
+            "website_draft_generation_runs",
+            "website_draft_generation_items",
+        ):
+            if group not in data:
+                data[group] = []
+                counts[group] = 0
+    if "website_service_county_coverage_decisions" not in data:
+        data.setdefault("website_service_county_coverage_decisions", [])
+        counts.setdefault("website_service_county_coverage_decisions", 0)
 
     for group in BACKUP_MODELS:
         records = data.get(group)
@@ -1326,6 +1611,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
         "website_county_coverage_decisions",
         "website_city_coverage_decisions",
         "website_service_city_coverage_decisions",
+        "website_service_county_coverage_decisions",
     ):
         for record in data[group]:
             if record.get("status") not in {"included", "excluded", "deferred"}:
@@ -1340,6 +1626,40 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
                 raise BackupValidationError(
                     f"Backup contains invalid coverage provenance in '{group}'."
                 )
+
+    valid_run_statuses = {
+        "preparing",
+        "running",
+        "interrupted",
+        "completed",
+        "completed_with_errors",
+    }
+    for record in data["website_draft_generation_runs"]:
+        if record.get("status") not in valid_run_statuses:
+            raise BackupValidationError(
+                "Backup contains an invalid Website draft-generation run status."
+            )
+        if not str(record.get("manifest_hash") or "").strip():
+            raise BackupValidationError(
+                "Backup contains a draft-generation run without a manifest identity."
+            )
+    valid_item_outcomes = {
+        "pending",
+        "generated",
+        "already_drafted",
+        "blocked",
+        "deferred",
+        "excluded",
+        "stale",
+        "consolidation_recommended",
+        "unsupported",
+        "error",
+    }
+    for record in data["website_draft_generation_items"]:
+        if record.get("outcome") not in valid_item_outcomes:
+            raise BackupValidationError(
+                "Backup contains an invalid Website draft-generation item outcome."
+            )
 
     _validate_unique_records(data)
     _validate_backup_references(data)
@@ -1458,6 +1778,17 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
             "service_id",
             "city_id",
         ),
+        "website_service_county_coverage_decisions": (
+            "website_id",
+            "service_id",
+            "county_id",
+        ),
+        "supporting_page_authorizations": ("planned_page_id",),
+        "pre_draft_distinctness_briefs": ("planned_page_id",),
+        "drafting_eligibility_assessments": ("planned_page_id",),
+        "drafting_eligibility_dispositions": ("planned_page_id",),
+        "website_draft_generation_runs": ("site_plan_id", "manifest_hash"),
+        "website_draft_generation_items": ("run_id", "inventory_key"),
         "navigation_sets": ("site_plan_id", "set_type"),
         "navigation_items": ("navigation_set_id", "target_planned_page_id"),
         "internal_link_intents": (
@@ -1557,6 +1888,44 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
             ("website_id", "websites", False),
             ("service_id", "services", False),
             ("city_id", "cities", False),
+        ),
+        "website_service_county_coverage_decisions": (
+            ("website_id", "websites", False),
+            ("service_id", "services", False),
+            ("county_id", "counties", False),
+        ),
+        "supporting_page_authorizations": (
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+            ("planned_page_id", "planned_pages", False),
+        ),
+        "pre_draft_distinctness_briefs": (
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+            ("planned_page_id", "planned_pages", False),
+        ),
+        "drafting_eligibility_assessments": (
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+            ("planned_page_id", "planned_pages", False),
+        ),
+        "drafting_eligibility_dispositions": (
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+            ("planned_page_id", "planned_pages", False),
+            ("assessment_id", "drafting_eligibility_assessments", False),
+        ),
+        "website_draft_generation_runs": (
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+        ),
+        "website_draft_generation_items": (
+            ("run_id", "website_draft_generation_runs", False),
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+            ("planned_page_id", "planned_pages", True),
+            ("generated_page_id", "generated_pages", True),
+            ("assessment_id", "drafting_eligibility_assessments", True),
         ),
         "navigation_sets": (
             ("website_id", "websites", False),

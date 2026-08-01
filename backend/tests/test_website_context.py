@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine, select
@@ -24,6 +25,14 @@ from app.services.draft_generation import generate_page_draft, load_generation_c
 from app.services.page_export import build_page_export_package
 from app.services.page_queue import build_city_service_page_payload, create_city_service_page_queue
 from app.services.website_context import build_website_context
+
+
+@pytest.fixture(autouse=True)
+def isolate_context_tests_from_predraft_gate(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.draft_generation.require_effective_drafting_eligibility",
+        lambda *args, **kwargs: None,
+    )
 
 
 def test_seeded_flo_zone_has_first_class_website_context() -> None:

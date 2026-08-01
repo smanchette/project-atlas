@@ -486,6 +486,132 @@ def _website_category(
                 ),
             ]
         )
+    from app.services.drafting_eligibility import (
+        DraftingEligibilityError,
+        read_manifest,
+    )
+
+    try:
+        eligibility = read_manifest(session, plan.id or 0)
+    except (DraftingEligibilityError, SiteCoverageError) as exc:
+        items.append(
+            WebsiteReadinessItem(
+                key="drafting_eligibility",
+                label="Coverage-gated drafting eligibility",
+                status="needs_attention",
+                message=str(exc),
+            )
+        )
+    else:
+        cannibalization_count = sum(
+            1
+            for assessment in eligibility.assessments
+            if any(
+                finding.get("kind") == "likely_cannibalization"
+                for finding in assessment.semantic_findings
+            )
+        )
+        eligibility_specs = (
+            (
+                "drafting_eligibility_coverage",
+                "Coverage-gated assessments",
+                eligibility.counts.excluded_by_coverage,
+                "All assessed expected pages are explicitly covered.",
+                "One or more pages are excluded by current coverage decisions.",
+            ),
+            (
+                "drafting_eligibility_freshness",
+                "Eligibility assessment freshness",
+                eligibility.counts.stale_assessment,
+                "Eligibility assessments reflect current approved inputs.",
+                "One or more eligibility assessments are stale.",
+            ),
+            (
+                "drafting_local_value",
+                "Approved local value",
+                eligibility.counts.insufficient_local_value,
+                "Assessed local pages have sufficient approved local-value evidence.",
+                "One or more pages need approved local-value evidence or an operator disposition.",
+            ),
+            (
+                "semantic_duplication",
+                "Semantic duplication",
+                eligibility.counts.semantic_duplication,
+                "No current semantic duplicates were detected.",
+                "One or more pages require semantic-duplication review.",
+            ),
+            (
+                "semantic_consolidation",
+                "Consolidation recommendations",
+                eligibility.counts.consolidation_recommended,
+                "No current pages require consolidation review.",
+                "One or more pages appear to differ only by geographic substitution.",
+            ),
+            (
+                "semantic_cannibalization",
+                "Cannibalization risk",
+                cannibalization_count,
+                "No current deterministic cannibalization risks were detected.",
+                "One or more related pages have overlapping intent, headings, and sections.",
+            ),
+            (
+                "drafting_required_information",
+                "Drafting required information",
+                eligibility.counts.blocked_missing_required_information,
+                "Current assessments contain required approved information.",
+                "One or more pages lack required approved information.",
+            ),
+        )
+        items.extend(
+            WebsiteReadinessItem(
+                key=key,
+                label=label,
+                status="ready" if count == 0 else "needs_attention",
+                message=pass_message if count == 0 else fail_message,
+            )
+            for key, label, count, pass_message, fail_message in eligibility_specs
+        )
+        missing_briefs = max(
+            0,
+            len(eligibility.assessments) - len(eligibility.distinctness_briefs),
+        )
+        items.extend(
+            [
+                WebsiteReadinessItem(
+                    key="pre_draft_distinctness_briefs",
+                    label="Pre-Draft Distinctness Briefs",
+                    status="ready" if missing_briefs == 0 else "needs_attention",
+                    message=(
+                        "Every assessed Planned Page has a current deterministic "
+                        "distinctness brief."
+                        if missing_briefs == 0
+                        else "One or more assessed Planned Pages lack a distinctness brief."
+                    ),
+                ),
+                WebsiteReadinessItem(
+                    key="drafting_batch_manifest",
+                    label="Complete pre-draft batch manifest",
+                    status=(
+                        "ready"
+                        if eligibility.batch_manifest.preview_ready
+                        else "needs_attention"
+                    ),
+                    message=(
+                        "Every expected page has a current effective eligibility result."
+                        if eligibility.batch_manifest.preview_ready
+                        else "The complete expected inventory contains blocked, stale, "
+                        "or consolidation-recommended pages."
+                    ),
+                    affected_planned_page_ids=[
+                        item.planned_page_id
+                        for item in eligibility.batch_manifest.items
+                        if item.planned_page_id is not None
+                        and item.classification
+                        in {"blocked", "stale", "consolidation_recommended"}
+                    ],
+                ),
+            ]
+        )
     return _category("website_readiness", "Website Readiness", items)
 
 
@@ -521,12 +647,6 @@ def _future_category() -> WebsiteReadinessCategory:
                 "Publication readiness",
                 "not_assessed",
                 "Not assessed; no CMS or production system was contacted.",
-            ),
-            (
-                "semantic_duplication",
-                "Semantic duplication and cannibalization",
-                "not_assessed",
-                "Only deterministic exact conflicts are evaluated in this milestone.",
             ),
         )
     ]

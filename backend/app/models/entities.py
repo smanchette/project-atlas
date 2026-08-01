@@ -273,6 +273,14 @@ class WebsiteCoveragePlanningRecord(TimestampMixin, table=True):
         default_factory=list,
         sa_column=Column(JSON, nullable=False),
     )
+    generated_service_county_candidates: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    generated_supporting_page_candidates: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
     source_snapshot: dict[str, Any] = Field(
         default_factory=dict,
         sa_column=Column(JSON, nullable=False),
@@ -389,6 +397,279 @@ class WebsiteServiceCityCoverageDecision(TimestampMixin, table=True):
     decided_by: str
     decision_version: int = Field(default=1, ge=1)
     decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class WebsiteServiceCountyCoverageDecision(TimestampMixin, table=True):
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('included','excluded','deferred')",
+            name="ck_websiteservicecountycoveragedecision_status",
+        ),
+        CheckConstraint(
+            "decision_version >= 1",
+            name="ck_websiteservicecountycoveragedecision_version",
+        ),
+        UniqueConstraint(
+            "website_id",
+            "service_id",
+            "county_id",
+            name="uq_websiteservicecountycoveragedecision_website_service_county",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    service_id: int = Field(foreign_key="service.id", index=True)
+    county_id: int = Field(foreign_key="county.id", index=True)
+    status: str = Field(max_length=24, index=True)
+    rationale: str | None = None
+    decided_by: str
+    decision_version: int = Field(default=1, ge=1)
+    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class SupportingPageAuthorization(TimestampMixin, table=True):
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('included','excluded','deferred')",
+            name="ck_supportingpageauthorization_status",
+        ),
+        CheckConstraint(
+            "decision_version >= 1",
+            name="ck_supportingpageauthorization_version",
+        ),
+        UniqueConstraint(
+            "planned_page_id",
+            name="uq_supportingpageauthorization_planned_page",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    planned_page_id: int = Field(foreign_key="plannedpage.id", index=True)
+    status: str = Field(max_length=24, index=True)
+    rationale: str
+    decided_by: str
+    decision_version: int = Field(default=1, ge=1)
+    decided_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+
+
+class PreDraftDistinctnessBrief(TimestampMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "planned_page_id",
+            name="uq_predraftdistinctnessbrief_planned_page",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    planned_page_id: int = Field(foreign_key="plannedpage.id", index=True)
+    algorithm_version: str = Field(max_length=80, index=True)
+    intended_audience: list[str] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=False)
+    )
+    search_intent: str
+    approved_fact_identities: list[dict[str, Any]] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=False)
+    )
+    approved_knowledge_identities: list[dict[str, Any]] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=False)
+    )
+    conversion_purpose: str
+    required_page_specific_value: list[dict[str, Any]] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=False)
+    )
+    proposed_unique_elements: list[dict[str, Any]] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=False)
+    )
+    related_planned_page_ids: list[int] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=False)
+    )
+    competing_planned_page_ids: list[int] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=False)
+    )
+    source_binding: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
+    brief_hash: str = Field(max_length=64, index=True)
+    generated_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+
+
+class DraftingEligibilityAssessment(TimestampMixin, table=True):
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('eligible','blocked_missing_required_information',"
+            "'insufficient_local_value','semantic_duplication',"
+            "'consolidation_recommended','deferred','excluded_by_coverage',"
+            "'stale_assessment')",
+            name="ck_draftingeligibilityassessment_status",
+        ),
+        UniqueConstraint(
+            "planned_page_id",
+            name="uq_draftingeligibilityassessment_planned_page",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    planned_page_id: int = Field(foreign_key="plannedpage.id", index=True)
+    status: str = Field(index=True)
+    algorithm_version: str = Field(max_length=80, index=True)
+    coverage_binding: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
+    expected_inventory_binding: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
+    planning_record_binding: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
+    distinctness_brief_binding: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
+    approved_source_identities: list[dict[str, Any]] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=False)
+    )
+    evidence: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
+    local_value_findings: list[dict[str, Any]] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=False)
+    )
+    semantic_findings: list[dict[str, Any]] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=False)
+    )
+    reasons: list[str] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=False)
+    )
+    assessed_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+
+
+class DraftingEligibilityDisposition(TimestampMixin, table=True):
+    __table_args__ = (
+        CheckConstraint(
+            "decision IN ('accepted','exception_approved','deferred','consolidate')",
+            name="ck_draftingeligibilitydisposition_decision",
+        ),
+        CheckConstraint(
+            "decision_version >= 1",
+            name="ck_draftingeligibilitydisposition_version",
+        ),
+        UniqueConstraint(
+            "planned_page_id",
+            name="uq_draftingeligibilitydisposition_planned_page",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    planned_page_id: int = Field(foreign_key="plannedpage.id", index=True)
+    assessment_id: int = Field(
+        foreign_key="draftingeligibilityassessment.id", index=True
+    )
+    decision: str = Field(index=True)
+    rationale: str
+    decided_by: str
+    accepted_exception: bool = Field(default=False)
+    decision_version: int = Field(default=1, ge=1)
+    decided_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+
+
+class WebsiteDraftGenerationRun(TimestampMixin, table=True):
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('preparing','running','interrupted','completed',"
+            "'completed_with_errors')",
+            name="ck_websitedraftgenerationrun_status",
+        ),
+        UniqueConstraint(
+            "site_plan_id",
+            "manifest_hash",
+            name="uq_websitedraftgenerationrun_plan_manifest",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    manifest_hash: str = Field(max_length=64, index=True)
+    eligibility_algorithm_version: str = Field(max_length=80, index=True)
+    status: str = Field(default="preparing", max_length=32, index=True)
+    manifest_snapshot: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
+    expected_count: int = Field(default=0, ge=0)
+    eligible_count: int = Field(default=0, ge=0)
+    generated_count: int = Field(default=0, ge=0)
+    already_drafted_count: int = Field(default=0, ge=0)
+    skipped_count: int = Field(default=0, ge=0)
+    blocked_count: int = Field(default=0, ge=0)
+    deferred_count: int = Field(default=0, ge=0)
+    excluded_count: int = Field(default=0, ge=0)
+    stale_count: int = Field(default=0, ge=0)
+    consolidation_count: int = Field(default=0, ge=0)
+    error_count: int = Field(default=0, ge=0)
+    processed_count: int = Field(default=0, ge=0)
+    progress_message: str = Field(default="Preparing inventory...")
+    started_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    last_resumed_at: datetime | None = None
+    completed_at: datetime | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+
+
+class WebsiteDraftGenerationItem(TimestampMixin, table=True):
+    __table_args__ = (
+        CheckConstraint(
+            "manifest_classification IN ('eligible','blocked','excluded','deferred',"
+            "'stale','consolidation_recommended')",
+            name="ck_websitedraftgenerationitem_classification",
+        ),
+        CheckConstraint(
+            "outcome IN ('pending','generated','already_drafted','blocked','deferred',"
+            "'excluded','stale','consolidation_recommended','unsupported','error')",
+            name="ck_websitedraftgenerationitem_outcome",
+        ),
+        UniqueConstraint(
+            "run_id",
+            "inventory_key",
+            name="uq_websitedraftgenerationitem_run_inventory",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    run_id: int = Field(foreign_key="websitedraftgenerationrun.id", index=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    planned_page_id: int | None = Field(
+        default=None, foreign_key="plannedpage.id", index=True
+    )
+    generated_page_id: int | None = Field(
+        default=None, foreign_key="generatedpage.id", index=True
+    )
+    inventory_key: str = Field(max_length=180, index=True)
+    ordinal: int = Field(ge=1)
+    page_type: str = Field(max_length=40, index=True)
+    working_name: str
+    manifest_classification: str = Field(max_length=40, index=True)
+    outcome: str = Field(default="pending", max_length=40, index=True)
+    reasons: list[str] = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=False)
+    )
+    assessment_id: int | None = Field(
+        default=None, foreign_key="draftingeligibilityassessment.id", index=True
+    )
+    assessment_binding: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
+    generated_content_hash: str | None = Field(default=None, max_length=64)
+    attempt_count: int = Field(default=0, ge=0)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
 
 
 class Service(TimestampMixin, table=True):

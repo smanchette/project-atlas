@@ -10,6 +10,7 @@ from app.db.session import create_db_and_tables, engine
 from app.models import (
     Brand,
     Business,
+    City,
     GeneratedPage,
     PlannedPage,
     PlanningRecord,
@@ -30,6 +31,19 @@ from app.services.site_planning import (
     refresh_planning_record,
     update_planning_overrides,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_existing_drafting_contract_tests_from_predraft_gate(monkeypatch):
+    """The authoritative gate has dedicated tests; this module tests draft rendering."""
+    monkeypatch.setattr(
+        "app.services.planned_page_drafting.require_effective_drafting_eligibility",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.draft_generation.require_effective_drafting_eligibility",
+        lambda *args, **kwargs: None,
+    )
 
 
 def _seed() -> None:
@@ -362,7 +376,7 @@ def test_city_service_compatibility_adapter_preserves_legacy_contract() -> None:
         assert "schema_version" not in result.draft_content
 
 
-def test_deferred_county_and_city_drafting_remains_fail_closed(
+def test_standalone_city_drafting_remains_fail_closed(
     drafting_scope: str,
 ) -> None:
     _seed()
@@ -372,14 +386,19 @@ def test_deferred_county_and_city_drafting_remains_fail_closed(
             select(GeneratedPage).where(GeneratedPage.website_id == website.id)
         ).first()
         assert generated and generated.county_id
+        city = session.exec(
+            select(City).where(City.county_id == generated.county_id)
+        ).first()
+        assert city
         created = create_planned_page(
             session,
             PlannedPageCreate(
                 website_id=website.id,
                 site_plan_id=plan.id,
-                page_type="county",
-                working_name=f"County Draft {drafting_scope}",
-                intended_slug=f"draft-{drafting_scope}-county",
+                page_type="city",
+                working_name=f"City Draft {drafting_scope}",
+                intended_slug=f"draft-{drafting_scope}-city",
+                city_id=city.id,
                 county_id=generated.county_id,
             ),
         )

@@ -110,3 +110,21 @@ def test_0032_backfills_planning_record_without_approving_historical_page(
     assert decision_count == 0
     assert tuple(preserved) == ("Preserved Historical Page", "preserved-historical-page")
     get_settings.cache_clear()
+
+
+def test_0036_adds_service_county_decisions_and_candidate_projection(
+    monkeypatch,
+    tmp_path,
+):
+    database = tmp_path / "service-county-clean.sqlite3"
+    config = _config(monkeypatch, database)
+    command.upgrade(config, "20260731_0035")
+    command.upgrade(config, "20260731_0036")
+    inspector = inspect(create_engine(f"sqlite:///{database.as_posix()}"))
+    assert "websiteservicecountycoveragedecision" in inspector.get_table_names()
+    columns = {
+        item["name"]
+        for item in inspector.get_columns("websitecoverageplanningrecord")
+    }
+    assert "generated_service_county_candidates" in columns
+    get_settings.cache_clear()

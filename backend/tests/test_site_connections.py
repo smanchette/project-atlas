@@ -100,6 +100,7 @@ def _scope(session: Session, *, domain: str | None = None):
         ("contact", "Contact", "contact"),
         ("service", "Termite Service", "termite-service"),
         ("county", "Orange County", "orange-county"),
+        ("city", "Deferred City", "deferred-city"),
     ):
         page = PlannedPage(
             website_id=website.id,
@@ -203,11 +204,13 @@ def test_operator_decisions_make_navigation_and_conversion_paths_ready():
         website, plan, pages = _scope(session)
         _add_nav(session, website, plan, pages["home"], "primary", 0)
         _add_nav(session, website, plan, pages["service"], "primary", 10)
+        _add_nav(session, website, plan, pages["county"], "primary", 20)
         _add_nav(session, website, plan, pages["about"], "footer", 0)
         _add_nav(session, website, plan, pages["contact"], "utility", 0)
         _add_link(session, website, plan, pages["home"], pages["service"])
         _add_link(session, website, plan, pages["home"], pages["contact"])
         _add_link(session, website, plan, pages["service"], pages["contact"])
+        _add_link(session, website, plan, pages["county"], pages["contact"])
 
         result = read_site_connection_plan(session, plan.id)
         assert result.ready is True
@@ -222,6 +225,10 @@ def test_operator_decisions_make_navigation_and_conversion_paths_ready():
             and item.status == "ready"
             for item in website_category.items
         )
+        assert any(
+            item.key == "semantic_duplication"
+            for item in website_category.items
+        )
         future = next(
             item for item in report.categories if item.key == "future_readiness"
         )
@@ -231,7 +238,6 @@ def test_operator_decisions_make_navigation_and_conversion_paths_ready():
             "theme",
             "components",
             "publication",
-            "semantic_duplication",
         } <= {item.key for item in future.items}
 
 
@@ -266,7 +272,7 @@ def test_scope_self_link_deferred_target_and_duplicate_guards_fail_closed():
                 ),
             )
         with pytest.raises(SiteConnectionError, match="deferred"):
-            _add_nav(session, website, plan, pages["county"], "primary", 0)
+            _add_nav(session, website, plan, pages["city"], "primary", 0)
         with pytest.raises(SiteConnectionError, match="itself"):
             _add_link(session, website, plan, pages["home"], pages["home"])
 
@@ -304,7 +310,7 @@ def test_cycle_detection_and_readiness_diagnostics_are_deterministic():
         assert by_key["navigation_cycles"].status == "ready"
         assert by_key["orphaned_pages"].status == "needs_attention"
         assert by_key["orphaned_pages"].affected_planned_page_ids == sorted(
-            [pages["about"].id, pages["contact"].id]
+            [pages["about"].id, pages["contact"].id, pages["county"].id]
         )
         assert by_key["conversion_paths"].status == "needs_attention"
 

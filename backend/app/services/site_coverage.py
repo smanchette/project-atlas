@@ -13,11 +13,13 @@ from app.models import (
     PlannedPage,
     Service,
     SitePlan,
+    SupportingPageAuthorization,
     Website,
     WebsiteCityCoverageDecision,
     WebsiteCountyCoverageDecision,
     WebsiteCoveragePlanningRecord,
     WebsiteServiceCityCoverageDecision,
+    WebsiteServiceCountyCoverageDecision,
     WebsiteServiceCoverageDecision,
 )
 from app.schemas.site_coverage import (
@@ -32,7 +34,9 @@ from app.schemas.site_coverage import (
     CoveragePolicyRead,
     CoverageReconciliationResult,
     ServiceCityCoverageDecisionRead,
+    ServiceCountyCoverageDecisionRead,
     ServiceCoverageDecisionRead,
+    SupportingPageAuthorizationRead,
 )
 from app.schemas.site_plans import PlannedPageCreate
 from app.services.site_planning import create_planned_page
@@ -118,6 +122,14 @@ def read_coverage_policy(session: Session, plan_id: int) -> CoveragePolicyRead:
         matrix_decisions=[
             ServiceCityCoverageDecisionRead.model_validate(item)
             for item in _matrix_decisions(session, plan.website_id)
+        ],
+        service_county_decisions=[
+            ServiceCountyCoverageDecisionRead.model_validate(item)
+            for item in _service_county_decisions(session, plan.website_id)
+        ],
+        supporting_page_authorizations=[
+            SupportingPageAuthorizationRead.model_validate(item)
+            for item in _supporting_authorizations(session, plan.id or plan_id)
         ],
     )
 
@@ -290,6 +302,124 @@ def decide_service_city(
     return ServiceCityCoverageDecisionRead.model_validate(decision)
 
 
+def decide_service_county(
+    session: Session,
+    plan_id: int,
+    service_id: int,
+    county_id: int,
+    payload: CoverageDecisionUpdate,
+) -> ServiceCountyCoverageDecisionRead:
+    plan = _plan(session, plan_id)
+    website = _website(session, plan.website_id)
+    service = session.get(Service, service_id)
+    county = session.get(County, county_id)
+    if not service or service.business_id != website.business_id:
+        raise SiteCoverageError(
+            "Service does not belong to the selected Website business."
+        )
+    if not county:
+        raise SiteCoverageError("County not found.")
+    _require_candidate_county(session, plan, county)
+    if payload.status == "included":
+        service_parent = _service_decision(
+            session, website.id or 0, service.id or 0
+        )
+        county_parent = _county_decision(
+            session, website.id or 0, county.id or 0
+        )
+        if not service_parent or service_parent.status != "included":
+            raise SiteCoverageError(
+                "Include the Website service before including a Service × County combination."
+            )
+        if (
+            not county_parent
+            or county_parent.status != "included"
+            or not county_parent.page_appropriate
+        ):
+            raise SiteCoverageError(
+                "Include the page-appropriate Website County before including a Service × County combination."
+            )
+    decision = session.exec(
+        select(WebsiteServiceCountyCoverageDecision).where(
+            WebsiteServiceCountyCoverageDecision.website_id == website.id,
+            WebsiteServiceCountyCoverageDecision.service_id == service.id,
+            WebsiteServiceCountyCoverageDecision.county_id == county.id,
+        )
+    ).first()
+    decision = _apply_decision(
+        decision,
+        WebsiteServiceCountyCoverageDecision,
+        payload,
+        website_id=website.id,
+        service_id=service.id,
+        county_id=county.id,
+    )
+    session.add(decision)
+    session.commit()
+    session.refresh(decision)
+    _refresh_plan_candidates(session, plan)
+    return ServiceCountyCoverageDecisionRead.model_validate(decision)
+
+
+def decide_supporting_page(
+    session: Session,
+    plan_id: int,
+    planned_page_id: int,
+    payload: CoverageDecisionUpdate,
+) -> SupportingPageAuthorizationRead:
+    plan = _plan(session, plan_id)
+    page = session.get(PlannedPage, planned_page_id)
+    if (
+        page is None
+        or page.site_plan_id != plan.id
+        or page.website_id != plan.website_id
+    ):
+        raise SiteCoverageError(
+            "Supporting Planned Page does not belong to the selected Website and Site Plan."
+        )
+    if page.page_type not in {"informational", "faq"}:
+        raise SiteCoverageError(
+            "Only Informational and additional FAQ pages use supporting-page authorization."
+        )
+    if page.page_type == "faq" and page.intended_slug == "faq":
+        raise SiteCoverageError(
+            "The required core FAQ page is governed by the core inventory policy."
+        )
+    rationale = (payload.rationale or "").strip()
+    operator = payload.decided_by.strip()
+    if not rationale or not operator:
+        raise SiteCoverageError(
+            "Supporting-page rationale and operator provenance are required."
+        )
+    authorization = session.exec(
+        select(SupportingPageAuthorization).where(
+            SupportingPageAuthorization.planned_page_id == page.id
+        )
+    ).first()
+    now = datetime.now(UTC)
+    if authorization is None:
+        authorization = SupportingPageAuthorization(
+            website_id=plan.website_id,
+            site_plan_id=plan.id or plan_id,
+            planned_page_id=page.id or planned_page_id,
+            status=payload.status,
+            rationale=rationale,
+            decided_by=operator,
+        )
+    else:
+        authorization.status = payload.status
+        authorization.rationale = rationale
+        authorization.decided_by = operator
+        authorization.decision_version += 1
+        authorization.decided_at = now
+        authorization.updated_at = now
+    session.add(authorization)
+    session.commit()
+    session.refresh(authorization)
+    _refresh_plan_candidates(session, plan)
+    return SupportingPageAuthorizationRead.model_validate(authorization)
+
+
 def preview_expected_inventory(
     session: Session,
     plan_id: int,
@@ -336,6 +466,14 @@ def preview_expected_inventory(
         (item.service_id, item.city_id): item
         for item in _matrix_decisions(session, website.id or 0)
     }
+    service_county_decisions = {
+        (item.service_id, item.county_id): item
+        for item in _service_county_decisions(session, website.id or 0)
+    }
+    supporting_authorizations = {
+        item.planned_page_id: item
+        for item in _supporting_authorizations(session, plan.id or plan_id)
+    }
     expected_specs: list[dict[str, Any]] = [
         _spec(page_type, name, slug)
         for page_type, name, slug in CORE_PAGE_SPECS
@@ -351,24 +489,21 @@ def preview_expected_inventory(
                     service_id=service.id,
                 )
             )
-    for county_id, decision in sorted(county_decisions.items()):
-        county = counties.get(county_id)
-        if (
-            decision.status == "included"
-            and decision.page_appropriate
-            and county
-        ):
-            expected_specs.append(
-                _spec(
-                    "county",
-                    county.county_name,
-                    _slugify(county.county_name),
-                    county_id=county.id,
-                )
-            )
     included_services = {
         key for key, value in service_decisions.items() if value.status == "included"
     }
+    included_page_counties = {
+        key
+        for key, value in county_decisions.items()
+        if value.status == "included" and value.page_appropriate
+    }
+    for service_id in sorted(included_services):
+        for county_id in sorted(included_page_counties):
+            service = services.get(service_id)
+            county = counties.get(county_id)
+            decision = service_county_decisions.get((service_id, county_id))
+            if service and county and decision and decision.status == "included":
+                expected_specs.append(_service_county_spec(service, county))
     included_cities = {
         key for key, value in city_decisions.items() if value.status == "included"
     }
@@ -390,6 +525,21 @@ def preview_expected_inventory(
                         county_id=city.county_id,
                     )
                 )
+    for page in pages:
+        authorization = supporting_authorizations.get(page.id or 0)
+        if (
+            authorization
+            and authorization.status == "included"
+            and page.page_type in {"informational", "faq"}
+            and not (page.page_type == "faq" and page.intended_slug == "faq")
+        ):
+            expected_specs.append(
+                _spec(
+                    page.page_type,
+                    page.working_name,
+                    page.intended_slug,
+                )
+            )
 
     items: list[CoverageInventoryItem] = []
     matched_page_ids: set[int] = set()
@@ -457,6 +607,29 @@ def preview_expected_inventory(
                     county_id=city.county_id if city else None,
                 )
             )
+    for (service_id, county_id), decision in sorted(service_county_decisions.items()):
+        service = services.get(service_id)
+        county = counties.get(county_id)
+        service_parent = service_decisions.get(service_id)
+        county_parent = county_decisions.get(county_id)
+        if (
+            service is None
+            or county is None
+            or service_parent is None
+            or service_parent.status != "included"
+            or county_parent is None
+            or county_parent.status != "included"
+            or not county_parent.page_appropriate
+        ):
+            items.append(
+                _invalid_decision_item(
+                    f"service-county-decision:{decision.id}",
+                    "county",
+                    "Service × County decision conflicts with its Website-scoped parent coverage.",
+                    service_id=service_id,
+                    county_id=county_id,
+                )
+            )
     for spec in expected_specs:
         matches = [page for page in pages if _page_matches(page, spec)]
         slug_owners = [
@@ -521,21 +694,29 @@ def preview_expected_inventory(
                         or f"Operator marked this Website service {decision.status}.",
                     )
                 )
-    for county_id, decision in sorted(county_decisions.items()):
-        if decision.status in {"excluded", "deferred"}:
+    for service_id in sorted(included_services):
+        for county_id in sorted(included_page_counties):
+            service = services.get(service_id)
             county = counties.get(county_id)
-            if county:
+            if not service or not county:
+                continue
+            decision = service_county_decisions.get((service_id, county_id))
+            spec = _service_county_spec(service, county)
+            if decision is None:
                 items.append(
                     _inventory_item(
-                        _spec(
-                            "county",
-                            county.county_name,
-                            _slugify(county.county_name),
-                            county_id=county.id,
-                        ),
+                        spec,
+                        "pending_decision",
+                        "Atlas candidate requires an explicit Service × County operator decision.",
+                    )
+                )
+            elif decision.status in {"excluded", "deferred"}:
+                items.append(
+                    _inventory_item(
+                        spec,
                         decision.status,
                         decision.rationale
-                        or f"Operator marked this Website County {decision.status}.",
+                        or f"Operator marked this Service × County combination {decision.status}.",
                     )
                 )
     for city_id, decision in sorted(city_decisions.items()):
@@ -619,17 +800,18 @@ def preview_expected_inventory(
                 )
                 continue
         if page.page_type == "county":
-            decision = county_decisions.get(page.county_id)
+            decision = service_county_decisions.get(
+                (page.service_id, page.county_id)
+            )
             if (
                 not decision
                 or decision.status != "included"
-                or not decision.page_appropriate
             ):
                 items.append(
                     _item_from_page(
                         page,
                         "unexplained_historical",
-                        "Historical County page has no included page-appropriate operator decision.",
+                        "Historical County page has no included Service × County operator decision.",
                     )
                 )
                 continue
@@ -653,12 +835,40 @@ def preview_expected_inventory(
                     )
                 )
                 continue
-        if page.page_type == "informational":
+        if page.page_type in {"informational", "faq"}:
+            authorization = supporting_authorizations.get(page.id or 0)
+            if authorization is None:
+                items.append(
+                    _item_from_page(
+                        page,
+                        "pending_decision",
+                        "Supporting page requires an explicit operator authorization decision.",
+                    )
+                )
+                continue
+            if authorization.status in {"excluded", "deferred"}:
+                items.append(
+                    _item_from_page(
+                        page,
+                        authorization.status,
+                        authorization.rationale,
+                    )
+                )
+                continue
+            if authorization.status != "included":
+                items.append(
+                    _item_from_page(
+                        page,
+                        "relationship_conflict",
+                        "Supporting-page authorization has an unsupported status.",
+                    )
+                )
+                continue
             items.append(
                 _item_from_page(
                     page,
                     "matching",
-                    "Operator-created supporting page remains part of the Site Plan.",
+                    "Supporting page has an explicit included operator authorization.",
                 )
             )
             matched_page_ids.add(page.id or 0)
@@ -778,6 +988,10 @@ def _refresh_candidates(
         (item.service_id, item.city_id): item
         for item in _matrix_decisions(session, website.id or 0)
     }
+    service_county_decisions = {
+        (item.service_id, item.county_id): item
+        for item in _service_county_decisions(session, website.id or 0)
+    }
     record.website_id = website.id or 0
     record.generated_service_candidates = [
         {
@@ -849,6 +1063,71 @@ def _refresh_candidates(
         if (service := service_by_id.get(service_id)) is not None
         if (city := city_by_id.get(city_id)) is not None
     ]
+    included_page_counties = [
+        county
+        for county in counties
+        if county_decisions.get(county.id)
+        and county_decisions[county.id].status == "included"
+        and county_decisions[county.id].page_appropriate
+    ]
+    county_by_id = {county.id: county for county in counties}
+    eligible_service_county_pairs = {
+        (service.id, county.id)
+        for service in included_services
+        for county in included_page_counties
+    }
+    service_county_pairs = (
+        eligible_service_county_pairs | set(service_county_decisions)
+    )
+    record.generated_service_county_candidates = [
+        {
+            "candidate_key": f"service-county:{service.id}:{county.id}",
+            "service_id": service.id,
+            "service_name": service.service_name,
+            "county_id": county.id,
+            "county_name": county.county_name,
+            "state": county.state,
+            "atlas_candidate_state": (
+                "eligible"
+                if (service.id, county.id) in eligible_service_county_pairs
+                else "parent_conflict"
+            ),
+        }
+        for service_id, county_id in sorted(service_county_pairs)
+        if (service := service_by_id.get(service_id)) is not None
+        if (county := county_by_id.get(county_id)) is not None
+    ]
+    supporting_authorizations = {
+        item.planned_page_id: item
+        for item in _supporting_authorizations(session, plan.id or 0)
+    }
+    supporting_pages = list(
+        session.exec(
+            select(PlannedPage)
+            .where(
+                PlannedPage.site_plan_id == plan.id,
+                PlannedPage.page_type.in_(["informational", "faq"]),
+            )
+            .order_by(PlannedPage.id)
+        ).all()
+    )
+    record.generated_supporting_page_candidates = [
+        {
+            "candidate_key": f"supporting-page:{page.id}",
+            "planned_page_id": page.id,
+            "page_type": page.page_type,
+            "working_name": page.working_name,
+            "intended_slug": page.intended_slug,
+            "atlas_candidate_state": (
+                "core_policy"
+                if page.page_type == "faq" and page.intended_slug == "faq"
+                else "operator_decision_required"
+                if page.id not in supporting_authorizations
+                else "decision_recorded"
+            ),
+        }
+        for page in supporting_pages
+    ]
     record.source_snapshot = {
         "website_id": website.id,
         "business_id": website.business_id,
@@ -858,6 +1137,11 @@ def _refresh_candidates(
         "service_ids": [service.id for service in services],
         "county_ids": [county.id for county in counties],
         "city_ids": [city.id for city in cities],
+        "service_county_candidate_keys": [
+            item["candidate_key"]
+            for item in record.generated_service_county_candidates
+        ],
+        "supporting_page_ids": [page.id for page in supporting_pages],
     }
     now = datetime.now(UTC)
     record.generated_at = now
@@ -948,7 +1232,8 @@ def _spec(
 ) -> dict[str, Any]:
     return {
         "inventory_key": (
-            f"{page_type}:{service_id or '-'}:{city_id or '-'}:{county_id or '-'}"
+            f"{page_type}:{intended_slug}:{service_id or '-'}:"
+            f"{city_id or '-'}:{county_id or '-'}"
         ),
         "page_type": page_type,
         "working_name": working_name,
@@ -959,13 +1244,29 @@ def _spec(
     }
 
 
+def _service_county_spec(service: Service, county: County) -> dict[str, Any]:
+    state_name = "Florida" if county.state.upper() == "FL" else county.state
+    return _spec(
+        "county",
+        f"{service.service_name} in {county.county_name}, {state_name}",
+        f"{service.service_slug}-{_slugify(county.county_name)}-{county.state.lower()}",
+        service_id=service.id,
+        county_id=county.id,
+    )
+
+
 def _page_matches(page: PlannedPage, spec: dict[str, Any]) -> bool:
-    return (
+    relationships_match = (
         page.page_type == spec["page_type"]
         and page.service_id == spec["service_id"]
         and page.city_id == spec["city_id"]
         and page.county_id == spec["county_id"]
     )
+    if not relationships_match:
+        return False
+    if page.page_type in {"home", "about", "contact", "faq", "informational"}:
+        return page.intended_slug == spec["intended_slug"]
+    return True
 
 
 def _inventory_item(
@@ -1045,6 +1346,10 @@ def _relationship_error(
         city = cities[page.city_id]
         if city.county_id != page.county_id:
             return "Planned Page City and County relationships conflict."
+    if page.page_type == "county" and not page.service_id:
+        return "County Planned Pages require exactly one Website-owned Service relationship."
+    if page.page_type == "county" and not page.county_id:
+        return "County Planned Pages require exactly one County relationship."
     return None
 
 
@@ -1091,6 +1396,29 @@ def _matrix_decisions(session: Session, website_id: int):
                 WebsiteServiceCityCoverageDecision.service_id,
                 WebsiteServiceCityCoverageDecision.city_id,
             )
+        ).all()
+    )
+
+
+def _service_county_decisions(session: Session, website_id: int):
+    return list(
+        session.exec(
+            select(WebsiteServiceCountyCoverageDecision)
+            .where(WebsiteServiceCountyCoverageDecision.website_id == website_id)
+            .order_by(
+                WebsiteServiceCountyCoverageDecision.service_id,
+                WebsiteServiceCountyCoverageDecision.county_id,
+            )
+        ).all()
+    )
+
+
+def _supporting_authorizations(session: Session, site_plan_id: int):
+    return list(
+        session.exec(
+            select(SupportingPageAuthorization)
+            .where(SupportingPageAuthorization.site_plan_id == site_plan_id)
+            .order_by(SupportingPageAuthorization.planned_page_id)
         ).all()
     )
 

@@ -28,6 +28,10 @@ from app.schemas.site_plans import (
     SitePlanUpdate,
 )
 from app.services.website_context import build_website_context
+from app.services.county_page_contract import (
+    CountyPageContractError,
+    build_county_page_context,
+)
 
 
 PAGE_TYPES = {
@@ -48,6 +52,10 @@ PLANNING_ANSWER_KEYS = {
     "missing_required_facts",
     "relationships",
     "primary_action",
+    "search_intent",
+    "page_specific_value",
+    "unique_sections",
+    "unique_questions",
 }
 PURPOSES = {
     "home": "Introduce the business, establish trust, and guide visitors to the most relevant next step.",
@@ -190,14 +198,24 @@ def refresh_planning_record(
     answers, snapshot, score, missing, recommendations = _planning_material(session, page)
     if record is None:
         record = PlanningRecord(planned_page_id=page.id or planned_page_id)
-    record.generated_answers = answers
-    record.source_snapshot = snapshot
-    record.confidence_score = score
-    record.confidence_level = _confidence_level(score)
-    record.missing_information = missing
-    record.improvement_recommendations = recommendations
-    record.generated_at = datetime.now(UTC)
-    record.updated_at = datetime.now(UTC)
+    changed = (
+        record.generated_answers != answers
+        or record.source_snapshot != snapshot
+        or record.confidence_score != score
+        or record.confidence_level != _confidence_level(score)
+        or record.missing_information != missing
+        or record.improvement_recommendations != recommendations
+    )
+    if changed:
+        now = datetime.now(UTC)
+        record.generated_answers = answers
+        record.source_snapshot = snapshot
+        record.confidence_score = score
+        record.confidence_level = _confidence_level(score)
+        record.missing_information = missing
+        record.improvement_recommendations = recommendations
+        record.generated_at = now
+        record.updated_at = now
     session.add(record)
     if commit:
         session.commit()
@@ -363,6 +381,18 @@ def _planning_material(
     service = session.get(Service, page.service_id) if page.service_id else None
     city = session.get(City, page.city_id) if page.city_id else None
     county = session.get(County, page.county_id) if page.county_id else None
+    county_context = None
+    if page.page_type == "county" and county is not None:
+        try:
+            county_context = build_county_page_context(
+                session,
+                website_id=website.id or page.website_id,
+                site_plan_id=page.site_plan_id,
+                county_id=county.id or page.county_id or 0,
+                service_id=page.service_id,
+            )
+        except CountyPageContractError:
+            county_context = None
     knowledge_statement = select(KnowledgeBlock).where(
         KnowledgeBlock.business_id == business.id,
         KnowledgeBlock.status == "active",
@@ -419,6 +449,14 @@ def _planning_material(
             item.question and item.short_answer and item.long_answer
             for item in knowledge
         ),
+        "county_relationship": county is not None,
+        "approved_county_coverage": bool(
+            county_context and county_context.has_approved_value
+        ),
+        "approved_county_cities": bool(
+            county_context and county_context.included_cities
+        ),
+        "approved_service_county_relationship": bool(county_context),
     }
     required_keys = ["website_identity"]
     if page.page_type == "home":
@@ -445,6 +483,15 @@ def _planning_material(
         )
     if page.page_type in {"county", "city"}:
         required_keys.append("contact_information")
+    if page.page_type == "county":
+        required_keys.extend(
+            [
+                "county_relationship",
+                "approved_county_coverage",
+                "approved_county_cities",
+                "approved_service_county_relationship",
+            ]
+        )
     if page.page_type in {"county", "city", "city_service"}:
         required_keys.append("service_area")
     missing_required = [key for key in required_keys if not facts[key]]
@@ -488,6 +535,20 @@ def _planning_material(
         "relationships": relationships,
         "primary_action": PRIMARY_ACTIONS[page.page_type],
     }
+    if page.page_type == "county" and county_context is not None:
+        answers.update(
+            {
+                "search_intent": county_context.search_intent,
+                "page_specific_value": [
+                    item["value"] for item in county_context.approved_values()
+                ],
+                "unique_sections": [
+                    item["value"] for item in county_context.unique_elements()
+                    if item["kind"] == "proposed_unique_section"
+                ],
+                "unique_questions": [],
+            }
+        )
     snapshot = {
         "business_id": business.id,
         "brand_id": website.brand_id,
@@ -499,6 +560,10 @@ def _planning_material(
         "knowledge_block_ids": [item.id for item in knowledge],
         "provider_sources": ["approved_website_context", "approved_knowledge"],
     }
+    if county_context is not None:
+        snapshot["county_coverage_sources"] = list(
+            county_context.approved_source_identities
+        )
     return answers, snapshot, round(score, 4), missing_information, recommendations
 
 
@@ -543,8 +608,10 @@ def _validate_planned_page_values(
         raise SitePlanningError("City does not belong to the selected County.")
     if page_type == "service" and not service:
         raise SitePlanningError("Service pages require a Service relationship.")
-    if page_type == "county" and not county:
-        raise SitePlanningError("County pages require a County relationship.")
+    if page_type == "county" and (not county or not service):
+        raise SitePlanningError(
+            "County pages require exactly one Service and one County relationship."
+        )
     if page_type == "city" and not city:
         raise SitePlanningError("City pages require a City relationship.")
     if page_type == "city_service" and (not service or not city):
@@ -614,4 +681,12 @@ def _missing_label(key: str) -> str:
         "trust_information": "Add approved license, operator, or company trust information.",
         "approved_knowledge": "Add approved supporting knowledge.",
         "approved_questions_and_answers": "Add at least one approved question and answer.",
+        "county_relationship": "Assign an approved County relationship.",
+        "approved_county_coverage": (
+            "Approve the County page and its included City and Service coverage."
+        ),
+        "approved_county_cities": "Approve at least one included City in this County.",
+        "approved_service_county_relationship": (
+            "Approve this exact Service × County relationship."
+        ),
     }.get(key, f"Complete approved information for {key.replace('_', ' ')}.")

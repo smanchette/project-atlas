@@ -38,6 +38,14 @@ from app.services.site_planning import (
     update_planning_overrides,
 )
 from app.services.website_context import WebsiteContextError, resolve_website_for_business
+
+
+@pytest.fixture(autouse=True)
+def isolate_site_planning_tests_from_predraft_gate(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.draft_generation.require_effective_drafting_eligibility",
+        lambda *args, **kwargs: None,
+    )
 from app.services.wordpress_draft_queue import build_wordpress_draft_queue
 
 
@@ -144,7 +152,7 @@ def test_all_initial_page_types_create_automatic_planning_records() -> None:
             ("about", None, None, None),
             ("contact", None, None, None),
             ("service", service.id, None, None),
-            ("county", None, None, generated.county_id),
+            ("county", service.id, None, generated.county_id),
             ("city", None, generated.city_id, generated.county_id),
             ("city_service", service.id, generated.city_id, generated.county_id),
             ("informational", None, None, None),

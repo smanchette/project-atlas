@@ -1,5 +1,6 @@
 from uuid import uuid4
 
+import pytest
 from sqlmodel import Session, select
 
 from app.db.session import create_db_and_tables, engine
@@ -29,12 +30,23 @@ from app.services.site_planning import create_planned_page
 from app.services.website_readiness import evaluate_website_readiness
 
 
+@pytest.fixture(autouse=True)
+def isolate_review_contract_tests_from_predraft_gate(monkeypatch):
+    for target in (
+        "app.services.planned_page_drafting.require_effective_drafting_eligibility",
+        "app.services.draft_generation.require_effective_drafting_eligibility",
+        "app.services.page_editor.require_effective_drafting_eligibility",
+    ):
+        monkeypatch.setattr(target, lambda *args, **kwargs: None)
+
+
 def test_review_contract_registry_is_explicit_and_preserves_legacy_boundary() -> None:
     assert set(PLANNED_PAGE_CONTRACTS) == {
         "home",
         "about",
         "contact",
         "service",
+        "county",
         "informational",
         "faq",
     }
@@ -48,6 +60,17 @@ def test_review_contract_registry_is_explicit_and_preserves_legacy_boundary() ->
     assert CITY_SERVICE_CONTRACT.require_service is True
     assert CITY_SERVICE_CONTRACT.require_city is True
     assert CITY_SERVICE_CONTRACT.require_county is True
+    assert PLANNED_PAGE_CONTRACTS["county"].require_county is True
+    assert PLANNED_PAGE_CONTRACTS["county"].require_service is True
+    assert PLANNED_PAGE_CONTRACTS["county"].required_section_keys == (
+        "service_county_intro",
+        "cities_served",
+        "how_service_works",
+        "customer_expectations",
+        "preparation_guidance",
+        "trust_and_license",
+        "related_city_services",
+    )
 
 
 def _scope(session: Session):

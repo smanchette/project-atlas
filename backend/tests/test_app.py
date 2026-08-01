@@ -69,6 +69,16 @@ from sqlmodel import Session, select
 FLO_ZONE_COMPANY_NAME = "Flo-Zone Pest And Termite Solutions Inc"
 
 
+@pytest.fixture(autouse=True)
+def isolate_legacy_application_tests_from_predraft_gate(monkeypatch):
+    """Pre-draft authorization has dedicated tests; these cover downstream behavior."""
+    for target in (
+        "app.services.draft_generation.require_effective_drafting_eligibility",
+        "app.services.page_editor.require_effective_drafting_eligibility",
+    ):
+        monkeypatch.setattr(target, lambda *args, **kwargs: None)
+
+
 def test_health_check() -> None:
     with TestClient(app) as client:
         response = client.get("/health")
@@ -225,7 +235,7 @@ def test_backup_export_contains_metadata_counts_and_all_data_groups(tmp_path: Pa
 
     assert backup_path.is_file()
     assert payload["metadata"]["app"] == "Project Atlas"
-    assert payload["metadata"]["version"] == "0.45"
+    assert payload["metadata"]["version"] == "0.48"
     assert isinstance(payload["metadata"]["created_at"], str)
     assert payload["metadata"]["table_counts"] == before_counts
     assert set(payload["data"]) == set(BACKUP_MODELS)
@@ -686,7 +696,13 @@ def test_batch_preview_does_not_modify_database() -> None:
             after = (page.status, page.generation_status, page.draft_content, page.content_body, page.updated_at)
 
     assert preview.matched_count == 1
-    assert preview.eligible_count == 1
+    assert preview.eligible_count == 0
+    assert preview.skipped_count == 1
+    assert preview.candidates[0].eligibility_status is None
+    assert (
+        preview.candidates[0].reason
+        == "No current coverage-gated drafting eligibility assessment."
+    )
     assert after == before
 
 
@@ -713,9 +729,10 @@ def test_batch_generation_updates_only_allowed_draft_pages() -> None:
             session.refresh(draft_page)
             session.refresh(approved_page)
 
-            assert generated_ids == [draft_page.id]
-            assert draft_page.generation_status == "generated"
-            assert draft_page.draft_content is not None
+            assert generated_ids == []
+            assert draft_page.generation_status == "not_generated"
+            assert draft_page.draft_content is None
+            assert draft_page.content_body is None
             assert approved_page.status == "approved"
             assert approved_page.draft_content == {"title": "Keep me"}
             assert approved_page.content_body == "Keep this approved body"
@@ -1744,7 +1761,7 @@ def test_backup_restore_preserves_review_notes_and_approval_audits_idempotently(
                 session.delete(record)
             session.commit()
 
-        assert payload["metadata"]["version"] == "0.45"
+        assert payload["metadata"]["version"] == "0.48"
     assert payload["data"]["approval_audits"]
     exported_page = next(
         record
@@ -2128,7 +2145,7 @@ def test_backup_restore_preserves_page_revisions_idempotently(tmp_path: Path) ->
                 revisions=restored_revisions,
             )
 
-    assert payload_json["metadata"]["version"] == "0.45"
+    assert payload_json["metadata"]["version"] == "0.48"
     assert payload_json["data"]["page_revisions"]
     assert len(restored_revisions) == 1
     assert restored_after["hero_subheadline"].endswith("Reviewed for backup.")
@@ -4785,7 +4802,7 @@ def test_backup_restore_preserves_wordpress_audits_and_safe_references_idempoten
                 audits=restored_audits,
             )
 
-    assert payload["metadata"]["version"] == "0.45"
+    assert payload["metadata"]["version"] == "0.48"
     assert payload["data"]["wordpress_draft_audits"]
     assert payload["data"]["generated_pages"][0].get("wordpress_post_id") is not None or any(
         item.get("wordpress_post_id") == 911

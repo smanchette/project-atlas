@@ -111,6 +111,50 @@ def isolate_wordpress_audit_state() -> None:
                     "WHERE site_plan_id NOT IN (SELECT id FROM siteplan)"
                 )
             )
+        if "draftingeligibilitydisposition" in available:
+            session.exec(
+                text(
+                    "DELETE FROM draftingeligibilitydisposition "
+                    "WHERE site_plan_id NOT IN (SELECT id FROM siteplan) "
+                    "OR planned_page_id NOT IN (SELECT id FROM plannedpage)"
+                )
+            )
+        if "draftingeligibilityassessment" in available:
+            session.exec(
+                text(
+                    "DELETE FROM draftingeligibilityassessment "
+                    "WHERE site_plan_id NOT IN (SELECT id FROM siteplan) "
+                    "OR planned_page_id NOT IN (SELECT id FROM plannedpage)"
+                )
+            )
+        if "websitedraftgenerationitem" in available:
+            session.exec(
+                text(
+                    "DELETE FROM websitedraftgenerationitem "
+                    "WHERE run_id NOT IN "
+                    "(SELECT id FROM websitedraftgenerationrun) "
+                    "OR site_plan_id NOT IN (SELECT id FROM siteplan)"
+                )
+            )
+        if "websitedraftgenerationrun" in available:
+            session.exec(
+                text(
+                    "DELETE FROM websitedraftgenerationrun "
+                    "WHERE site_plan_id NOT IN (SELECT id FROM siteplan)"
+                )
+            )
+        for table in (
+            "predraftdistinctnessbrief",
+            "supportingpageauthorization",
+        ):
+            if table in available:
+                session.exec(
+                    text(
+                        f"DELETE FROM {table} "
+                        "WHERE site_plan_id NOT IN (SELECT id FROM siteplan) "
+                        "OR planned_page_id NOT IN (SELECT id FROM plannedpage)"
+                    )
+                )
         for table in (
             "websiteservicecitycoveragedecision",
             "websitecitycoveragedecision",

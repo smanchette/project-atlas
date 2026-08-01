@@ -3,10 +3,12 @@ import { ClipboardList, FilePlus2, RefreshCw, Save, Trash2 } from "lucide-react"
 
 import { apiRequest } from "../api";
 import CoveragePlanningPanel from "../components/CoveragePlanningPanel";
+import DraftingEligibilityPanel from "../components/DraftingEligibilityPanel";
 import type {
   City,
   CoverageInventoryPreview,
   CoveragePolicy,
+  DraftingEligibilityManifest,
   County,
   InternalLinkIntent,
   NavigationItem,
@@ -65,6 +67,8 @@ export default function SitePlansPage() {
   const [coveragePolicy, setCoveragePolicy] = useState<CoveragePolicy | null>(null);
   const [coverageInventory, setCoverageInventory] =
     useState<CoverageInventoryPreview | null>(null);
+  const [eligibility, setEligibility] =
+    useState<DraftingEligibilityManifest | null>(null);
   const [draft, setDraft] = useState<DraftPage>(EMPTY_PAGE);
   const [purposeOverrides, setPurposeOverrides] = useState<Record<number, string>>({});
   const [message, setMessage] = useState("");
@@ -109,20 +113,24 @@ export default function SitePlansPage() {
       );
       setPlans(rows);
       if (rows[0]) {
-        const [detail, readinessReport, connectionPlan, policy, inventory] = await Promise.all([
+        const [detail, readinessReport, connectionPlan, policy, inventory, eligibilityManifest] = await Promise.all([
           apiRequest<SitePlanDetail>(`/api/site-plans/${rows[0].id}`),
           apiRequest<WebsiteReadinessReport>(`/api/site-plans/${rows[0].id}/readiness`),
           apiRequest<SiteConnectionPlan>(`/api/site-plans/${rows[0].id}/connections`),
           apiRequest<CoveragePolicy>(`/api/site-plans/${rows[0].id}/coverage`),
           apiRequest<CoverageInventoryPreview>(
             `/api/site-plans/${rows[0].id}/coverage/inventory`
-          )
+          ),
+          apiRequest<DraftingEligibilityManifest>(
+            `/api/site-plans/${rows[0].id}/drafting-eligibility`
+          ),
         ]);
         setPlan(detail);
         setReadiness(readinessReport);
         setConnections(connectionPlan);
         setCoveragePolicy(policy);
         setCoverageInventory(inventory);
+        setEligibility(eligibilityManifest);
         setPurposeOverrides(
           Object.fromEntries(
             detail.planned_pages.map((page) => [
@@ -137,6 +145,7 @@ export default function SitePlansPage() {
         setConnections(null);
         setCoveragePolicy(null);
         setCoverageInventory(null);
+        setEligibility(null);
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Unable to load Site Plans.");
@@ -377,6 +386,16 @@ export default function SitePlansPage() {
               reportMessage={setMessage}
             />
           )}
+          {eligibility && websiteId && (
+            <DraftingEligibilityPanel
+              planId={plan.id}
+              websiteId={websiteId}
+              manifest={eligibility}
+              working={working}
+              reload={() => loadPlans(websiteId)}
+              reportMessage={setMessage}
+            />
+          )}
           {connections && websiteId && (
             <SiteConnectionPanel
               key={plan.id}
@@ -519,7 +538,7 @@ function SiteConnectionPanel({
   reportMessage: (message: string) => void;
 }) {
   const eligiblePages = plan.planned_pages.filter(
-    (page) => page.page_type !== "county" && page.page_type !== "city"
+    (page) => page.page_type !== "city"
   );
   const firstSet = connections.navigation_sets[0];
   const [navSetId, setNavSetId] = useState(String(firstSet?.id ?? ""));

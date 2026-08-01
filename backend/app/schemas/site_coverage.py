@@ -80,6 +80,32 @@ class ServiceCityCoverageDecisionRead(SQLModel):
     updated_at: datetime
 
 
+class ServiceCountyCoverageDecisionRead(SQLModel):
+    id: int
+    website_id: int
+    service_id: int
+    county_id: int
+    status: CoverageDecisionStatus
+    rationale: str | None = None
+    decided_by: str
+    decision_version: int
+    decided_at: datetime
+    updated_at: datetime
+
+
+class SupportingPageAuthorizationRead(SQLModel):
+    id: int
+    website_id: int
+    site_plan_id: int
+    planned_page_id: int
+    status: CoverageDecisionStatus
+    rationale: str
+    decided_by: str
+    decision_version: int
+    decided_at: datetime
+    updated_at: datetime
+
+
 class CoveragePlanningRecordRead(SQLModel):
     id: int
     website_id: int
@@ -88,6 +114,8 @@ class CoveragePlanningRecordRead(SQLModel):
     generated_county_candidates: list[dict[str, Any]]
     generated_city_candidates: list[dict[str, Any]]
     generated_matrix_candidates: list[dict[str, Any]]
+    generated_service_county_candidates: list[dict[str, Any]]
+    generated_supporting_page_candidates: list[dict[str, Any]]
     source_snapshot: dict[str, Any]
     generated_at: datetime
     updated_at: datetime
@@ -101,6 +129,8 @@ class CoveragePolicyRead(SQLModel):
     county_decisions: list[CountyCoverageDecisionRead]
     city_decisions: list[CityCoverageDecisionRead]
     matrix_decisions: list[ServiceCityCoverageDecisionRead]
+    service_county_decisions: list[ServiceCountyCoverageDecisionRead]
+    supporting_page_authorizations: list[SupportingPageAuthorizationRead]
 
 
 class CoverageInventoryItem(SQLModel):

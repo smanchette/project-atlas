@@ -44,6 +44,21 @@ PLANNED_PAGE_CONTRACTS: dict[str, PageTypeReviewContract] = {
         required_section_keys=("service_overview", "approved_guidance", "service_area"),
         require_service=True,
     ),
+    "county": PageTypeReviewContract(
+        page_type="county",
+        schema="planned-page-draft-v1",
+        required_section_keys=(
+            "service_county_intro",
+            "cities_served",
+            "how_service_works",
+            "customer_expectations",
+            "preparation_guidance",
+            "trust_and_license",
+            "related_city_services",
+        ),
+        require_service=True,
+        require_county=True,
+    ),
     "informational": PageTypeReviewContract(
         page_type="informational",
         schema="planned-page-draft-v1",
@@ -67,7 +82,7 @@ CITY_SERVICE_CONTRACT = PageTypeReviewContract(
     media_policy="required",
 )
 
-DEFERRED_PAGE_TYPES = frozenset({"county", "city"})
+DEFERRED_PAGE_TYPES = frozenset({"city"})
 
 
 def review_contract_for(page: GeneratedPage) -> PageTypeReviewContract:

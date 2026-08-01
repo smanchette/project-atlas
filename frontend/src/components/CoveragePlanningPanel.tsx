@@ -59,11 +59,16 @@ export default function CoveragePlanningPanel({
     key: string,
     path: string,
     existing?: Partial<DecisionDraft>,
-    county = false
+    county = false,
+    rationaleRequired = false
   ) {
     const value = draft(key, existing);
     if (!value.decided_by.trim()) {
       reportMessage("Operator provenance is required for every coverage decision.");
+      return;
+    }
+    if (rationaleRequired && !value.rationale.trim()) {
+      reportMessage("Supporting-page authorization requires a rationale.");
       return;
     }
     setBusy(true);
@@ -207,6 +212,41 @@ export default function CoveragePlanningPanel({
       />
 
       <CoverageDecisionGroup
+        title="Explicit Service × County pages"
+        candidates={policy.planning_record.generated_service_county_candidates}
+        keyFor={(item) =>
+          `service-county:${numberValue(item.service_id)}:${numberValue(item.county_id)}`
+        }
+        labelFor={(item) =>
+          `${stringValue(item.service_name)} × ${stringValue(item.county_name)}`
+        }
+        existingFor={(item) => {
+          const found = policy.service_county_decisions.find(
+            (decision) =>
+              decision.service_id === numberValue(item.service_id) &&
+              decision.county_id === numberValue(item.county_id)
+          );
+          return found
+            ? {
+                status: found.status,
+                rationale: found.rationale ?? "",
+                decided_by: found.decided_by
+              }
+            : undefined;
+        }}
+        draft={draft}
+        updateDraft={updateDraft}
+        save={(item, key, existing) =>
+          saveDecision(
+            key,
+            `services/${numberValue(item.service_id)}/counties/${numberValue(item.county_id)}`,
+            existing
+          )
+        }
+        disabled={disabled}
+      />
+
+      <CoverageDecisionGroup
         title="Cities"
         candidates={policy.planning_record.generated_city_candidates}
         keyFor={(item) => `city:${numberValue(item.city_id)}`}
@@ -261,6 +301,42 @@ export default function CoveragePlanningPanel({
             key,
             `services/${numberValue(item.service_id)}/cities/${numberValue(item.city_id)}`,
             existing
+          )
+        }
+        disabled={disabled}
+      />
+
+      <CoverageDecisionGroup
+        title="Supporting Informational and additional FAQ pages"
+        candidates={policy.planning_record.generated_supporting_page_candidates.filter(
+          (item) => stringValue(item.approval_source) !== "core_policy"
+        )}
+        keyFor={(item) => `supporting:${numberValue(item.planned_page_id)}`}
+        labelFor={(item) =>
+          `${stringValue(item.page_type)}: ${stringValue(item.working_name)}`
+        }
+        existingFor={(item) => {
+          const found = policy.supporting_page_authorizations.find(
+            (decision) =>
+              decision.planned_page_id === numberValue(item.planned_page_id)
+          );
+          return found
+            ? {
+                status: found.status,
+                rationale: found.rationale,
+                decided_by: found.decided_by
+              }
+            : undefined;
+        }}
+        draft={draft}
+        updateDraft={updateDraft}
+        save={(item, key, existing) =>
+          saveDecision(
+            key,
+            `supporting-pages/${numberValue(item.planned_page_id)}`,
+            existing,
+            false,
+            true
           )
         }
         disabled={disabled}

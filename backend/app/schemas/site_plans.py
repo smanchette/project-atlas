@@ -93,6 +93,8 @@ class PlannedPageDraftContent(SQLModel):
     intro: str
     sections: list[DraftSection] = Field(default_factory=list)
     faq_items: list[dict[str, str]] = Field(default_factory=list)
+    image_placements: list[dict[str, str]] = Field(default_factory=list)
+    related_pages: list[dict[str, str]] = Field(default_factory=list)
     call_to_action: str
     internal_notes: str
     planning_record_id: int

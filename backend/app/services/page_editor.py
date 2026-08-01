@@ -3,9 +3,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException
-from sqlmodel import Session
+from sqlmodel import Session, select
 
-from app.models import GeneratedPage, GeneratedPageRevision
+from app.models import GeneratedPage, GeneratedPageRevision, PlannedPage
 from app.schemas.generation import DraftContent
 from app.schemas.page_editor import ManualDraftSaveRequest
 from app.schemas.qa import PageQAResult
@@ -15,6 +15,10 @@ from app.services.draft_generation import (
     UnsafeContentError,
     render_content_body,
     validate_safe_content,
+)
+from app.services.drafting_eligibility import (
+    DraftingEligibilityError,
+    require_effective_drafting_eligibility,
 )
 from app.services.page_qa import save_page_qa
 from app.services.page_type_review import review_contract_for, validate_draft_contract
@@ -66,6 +70,22 @@ def save_manual_draft(
         raise HTTPException(status_code=409, detail="Only draft pages can be edited")
     if not page.draft_content:
         raise HTTPException(status_code=409, detail="Generate a structured draft before editing")
+    planned_page = session.exec(
+        select(PlannedPage).where(PlannedPage.generated_page_id == page.id)
+    ).first()
+    if planned_page is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Draft editing blocked: Generated Page is not owned by a Planned Page.",
+        )
+    try:
+        require_effective_drafting_eligibility(
+            session,
+            planned_page.id or 0,
+            operation="draft editing",
+        )
+    except DraftingEligibilityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     before = deepcopy(page.draft_content)
     contract = review_contract_for(page)

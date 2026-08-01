@@ -32,6 +32,7 @@ from app.services.site_coverage import (
     decide_county,
     decide_service,
     decide_service_city,
+    decide_service_county,
     ensure_coverage_foundation,
     preview_expected_inventory,
     read_coverage_policy,
@@ -163,6 +164,17 @@ def _include_coverage(
         CoverageDecisionUpdate(
             status="included",
             rationale="Approved exact Service × City combination.",
+            decided_by=operator,
+        ),
+    )
+    decide_service_county(
+        session,
+        plan.id,
+        service.id,
+        county.id,
+        CoverageDecisionUpdate(
+            status="included",
+            rationale="Approved exact Service × County page.",
             decided_by=operator,
         ),
     )
@@ -321,10 +333,67 @@ def test_cross_website_service_and_matrix_decisions_fail_closed():
                 ),
             )
         _include_coverage(session, website, service, county, city, plan)
+        with pytest.raises(SiteCoverageError, match="does not belong"):
+            decide_service_county(
+                session,
+                plan.id,
+                foreign_service.id,
+                county.id,
+                CoverageDecisionUpdate(
+                    status="included",
+                    rationale="Wrong Website.",
+                    decided_by="Reviewer",
+                ),
+            )
         assert all(
             decision.service_id == service.id
             for decision in read_coverage_policy(session, plan.id).matrix_decisions
         )
+
+
+def test_multiple_services_create_distinct_service_county_inventory_items():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, service, county, city, plan = _scope(session)
+        _include_coverage(session, website, service, county, city, plan)
+        second = Service(
+            business_id=business.id,
+            service_name="Rodent Exclusion",
+            service_slug="rodent-exclusion",
+            status="active",
+        )
+        session.add(second)
+        session.commit()
+        decide_service(
+            session,
+            plan.id,
+            second.id,
+            CoverageDecisionUpdate(
+                status="included",
+                rationale="Second Website service.",
+                decided_by="Reviewer",
+            ),
+        )
+        decide_service_county(
+            session,
+            plan.id,
+            second.id,
+            county.id,
+            CoverageDecisionUpdate(
+                status="included",
+                rationale="Second exact Service × County page.",
+                decided_by="Reviewer",
+            ),
+        )
+        county_items = [
+            item
+            for item in preview_expected_inventory(session, plan.id).items
+            if item.page_type == "county" and item.disposition == "missing"
+        ]
+        assert len(county_items) == 2
+        assert {item.service_id for item in county_items} == {service.id, second.id}
+        assert len({item.intended_slug for item in county_items}) == 2
 
 
 def test_identical_names_and_shared_geography_remain_website_isolated():
@@ -454,7 +523,7 @@ def test_parent_decision_drift_is_reported_and_blocks_reconciliation():
             ),
         )
         preview = preview_expected_inventory(session, plan.id)
-        assert preview.counts.relationship_conflict == 2
+        assert preview.counts.relationship_conflict == 3
         assert preview.reconciliation_ready is False
         policy = read_coverage_policy(session, plan.id)
         assert policy.planning_record.generated_matrix_candidates[0][
@@ -509,6 +578,7 @@ def test_backup_round_trip_preserves_coverage_decisions_and_provenance(tmp_path)
         assert len(policy.county_decisions) == 1
         assert len(policy.city_decisions) == 1
         assert len(policy.matrix_decisions) == 1
+        assert len(policy.service_county_decisions) == 1
         assert policy.matrix_decisions[0].decided_by == "Coverage Reviewer"
         assert policy.matrix_decisions[0].decision_version == 1
         assert policy.matrix_decisions[0].decided_at is not None

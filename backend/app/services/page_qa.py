@@ -8,6 +8,7 @@ from sqlmodel import Session, select
 from app.models import (
     Business,
     City,
+    County,
     GeneratedPage,
     ImageMetadata,
     PageImageAssignment,
@@ -83,6 +84,7 @@ def evaluate_page_qa(session: Session, page_id: int) -> PageQAResult:
     business = website_context.business
     service = session.get(Service, page.service_id) if page.service_id else None
     city = session.get(City, page.city_id) if page.city_id else None
+    county = session.get(County, page.county_id) if page.county_id else None
     draft = page.draft_content or {}
     try:
         contract = review_contract_for(page)
@@ -156,6 +158,22 @@ def evaluate_page_qa(session: Session, page_id: int) -> PageQAResult:
                     else "Service appears in the draft."
                 ),
                 fail_message="The assigned service name is missing from the draft.",
+            )
+        if contract.require_county:
+            county_present = bool(
+                county and county.county_name.lower() in public_text_lower
+            )
+            _check(
+                checks,
+                key="county_name",
+                label="County name present",
+                passed=county_present,
+                pass_message=(
+                    f"{county.county_name} appears in the draft."
+                    if county
+                    else "County appears in the draft."
+                ),
+                fail_message="The assigned County name is missing from the draft.",
             )
     else:
         _required(checks, "why_it_matters", "Why it matters section", draft.get("why_it_matters"))

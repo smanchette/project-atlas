@@ -47,6 +47,8 @@ class BatchCandidate(SQLModel):
     generation_status: str
     eligible: bool
     reason: str | None = None
+    planned_page_id: int | None = None
+    eligibility_status: str | None = None
 
 
 class BatchPreviewResponse(SQLModel):
@@ -54,6 +56,9 @@ class BatchPreviewResponse(SQLModel):
     eligible_count: int
     skipped_count: int
     candidates: list[BatchCandidate]
+    source_snapshot: dict[str, Any] = Field(default_factory=dict)
+    blocked_by_reason: dict[str, int] = Field(default_factory=dict)
+    inventory_summary: dict[str, int] = Field(default_factory=dict)
 
 
 class BatchGenerationResponse(SQLModel):

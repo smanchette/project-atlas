@@ -5,11 +5,26 @@ from typing import Any, Protocol
 from sqlmodel import Session, select
 
 from app.core.config import get_settings
-from app.models import Business, City, County, GeneratedPage, KnowledgeBlock, Service, Setting
+from app.models import (
+    Business,
+    City,
+    County,
+    GeneratedPage,
+    KnowledgeBlock,
+    PlannedPage,
+    Service,
+    Setting,
+)
 from app.schemas.generation import BatchCandidate, BatchPreviewResponse, DraftContent, FAQItem
 from app.schemas.website_context import WebsiteContextRead
 from app.services.website_context import build_website_context, website_config_value
 from app.services.website_scope import require_page_website, require_single_website_selection
+from app.services.drafting_eligibility import (
+    DraftingEligibilityError,
+    effective_batch_eligibility,
+    read_manifest,
+    require_effective_drafting_eligibility,
+)
 
 FORBIDDEN_PHRASES = (
     "100% guaranteed",
@@ -280,6 +295,23 @@ def generate_page_draft(
             scoped_page,
             expected_website_id=expected_website_id,
         )
+        planned_page = session.exec(
+            select(PlannedPage).where(
+                PlannedPage.generated_page_id == scoped_page.id
+            )
+        ).first()
+        if planned_page is None:
+            raise DraftGenerationError(
+                "Draft generation blocked: Generated Page is not owned by a Planned Page."
+            )
+        try:
+            require_effective_drafting_eligibility(
+                session,
+                planned_page.id or 0,
+                operation="City-Service draft generation",
+            )
+        except DraftingEligibilityError as exc:
+            raise DraftGenerationError(str(exc)) from exc
     context = load_generation_context(session, page_id)
     _ensure_page_can_generate(context.page, allow_overwrite=allow_overwrite)
     prompt = assemble_generation_prompt(context)
@@ -332,11 +364,43 @@ def preview_batch(
         operation="Batch generation",
     )
     candidates: list[BatchCandidate] = []
+    blocked_by_reason: dict[str, int] = {}
+    source_snapshot: dict[str, Any] = {}
+    inventory_summary: dict[str, int] = {}
     for page in pages:
         city = session.get(City, page.city_id) if page.city_id is not None else None
         county = session.get(County, page.county_id) if page.county_id is not None else None
-        eligible = page.status == "draft" and city is not None and county is not None
-        reason = None if eligible else _batch_skip_reason(page, city, county)
+        planned = session.exec(
+            select(PlannedPage).where(PlannedPage.generated_page_id == page.id)
+        ).first()
+        base_eligible = (
+            page.status == "draft" and city is not None and county is not None
+        )
+        gate_eligible, gate_status, gate_reason = (
+            effective_batch_eligibility(session, planned.id)
+            if planned and planned.id is not None
+            else (
+                False,
+                None,
+                "No current coverage-gated drafting eligibility assessment.",
+            )
+        )
+        eligible = base_eligible and gate_eligible
+        reason = (
+            None
+            if eligible
+            else (
+                _batch_skip_reason(page, city, county)
+                if not base_eligible
+                else gate_reason
+            )
+        )
+        if reason:
+            blocked_by_reason[reason] = blocked_by_reason.get(reason, 0) + 1
+        if planned and not source_snapshot:
+            manifest = read_manifest(session, planned.site_plan_id)
+            source_snapshot = manifest.source_snapshot
+            inventory_summary = manifest.counts.model_dump()
         candidates.append(
             BatchCandidate(
                 page_id=page.id or 0,
@@ -347,6 +411,8 @@ def preview_batch(
                 generation_status=page.generation_status,
                 eligible=eligible,
                 reason=reason,
+                planned_page_id=planned.id if planned else None,
+                eligibility_status=gate_status,
             )
         )
 
@@ -356,6 +422,9 @@ def preview_batch(
         eligible_count=eligible_count,
         skipped_count=len(candidates) - eligible_count,
         candidates=candidates,
+        source_snapshot=source_snapshot,
+        blocked_by_reason=blocked_by_reason,
+        inventory_summary=inventory_summary,
     )
 
 

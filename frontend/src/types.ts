@@ -268,6 +268,8 @@ export type CoveragePlanningRecord = {
   generated_county_candidates: Array<Record<string, unknown>>;
   generated_city_candidates: Array<Record<string, unknown>>;
   generated_matrix_candidates: Array<Record<string, unknown>>;
+  generated_service_county_candidates: Array<Record<string, unknown>>;
+  generated_supporting_page_candidates: Array<Record<string, unknown>>;
   source_snapshot: Record<string, unknown>;
   generated_at: string;
   updated_at: string;
@@ -284,6 +286,12 @@ export type CoveragePolicy = {
   city_decisions: Array<CoverageDecision & { city_id: number }>;
   matrix_decisions: Array<
     CoverageDecision & { service_id: number; city_id: number }
+  >;
+  service_county_decisions: Array<
+    CoverageDecision & { service_id: number; county_id: number }
+  >;
+  supporting_page_authorizations: Array<
+    CoverageDecision & { site_plan_id: number; planned_page_id: number; rationale: string }
   >;
 };
 
@@ -972,6 +980,8 @@ export type PlannedPageDraftContent = {
   intro: string;
   sections: PlannedPageDraftSection[];
   faq_items: { question: string; answer: string }[];
+  image_placements: { key: string; purpose: string; status: string }[];
+  related_pages: { label: string; slug: string }[];
   call_to_action: string;
   internal_notes: string;
   planning_record_id: number;
@@ -1545,4 +1555,155 @@ export type KnowledgeBlock = {
   status: string;
   created_at: string;
   updated_at: string;
+};
+
+export type DraftingEligibilityDisposition = {
+  id: number;
+  assessment_id: number;
+  decision: "accepted" | "exception_approved" | "deferred" | "consolidate";
+  rationale: string;
+  decided_by: string;
+  accepted_exception: boolean;
+  decision_version: number;
+  decided_at: string;
+};
+
+export type DraftingEligibilityAssessment = {
+  id: number;
+  planned_page_id: number;
+  status:
+    | "eligible"
+    | "blocked_missing_required_information"
+    | "insufficient_local_value"
+    | "semantic_duplication"
+    | "consolidation_recommended"
+    | "deferred"
+    | "excluded_by_coverage"
+    | "stale_assessment";
+  current: boolean;
+  effective_eligible: boolean;
+  reasons: string[];
+  distinctness_brief_binding: Record<string, unknown>;
+  local_value_findings: Array<Record<string, unknown>>;
+  semantic_findings: Array<Record<string, unknown>>;
+  operator_disposition?: DraftingEligibilityDisposition | null;
+};
+
+export type PreDraftDistinctnessBrief = {
+  id: number;
+  planned_page_id: number;
+  algorithm_version: string;
+  intended_audience: string[];
+  search_intent: string;
+  approved_fact_identities: Array<Record<string, unknown>>;
+  approved_knowledge_identities: Array<Record<string, unknown>>;
+  conversion_purpose: string;
+  required_page_specific_value: Array<Record<string, unknown>>;
+  proposed_unique_elements: Array<Record<string, unknown>>;
+  related_planned_page_ids: number[];
+  competing_planned_page_ids: number[];
+  brief_hash: string;
+  generated_at: string;
+};
+
+export type DraftingBatchManifestItem = {
+  inventory_key: string;
+  planned_page_id?: number | null;
+  page_type: string;
+  working_name: string;
+  classification:
+    | "eligible"
+    | "blocked"
+    | "excluded"
+    | "deferred"
+    | "stale"
+    | "consolidation_recommended";
+  assessment_status?: DraftingEligibilityAssessment["status"] | null;
+  current: boolean;
+  effective_eligible: boolean;
+  reasons: string[];
+};
+
+export type DraftingEligibilityManifest = {
+  website_id: number;
+  site_plan_id: number;
+  algorithm_version: string;
+  source_snapshot: Record<string, unknown>;
+  counts: Record<string, number>;
+  assessments: DraftingEligibilityAssessment[];
+  distinctness_briefs: PreDraftDistinctnessBrief[];
+  inventory_exceptions: Array<Record<string, unknown>>;
+  batch_preview_ready: boolean;
+  batch_manifest: {
+    website_id: number;
+    site_plan_id: number;
+    items: DraftingBatchManifestItem[];
+    counts: Record<string, number>;
+    preview_ready: boolean;
+    blocking_reasons: string[];
+  };
+  generated_at: string;
+};
+
+export type WebsiteDraftGenerationItem = {
+  id: number;
+  inventory_key: string;
+  ordinal: number;
+  planned_page_id?: number | null;
+  generated_page_id?: number | null;
+  page_type: string;
+  working_name: string;
+  manifest_classification: string;
+  outcome:
+    | "pending"
+    | "generated"
+    | "already_drafted"
+    | "blocked"
+    | "deferred"
+    | "excluded"
+    | "stale"
+    | "consolidation_recommended"
+    | "unsupported"
+    | "error";
+  reasons: string[];
+  attempt_count: number;
+  generated_content_hash?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+};
+
+export type WebsiteDraftGenerationRun = {
+  id: number;
+  website_id: number;
+  site_plan_id: number;
+  manifest_hash: string;
+  eligibility_algorithm_version: string;
+  status:
+    | "preparing"
+    | "running"
+    | "interrupted"
+    | "completed"
+    | "completed_with_errors";
+  counts: {
+    expected: number;
+    eligible: number;
+    generated: number;
+    already_drafted: number;
+    skipped: number;
+    blocked: number;
+    deferred: number;
+    excluded: number;
+    stale: number;
+    consolidation_recommended: number;
+    unsupported: number;
+    errors: number;
+  };
+  processed_count: number;
+  progress_total: number;
+  progress_message: string;
+  started_at: string;
+  last_resumed_at?: string | null;
+  completed_at?: string | null;
+  duration_ms?: number | null;
+  items: WebsiteDraftGenerationItem[];
 };

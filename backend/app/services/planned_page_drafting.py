@@ -25,6 +25,14 @@ from app.services.draft_generation import (
     generate_page_draft,
     validate_safe_content,
 )
+from app.services.drafting_eligibility import (
+    DraftingEligibilityError,
+    require_effective_drafting_eligibility,
+)
+from app.services.county_page_contract import (
+    CountyPageContractError,
+    build_county_page_context,
+)
 from app.services.website_context import build_website_context
 
 
@@ -33,6 +41,7 @@ SUPPORTED_PAGE_TYPES = {
     "about",
     "contact",
     "service",
+    "county",
     "informational",
     "faq",
 }
@@ -208,6 +217,54 @@ def evaluate_draft_readiness(
                     ),
                 ]
             )
+    elif page.page_type == "county":
+        county = session.get(County, page.county_id) if page.county_id else None
+        try:
+            county_context = (
+                build_county_page_context(
+                    session,
+                    website_id=page.website_id,
+                    site_plan_id=page.site_plan_id,
+                    county_id=page.county_id or 0,
+                    service_id=page.service_id,
+                )
+                if county
+                else None
+            )
+        except CountyPageContractError:
+            county_context = None
+        checks.extend(
+            [
+                (
+                    "county_relationship",
+                    county is not None,
+                    "Assign an approved County to this County page.",
+                ),
+                (
+                    "approved_service_county_page",
+                    bool(county_context and county_context.has_approved_value),
+                    (
+                        "Approve this exact Service × County page and at least one "
+                        "related Service × City relationship for this Website."
+                    ),
+                ),
+                (
+                    "approved_county_cities",
+                    bool(county_context and county_context.included_cities),
+                    "Approve at least one included City in this County.",
+                ),
+                (
+                    "service_relationship",
+                    bool(county_context and county_context.service),
+                    "Assign exactly one approved Website Service to this County page.",
+                ),
+                (
+                    "primary_call_to_action",
+                    bool(contact_methods),
+                    "Add an approved phone number or email for the call to action.",
+                ),
+            ]
+        )
     elif page.page_type == "informational":
         checks.append(
             (
@@ -280,6 +337,14 @@ def draft_planned_page(
     from app.services.site_planning import refresh_planning_record
 
     refresh_planning_record(session, planned_page_id, commit=False)
+    try:
+        require_effective_drafting_eligibility(
+            session,
+            planned_page_id,
+            operation="Planned Page drafting",
+        )
+    except DraftingEligibilityError as exc:
+        raise PlannedPageDraftingError(str(exc)) from exc
     record = session.exec(
         select(PlanningRecord).where(PlanningRecord.planned_page_id == page.id)
     ).one()
@@ -380,6 +445,8 @@ def _build_draft(
     intro: str
     sections: list[DraftSection]
     faq_items: list[dict[str, str]] = []
+    image_placements: list[dict[str, str]] = []
+    related_pages: list[dict[str, str]] = []
 
     if page.page_type == "home":
         title = brand_name
@@ -478,6 +545,134 @@ def _build_draft(
                 body=f"This service is available in the approved service area, including {service_area}.",
             ),
         ]
+    elif page.page_type == "county":
+        if page.county_id is None or page.service_id is None:
+            raise PlannedPageDraftingError(
+                "County drafting requires exactly one Service and one County relationship."
+            )
+        try:
+            county_context = build_county_page_context(
+                session,
+                website_id=page.website_id,
+                site_plan_id=page.site_plan_id,
+                county_id=page.county_id,
+                service_id=page.service_id,
+            )
+        except CountyPageContractError as exc:
+            raise PlannedPageDraftingError(str(exc)) from exc
+        if not county_context.has_approved_value:
+            raise PlannedPageDraftingError(
+                "County drafting requires approved included-city and Service × City value."
+            )
+        county = county_context.county
+        service = county_context.service
+        state_name = "Florida" if county.state.upper() == "FL" else county.state
+        title = page.working_name or (
+            f"{service.service_name} in {county.county_name}, {state_name}"
+        )
+        h1 = title
+        city_names = [item.city_name for item in county_context.included_cities]
+        intro = (
+            f"{brand_name} provides {service.service_name.lower()} for homes and "
+            f"properties throughout {county.county_name}. Our team helps customers "
+            "understand the process, prepare with confidence, and choose the right next step."
+        )
+        related_planned = [
+            planned
+            for related_id in county_context.related_city_service_page_ids
+            if (planned := session.get(PlannedPage, related_id)) is not None
+        ]
+        related_pages = [
+            {"label": item.working_name, "slug": item.intended_slug}
+            for item in related_planned
+        ]
+        city_links = ", ".join(city_names)
+        service_description = (
+            service.long_description
+            or service.short_description
+            or f"Professional {service.service_name.lower()} for local properties."
+        )
+        expectations = (
+            _knowledge_body(knowledge)
+            if knowledge
+            else (
+                "Customers receive clear preparation guidance, coordinated scheduling, "
+                "and an opportunity to ask questions before service begins."
+            )
+        )
+        trust = _trust_text(context) or (
+            f"{brand_name} serves local property owners with careful communication "
+            "and service guidance from the first call through follow-up."
+        )
+        sections = [
+            DraftSection(
+                key="service_county_intro",
+                heading=f"{service.service_name} for {county.county_name}",
+                body=service_description,
+            ),
+            DraftSection(
+                key="cities_served",
+                heading=f"Cities We Serve in {county.county_name}",
+                body=city_links,
+            ),
+            DraftSection(
+                key="how_service_works",
+                heading=f"How {service.service_name} Works",
+                body=(
+                    f"Our team coordinates each {service.service_name.lower()} project "
+                    "from the initial conversation through preparation, service, and follow-up."
+                ),
+            ),
+            DraftSection(
+                key="customer_expectations",
+                heading="What Customers Can Expect",
+                body=expectations,
+            ),
+            DraftSection(
+                key="preparation_guidance",
+                heading="Preparing for Service",
+                body=(
+                    "Preparation depends on the property and service plan. Our team "
+                    "provides clear instructions before work begins and answers questions along the way."
+                ),
+            ),
+            DraftSection(
+                key="trust_and_license",
+                heading=f"Why Choose {brand_name}",
+                body=trust,
+            ),
+            DraftSection(
+                key="related_city_services",
+                heading=f"Explore {service.service_name} Near You",
+                body=(
+                    ", ".join(item.working_name for item in related_planned)
+                    if related_planned
+                    else f"Contact {brand_name} to discuss service in {county.county_name}."
+                ),
+            ),
+        ]
+        faq_items = [
+            {"question": item.question, "answer": item.short_answer}
+            for item in knowledge
+            if item.question and item.short_answer
+        ][:6]
+        image_placements = [
+            {
+                "key": "hero",
+                "purpose": f"Hero image for {service.service_name} in {county.county_name}",
+                "status": "planned",
+            },
+            {
+                "key": "service",
+                "purpose": f"Service process image for {service.service_name}",
+                "status": "planned",
+            },
+            {
+                "key": "local",
+                "purpose": f"Property or community image for {county.county_name}",
+                "status": "planned",
+            },
+        ]
     elif page.page_type == "informational":
         title = page.working_name
         h1 = page.working_name
@@ -522,6 +717,8 @@ def _build_draft(
         intro=intro,
         sections=sections,
         faq_items=faq_items,
+        image_placements=image_placements,
+        related_pages=related_pages,
         call_to_action=call_to_action,
         internal_notes=(
             "Deterministic local draft assembled from approved Website Context and "

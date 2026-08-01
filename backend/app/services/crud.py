@@ -40,6 +40,47 @@ def create_record(session: Session, model: type[ModelT], payload: SQLModel) -> M
 def update_record(session: Session, model: type[ModelT], record_id: int, payload: SQLModel) -> ModelT:
     record = get_record(session, model, record_id)
     updates: dict[str, Any] = payload.model_dump(exclude_unset=True)
+    from app.models import GeneratedPage, PlannedPage
+
+    drafting_fields = {
+        "page_title",
+        "page_slug",
+        "meta_title",
+        "meta_description",
+        "h1",
+        "content_body",
+        "draft_content",
+        "generation_status",
+        "generated_at",
+    }
+    if model is GeneratedPage and drafting_fields.intersection(updates):
+        from app.services.drafting_eligibility import (
+            DraftingEligibilityError,
+            require_effective_drafting_eligibility,
+        )
+
+        planned_page = session.exec(
+            select(PlannedPage).where(PlannedPage.generated_page_id == record_id)
+        ).first()
+        if planned_page is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Draft update blocked: Generated Page is not owned by a "
+                    "Planned Page."
+                ),
+            )
+        try:
+            require_effective_drafting_eligibility(
+                session,
+                planned_page.id or 0,
+                operation="Generated Page draft update",
+            )
+        except DraftingEligibilityError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
     _validate_relationships(
         session,
         model,
@@ -156,4 +197,3 @@ def _validate_relationships(
                 statement = statement.where(GeneratedPage.id != record_id)
             if session.exec(statement).first():
                 conflict("Generated Page slug already exists for this Website.")
-
