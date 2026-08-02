@@ -2,10 +2,13 @@ import argparse
 from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
+import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlmodel import Session, SQLModel, select
 
+from app.core.config import get_settings
 from app.db.session import create_db_and_tables, engine
 from app.models import (
     ApprovalAudit,
@@ -65,6 +68,12 @@ from app.models import (
 
 APP_NAME = "Project Atlas"
 BACKUP_VERSION = "0.50"
+BRAND_ASSET_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
+BRAND_ASSET_MIME_EXTENSIONS = {
+    "image/jpeg": {".jpg", ".jpeg"},
+    "image/png": {".png"},
+    "image/webp": {".webp"},
+}
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -1751,23 +1760,57 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
         "website_header", "website_footer", "browser_tab", "social_preview",
         "reports", "login_screen",
     }
+    valid_provenance_types = {
+        "company_original", "commissioned", "licensed", "public_domain",
+    }
+    valid_rights_statuses = {"owned", "licensed", "commissioned", "public_domain"}
+    media_settings = get_settings()
     for record in data["brand_assets"]:
         approved_usage = record.get("approved_usage")
         restrictions = record.get("restrictions")
         checksum = record.get("checksum_sha256")
+        original_filename = record.get("original_filename")
+        stored_filename = record.get("stored_filename")
+        mime_type = record.get("mime_type")
         if (
             record.get("status") not in valid_asset_statuses
             or record.get("asset_type") not in valid_asset_types
+            or not isinstance(record.get("asset_key"), str)
+            or BRAND_ASSET_KEY_PATTERN.fullmatch(record["asset_key"]) is None
+            or not isinstance(record.get("version"), int)
+            or record["version"] < 1
             or not isinstance(approved_usage, list)
             or not approved_usage
+            or not _is_normalized_string_list(approved_usage)
             or not set(approved_usage) <= valid_usages
             or not isinstance(restrictions, list)
+            or not restrictions
+            or not _is_normalized_string_list(restrictions)
             or not set(restrictions) <= valid_usages
             or set(approved_usage) & set(restrictions)
             or not str(record.get("purpose") or "").strip()
             or not str(record.get("accessibility_description") or "").strip()
             or not str(record.get("created_by") or "").strip()
-            or "/media/" not in str(record.get("asset_url") or "")
+            or record.get("provenance_type") not in valid_provenance_types
+            or not str(record.get("provenance_notes") or "").strip()
+            or record.get("rights_status") not in valid_rights_statuses
+            or not str(record.get("rights_holder") or "").strip()
+            or not str(record.get("rights_notes") or "").strip()
+            or not _is_safe_backup_filename(original_filename)
+            or not _is_safe_backup_filename(stored_filename)
+            or mime_type not in BRAND_ASSET_MIME_EXTENSIONS
+            or Path(original_filename).suffix.lower() not in BRAND_ASSET_MIME_EXTENSIONS.get(mime_type, set())
+            or Path(stored_filename).suffix.lower() not in BRAND_ASSET_MIME_EXTENSIONS.get(mime_type, set())
+            or not _is_positive_int(record.get("file_size"))
+            or record["file_size"] > media_settings.media_max_upload_bytes
+            or not _is_positive_int(record.get("width"))
+            or not _is_positive_int(record.get("height"))
+            or record["width"] * record["height"] > media_settings.media_max_pixels
+            or not _has_coherent_managed_asset_urls(
+                record,
+                stored_filename,
+                str(media_settings.media_public_url),
+            )
             or not isinstance(checksum, str)
             or len(checksum) != 64
             or any(character not in "0123456789abcdef" for character in checksum)
@@ -1800,6 +1843,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             record.get("status") not in valid_assignment_statuses
             or record.get("slot") not in valid_slots
             or not str(record.get("assigned_by") or "").strip()
+            or not str(record.get("rationale") or "").strip()
             or not isinstance(record.get("version"), int)
             or record["version"] < 1
             or record.get("assigned_at") is None
@@ -2315,6 +2359,10 @@ def _validate_brand_asset_ownership(data: dict[str, list[dict[str, Any]]]) -> No
             )
         replacement_id = asset.get("replaces_brand_asset_id")
         if replacement_id is None:
+            if asset["version"] != 1:
+                raise BackupValidationError(
+                    "Backup root Brand Asset must begin at version 1."
+                )
             continue
         replacement = assets[replacement_id]
         if (
@@ -2323,7 +2371,7 @@ def _validate_brand_asset_ownership(data: dict[str, list[dict[str, Any]]]) -> No
             or replacement["asset_key"] != asset["asset_key"]
             or not isinstance(asset.get("version"), int)
             or not isinstance(replacement.get("version"), int)
-            or asset["version"] <= replacement["version"]
+            or asset["version"] != replacement["version"] + 1
         ):
             raise BackupValidationError(
                 "Backup Brand Asset replacement crosses ownership, changes its asset key, or does not increase the version."
@@ -2370,6 +2418,82 @@ def _validate_brand_asset_ownership(data: dict[str, list[dict[str, Any]]]) -> No
             raise BackupValidationError(
                 "Backup active Website Identity asset selection does not reference a currently approved asset."
             )
+
+
+def _is_safe_backup_filename(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and value
+        and value == value.strip()
+        and value not in {".", ".."}
+        and "/" not in value
+        and "\\" not in value
+        and "\x00" not in value
+        and all(ord(character) >= 32 and ord(character) != 127 for character in value)
+        and Path(value).name == value
+    )
+
+
+def _is_normalized_string_list(value: list[object]) -> bool:
+    return bool(
+        value
+        and all(isinstance(item, str) and item == item.strip().lower() and item for item in value)
+        and len(set(value)) == len(value)
+    )
+
+
+def _is_positive_int(value: object) -> bool:
+    return type(value) is int and value > 0
+
+
+def _safe_configured_media_base(value: str) -> str | None:
+    base = value.rstrip("/")
+    if not base:
+        return None
+    try:
+        parsed = urlsplit(base)
+        parsed.port
+    except ValueError:
+        return None
+    if parsed.query or parsed.fragment:
+        return None
+    if parsed.scheme or parsed.netloc:
+        if (
+            parsed.scheme.lower() not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.hostname is None
+        ):
+            return None
+        return base
+    if not base.startswith("/") or base.startswith("//"):
+        return None
+    return base
+
+
+def _has_coherent_managed_asset_urls(
+    record: dict[str, Any],
+    stored_filename: str,
+    configured_media_public_url: str,
+) -> bool:
+    public_base = _safe_configured_media_base(configured_media_public_url)
+    if public_base is None:
+        return False
+    stem = Path(stored_filename).stem
+    expected_optimized = {
+        f"{public_base}/optimized/{stem}-optimized.webp",
+        f"{public_base}/optimized/{stem}-optimized.jpg",
+    }
+    expected_thumbnail = {
+        f"{public_base}/thumbnails/{stem}-thumbnail.webp",
+        f"{public_base}/thumbnails/{stem}-thumbnail.jpg",
+    }
+    return bool(
+        record.get("asset_url") == f"{public_base}/originals/{stored_filename}"
+        and record.get("optimized_url") in expected_optimized
+        and record.get("thumbnail_url") in expected_thumbnail
+    )
 
 
 def main() -> None:

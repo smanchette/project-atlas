@@ -51,19 +51,19 @@ async def upload_brand_asset(
     variant_key: str = Form(default="default"),
     purpose: str = Form(...),
     approved_usage: str = Form(...),
-    restrictions: str = Form(default="[]"),
+    restrictions: str = Form(...),
     accessibility_description: str = Form(...),
     provenance_type: str = Form(...),
-    provenance_notes: str | None = Form(default=None),
+    provenance_notes: str = Form(...),
     rights_status: str = Form(...),
-    rights_holder: str | None = Form(default=None),
-    rights_notes: str | None = Form(default=None),
+    rights_holder: str = Form(...),
+    rights_notes: str = Form(...),
     created_by: str = Form(...),
     replaces_brand_asset_id: int | None = Form(default=None),
     session: Session = Depends(get_session),
 ) -> BrandAsset:
     usages = parse_string_list(approved_usage, "Approved usage")
-    restriction_values = [] if restrictions.strip() == "[]" else parse_string_list(restrictions, "Restrictions")
+    restriction_values = parse_string_list(restrictions, "Restrictions")
     return await create_brand_asset(
         session,
         file=file,

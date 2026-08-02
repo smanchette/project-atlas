@@ -1844,6 +1844,7 @@ th {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
 }
 
 .previewBrandMark {
@@ -1859,9 +1860,10 @@ th {
 
 .previewBrandLogo {
   display: block;
+  flex: 0 1 auto;
   width: auto;
-  max-width: 180px;
   height: auto;
+  max-width: min(180px, 42vw);
   max-height: 48px;
   object-fit: contain;
 }
@@ -1893,6 +1895,29 @@ th {
 .brandAssetCard button,
 .identitySlotGrid select {
   margin-top: 10px;
+}
+
+.brandAssetEvidence {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.brandAssetEvidence div {
+  border-top: 1px solid #e5ebe8;
+  padding-top: 8px;
+}
+
+.brandAssetEvidence dt {
+  color: #596965;
+  font-size: 12px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.brandAssetEvidence dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
 }
 
 .previewBrand strong,
@@ -2384,7 +2409,8 @@ th {
 }
 
 .previewFooterLogo {
-  max-width: 150px;
+  flex: 0 1 auto;
+  max-width: min(150px, 42vw);
   height: auto;
   max-height: 42px;
   object-fit: contain;
@@ -3066,6 +3092,11 @@ th {
 
   .previewHeaderInner {
     min-height: 76px;
+  }
+
+  .previewBrandLogo {
+    max-width: min(150px, 48vw);
+    max-height: 42px;
   }
 
   .previewBrand span {

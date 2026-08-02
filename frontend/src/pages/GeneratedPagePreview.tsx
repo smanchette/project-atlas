@@ -1,8 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AlertTriangle, ArrowLeft, Image, Phone, ShieldCheck } from "lucide-react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { apiRequest } from "../api";
+import {
+  WebsiteIdentityLogo,
+  installIdentityHeadTags,
+  removeIdentityHeadTags,
+} from "../components/WebsiteIdentityPresentation";
 import type {
   ApprovalAudit,
   GeneratedPage,
@@ -12,25 +17,53 @@ import type {
   PageQAResult
 } from "../types";
 
-type PreviewData = { page: GeneratedPage; composition: PageComposition };
+type PreviewData = {
+  page: GeneratedPage;
+  composition: PageComposition;
+  requestKey: string;
+};
 
 function GeneratedPagePreview() {
   const { id } = useParams();
   const [searchParams] = useSearchParams();
   const showQa = searchParams.get("qa") === "1";
+  const requestKey = previewRequestKey(id, showQa);
   const [data, setData] = useState<PreviewData | null>(null);
   const [qaResult, setQaResult] = useState<PageQAResult | null>(null);
   const [approvalCount, setApprovalCount] = useState(0);
   const [revisionCount, setRevisionCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [requestStateKey, setRequestStateKey] = useState("");
+  const loadGeneration = useRef(0);
+
+  useLayoutEffect(() => {
+    removeIdentityHeadTags(document);
+    return () => removeIdentityHeadTags(document);
+  }, [requestKey]);
 
   useEffect(() => {
+    const generation = ++loadGeneration.current;
+    let cancelled = false;
+    const isCurrentLoad = () =>
+      !cancelled && generation === loadGeneration.current;
+    setRequestStateKey(requestKey);
+    setLoading(true);
+    setError(null);
+    setData(null);
+    setQaResult(null);
+    setApprovalCount(0);
+    setRevisionCount(0);
+    document.title = "Project Atlas";
+    removeIdentityHeadTags(document);
+
     async function loadPreview() {
       const pageId = Number(id);
       if (!Number.isInteger(pageId)) {
-        setError("Invalid generated page ID.");
-        setLoading(false);
+        if (isCurrentLoad()) {
+          setError("Invalid generated page ID.");
+          setLoading(false);
+        }
         return;
       }
       try {
@@ -38,67 +71,64 @@ function GeneratedPagePreview() {
           apiRequest<GeneratedPage>(`/api/generated-pages/${pageId}`),
           apiRequest<PageComposition>(`/api/site-plans/generated-pages/${pageId}/composition`)
         ]);
-        if (composition.status !== "current" || composition.validation_errors.length) {
-          throw new Error(
-            composition.validation_errors.join(" ") ||
-            "The semantic page composition is not current."
-          );
-        }
-        setData({ page, composition });
+        const compositionError = compositionValidationError(composition);
+        if (compositionError) throw new Error(compositionError);
+        let nextQaResult: PageQAResult | null = null;
+        let nextApprovalCount = 0;
+        let nextRevisionCount = 0;
         if (showQa) {
           const [qa, history, revisions] = await Promise.all([
             apiRequest<PageQAResult>(`/api/generated-pages/${pageId}/qa`),
             apiRequest<ApprovalAudit[]>(`/api/generated-pages/${pageId}/approval-history`),
             apiRequest<GeneratedPageRevision[]>(`/api/generated-pages/${pageId}/revisions`)
           ]);
-          setQaResult(qa);
-          setApprovalCount(history.length);
-          setRevisionCount(revisions.length);
+          nextQaResult = qa;
+          nextApprovalCount = history.length;
+          nextRevisionCount = revisions.length;
         }
+        if (!isCurrentLoad()) return;
+        setData({ page, composition, requestKey });
+        setQaResult(nextQaResult);
+        setApprovalCount(nextApprovalCount);
+        setRevisionCount(nextRevisionCount);
         document.title = `${page.page_title} | Atlas Preview`;
       } catch (value) {
+        if (!isCurrentLoad()) return;
+        setData(null);
+        removeIdentityHeadTags(document);
         setError(value instanceof Error ? value.message : "Unable to load page preview.");
       } finally {
-        setLoading(false);
+        if (isCurrentLoad()) setLoading(false);
       }
     }
-    loadPreview();
-    return () => { document.title = "Project Atlas"; };
-  }, [id, showQa]);
+    void loadPreview();
+    return () => {
+      cancelled = true;
+      if (generation === loadGeneration.current) loadGeneration.current += 1;
+      removeIdentityHeadTags(document);
+      document.title = "Project Atlas";
+    };
+  }, [requestKey]);
 
   useEffect(() => {
-    if (!data) return;
+    if (!data || data.requestKey !== requestKey) return;
     const header = data.composition.effective_components.find(item => item.component_key === "website_header");
     const identityAssets = record(header?.resolved_data.identity_assets);
-    const favicon = record(identityAssets.favicon);
-    const browserIcon = record(identityAssets.browser_icon);
-    const appleTouchIcon = record(identityAssets.apple_touch_icon);
-    const openGraph = record(identityAssets.open_graph_image);
-    const identityLinks = [
-      ["icon", "favicon", text(favicon.asset_url)],
-      ["shortcut icon", "browser_icon", text(browserIcon.asset_url)],
-      ["apple-touch-icon", "apple_touch_icon", text(appleTouchIcon.asset_url)]
-    ].flatMap(([rel, slot, url]) => {
-      if (!url) return [];
-      const link = document.createElement("link");
-      link.rel = rel; link.href = url; link.dataset.atlasIdentity = "true"; link.dataset.atlasIdentitySlot = slot;
-      document.head.appendChild(link); return [link];
-    });
-    const socialUrl = text(openGraph.asset_url);
-    const social = socialUrl ? document.createElement("meta") : null;
-    if (social) { social.setAttribute("property", "og:image"); social.content = socialUrl; social.dataset.atlasIdentity = "true"; document.head.appendChild(social); }
-    const socialAlt = socialUrl && text(openGraph.accessibility_description) ? document.createElement("meta") : null;
-    if (socialAlt) { socialAlt.setAttribute("property", "og:image:alt"); socialAlt.content = text(openGraph.accessibility_description); socialAlt.dataset.atlasIdentity = "true"; document.head.appendChild(socialAlt); }
-    return () => { identityLinks.forEach(link => link.remove()); social?.remove(); socialAlt?.remove(); };
-  }, [data]);
+    return installIdentityHeadTags(document, identityAssets);
+  }, [data, requestKey]);
 
-  if (loading) return <PreviewState message="Loading semantic page composition..." />;
-  if (error || !data) return <PreviewState message={error ?? "Page preview is unavailable."} error />;
-  if (!data.page.draft_content) {
+  const currentData = hasCurrentPreviewData(requestKey, requestStateKey, data)
+    ? data
+    : null;
+  if (requestStateKey !== requestKey || loading) {
+    return <PreviewState message="Loading semantic page composition..." />;
+  }
+  if (error || !currentData) return <PreviewState message={error ?? "Page preview is unavailable."} error />;
+  if (!currentData.page.draft_content) {
     return <PreviewState message="Generate a structured draft before composing its preview." error />;
   }
 
-  const components = data.composition.effective_components;
+  const components = currentData.composition.effective_components;
   return (
     <div className="servicePreview atlasBasePresentation">
       <div className="previewReviewBar">
@@ -106,7 +136,7 @@ function GeneratedPagePreview() {
           <Link to="/site-plans" className="previewBackLink">
             <ArrowLeft size={16} aria-hidden="true" /> Back to Site Plans
           </Link>
-          <span>Semantic composition v{data.composition.composition_version}</span>
+          <span>Semantic composition v{currentData.composition.composition_version}</span>
           <strong>Not published</strong>
         </div>
       </div>
@@ -131,20 +161,21 @@ function GeneratedPagePreview() {
   );
 }
 
-function renderComponent(component: PageComponentInstance) {
+export function renderComponent(component: PageComponentInstance) {
   const data = component.resolved_data;
   switch (component.component_key) {
     case "website_header":
       {
       const assets = record(data.identity_assets);
-      const logo = record(assets.header_logo);
       return (
         <header className="previewSiteHeader" key={component.instance_key}>
           <div className="previewContainer previewHeaderInner">
             <div className="previewBrand">
-              {logo.asset_url
-                ? <img className="previewBrandLogo" src={text(logo.asset_url)} alt={text(logo.accessibility_description)}/>
-                : <span className="previewBrandMark" aria-hidden="true">{initials(text(data.display_name))}</span>}
+              <WebsiteIdentityLogo
+                identityAssets={assets}
+                slot="header_logo"
+                displayName={text(data.display_name)}
+              />
               <div><strong>{text(data.display_name)}</strong><span>{text(data.tagline) || text(data.business_type)}</span></div>
             </div>
             {data.phone ? <ContactLink value={text(data.phone)} kind="phone" /> : <ContactLink value={text(data.email)} kind="email" />}
@@ -242,10 +273,13 @@ function renderComponent(component: PageComponentInstance) {
     case "website_footer":
       {
       const assets = record(data.identity_assets);
-      const logo = record(assets.footer_logo);
       return (
         <div className="previewContainer previewFooterInner" key={component.instance_key}>
-          {Boolean(logo.asset_url) && <img className="previewBrandLogo previewFooterLogo" src={text(logo.asset_url)} alt={text(logo.accessibility_description)}/>}
+          <WebsiteIdentityLogo
+            identityAssets={assets}
+            slot="footer_logo"
+            displayName={text(data.company_name)}
+          />
           <div><strong>{text(data.company_name)}</strong><span>{data.license_number ? `License ${text(data.license_number)}` : text(data.business_type)}</span></div>
         </div>
       );
@@ -288,6 +322,34 @@ function text(value: unknown) { return typeof value === "string" || typeof value
 function array(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 function record(value: unknown): Record<string, unknown> { return value && typeof value === "object" ? value as Record<string, unknown> : {}; }
 function number(value: unknown, fallback: number) { return typeof value === "number" && Number.isFinite(value) ? value : fallback; }
-function initials(value: string) { return value.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "A"; }
+
+export function compositionValidationError(composition: PageComposition): string | null {
+  if (composition.validation_errors.length) {
+    return composition.validation_errors.join(" ");
+  }
+  if (composition.status !== "current") {
+    return "The semantic page composition is not current.";
+  }
+  return null;
+}
+
+export function previewRequestKey(
+  id: string | undefined,
+  showQa: boolean,
+): string {
+  return `${id ?? "missing"}:${showQa ? "qa" : "preview"}`;
+}
+
+export function hasCurrentPreviewData(
+  requestKey: string,
+  requestStateKey: string,
+  data: { requestKey: string } | null,
+): data is { requestKey: string } {
+  return (
+    requestStateKey === requestKey &&
+    data !== null &&
+    data.requestKey === requestKey
+  );
+}
 
 export default GeneratedPagePreview;

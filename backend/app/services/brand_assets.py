@@ -1,6 +1,7 @@
 import json
 import re
 from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import HTTPException, UploadFile
 from sqlmodel import Session, select
@@ -9,11 +10,19 @@ from app.core.config import get_settings
 from app.models import (
     Brand,
     BrandAsset,
+    Business,
     Website,
     WebsiteIdentity,
     WebsiteIdentityAssetAssignment,
 )
-from app.services.media_uploads import remove_stored_media_files, store_uploaded_image
+from app.services.media_uploads import (
+    ALLOWED_CONTENT_TYPES,
+    EXTENSION_CONTENT_TYPES,
+    inspect_managed_original,
+    is_safe_image_filename,
+    remove_stored_media_files,
+    store_uploaded_image,
+)
 
 
 ASSET_TYPES = {
@@ -44,6 +53,7 @@ IDENTITY_SLOTS = {
     "open_graph_image": ({"open_graph_image"}, "social_preview"),
 }
 ASSET_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
+CHECKSUM_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def parse_string_list(raw: str, label: str) -> list[str]:
@@ -73,14 +83,24 @@ def identity_asset_contract_error(asset: BrandAsset, slot: str) -> str | None:
 
 
 def is_brand_asset_superseded(session: Session, asset_id: int) -> bool:
-    """An approved replacement closes only new selection of the prior version."""
+    """Return whether a later version in the complete Brand/asset-key chain was approved.
 
-    return session.exec(
+    Approval provenance is durable: retiring an intermediate replacement must never
+    reopen an older superseded version for a new Website Identity selection.
+    """
+
+    asset = _asset(session, asset_id)
+    later_versions = session.exec(
         select(BrandAsset).where(
-            BrandAsset.replaces_brand_asset_id == asset_id,
-            BrandAsset.status == "approved",
+            BrandAsset.brand_id == asset.brand_id,
+            BrandAsset.asset_key == asset.asset_key,
+            BrandAsset.version > asset.version,
         )
-    ).first() is not None
+    ).all()
+    return any(
+        later.status == "approved" or later.approved_at is not None
+        for later in later_versions
+    )
 
 
 async def create_brand_asset(
@@ -117,18 +137,20 @@ async def create_brand_asset(
     restrictions = list(dict.fromkeys(value.strip().lower() for value in restrictions if value.strip()))
     if not approved_usage or not set(approved_usage) <= APPROVED_USAGES:
         raise HTTPException(status_code=422, detail="Approved usage contains unsupported values")
+    if not restrictions:
+        raise HTTPException(status_code=422, detail="Brand Asset restrictions are required")
     if not set(restrictions) <= APPROVED_USAGES:
         raise HTTPException(status_code=422, detail="Restrictions contain unsupported values")
     if set(approved_usage) & set(restrictions):
         raise HTTPException(status_code=422, detail="Approved usage and restrictions cannot overlap")
     if provenance_type not in PROVENANCE_TYPES or rights_status not in RIGHTS_STATUSES:
         raise HTTPException(status_code=422, detail="Approved provenance and rights information is required")
-    if provenance_type in {"commissioned", "licensed", "public_domain"} and not _clean(provenance_notes):
-        raise HTTPException(status_code=422, detail="Provenance notes are required for this source classification")
-    if rights_status in {"owned", "licensed", "commissioned"} and not _clean(rights_holder):
-        raise HTTPException(status_code=422, detail="Rights holder is required for this rights status")
-    if rights_status == "licensed" and not _clean(rights_notes):
-        raise HTTPException(status_code=422, detail="Rights notes are required for a licensed asset")
+    if not _clean(provenance_notes):
+        raise HTTPException(status_code=422, detail="Brand Asset provenance notes are required")
+    if not _clean(rights_holder):
+        raise HTTPException(status_code=422, detail="Brand Asset rights holder is required")
+    if not _clean(rights_notes):
+        raise HTTPException(status_code=422, detail="Brand Asset rights notes are required")
     required_text = {
         "purpose": purpose,
         "accessibility description": accessibility_description,
@@ -202,6 +224,10 @@ def approve_brand_asset(session: Session, asset_id: int, approved_by: str) -> Br
     approved_by = _required_operator(approved_by, "Asset approval operator")
     if asset.status not in {"draft", "pending_review"}:
         raise HTTPException(status_code=409, detail="Only a draft or pending-review asset can be approved")
+    _validate_approval_record(session, asset)
+    _revalidate_managed_original(asset)
+    if is_brand_asset_superseded(session, asset.id):
+        raise HTTPException(status_code=409, detail="A superseded Brand Asset version cannot be approved")
     asset.status = "approved"
     asset.approved_by = approved_by
     asset.approved_at = datetime.now(UTC)
@@ -239,6 +265,7 @@ def assign_identity_asset(
     if contract_error:
         raise HTTPException(status_code=422, detail=contract_error)
     assigned_by = _required_operator(assigned_by, "Identity selection operator")
+    rationale = _required_operator(rationale or "", "Identity selection rationale")
 
     now = datetime.now(UTC)
     previous = session.exec(
@@ -273,7 +300,7 @@ def assign_identity_asset(
         version=version,
         status="active",
         assigned_by=assigned_by,
-        rationale=_clean(rationale),
+        rationale=rationale,
         assigned_at=now,
     )
     session.add(assignment)
@@ -312,6 +339,140 @@ def _asset(session: Session, asset_id: int) -> BrandAsset:
     if not asset:
         raise HTTPException(status_code=404, detail="Brand Asset not found")
     return asset
+
+
+def _validate_approval_record(session: Session, asset: BrandAsset) -> None:
+    """Validate all governed identity metadata immediately before approval."""
+
+    business = session.get(Business, asset.business_id)
+    brand = session.get(Brand, asset.brand_id)
+    if not business or not brand or brand.business_id != asset.business_id:
+        raise HTTPException(status_code=409, detail="Brand Asset ownership is invalid")
+    if not ASSET_KEY_PATTERN.fullmatch(asset.asset_key):
+        raise HTTPException(status_code=409, detail="Brand Asset key is invalid")
+    if asset.asset_type not in ASSET_TYPES:
+        raise HTTPException(status_code=409, detail="Brand Asset type is invalid")
+    if asset.version < 1:
+        raise HTTPException(status_code=409, detail="Brand Asset version is invalid")
+    if asset.replaces_brand_asset_id is None:
+        if asset.version != 1:
+            raise HTTPException(status_code=409, detail="Brand Asset replacement chain is invalid")
+    else:
+        replaced = session.get(BrandAsset, asset.replaces_brand_asset_id)
+        if (
+            not replaced
+            or replaced.business_id != asset.business_id
+            or replaced.brand_id != asset.brand_id
+            or replaced.asset_key != asset.asset_key
+            or asset.version != replaced.version + 1
+        ):
+            raise HTTPException(status_code=409, detail="Brand Asset replacement chain is invalid")
+
+    approved_usage = _validated_list(asset.approved_usage, "approved usage")
+    restrictions = _validated_list(asset.restrictions, "restrictions")
+    if not set(approved_usage) <= APPROVED_USAGES:
+        raise HTTPException(status_code=409, detail="Brand Asset approved usage is invalid")
+    if not set(restrictions) <= APPROVED_USAGES:
+        raise HTTPException(status_code=409, detail="Brand Asset restrictions are invalid")
+    if set(approved_usage) & set(restrictions):
+        raise HTTPException(status_code=409, detail="Brand Asset usage and restrictions conflict")
+
+    for label, value in (
+        ("purpose", asset.purpose),
+        ("accessibility intent", asset.accessibility_description),
+        ("creator or source identity", asset.created_by),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(status_code=409, detail=f"Brand Asset {label} is invalid")
+
+    if asset.provenance_type not in PROVENANCE_TYPES:
+        raise HTTPException(status_code=409, detail="Brand Asset provenance is invalid")
+    if not _clean(asset.provenance_notes):
+        raise HTTPException(status_code=409, detail="Brand Asset provenance notes are incomplete")
+    if asset.rights_status not in RIGHTS_STATUSES:
+        raise HTTPException(status_code=409, detail="Brand Asset rights status is invalid")
+    if not _clean(asset.rights_holder):
+        raise HTTPException(status_code=409, detail="Brand Asset rights holder is incomplete")
+    if not _clean(asset.rights_notes):
+        raise HTTPException(status_code=409, detail="Brand Asset rights notes are incomplete")
+
+    if not is_safe_image_filename(asset.original_filename) or not is_safe_image_filename(asset.stored_filename):
+        raise HTTPException(status_code=409, detail="Brand Asset filename is unsafe")
+    if asset.mime_type not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(status_code=409, detail="Brand Asset recorded MIME type is invalid")
+    if EXTENSION_CONTENT_TYPES.get(Path(asset.original_filename).suffix.lower()) != asset.mime_type:
+        raise HTTPException(status_code=409, detail="Brand Asset original filename does not match its MIME type")
+    if not CHECKSUM_PATTERN.fullmatch(asset.checksum_sha256):
+        raise HTTPException(status_code=409, detail="Brand Asset recorded checksum is invalid")
+    if asset.file_size < 1 or asset.width < 1 or asset.height < 1:
+        raise HTTPException(status_code=409, detail="Brand Asset recorded binary identity is invalid")
+
+
+def _revalidate_managed_original(asset: BrandAsset) -> None:
+    settings = get_settings()
+    public_base = settings.media_public_url.rstrip("/")
+    expected_original_url = f"{public_base}/originals/{asset.stored_filename}"
+    if asset.asset_url != expected_original_url:
+        raise HTTPException(status_code=409, detail="Brand Asset original URL is not bound to its managed original")
+    _validate_managed_derivative_url(
+        asset.optimized_url,
+        public_base=public_base,
+        directory="optimized",
+        expected_stem=f"{Path(asset.stored_filename).stem}-optimized",
+        label="optimized URL",
+    )
+    _validate_managed_derivative_url(
+        asset.thumbnail_url,
+        public_base=public_base,
+        directory="thumbnails",
+        expected_stem=f"{Path(asset.stored_filename).stem}-thumbnail",
+        label="thumbnail URL",
+    )
+    observed = inspect_managed_original(asset.stored_filename, settings)
+    mismatched_fields = [
+        field
+        for field in ("mime_type", "file_size", "width", "height", "checksum_sha256")
+        if getattr(asset, field) != getattr(observed, field)
+    ]
+    if mismatched_fields:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Managed original does not match the recorded Brand Asset identity: "
+                + ", ".join(mismatched_fields)
+            ),
+        )
+
+
+def _validate_managed_derivative_url(
+    url: str | None,
+    *,
+    public_base: str,
+    directory: str,
+    expected_stem: str,
+    label: str,
+) -> None:
+    prefix = f"{public_base}/{directory}/"
+    if not isinstance(url, str) or not url.startswith(prefix):
+        raise HTTPException(status_code=409, detail=f"Brand Asset {label} is not bound to managed storage")
+    filename = url[len(prefix):]
+    if (
+        not is_safe_image_filename(filename)
+        or Path(filename).stem != expected_stem
+        or EXTENSION_CONTENT_TYPES.get(Path(filename).suffix.lower()) not in ALLOWED_CONTENT_TYPES
+    ):
+        raise HTTPException(status_code=409, detail=f"Brand Asset {label} is not bound to managed storage")
+
+
+def _validated_list(value: object, label: str, *, allow_empty: bool = False) -> list[str]:
+    if not isinstance(value, list) or (not value and not allow_empty):
+        raise HTTPException(status_code=409, detail=f"Brand Asset {label} is invalid")
+    if not all(isinstance(item, str) and item.strip() for item in value):
+        raise HTTPException(status_code=409, detail=f"Brand Asset {label} is invalid")
+    normalized = [item.strip().lower() for item in value]
+    if normalized != value or len(set(normalized)) != len(normalized):
+        raise HTTPException(status_code=409, detail=f"Brand Asset {label} is invalid")
+    return normalized
 
 
 def _clean(value: str | None) -> str | None:

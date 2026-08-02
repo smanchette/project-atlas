@@ -41,6 +41,18 @@ class StoredMedia:
     checksum_sha256: str
 
 
+@dataclass(frozen=True)
+class ManagedOriginalIdentity:
+    """Observed identity of one managed original, re-read from durable storage."""
+
+    stored_filename: str
+    mime_type: str
+    file_size: int
+    width: int
+    height: int
+    checksum_sha256: str
+
+
 def ensure_media_directories(settings: Settings) -> Path:
     root = settings.media_root.resolve()
     for child in ("originals", "optimized", "thumbnails"):
@@ -49,15 +61,8 @@ def ensure_media_directories(settings: Settings) -> Path:
 
 
 async def store_uploaded_image(upload: UploadFile, settings: Settings) -> StoredMedia:
-    original_filename = (upload.filename or "").strip()
-    if (
-        not original_filename
-        or original_filename in {".", ".."}
-        or "/" in original_filename
-        or "\\" in original_filename
-        or "\x00" in original_filename
-        or Path(original_filename).name != original_filename
-    ):
+    original_filename = upload.filename or ""
+    if not is_safe_image_filename(original_filename):
         raise HTTPException(status_code=422, detail="Uploaded image filename is unsafe")
 
     if upload.content_type not in ALLOWED_CONTENT_TYPES:
@@ -77,7 +82,7 @@ async def store_uploaded_image(upload: UploadFile, settings: Settings) -> Stored
     if not payload:
         raise HTTPException(status_code=422, detail="Uploaded image is empty")
 
-    image_format, width, height = _inspect_image(payload)
+    image_format, width, height = inspect_image_payload(payload)
     detected_content_type = FORMAT_CONTENT_TYPES[image_format]
     if detected_content_type != upload.content_type:
         raise HTTPException(status_code=415, detail="Uploaded image MIME type does not match its file signature")
@@ -126,6 +131,75 @@ async def store_uploaded_image(upload: UploadFile, settings: Settings) -> Stored
     )
 
 
+def inspect_managed_original(stored_filename: str, settings: Settings) -> ManagedOriginalIdentity:
+    """Re-read a managed original and return its independently observed identity.
+
+    This intentionally does not create media directories. Approval must fail closed when
+    durable storage is missing or when a stored filename escapes the managed originals
+    directory.
+    """
+
+    if not is_safe_image_filename(stored_filename):
+        raise HTTPException(status_code=422, detail="Managed original filename is unsafe")
+    extension_content_type = EXTENSION_CONTENT_TYPES.get(Path(stored_filename).suffix.lower())
+    if extension_content_type is None:
+        raise HTTPException(status_code=415, detail="Managed original filename has an unsupported extension")
+
+    root = settings.media_root.resolve()
+    originals_root = (root / "originals").resolve()
+    original_path = (originals_root / stored_filename).resolve()
+    if original_path.parent != originals_root or not original_path.is_relative_to(originals_root):
+        raise HTTPException(status_code=422, detail="Managed original filename is unsafe")
+    if not original_path.is_file():
+        raise HTTPException(status_code=409, detail="Managed original is missing")
+
+    try:
+        recorded_size = original_path.stat().st_size
+        if recorded_size > settings.media_max_upload_bytes:
+            raise HTTPException(status_code=413, detail="Managed original exceeds the configured upload size limit")
+        with original_path.open("rb") as managed_file:
+            payload = managed_file.read(settings.media_max_upload_bytes + 1)
+    except HTTPException:
+        raise
+    except OSError as exc:
+        raise HTTPException(status_code=409, detail="Managed original could not be read") from exc
+    if len(payload) > settings.media_max_upload_bytes:
+        raise HTTPException(status_code=413, detail="Managed original exceeds the configured upload size limit")
+    if not payload:
+        raise HTTPException(status_code=409, detail="Managed original is empty")
+    if len(payload) != recorded_size:
+        raise HTTPException(status_code=409, detail="Managed original changed while it was being inspected")
+
+    image_format, width, height = inspect_image_payload(payload)
+    detected_content_type = FORMAT_CONTENT_TYPES[image_format]
+    if detected_content_type != extension_content_type:
+        raise HTTPException(status_code=415, detail="Managed original filename extension does not match its file signature")
+    if width * height > settings.media_max_pixels:
+        raise HTTPException(status_code=413, detail="Managed original dimensions exceed the configured pixel limit")
+
+    return ManagedOriginalIdentity(
+        stored_filename=stored_filename,
+        mime_type=detected_content_type,
+        file_size=len(payload),
+        width=width,
+        height=height,
+        checksum_sha256=sha256(payload).hexdigest(),
+    )
+
+
+def is_safe_image_filename(filename: str) -> bool:
+    return bool(
+        filename
+        and filename == filename.strip()
+        and filename not in {".", ".."}
+        and "/" not in filename
+        and "\\" not in filename
+        and "\x00" not in filename
+        and all(ord(character) >= 32 and ord(character) != 127 for character in filename)
+        and Path(filename).name == filename
+    )
+
+
 def remove_stored_media_files(stored: StoredMedia, settings: Settings) -> None:
     root = settings.media_root.resolve()
     candidates = [
@@ -138,7 +212,7 @@ def remove_stored_media_files(stored: StoredMedia, settings: Settings) -> None:
             path.unlink(missing_ok=True)
 
 
-def _inspect_image(payload: bytes) -> tuple[str, int, int]:
+def inspect_image_payload(payload: bytes) -> tuple[str, int, int]:
     try:
         with Image.open(BytesIO(payload)) as image:
             image.verify()

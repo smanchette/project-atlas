@@ -8,11 +8,13 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException, UploadFile
 from PIL import Image
+from pydantic import ValidationError
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 from starlette.datastructures import Headers
 
 from app.core.config import Settings
+from app.db import backup as backup_service
 from app.db.backup import (
     BACKUP_VERSION,
     BackupValidationError,
@@ -28,7 +30,15 @@ from app.models import (
     WebsiteIdentity,
     WebsiteIdentityAssetAssignment,
 )
-from app.services.brand_assets import assign_identity_asset, create_brand_asset, retire_brand_asset
+from app.schemas.brand_assets import IdentityAssetAssignmentCreate
+from app.services import brand_assets as brand_asset_service
+from app.services.brand_assets import (
+    approve_brand_asset,
+    assign_identity_asset,
+    create_brand_asset,
+    is_brand_asset_superseded,
+    retire_brand_asset,
+)
 from app.services.media_uploads import store_uploaded_image
 
 
@@ -63,15 +73,23 @@ def _asset(
     status="approved",
     replaces_brand_asset_id=None,
 ):
+    media_public_base = str(backup_service.get_settings().media_public_url).rstrip("/")
     value = BrandAsset(
         business_id=business.id, brand_id=brand.id, asset_key=key, version=version,
         asset_type=kind, variant_key="default", purpose="Identify the approved Brand.",
         approved_usage=usage or ["website_header"], restrictions=["social_preview"],
         accessibility_description="Flo-Zone Pest and Termite Solutions",
-        original_filename="logo.png", stored_filename="logo.png", asset_url="/media/optimized/logo.webp",
-        optimized_url="/media/optimized/logo.webp", thumbnail_url="/media/thumbnails/logo.webp",
+        original_filename="logo.png", stored_filename="logo.png",
+        asset_url=f"{media_public_base}/originals/logo.png",
+        optimized_url=f"{media_public_base}/optimized/logo-optimized.webp",
+        thumbnail_url=f"{media_public_base}/thumbnails/logo-thumbnail.webp",
         mime_type="image/png", file_size=100, width=400, height=120,
-        checksum_sha256="a" * 64, provenance_type="company_original", rights_status="owned",
+        checksum_sha256="a" * 64,
+        provenance_type="company_original",
+        provenance_notes="Supplied directly by the company operator.",
+        rights_status="owned",
+        rights_holder=business.company_name,
+        rights_notes="Company ownership confirmed by the operator.",
         status=status, created_by="operator", approved_by="operator" if status == "approved" else None,
         approved_at=datetime(2026, 8, 1, tzinfo=UTC) if status == "approved" else None,
         replaces_brand_asset_id=replaces_brand_asset_id,
@@ -134,6 +152,40 @@ def test_type_usage_and_approval_fail_closed():
             assign_identity_asset(session, identity.id, asset_id=pending.id, slot="header_logo", assigned_by="Operator", rationale=None)
 
 
+def test_identity_selection_requires_operator_rationale():
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, brand, _, identity = _scope(session, "assignment-rationale")
+        asset = _asset(session, business, brand)
+        session.commit()
+        with pytest.raises(HTTPException, match="Identity selection rationale is required"):
+            assign_identity_asset(
+                session,
+                identity.id,
+                asset_id=asset.id,
+                slot="header_logo",
+                assigned_by="Selection Operator",
+                rationale=" ",
+            )
+        assert session.exec(select(WebsiteIdentityAssetAssignment)).all() == []
+
+
+def test_identity_selection_schema_requires_nonblank_rationale():
+    with pytest.raises(ValidationError):
+        IdentityAssetAssignmentCreate(
+            brand_asset_id=1,
+            slot="header_logo",
+            assigned_by="Selection Operator",
+            rationale="   ",
+        )
+    with pytest.raises(ValidationError):
+        IdentityAssetAssignmentCreate.model_validate({
+            "brand_asset_id": 1,
+            "slot": "header_logo",
+            "assigned_by": "Selection Operator",
+        })
+
+
 def _image_bytes(format_name: str = "PNG", size: tuple[int, int] = (32, 16)) -> bytes:
     target = BytesIO()
     Image.new("RGB", size, "#245b46").save(target, format=format_name)
@@ -166,6 +218,9 @@ def test_image_upload_records_detected_identity_and_rejects_unsafe_or_mismatched
 
     rejected = (
         ("../temporary-logo.png", payload, "image/png", 422),
+        (" temporary-logo.png", payload, "image/png", 422),
+        ("temporary-logo\n.png", payload, "image/png", 422),
+        ("temporary-logo\x7f.png", payload, "image/png", 422),
         ("temporary-logo.png", payload, "image/jpeg", 415),
         ("temporary-logo.jpg", payload, "image/jpeg", 415),
         ("temporary-logo.png", b"not an image", "image/png", 415),
@@ -199,17 +254,84 @@ def test_create_requires_governed_rights_and_rejects_unknown_restrictions():
             business_id=business.id, brand_id=brand.id, asset_key="owned-logo",
             asset_type="primary_logo", variant_key="default",
             purpose="Identify the temporary test Brand.", approved_usage=["website_header"],
-            restrictions=[], accessibility_description="Temporary test Brand logo",
-            provenance_type="company_original", provenance_notes=None,
-            rights_status="owned", rights_holder=None, rights_notes=None,
+            restrictions=["social_preview"], accessibility_description="Temporary test Brand logo",
+            provenance_type="company_original", provenance_notes="Supplied directly by the company operator.",
+            rights_status="owned", rights_holder=None, rights_notes="Company ownership confirmed by the operator.",
             created_by="Smoke Operator", replaces_brand_asset_id=None,
         )
-        with pytest.raises(HTTPException, match="Rights holder"):
+        with pytest.raises(HTTPException, match="rights holder"):
             asyncio.run(create_brand_asset(session, **values))
         values["rights_holder"] = "Temporary Test Business"
         values["restrictions"] = ["unsupported_surface"]
         with pytest.raises(HTTPException, match="Restrictions contain"):
             asyncio.run(create_brand_asset(session, **values))
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("provenance_notes", "provenance notes are required"),
+        ("rights_holder", "rights holder is required"),
+        ("rights_notes", "rights notes are required"),
+    ],
+)
+def test_create_requires_complete_provenance_and_rights_for_every_classification(
+    tmp_path: Path,
+    field: str,
+    message: str,
+):
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, brand, _, _ = _scope(session, f"complete-{field}")
+        values = dict(
+            file=_upload("public-domain-mark.png", _image_bytes(), "image/png"),
+            business_id=business.id,
+            brand_id=brand.id,
+            asset_key="public-domain-mark",
+            asset_type="brand_mark",
+            variant_key="default",
+            purpose="Identify the governed Brand.",
+            approved_usage=["website_header"],
+            restrictions=["social_preview"],
+            accessibility_description="Governed Brand mark",
+            provenance_type="public_domain",
+            provenance_notes="Operator identified the public-domain source.",
+            rights_status="public_domain",
+            rights_holder="Public-domain source identified by the operator",
+            rights_notes="Operator confirmed the public-domain rights basis.",
+            created_by="Source Operator",
+            replaces_brand_asset_id=None,
+        )
+        values[field] = None
+        with pytest.raises(HTTPException, match=message):
+            asyncio.run(create_brand_asset(session, **values))
+
+
+def test_create_requires_explicit_prohibited_usage():
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, brand, _, _ = _scope(session, "required-restrictions")
+        with pytest.raises(HTTPException, match="restrictions are required"):
+            asyncio.run(create_brand_asset(
+                session,
+                file=_upload("governed-logo.png", _image_bytes(), "image/png"),
+                business_id=business.id,
+                brand_id=brand.id,
+                asset_key="governed-logo",
+                asset_type="primary_logo",
+                variant_key="default",
+                purpose="Identify the governed Brand.",
+                approved_usage=["website_header"],
+                restrictions=[],
+                accessibility_description="Governed Brand logo",
+                provenance_type="company_original",
+                provenance_notes="Supplied directly by the company operator.",
+                rights_status="owned",
+                rights_holder=business.company_name,
+                rights_notes="Company ownership confirmed by the operator.",
+                created_by="Source Operator",
+                replaces_brand_asset_id=None,
+            ))
 
 
 def test_approved_replacement_supersedes_prior_version_for_new_assignments():
@@ -247,6 +369,282 @@ def test_approved_replacement_supersedes_prior_version_for_new_assignments():
         )).one().brand_asset_id == first.id
 
 
+def test_three_version_chain_keeps_every_older_approved_version_superseded():
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, brand, _, identity = _scope(session, "three-version-chain")
+        first = _asset(session, business, brand)
+        second = _asset(
+            session,
+            business,
+            brand,
+            version=2,
+            status="retired",
+            replaces_brand_asset_id=first.id,
+        )
+        second.approved_by = "Second Version Operator"
+        second.approved_at = datetime(2026, 8, 2, tzinfo=UTC)
+        second.retired_by = "Second Version Operator"
+        second.retirement_rationale = "Replaced by version 3."
+        second.retired_at = datetime(2026, 8, 3, tzinfo=UTC)
+        third = _asset(
+            session,
+            business,
+            brand,
+            version=3,
+            replaces_brand_asset_id=second.id,
+        )
+        third.approved_at = datetime(2026, 8, 4, tzinfo=UTC)
+        session.commit()
+
+        assert is_brand_asset_superseded(session, first.id) is True
+        assert is_brand_asset_superseded(session, second.id) is True
+        assert is_brand_asset_superseded(session, third.id) is False
+        with pytest.raises(HTTPException, match="superseded"):
+            assign_identity_asset(
+                session,
+                identity.id,
+                asset_id=first.id,
+                slot="header_logo",
+                assigned_by="Selection Operator",
+                rationale="An older version must never reopen.",
+            )
+
+
+def test_long_replacement_chain_remains_monotonic_after_intermediate_retirements():
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, brand, _, _ = _scope(session, "long-version-chain")
+        chain = [_asset(session, business, brand)]
+        for version in range(2, 6):
+            predecessor = chain[-1]
+            status = "approved" if version == 5 else "retired"
+            asset = _asset(
+                session,
+                business,
+                brand,
+                version=version,
+                status=status,
+                replaces_brand_asset_id=predecessor.id,
+            )
+            if status == "retired":
+                asset.approved_by = f"Version {version} Operator"
+                asset.approved_at = datetime(2026, 8, version, tzinfo=UTC)
+                asset.retired_by = f"Version {version} Operator"
+                asset.retirement_rationale = f"Replaced by version {version + 1}."
+                asset.retired_at = datetime(2026, 8, version + 1, tzinfo=UTC)
+            else:
+                asset.approved_at = datetime(2026, 8, version, tzinfo=UTC)
+            chain.append(asset)
+        session.commit()
+
+        assert [is_brand_asset_superseded(session, asset.id) for asset in chain] == [
+            True,
+            True,
+            True,
+            True,
+            False,
+        ]
+
+        latest = chain[-1]
+        latest.status = "retired"
+        latest.retired_by = "Version 5 Operator"
+        latest.retirement_rationale = "Retired after governed use."
+        latest.retired_at = datetime(2026, 8, 6, tzinfo=UTC)
+        session.add(latest)
+        session.commit()
+        assert [is_brand_asset_superseded(session, asset.id) for asset in chain[:-1]] == [
+            True,
+            True,
+            True,
+            True,
+        ]
+
+
+def _pending_managed_asset(
+    session: Session,
+    business: Business,
+    brand: Brand,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[BrandAsset, Settings]:
+    settings = Settings(
+        _env_file=None,
+        media_root=tmp_path,
+        media_public_url="http://testserver/media",
+        media_max_upload_bytes=1024 * 1024,
+        media_max_pixels=1_000_000,
+    )
+    monkeypatch.setattr(brand_asset_service, "get_settings", lambda: settings)
+    asset = asyncio.run(create_brand_asset(
+        session,
+        file=_upload("operator-supplied-logo.png", _image_bytes(), "image/png"),
+        business_id=business.id,
+        brand_id=brand.id,
+        asset_key="operator-supplied-logo",
+        asset_type="primary_logo",
+        variant_key="default",
+        purpose="Identify the approved Brand in the Website header.",
+        approved_usage=["website_header"],
+        restrictions=["social_preview"],
+        accessibility_description="Approved Brand logo",
+        provenance_type="company_original",
+        provenance_notes="Supplied directly by the company operator.",
+        rights_status="owned",
+        rights_holder=business.company_name,
+        rights_notes="Operator confirmed company ownership.",
+        created_by="Source Operator",
+        replaces_brand_asset_id=None,
+    ))
+    return asset, settings
+
+
+def test_approval_rereads_managed_original_and_records_operator_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, brand, _, _ = _scope(session, "approval-revalidation")
+        asset, _ = _pending_managed_asset(session, business, brand, tmp_path, monkeypatch)
+
+        approved = approve_brand_asset(session, asset.id, "Approval Operator")
+
+        assert approved.status == "approved"
+        assert approved.approved_by == "Approval Operator"
+        assert approved.approved_at is not None
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing", "Managed original is missing"),
+        ("checksum", "checksum_sha256"),
+        ("invalid_signature", "valid image"),
+        ("detected_mime", "file signature"),
+        ("recorded_width", "width"),
+        ("recorded_size", "file_size"),
+        ("unsafe_stored_name", "filename is unsafe"),
+        ("unsafe_original_name", "filename is unsafe"),
+        ("control_character_original_name", "filename is unsafe"),
+        ("external_original_url", "original URL"),
+        ("external_optimized_url", "optimized URL"),
+        ("external_thumbnail_url", "thumbnail URL"),
+        ("size_limit", "upload size limit"),
+        ("pixel_limit", "pixel limit"),
+    ],
+)
+def test_approval_fails_closed_when_managed_original_identity_is_not_exact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    message: str,
+):
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, brand, _, _ = _scope(session, f"binary-{mutation}")
+        asset, settings = _pending_managed_asset(session, business, brand, tmp_path, monkeypatch)
+        original = settings.media_root / "originals" / asset.stored_filename
+        if mutation == "missing":
+            original.unlink()
+        elif mutation == "checksum":
+            original.write_bytes(_image_bytes(size=(31, 16)))
+        elif mutation == "invalid_signature":
+            original.write_bytes(b"not an image")
+        elif mutation == "detected_mime":
+            original.write_bytes(_image_bytes("JPEG"))
+        elif mutation == "recorded_width":
+            asset.width += 1
+        elif mutation == "recorded_size":
+            asset.file_size += 1
+        elif mutation == "unsafe_stored_name":
+            asset.stored_filename = "../operator-supplied-logo.png"
+        elif mutation == "unsafe_original_name":
+            asset.original_filename = "../operator-supplied-logo.png"
+        elif mutation == "control_character_original_name":
+            asset.original_filename = "operator-supplied-logo\n.png"
+        elif mutation == "external_original_url":
+            asset.asset_url = "https://unapproved.example.test/logo.png"
+        elif mutation == "external_optimized_url":
+            asset.optimized_url = "https://unapproved.example.test/logo.webp"
+        elif mutation == "external_thumbnail_url":
+            asset.thumbnail_url = "https://unapproved.example.test/logo.webp"
+        elif mutation == "size_limit":
+            stricter = settings.model_copy(update={"media_max_upload_bytes": 8})
+            monkeypatch.setattr(brand_asset_service, "get_settings", lambda: stricter)
+        elif mutation == "pixel_limit":
+            stricter = settings.model_copy(update={"media_max_pixels": 100})
+            monkeypatch.setattr(brand_asset_service, "get_settings", lambda: stricter)
+        session.add(asset)
+        session.commit()
+
+        with pytest.raises(HTTPException, match=message):
+            approve_brand_asset(session, asset.id, "Approval Operator")
+        session.refresh(asset)
+        assert asset.status == "pending_review"
+        assert asset.approved_by is None
+        assert asset.approved_at is None
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("ownership", "ownership is invalid"),
+        ("purpose", "purpose is invalid"),
+        ("usage", "approved usage is invalid"),
+        ("empty_restrictions", "restrictions is invalid"),
+        ("restrictions", "usage and restrictions conflict"),
+        ("accessibility", "accessibility intent is invalid"),
+        ("provenance", "provenance notes are incomplete"),
+        ("rights", "rights holder is incomplete"),
+        ("rights_notes", "rights notes are incomplete"),
+        ("creator", "creator or source identity is invalid"),
+    ],
+)
+def test_approval_fails_closed_when_governed_metadata_is_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    message: str,
+):
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, brand, _, _ = _scope(session, f"governance-{mutation}")
+        asset, _ = _pending_managed_asset(session, business, brand, tmp_path, monkeypatch)
+        if mutation == "ownership":
+            other = Business(company_name="Unrelated Business", business_type="Service", state="FL")
+            session.add(other); session.flush()
+            asset.business_id = other.id
+        elif mutation == "purpose":
+            asset.purpose = " "
+        elif mutation == "usage":
+            asset.approved_usage = []
+        elif mutation == "empty_restrictions":
+            asset.restrictions = []
+        elif mutation == "restrictions":
+            asset.restrictions = ["website_header"]
+        elif mutation == "accessibility":
+            asset.accessibility_description = " "
+        elif mutation == "provenance":
+            asset.provenance_type = "commissioned"
+            asset.provenance_notes = None
+        elif mutation == "rights":
+            asset.rights_holder = None
+        elif mutation == "rights_notes":
+            asset.rights_notes = None
+        elif mutation == "creator":
+            asset.created_by = " "
+        session.add(asset)
+        session.commit()
+
+        with pytest.raises(HTTPException, match=message):
+            approve_brand_asset(session, asset.id, "Approval Operator")
+        session.refresh(asset)
+        assert asset.status == "pending_review"
+        assert asset.approved_by is None
+        assert asset.approved_at is None
+
+
 def test_backup_050_includes_asset_and_assignment_provenance(tmp_path: Path):
     engine = _engine(); SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
@@ -260,6 +658,9 @@ def test_backup_050_includes_asset_and_assignment_provenance(tmp_path: Path):
     assert payload["metadata"]["version"] == "0.50"
     assert payload["data"]["brand_assets"][0]["purpose"]
     assert payload["data"]["brand_assets"][0]["accessibility_description"]
+    assert payload["data"]["brand_assets"][0]["provenance_notes"]
+    assert payload["data"]["brand_assets"][0]["rights_holder"]
+    assert payload["data"]["brand_assets"][0]["rights_notes"]
     assert payload["data"]["website_identity_asset_assignments"][0]["assigned_by"] == "Operator"
 
     target_engine = _engine(); SQLModel.metadata.create_all(target_engine)
@@ -329,6 +730,102 @@ def test_backup_050_rejects_non_lowercase_hex_asset_checksum(tmp_path: Path):
         load_backup(_write_tampered_backup(tmp_path, payload, "checksum-tampered.json"))
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("asset_key", "Unsafe Asset Key"),
+        ("version", 0),
+        ("approved_usage", ["Website_Header"]),
+        ("restrictions", []),
+        ("provenance_notes", None),
+        ("rights_status", "unknown"),
+        ("rights_holder", None),
+        ("rights_notes", None),
+        ("original_filename", "../logo.png"),
+        ("original_filename", "logo\n.png"),
+        ("original_filename", " logo.png"),
+        ("stored_filename", "../logo.png"),
+        ("stored_filename", "logo\x7f.png"),
+        ("mime_type", "image/gif"),
+        ("file_size", 0),
+        ("width", 0),
+        ("height", 0),
+        ("asset_url", "https://unapproved.example.test/not-managed/logo.png"),
+        ("asset_url", "javascript:/media/originals/logo.png"),
+        ("asset_url", "file:///media/originals/logo.png"),
+        ("asset_url", "//unapproved.example.test/media/originals/logo.png"),
+        ("asset_url", "https://operator:secret@example.test/media/originals/logo.png"),
+        ("asset_url", "https://different-origin.example.test/media/originals/logo.png"),
+        ("optimized_url", "https://unapproved.example.test/media/optimized/wrong-optimized.webp"),
+        ("thumbnail_url", "https://unapproved.example.test/media/thumbnails/wrong-thumbnail.webp"),
+    ],
+)
+def test_backup_050_rejects_invalid_approved_asset_governance_or_binary_identity(
+    tmp_path: Path,
+    field: str,
+    value: object,
+):
+    payload, identifiers = _governed_backup_payload(tmp_path)
+    asset = _record(payload, "brand_assets", identifiers["one_asset"])
+    asset[field] = value
+
+    with pytest.raises(BackupValidationError, match="invalid governed Brand Asset"):
+        load_backup(_write_tampered_backup(tmp_path, payload, f"asset-{field}-tampered.json"))
+
+
+@pytest.mark.parametrize("limit", ["file_size", "pixels"])
+def test_backup_050_rejects_asset_above_current_configured_binary_limits(
+    tmp_path: Path,
+    limit: str,
+):
+    payload, identifiers = _governed_backup_payload(tmp_path)
+    asset = _record(payload, "brand_assets", identifiers["one_asset"])
+    settings = backup_service.get_settings()
+    if limit == "file_size":
+        asset["file_size"] = settings.media_max_upload_bytes + 1
+    else:
+        asset["width"] = settings.media_max_pixels + 1
+        asset["height"] = 1
+
+    with pytest.raises(BackupValidationError, match="invalid governed Brand Asset"):
+        load_backup(_write_tampered_backup(tmp_path, payload, f"asset-{limit}-limit.json"))
+
+
+def test_backup_050_uses_configured_binary_limits_and_accepts_same_origin_http_urls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    payload, identifiers = _governed_backup_payload(tmp_path)
+    asset = _record(payload, "brand_assets", identifiers["one_asset"])
+    configured_size = 12 * 1024 * 1024
+    asset["file_size"] = configured_size
+    for governed_asset in payload["data"]["brand_assets"]:
+        stored_filename = governed_asset["stored_filename"]
+        stem = Path(stored_filename).stem
+        governed_asset["asset_url"] = (
+            f"https://assets.example.test/atlas-assets/originals/{stored_filename}"
+        )
+        governed_asset["optimized_url"] = (
+            f"https://assets.example.test/atlas-assets/optimized/{stem}-optimized.webp"
+        )
+        governed_asset["thumbnail_url"] = (
+            f"https://assets.example.test/atlas-assets/thumbnails/{stem}-thumbnail.webp"
+        )
+    custom_settings = Settings(
+        _env_file=None,
+        media_public_url="https://assets.example.test/atlas-assets",
+        media_max_upload_bytes=20 * 1024 * 1024,
+        media_max_pixels=40_000_000,
+    )
+    monkeypatch.setattr(backup_service, "get_settings", lambda: custom_settings)
+
+    loaded = load_backup(_write_tampered_backup(tmp_path, payload, "custom-media-limits.json"))
+
+    restored_asset = _record(loaded, "brand_assets", identifiers["one_asset"])
+    assert restored_asset["file_size"] == configured_size
+    assert restored_asset["asset_url"].startswith("https://assets.example.test/atlas-assets/")
+
+
 @pytest.mark.parametrize("field", ["approved_by", "approved_at"])
 def test_backup_050_rejects_approved_asset_without_provenance(tmp_path: Path, field: str):
     payload, identifiers = _governed_backup_payload(tmp_path)
@@ -366,7 +863,7 @@ def test_backup_050_rejects_brand_asset_cross_business_ownership(tmp_path: Path)
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("asset_key", "changed-key"), ("version", 0)],
+    [("asset_key", "changed-key"), ("version", 3)],
 )
 def test_backup_050_rejects_invalid_replacement_chain(
     tmp_path: Path,
@@ -387,6 +884,15 @@ def test_backup_050_rejects_invalid_replacement_chain(
 
     with pytest.raises(BackupValidationError, match="replacement crosses ownership"):
         load_backup(_write_tampered_backup(tmp_path, payload, f"replacement-{field}-tampered.json"))
+
+
+def test_backup_050_rejects_root_asset_that_does_not_begin_at_version_one(tmp_path: Path):
+    payload, identifiers = _governed_backup_payload(tmp_path)
+    root_asset = _record(payload, "brand_assets", identifiers["one_asset"])
+    root_asset["version"] = 2
+
+    with pytest.raises(BackupValidationError, match="root Brand Asset must begin at version 1"):
+        load_backup(_write_tampered_backup(tmp_path, payload, "root-version-tampered.json"))
 
 
 @pytest.mark.parametrize("tamper", ["identity_website", "assignment_asset"])
@@ -443,6 +949,19 @@ def test_backup_050_rejects_replaced_assignment_without_lifecycle_provenance(tmp
 
     with pytest.raises(BackupValidationError, match="without replacement provenance"):
         load_backup(_write_tampered_backup(tmp_path, payload, "assignment-replaced-missing-time.json"))
+
+
+def test_backup_050_rejects_identity_assignment_without_operator_rationale(tmp_path: Path):
+    payload, identifiers = _governed_backup_payload(tmp_path)
+    assignment = _record(
+        payload,
+        "website_identity_asset_assignments",
+        identifiers["assignment"],
+    )
+    assignment["rationale"] = " "
+
+    with pytest.raises(BackupValidationError, match="invalid Website Identity asset selection"):
+        load_backup(_write_tampered_backup(tmp_path, payload, "assignment-rationale-tampered.json"))
 
 
 def test_backup_050_rejects_replacement_timestamp_before_assignment(tmp_path: Path):

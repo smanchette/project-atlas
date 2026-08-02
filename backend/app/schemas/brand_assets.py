@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class BrandAssetRead(BaseModel):
@@ -56,7 +56,15 @@ class IdentityAssetAssignmentCreate(BaseModel):
     brand_asset_id: int
     slot: str
     assigned_by: str = Field(min_length=1, max_length=160)
-    rationale: str | None = Field(default=None, max_length=1000)
+    rationale: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("rationale")
+    @classmethod
+    def validate_rationale(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Identity selection rationale is required")
+        return cleaned
 
 
 class IdentityAssetAssignmentRead(BaseModel):
