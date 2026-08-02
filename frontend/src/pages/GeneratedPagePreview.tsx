@@ -66,6 +66,32 @@ function GeneratedPagePreview() {
     return () => { document.title = "Project Atlas"; };
   }, [id, showQa]);
 
+  useEffect(() => {
+    if (!data) return;
+    const header = data.composition.effective_components.find(item => item.component_key === "website_header");
+    const identityAssets = record(header?.resolved_data.identity_assets);
+    const favicon = record(identityAssets.favicon);
+    const browserIcon = record(identityAssets.browser_icon);
+    const appleTouchIcon = record(identityAssets.apple_touch_icon);
+    const openGraph = record(identityAssets.open_graph_image);
+    const identityLinks = [
+      ["icon", "favicon", text(favicon.asset_url)],
+      ["shortcut icon", "browser_icon", text(browserIcon.asset_url)],
+      ["apple-touch-icon", "apple_touch_icon", text(appleTouchIcon.asset_url)]
+    ].flatMap(([rel, slot, url]) => {
+      if (!url) return [];
+      const link = document.createElement("link");
+      link.rel = rel; link.href = url; link.dataset.atlasIdentity = "true"; link.dataset.atlasIdentitySlot = slot;
+      document.head.appendChild(link); return [link];
+    });
+    const socialUrl = text(openGraph.asset_url);
+    const social = socialUrl ? document.createElement("meta") : null;
+    if (social) { social.setAttribute("property", "og:image"); social.content = socialUrl; social.dataset.atlasIdentity = "true"; document.head.appendChild(social); }
+    const socialAlt = socialUrl && text(openGraph.accessibility_description) ? document.createElement("meta") : null;
+    if (socialAlt) { socialAlt.setAttribute("property", "og:image:alt"); socialAlt.content = text(openGraph.accessibility_description); socialAlt.dataset.atlasIdentity = "true"; document.head.appendChild(socialAlt); }
+    return () => { identityLinks.forEach(link => link.remove()); social?.remove(); socialAlt?.remove(); };
+  }, [data]);
+
   if (loading) return <PreviewState message="Loading semantic page composition..." />;
   if (error || !data) return <PreviewState message={error ?? "Page preview is unavailable."} error />;
   if (!data.page.draft_content) {
@@ -109,17 +135,23 @@ function renderComponent(component: PageComponentInstance) {
   const data = component.resolved_data;
   switch (component.component_key) {
     case "website_header":
+      {
+      const assets = record(data.identity_assets);
+      const logo = record(assets.header_logo);
       return (
         <header className="previewSiteHeader" key={component.instance_key}>
           <div className="previewContainer previewHeaderInner">
             <div className="previewBrand">
-              <span className="previewBrandMark" aria-hidden="true">{initials(text(data.display_name))}</span>
+              {logo.asset_url
+                ? <img className="previewBrandLogo" src={text(logo.asset_url)} alt={text(logo.accessibility_description)}/>
+                : <span className="previewBrandMark" aria-hidden="true">{initials(text(data.display_name))}</span>}
               <div><strong>{text(data.display_name)}</strong><span>{text(data.tagline) || text(data.business_type)}</span></div>
             </div>
             {data.phone ? <ContactLink value={text(data.phone)} kind="phone" /> : <ContactLink value={text(data.email)} kind="email" />}
           </div>
         </header>
       );
+      }
     case "primary_navigation":
     case "utility_navigation":
     case "footer_navigation":
@@ -208,11 +240,16 @@ function renderComponent(component: PageComponentInstance) {
         </section>
       );
     case "website_footer":
+      {
+      const assets = record(data.identity_assets);
+      const logo = record(assets.footer_logo);
       return (
         <div className="previewContainer previewFooterInner" key={component.instance_key}>
-          <strong>{text(data.company_name)}</strong><span>{data.license_number ? `License ${text(data.license_number)}` : text(data.business_type)}</span>
+          {Boolean(logo.asset_url) && <img className="previewBrandLogo previewFooterLogo" src={text(logo.asset_url)} alt={text(logo.accessibility_description)}/>}
+          <div><strong>{text(data.company_name)}</strong><span>{data.license_number ? `License ${text(data.license_number)}` : text(data.business_type)}</span></div>
         </div>
       );
+      }
     default:
       return <PreviewState key={component.instance_key} message={`Unsupported semantic component: ${component.component_key}`} error />;
   }

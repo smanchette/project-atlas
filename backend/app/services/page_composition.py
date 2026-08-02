@@ -8,6 +8,7 @@ from typing import Any
 from sqlmodel import Session, select
 
 from app.models import (
+    BrandAsset,
     GeneratedPage,
     ImageMetadata,
     InternalLinkIntent,
@@ -19,6 +20,9 @@ from app.models import (
     SemanticComponentDefinition,
     Service,
     SitePlan,
+    Website,
+    WebsiteIdentity,
+    WebsiteIdentityAssetAssignment,
 )
 from app.schemas.page_composition import (
     PageComponentInstance,
@@ -28,6 +32,7 @@ from app.schemas.page_composition import (
     SitePlanCompositionRefreshResult,
 )
 from app.services.website_context import build_website_context
+from app.services.brand_assets import identity_asset_contract_error
 
 
 ALL_PAGE_TYPES = {
@@ -382,6 +387,10 @@ def _validate(session: Session, composition: PageComposition, plan: SitePlan, pl
         errors.append("Composition crosses a Website ownership boundary.")
     if composition.site_plan_id != planned.site_plan_id or composition.generated_page_id != planned.generated_page_id:
         errors.append("Composition source relationships do not match.")
+    try:
+        _active_identity_assets(session, plan.website_id)
+    except PageCompositionError as exc:
+        errors.append(str(exc))
     definitions = _definitions(session)
     generated_keys = {
         item.get("instance_key") for item in composition.generated_components
@@ -536,6 +545,22 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
             "license_number": context.business.license_number,
             "certified_operator": context.business.certified_operator,
         })
+        identity_assets = _active_identity_assets(session, composition.website_id)
+        data["identity_assets"] = {
+            slot: {
+                "asset_id": asset.id,
+                "asset_key": asset.asset_key,
+                "version": asset.version,
+                "asset_type": asset.asset_type,
+                "asset_url": (
+                    asset.asset_url
+                    if slot in {"favicon", "browser_icon", "apple_touch_icon"}
+                    else asset.optimized_url or asset.asset_url
+                ),
+                "accessibility_description": asset.accessibility_description,
+            }
+            for slot, asset in identity_assets.items()
+        }
     elif key.endswith("navigation"):
         nav_id = bindings["navigation_set_id"]
         nav = session.get(NavigationSet, nav_id)
@@ -613,7 +638,8 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
         for assignment in assignments
     }
     context = build_website_context(session, page_id=generated.id)
-    return {
+    identity_assets = _active_identity_assets(session, plan.website_id)
+    snapshot = {
         "website_id": plan.website_id,
         "site_plan_id": plan.id,
         "site_plan_version": plan.version,
@@ -641,6 +667,54 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
             for item in assignments
         ],
     }
+    if identity_assets:
+        snapshot["website_identity_assets"] = [
+            {
+                "slot": slot,
+                "asset_id": asset.id,
+                "asset_key": asset.asset_key,
+                "asset_version": asset.version,
+                "checksum_sha256": asset.checksum_sha256,
+                "status": asset.status,
+                "updated_at": asset.updated_at.isoformat(),
+            }
+            for slot, asset in sorted(identity_assets.items())
+        ]
+    return snapshot
+
+
+def _active_identity_assets(session: Session, website_id: int) -> dict[str, BrandAsset]:
+    website = session.get(Website, website_id)
+    if not website:
+        raise PageCompositionError("Website Identity asset resolution requires an existing Website.")
+    identity = session.exec(
+        select(WebsiteIdentity).where(WebsiteIdentity.website_id == website_id)
+    ).first()
+    if not identity:
+        raise PageCompositionError("Website Identity asset resolution requires Website Identity.")
+    rows = list(session.exec(
+        select(WebsiteIdentityAssetAssignment).where(
+            WebsiteIdentityAssetAssignment.website_identity_id == identity.id,
+            WebsiteIdentityAssetAssignment.status == "active",
+        )
+    ).all())
+    result: dict[str, BrandAsset] = {}
+    for row in rows:
+        if row.slot in result:
+            raise PageCompositionError(f"Website Identity has multiple active selections for {row.slot}.")
+        asset = session.get(BrandAsset, row.brand_asset_id)
+        if (
+            not asset
+            or asset.status != "approved"
+            or asset.brand_id != website.brand_id
+            or asset.business_id != website.business_id
+            or row.website_id != website.id
+            or row.brand_id != website.brand_id
+            or identity_asset_contract_error(asset, row.slot) is not None
+        ):
+            raise PageCompositionError(f"Website Identity selection for {row.slot} is invalid or crosses an ownership boundary.")
+        result[row.slot] = asset
+    return result
 
 
 def _definitions(

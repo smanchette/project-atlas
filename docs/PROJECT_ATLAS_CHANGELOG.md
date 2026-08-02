@@ -291,6 +291,31 @@ deferred.
 
 ---
 
+## Website-Scoped Brand Assets and Website Identity Asset Foundation
+
+Added Business- and Brand-owned, versioned visual-identity assets with explicit
+purpose, approved usage, restrictions, accessibility intent, local artifact
+identity, provenance, rights, approval, replacement, and retirement history.
+Asset existence does not imply approval. Website Identity selects only approved,
+type-compatible assets through separate versioned operator decisions, preserving
+selection provenance and history across replacements.
+
+Semantic page compositions consume current Website Identity selections without
+owning Brand facts or presentation rules. Approved identity artifacts may appear
+in the neutral local composition preview, while legacy free-form identity URLs
+are not treated as the authoritative component asset source. Composition source
+identity includes selected asset versions and checksums so changed selections
+make dependent compositions stale until explicitly refreshed.
+
+Migration `20260801_0038` adds Brand Asset and Website Identity assignment
+records. Atlas Data backup format 0.50 preserves the new durable records while
+remaining compatible with earlier supported formats. Website Readiness now
+reports approved Brand Asset governance and Website Identity selection coverage.
+Themes, design tokens, page-media planning, media or AI generation, complete-site
+preview, publication, WordPress rendering, and SiteGround remain deferred.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.

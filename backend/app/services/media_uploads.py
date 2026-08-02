@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
@@ -11,6 +12,17 @@ from app.core.config import Settings
 
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 FORMAT_EXTENSIONS = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
+FORMAT_CONTENT_TYPES = {
+    "JPEG": "image/jpeg",
+    "PNG": "image/png",
+    "WEBP": "image/webp",
+}
+EXTENSION_CONTENT_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
 THUMBNAIL_SIZE = (480, 480)
 OPTIMIZED_SIZE = (1920, 1920)
 
@@ -22,6 +34,11 @@ class StoredMedia:
     asset_url: str
     thumbnail_url: str
     optimized_url: str
+    mime_type: str
+    file_size: int
+    width: int
+    height: int
+    checksum_sha256: str
 
 
 def ensure_media_directories(settings: Settings) -> Path:
@@ -32,8 +49,24 @@ def ensure_media_directories(settings: Settings) -> Path:
 
 
 async def store_uploaded_image(upload: UploadFile, settings: Settings) -> StoredMedia:
+    original_filename = (upload.filename or "").strip()
+    if (
+        not original_filename
+        or original_filename in {".", ".."}
+        or "/" in original_filename
+        or "\\" in original_filename
+        or "\x00" in original_filename
+        or Path(original_filename).name != original_filename
+    ):
+        raise HTTPException(status_code=422, detail="Uploaded image filename is unsafe")
+
     if upload.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(status_code=415, detail="Only JPEG, PNG, and WebP images are accepted")
+    extension_content_type = EXTENSION_CONTENT_TYPES.get(Path(original_filename).suffix.lower())
+    if extension_content_type is None:
+        raise HTTPException(status_code=415, detail="Uploaded image filename has an unsupported extension")
+    if extension_content_type != upload.content_type:
+        raise HTTPException(status_code=415, detail="Uploaded image filename extension and MIME type do not match")
 
     payload = await upload.read(settings.media_max_upload_bytes + 1)
     if len(payload) > settings.media_max_upload_bytes:
@@ -45,6 +78,9 @@ async def store_uploaded_image(upload: UploadFile, settings: Settings) -> Stored
         raise HTTPException(status_code=422, detail="Uploaded image is empty")
 
     image_format, width, height = _inspect_image(payload)
+    detected_content_type = FORMAT_CONTENT_TYPES[image_format]
+    if detected_content_type != upload.content_type:
+        raise HTTPException(status_code=415, detail="Uploaded image MIME type does not match its file signature")
     if width * height > settings.media_max_pixels:
         raise HTTPException(status_code=413, detail="Image dimensions exceed the configured pixel limit")
 
@@ -77,11 +113,16 @@ async def store_uploaded_image(upload: UploadFile, settings: Settings) -> Stored
 
     public_base = settings.media_public_url.rstrip("/")
     return StoredMedia(
-        original_filename=Path(upload.filename or "upload").name,
+        original_filename=original_filename,
         stored_filename=stored_filename,
         asset_url=f"{public_base}/optimized/{optimized_filename}",
         thumbnail_url=f"{public_base}/thumbnails/{thumbnail_filename}",
         optimized_url=f"{public_base}/optimized/{optimized_filename}",
+        mime_type=detected_content_type,
+        file_size=len(payload),
+        width=width,
+        height=height,
+        checksum_sha256=sha256(payload).hexdigest(),
     )
 
 

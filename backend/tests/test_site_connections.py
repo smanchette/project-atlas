@@ -233,8 +233,10 @@ def test_operator_decisions_make_navigation_and_conversion_paths_ready():
             item for item in report.categories if item.key == "future_readiness"
         )
         assert "navigation" not in {item.key for item in future.items}
+        assert {"approved_brand_assets", "website_identity_asset_selections"} <= {
+            item.key for item in website_category.items
+        }
         assert {
-            "brand_assets",
             "complete_site_preview",
             "media",
             "media_ingestion",

@@ -1,6 +1,7 @@
 from app.models.entities import (
     ApprovalAudit,
     Brand,
+    BrandAsset,
     Business,
     City,
     County,
@@ -27,6 +28,7 @@ from app.models.entities import (
     SitePlan,
     Website,
     WebsiteIdentity,
+    WebsiteIdentityAssetAssignment,
     WebsiteCoveragePlanningRecord,
     WebsiteServiceCoverageDecision,
     WebsiteCountyCoverageDecision,
@@ -55,6 +57,7 @@ from app.models.entities import (
 __all__ = [
     "ApprovalAudit",
     "Brand",
+    "BrandAsset",
     "Business",
     "City",
     "County",
@@ -81,6 +84,7 @@ __all__ = [
     "SitePlan",
     "Website",
     "WebsiteIdentity",
+    "WebsiteIdentityAssetAssignment",
     "WebsiteCoveragePlanningRecord",
     "WebsiteServiceCoverageDecision",
     "WebsiteCountyCoverageDecision",

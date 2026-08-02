@@ -6,7 +6,17 @@ from typing import Any
 
 from sqlmodel import Session, select
 
-from app.models import GeneratedPage, PlannedPage, PlanningRecord, SitePlan
+from app.models import (
+    BrandAsset,
+    GeneratedPage,
+    PlannedPage,
+    PlanningRecord,
+    SitePlan,
+    Website,
+    WebsiteIdentity,
+    WebsiteIdentityAssetAssignment,
+)
+from app.services.brand_assets import identity_asset_contract_error
 from app.schemas.site_plans import (
     WebsiteReadinessCategory,
     WebsiteReadinessItem,
@@ -641,6 +651,77 @@ def _website_category(
             ),
         ]
     )
+    website = session.get(Website, plan.website_id)
+    identity = session.exec(
+        select(WebsiteIdentity).where(WebsiteIdentity.website_id == plan.website_id)
+    ).first()
+    approved_assets = list(session.exec(
+        select(BrandAsset).where(
+            BrandAsset.brand_id == website.brand_id,
+            BrandAsset.business_id == website.business_id,
+            BrandAsset.status == "approved",
+        )
+    ).all()) if website and website.brand_id is not None else []
+    active_selections = list(session.exec(
+        select(WebsiteIdentityAssetAssignment).where(
+            WebsiteIdentityAssetAssignment.website_identity_id == identity.id,
+            WebsiteIdentityAssetAssignment.status == "active",
+        )
+    ).all()) if identity and identity.id is not None else []
+    required_slots = {
+        "header_logo", "footer_logo", "favicon", "browser_icon",
+        "apple_touch_icon", "open_graph_image",
+    }
+    selected_slots: set[str] = set()
+    invalid_slots: list[str] = []
+    for selection in active_selections:
+        asset = session.get(BrandAsset, selection.brand_asset_id)
+        if (
+            not website
+            or not asset
+            or asset.status != "approved"
+            or selection.website_id != website.id
+            or selection.brand_id != website.brand_id
+            or asset.business_id != website.business_id
+            or asset.brand_id != website.brand_id
+            or identity_asset_contract_error(asset, selection.slot) is not None
+        ):
+            invalid_slots.append(selection.slot)
+        else:
+            selected_slots.add(selection.slot)
+    items.extend(
+        [
+            WebsiteReadinessItem(
+                key="approved_brand_assets",
+                label="Approved Brand Assets",
+                status="ready" if approved_assets else "needs_attention",
+                message=(
+                    "The Website Brand owns approved, governed visual-identity assets."
+                    if approved_assets
+                    else "The Website Brand has no approved visual-identity assets."
+                ),
+            ),
+            WebsiteReadinessItem(
+                key="website_identity_asset_selections",
+                label="Website Identity asset selections",
+                status="ready" if required_slots <= selected_slots and not invalid_slots else "needs_attention",
+                message=(
+                    "Website Identity selects approved assets for every supported identity slot."
+                    if required_slots <= selected_slots and not invalid_slots
+                    else "Website Identity needs valid approved selections"
+                    + (
+                        " for: " + ", ".join(sorted(required_slots - selected_slots))
+                        if required_slots - selected_slots else ""
+                    )
+                    + (
+                        "; invalid or unapproved selections: " + ", ".join(sorted(set(invalid_slots)))
+                        if invalid_slots else ""
+                    )
+                    + "."
+                ),
+            ),
+        ]
+    )
     return _category("website_readiness", "Website Readiness", items)
 
 
@@ -655,15 +736,9 @@ def _future_category() -> WebsiteReadinessCategory:
         for key, label, status, message in (
             (
                 "media",
-                "Media planning and provenance",
+                "Page-media planning and provenance",
                 "deferred",
-                "Deferred to a separately approved Media and Brand Assets milestone; not a current failure.",
-            ),
-            (
-                "brand_assets",
-                "Brand Assets Manager",
-                "deferred",
-                "Deferred to a separately approved Brand Assets milestone; not a current failure.",
+                "Deferred to a separately approved page-media milestone; not a current failure.",
             ),
             (
                 "media_ingestion",

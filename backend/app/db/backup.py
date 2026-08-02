@@ -10,6 +10,7 @@ from app.db.session import create_db_and_tables, engine
 from app.models import (
     ApprovalAudit,
     Brand,
+    BrandAsset,
     Business,
     City,
     County,
@@ -40,6 +41,7 @@ from app.models import (
     WebsiteCountyCoverageDecision,
     WebsiteCoveragePlanningRecord,
     WebsiteIdentity,
+    WebsiteIdentityAssetAssignment,
     WebsiteServiceCityCoverageDecision,
     WebsiteServiceCountyCoverageDecision,
     WebsiteServiceCoverageDecision,
@@ -62,7 +64,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.49"
+BACKUP_VERSION = "0.50"
 SUPPORTED_BACKUP_VERSIONS = {
     "0.4",
     "0.5",
@@ -97,6 +99,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.47",
     "0.48",
     "0.49",
+    "0.50",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -114,6 +117,8 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "brands": Brand,
     "websites": Website,
     "website_identities": WebsiteIdentity,
+    "brand_assets": BrandAsset,
+    "website_identity_asset_assignments": WebsiteIdentityAssetAssignment,
     "services": Service,
     "counties": County,
     "cities": City,
@@ -292,17 +297,76 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             )
             website_ids[old_id] = _required_id(restored)
 
+        website_identity_ids: dict[int, int] = {}
         for record in data.get("website_identities", []):
+            old_id = _record_id(record, "website_identities")
             website_id = _mapped_id(
                 website_ids,
                 record["website_id"],
                 "website_identities.website_id",
             )
-            _upsert(
+            restored = _upsert(
                 session,
                 WebsiteIdentity,
                 select(WebsiteIdentity).where(WebsiteIdentity.website_id == website_id),
                 {**record, "website_id": website_id},
+            )
+            website_identity_ids[old_id] = _required_id(restored)
+
+        brand_asset_ids: dict[int, int] = {}
+        pending_asset_replacements: list[tuple[dict[str, Any], BrandAsset]] = []
+        for record in data.get("brand_assets", []):
+            old_id = _record_id(record, "brand_assets")
+            brand_id = _mapped_id(brand_ids, record["brand_id"], "brand_assets.brand_id")
+            restored = _upsert(
+                session,
+                BrandAsset,
+                select(BrandAsset).where(
+                    BrandAsset.brand_id == brand_id,
+                    BrandAsset.asset_key == record["asset_key"],
+                    BrandAsset.version == record["version"],
+                ),
+                {
+                    **record,
+                    "business_id": _mapped_id(business_ids, record["business_id"], "brand_assets.business_id"),
+                    "brand_id": brand_id,
+                    "replaces_brand_asset_id": None,
+                },
+            )
+            brand_asset_ids[old_id] = _required_id(restored)
+            pending_asset_replacements.append((record, restored))
+        for record, restored in pending_asset_replacements:
+            restored.replaces_brand_asset_id = _mapped_optional_id(
+                brand_asset_ids,
+                record.get("replaces_brand_asset_id"),
+                "brand_assets.replaces_brand_asset_id",
+            )
+            session.add(restored)
+        session.flush()
+
+        for record in data.get("website_identity_asset_assignments", []):
+            identity_id = _mapped_id(
+                website_identity_ids,
+                record["website_identity_id"],
+                "website_identity_asset_assignments.website_identity_id",
+            )
+            slot = record["slot"]
+            version = record["version"]
+            _upsert(
+                session,
+                WebsiteIdentityAssetAssignment,
+                select(WebsiteIdentityAssetAssignment).where(
+                    WebsiteIdentityAssetAssignment.website_identity_id == identity_id,
+                    WebsiteIdentityAssetAssignment.slot == slot,
+                    WebsiteIdentityAssetAssignment.version == version,
+                ),
+                {
+                    **record,
+                    "website_identity_id": identity_id,
+                    "website_id": _mapped_id(website_ids, record["website_id"], "website_identity_asset_assignments.website_id"),
+                    "brand_id": _mapped_id(brand_ids, record["brand_id"], "website_identity_asset_assignments.brand_id"),
+                    "brand_asset_id": _mapped_id(brand_asset_ids, record["brand_asset_id"], "website_identity_asset_assignments.brand_asset_id"),
+                },
             )
 
         service_ids: dict[int, int] = {}
@@ -1607,12 +1671,12 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49"}:
+    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50"}:
         for group in ("site_plans", "planned_pages", "planning_records"):
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49"}:
+    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50"}:
         for group in (
             "site_connection_planning_records",
             "navigation_sets",
@@ -1622,7 +1686,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49"}:
+    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50"}:
         for group in (
             "website_coverage_planning_records",
             "website_service_coverage_decisions",
@@ -1633,7 +1697,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.46", "0.47", "0.48", "0.49"}:
+    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50"}:
         for group in (
             "drafting_eligibility_assessments",
             "drafting_eligibility_dispositions",
@@ -1641,7 +1705,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.47", "0.48", "0.49"}:
+    if backup_version not in {"0.47", "0.48", "0.49", "0.50"}:
         for group in (
             "supporting_page_authorizations",
             "pre_draft_distinctness_briefs",
@@ -1649,7 +1713,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.48", "0.49"}:
+    if backup_version not in {"0.48", "0.49", "0.50"}:
         for group in (
             "website_draft_generation_runs",
             "website_draft_generation_items",
@@ -1660,8 +1724,12 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "website_service_county_coverage_decisions" not in data:
         data.setdefault("website_service_county_coverage_decisions", [])
         counts.setdefault("website_service_county_coverage_decisions", 0)
-    if backup_version != "0.49":
+    if backup_version not in {"0.49", "0.50"}:
         for group in ("semantic_component_definitions", "page_compositions"):
+            data.setdefault(group, [])
+            counts.setdefault(group, 0)
+    if backup_version != "0.50":
+        for group in ("brand_assets", "website_identity_asset_assignments"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
 
@@ -1673,6 +1741,97 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             raise BackupValidationError(f"Backup count mismatch for '{group}'.")
         if not all(isinstance(record, dict) for record in records):
             raise BackupValidationError(f"Backup data group '{group}' contains an invalid record.")
+
+    valid_asset_statuses = {"draft", "pending_review", "approved", "rejected", "retired"}
+    valid_asset_types = {
+        "primary_logo", "alternate_logo", "brand_mark", "favicon",
+        "browser_icon", "apple_touch_icon", "open_graph_image",
+    }
+    valid_usages = {
+        "website_header", "website_footer", "browser_tab", "social_preview",
+        "reports", "login_screen",
+    }
+    for record in data["brand_assets"]:
+        approved_usage = record.get("approved_usage")
+        restrictions = record.get("restrictions")
+        checksum = record.get("checksum_sha256")
+        if (
+            record.get("status") not in valid_asset_statuses
+            or record.get("asset_type") not in valid_asset_types
+            or not isinstance(approved_usage, list)
+            or not approved_usage
+            or not set(approved_usage) <= valid_usages
+            or not isinstance(restrictions, list)
+            or not set(restrictions) <= valid_usages
+            or set(approved_usage) & set(restrictions)
+            or not str(record.get("purpose") or "").strip()
+            or not str(record.get("accessibility_description") or "").strip()
+            or not str(record.get("created_by") or "").strip()
+            or "/media/" not in str(record.get("asset_url") or "")
+            or not isinstance(checksum, str)
+            or len(checksum) != 64
+            or any(character not in "0123456789abcdef" for character in checksum)
+        ):
+            raise BackupValidationError("Backup contains an invalid governed Brand Asset.")
+        if record["status"] == "approved":
+            if not str(record.get("approved_by") or "").strip() or record.get("approved_at") is None:
+                raise BackupValidationError(
+                    "Backup contains an approved Brand Asset without approval provenance."
+                )
+            _datetime_value(record["approved_at"], "brand_assets.approved_at")
+        if record["status"] == "retired":
+            if (
+                not str(record.get("retired_by") or "").strip()
+                or not str(record.get("retirement_rationale") or "").strip()
+                or record.get("retired_at") is None
+            ):
+                raise BackupValidationError(
+                    "Backup contains a retired Brand Asset without retirement provenance."
+                )
+            _datetime_value(record["retired_at"], "brand_assets.retired_at")
+    valid_assignment_statuses = {"active", "replaced", "retired"}
+    valid_slots = {
+        "header_logo", "footer_logo", "favicon", "browser_icon",
+        "apple_touch_icon", "open_graph_image",
+    }
+    active_slot_keys: set[tuple[int, str]] = set()
+    for record in data["website_identity_asset_assignments"]:
+        if (
+            record.get("status") not in valid_assignment_statuses
+            or record.get("slot") not in valid_slots
+            or not str(record.get("assigned_by") or "").strip()
+            or not isinstance(record.get("version"), int)
+            or record["version"] < 1
+            or record.get("assigned_at") is None
+        ):
+            raise BackupValidationError("Backup contains an invalid Website Identity asset selection.")
+        assigned_at = _datetime_value(
+            record["assigned_at"],
+            "website_identity_asset_assignments.assigned_at",
+        )
+        replaced_at = record.get("replaced_at")
+        if record["status"] == "active" and replaced_at is not None:
+            raise BackupValidationError(
+                "Backup contains an active Website Identity asset selection with replacement provenance."
+            )
+        if record["status"] == "replaced" and replaced_at is None:
+            raise BackupValidationError(
+                "Backup contains a replaced Website Identity asset selection without replacement provenance."
+            )
+        if replaced_at is not None:
+            replacement_time = _datetime_value(
+                replaced_at,
+                "website_identity_asset_assignments.replaced_at",
+            )
+            if _comparable_datetime(replacement_time) < _comparable_datetime(assigned_at):
+                raise BackupValidationError(
+                    "Backup contains Website Identity replacement provenance before its assignment."
+                )
+        if record["status"] == "active":
+            key = (record["website_identity_id"], record["slot"])
+            if key in active_slot_keys:
+                raise BackupValidationError("Backup contains multiple active selections for one Website Identity slot.")
+            active_slot_keys.add(key)
 
     for group in (
         "website_service_coverage_decisions",
@@ -1731,6 +1890,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
 
     _validate_unique_records(data)
     _validate_backup_references(data)
+    _validate_brand_asset_ownership(data)
     return payload
 
 
@@ -1826,6 +1986,12 @@ def _datetime_value(value: Any, field: str) -> datetime:
     raise BackupValidationError(f"Backup contains an invalid timestamp in {field}.")
 
 
+def _comparable_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
 def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
     key_fields: dict[str, tuple[str, ...]] = {
         "businesses": ("company_name",),
@@ -1867,6 +2033,12 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         ),
         "semantic_component_definitions": ("component_key", "contract_version"),
         "page_compositions": ("planned_page_id",),
+        "brand_assets": ("brand_id", "asset_key", "version"),
+        "website_identity_asset_assignments": (
+            "website_identity_id",
+            "slot",
+            "version",
+        ),
         "approval_audits": ("generated_page_id", "approved_at", "draft_hash_at_approval"),
         "page_revisions": ("generated_page_id", "created_at", "draft_hash_after"),
         "wordpress_draft_audits": ("generated_page_id", "attempted_at", "payload_hash"),
@@ -1912,6 +2084,23 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
 def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
     ids = {group: {record["id"] for record in records} for group, records in data.items()}
     references = {
+        "brands": (("business_id", "businesses", False),),
+        "websites": (
+            ("business_id", "businesses", False),
+            ("brand_id", "brands", True),
+        ),
+        "website_identities": (("website_id", "websites", False),),
+        "brand_assets": (
+            ("business_id", "businesses", False),
+            ("brand_id", "brands", False),
+            ("replaces_brand_asset_id", "brand_assets", True),
+        ),
+        "website_identity_asset_assignments": (
+            ("website_identity_id", "website_identities", False),
+            ("website_id", "websites", False),
+            ("brand_id", "brands", False),
+            ("brand_asset_id", "brand_assets", False),
+        ),
         "services": (("business_id", "businesses", False),),
         "cities": (("county_id", "counties", False),),
         "generated_pages": (
@@ -2099,6 +2288,88 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
                     continue
                 if value not in ids[target_group]:
                     raise BackupValidationError(f"Backup contains an unresolved reference in {group}.{field}.")
+
+
+def _validate_brand_asset_ownership(data: dict[str, list[dict[str, Any]]]) -> None:
+    """Reject cross-owner or malformed Brand Asset graphs before restore mutates state."""
+
+    businesses = {record["id"]: record for record in data["businesses"]}
+    brands = {record["id"]: record for record in data["brands"]}
+    websites = {record["id"]: record for record in data["websites"]}
+    identities = {record["id"]: record for record in data["website_identities"]}
+    assets = {record["id"]: record for record in data["brand_assets"]}
+    slot_contracts = {
+        "header_logo": ({"primary_logo", "alternate_logo", "brand_mark"}, "website_header"),
+        "footer_logo": ({"primary_logo", "alternate_logo", "brand_mark"}, "website_footer"),
+        "favicon": ({"favicon"}, "browser_tab"),
+        "browser_icon": ({"browser_icon"}, "browser_tab"),
+        "apple_touch_icon": ({"apple_touch_icon"}, "browser_tab"),
+        "open_graph_image": ({"open_graph_image"}, "social_preview"),
+    }
+
+    for asset in assets.values():
+        brand = brands[asset["brand_id"]]
+        if asset["business_id"] not in businesses or brand["business_id"] != asset["business_id"]:
+            raise BackupValidationError(
+                "Backup Brand Asset crosses a Business or Brand ownership boundary."
+            )
+        replacement_id = asset.get("replaces_brand_asset_id")
+        if replacement_id is None:
+            continue
+        replacement = assets[replacement_id]
+        if (
+            replacement["business_id"] != asset["business_id"]
+            or replacement["brand_id"] != asset["brand_id"]
+            or replacement["asset_key"] != asset["asset_key"]
+            or not isinstance(asset.get("version"), int)
+            or not isinstance(replacement.get("version"), int)
+            or asset["version"] <= replacement["version"]
+        ):
+            raise BackupValidationError(
+                "Backup Brand Asset replacement crosses ownership, changes its asset key, or does not increase the version."
+            )
+
+    for assignment in data["website_identity_asset_assignments"]:
+        identity = identities[assignment["website_identity_id"]]
+        website = websites[assignment["website_id"]]
+        brand = brands[assignment["brand_id"]]
+        asset = assets[assignment["brand_asset_id"]]
+        if (
+            identity["website_id"] != assignment["website_id"]
+            or website.get("brand_id") != assignment["brand_id"]
+            or brand["business_id"] != website["business_id"]
+            or asset["business_id"] != website["business_id"]
+            or asset["brand_id"] != assignment["brand_id"]
+        ):
+            raise BackupValidationError(
+                "Backup Website Identity asset selection crosses a Website, Business, or Brand ownership boundary."
+            )
+        allowed_types, required_usage = slot_contracts[assignment["slot"]]
+        if (
+            asset["asset_type"] not in allowed_types
+            or required_usage not in asset["approved_usage"]
+            or required_usage in asset["restrictions"]
+        ):
+            raise BackupValidationError(
+                "Backup Website Identity asset selection violates its slot type, usage, or restriction contract."
+            )
+        if not str(asset.get("approved_by") or "").strip() or asset.get("approved_at") is None:
+            raise BackupValidationError(
+                "Backup Website Identity asset selection does not reference an approved-at-assignment asset."
+            )
+        approved_at = _datetime_value(asset["approved_at"], "brand_assets.approved_at")
+        assigned_at = _datetime_value(
+            assignment["assigned_at"],
+            "website_identity_asset_assignments.assigned_at",
+        )
+        if _comparable_datetime(approved_at) > _comparable_datetime(assigned_at):
+            raise BackupValidationError(
+                "Backup Website Identity asset selection predates Brand Asset approval."
+            )
+        if assignment["status"] == "active" and asset["status"] != "approved":
+            raise BackupValidationError(
+                "Backup active Website Identity asset selection does not reference a currently approved asset."
+            )
 
 
 def main() -> None:

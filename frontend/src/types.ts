@@ -65,6 +65,66 @@ export type WebsiteIdentity = {
   updated_at: string;
 };
 
+export type BrandAsset = {
+  id: number;
+  business_id: number;
+  brand_id: number;
+  asset_key: string;
+  version: number;
+  asset_type: string;
+  variant_key: string;
+  purpose: string;
+  approved_usage: string[];
+  restrictions: string[];
+  accessibility_description: string;
+  original_filename: string;
+  asset_url: string;
+  optimized_url?: string | null;
+  thumbnail_url?: string | null;
+  mime_type: string;
+  file_size: number;
+  width: number;
+  height: number;
+  checksum_sha256: string;
+  provenance_type: string;
+  provenance_notes?: string | null;
+  rights_status: string;
+  rights_holder?: string | null;
+  rights_notes?: string | null;
+  status: string;
+  created_by: string;
+  approved_by?: string | null;
+  approved_at?: string | null;
+  replaces_brand_asset_id?: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WebsiteIdentityAssetAssignment = {
+  id: number;
+  website_identity_id: number;
+  website_id: number;
+  brand_id: number;
+  brand_asset_id: number;
+  slot: string;
+  version: number;
+  status: string;
+  assigned_by: string;
+  rationale?: string | null;
+  assigned_at: string;
+  replaced_at?: string | null;
+  asset?: BrandAsset | null;
+};
+
+export type WebsiteIdentityAssets = {
+  website_identity_id: number;
+  website_id: number;
+  brand_id: number;
+  active: Record<string, WebsiteIdentityAssetAssignment>;
+  history: WebsiteIdentityAssetAssignment[];
+  missing_slots: string[];
+};
+
 export type PageType =
   | "home"
   | "about"

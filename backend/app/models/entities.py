@@ -82,6 +82,108 @@ class WebsiteIdentity(TimestampMixin, table=True):
     approved_at: datetime | None = None
 
 
+class BrandAsset(TimestampMixin, table=True):
+    """An approved, versioned visual-identity artifact owned by a Brand."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "brand_id",
+            "asset_key",
+            "version",
+            name="uq_brandasset_brand_key_version",
+        ),
+        CheckConstraint(
+            "asset_type IN ('primary_logo','alternate_logo','brand_mark','favicon',"
+            "'browser_icon','apple_touch_icon','open_graph_image')",
+            name="ck_brandasset_type",
+        ),
+        CheckConstraint(
+            "status IN ('draft','pending_review','approved','rejected','retired')",
+            name="ck_brandasset_status",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    business_id: int = Field(foreign_key="business.id", index=True)
+    brand_id: int = Field(foreign_key="brand.id", index=True)
+    asset_key: str = Field(max_length=120, index=True)
+    version: int = Field(default=1, ge=1)
+    asset_type: str = Field(index=True)
+    variant_key: str = Field(default="default", max_length=80)
+    purpose: str
+    approved_usage: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    restrictions: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    accessibility_description: str
+    original_filename: str
+    stored_filename: str
+    asset_url: str
+    optimized_url: str | None = None
+    thumbnail_url: str | None = None
+    mime_type: str
+    file_size: int = Field(ge=1)
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+    checksum_sha256: str = Field(max_length=64, index=True)
+    provenance_type: str
+    provenance_notes: str | None = None
+    rights_status: str
+    rights_holder: str | None = None
+    rights_notes: str | None = None
+    status: str = Field(default="draft", index=True)
+    created_by: str
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    retired_by: str | None = None
+    retirement_rationale: str | None = None
+    retired_at: datetime | None = None
+    replaces_brand_asset_id: int | None = Field(
+        default=None,
+        foreign_key="brandasset.id",
+        index=True,
+    )
+
+
+class WebsiteIdentityAssetAssignment(TimestampMixin, table=True):
+    """A versioned Website Identity selection of an approved Brand Asset."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "website_identity_id",
+            "slot",
+            "version",
+            name="uq_identityassetassignment_identity_slot_version",
+        ),
+        CheckConstraint(
+            "slot IN ('header_logo','footer_logo','favicon','browser_icon',"
+            "'apple_touch_icon','open_graph_image')",
+            name="ck_identityassetassignment_slot",
+        ),
+        CheckConstraint(
+            "status IN ('active','replaced','retired')",
+            name="ck_identityassetassignment_status",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_identity_id: int = Field(foreign_key="websiteidentity.id", index=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    brand_id: int = Field(foreign_key="brand.id", index=True)
+    brand_asset_id: int = Field(foreign_key="brandasset.id", index=True)
+    slot: str = Field(index=True)
+    version: int = Field(default=1, ge=1)
+    status: str = Field(default="active", index=True)
+    assigned_by: str
+    rationale: str | None = None
+    assigned_at: datetime = Field(default_factory=utc_now, nullable=False)
+    replaced_at: datetime | None = None
+
+
 class SitePlan(TimestampMixin, table=True):
     __table_args__ = (
         UniqueConstraint("website_id", "plan_key", name="uq_siteplan_website_key"),

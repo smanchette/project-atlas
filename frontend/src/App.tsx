@@ -21,6 +21,7 @@ import { NavLink, Route, Routes } from "react-router-dom";
 
 import Dashboard from "./pages/Dashboard";
 import BackupsPage from "./pages/BackupsPage";
+import BrandAssetsPage from "./pages/BrandAssetsPage";
 import ApprovalQueuePage from "./pages/ApprovalQueuePage";
 import CitiesPage from "./pages/CitiesPage";
 import GeneratedPagesPage from "./pages/GeneratedPagesPage";
@@ -47,6 +48,7 @@ const navItems = [
   { to: "/brands", label: "Brands", icon: Building2 },
   { to: "/websites", label: "Websites", icon: Building2 },
   { to: "/website-identities", label: "Website Identity", icon: Images },
+  { to: "/brand-assets", label: "Brand Assets", icon: Images },
   { to: "/site-plans", label: "Site Plans", icon: ClipboardList },
   { to: "/services", label: "Services", icon: Wrench },
   { to: "/knowledge-blocks", label: "Knowledge Blocks", icon: BookOpenText },
@@ -113,10 +115,6 @@ const websiteFields: FieldConfig<Website>[] = [
 const websiteIdentityFields: FieldConfig<WebsiteIdentity>[] = [
   { key: "website_id", label: "Website ID", type: "number", required: true },
   { key: "display_name", label: "Website Display Name", required: true },
-  { key: "favicon_url", label: "Favicon URL", type: "url" },
-  { key: "browser_icon_url", label: "Browser Icon URL", type: "url" },
-  { key: "apple_touch_icon_url", label: "Apple Touch Icon URL", type: "url" },
-  { key: "social_identity_image_url", label: "Social / Open Graph Identity Image", type: "url" },
   { key: "status", label: "Approval / Active State", required: true }
 ];
 
@@ -229,6 +227,7 @@ function DashboardShell() {
             }
           />
           <Route path="/site-plans" element={<SitePlansPage />} />
+          <Route path="/brand-assets" element={<BrandAssetsPage />} />
           <Route
             path="/services"
             element={

@@ -9,6 +9,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from app.db.backup import export_backup, restore_backup
 from app.models import (
     Brand,
+    BrandAsset,
     Business,
     GeneratedPage,
     ImageMetadata,
@@ -23,6 +24,7 @@ from app.models import (
     SitePlan,
     Website,
     WebsiteIdentity,
+    WebsiteIdentityAssetAssignment,
 )
 from app.schemas.page_composition import PageCompositionDecisionUpdate
 from app.services.page_composition import (
@@ -158,6 +160,9 @@ def test_refresh_builds_fact_free_suggestions_and_resolves_approved_inputs():
         assert all("company_name" not in item for item in service.generated_components)
         assert any(item.resolved_data.get("company_name") == f"Composition {website.domain.split('.')[0]}" for item in service.effective_components)
         assert session.get(GeneratedPage, pages[0][1].id).draft_content == original_draft
+        assert "website_identity_assets" not in session.exec(
+            select(PageComposition).where(PageComposition.generated_page_id == pages[0][1].id)
+        ).one().source_snapshot
 
 
 def test_operator_decisions_remain_separate_and_cannot_fabricate_components():
@@ -349,7 +354,75 @@ def test_existing_reviewed_media_is_consumed_without_becoming_component_owned():
         assert "asset_url" not in generated_record
 
 
-def test_backup_049_round_trip_preserves_registry_and_scoped_compositions(tmp_path):
+def test_approved_website_identity_asset_is_consumed_and_invalidates_stale_composition():
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session); website, plan, pages = _scope(session, suffix="identityasset")
+        refresh_site_plan_compositions(session, plan.id)
+        generated = pages[0][1]
+        identity = session.exec(select(WebsiteIdentity).where(WebsiteIdentity.website_id == website.id)).one()
+        asset = BrandAsset(
+            business_id=website.business_id, brand_id=website.brand_id,
+            asset_key="primary-logo", version=1, asset_type="primary_logo",
+            variant_key="default", purpose="Identify the approved Brand.",
+            approved_usage=["website_header"], restrictions=["social_preview"],
+            accessibility_description="Approved company logo", original_filename="logo.png",
+            stored_filename="logo.png", asset_url="/media/logo.webp",
+            optimized_url="/media/logo.webp", mime_type="image/png", file_size=100,
+            width=400, height=120, checksum_sha256="b" * 64,
+            provenance_type="company_original", rights_status="owned", status="approved",
+            created_by="Operator", approved_by="Operator",
+        )
+        session.add(asset); session.flush()
+        session.add(WebsiteIdentityAssetAssignment(
+            website_identity_id=identity.id, website_id=website.id,
+            brand_id=website.brand_id, brand_asset_id=asset.id,
+            slot="header_logo", version=1, status="active", assigned_by="Operator",
+        ))
+        session.commit()
+        with pytest.raises(PageCompositionError, match="authoritative source changed"):
+            read_composition_for_generated_page(session, generated.id)
+        refresh_site_plan_compositions(session, plan.id)
+        composition = read_composition_for_generated_page(session, generated.id)
+        header = next(item for item in composition.effective_components if item.component_key == "website_header")
+        assert header.resolved_data["identity_assets"]["header_logo"]["asset_url"] == "/media/logo.webp"
+        assert "purpose" not in header.resolved_data["identity_assets"]["header_logo"]
+
+
+def test_incompatible_active_identity_asset_selection_fails_composition_closed():
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session); website, plan, _ = _scope(session, suffix="invalididentityasset")
+        identity = session.exec(select(WebsiteIdentity).where(WebsiteIdentity.website_id == website.id)).one()
+        asset = BrandAsset(
+            business_id=website.business_id, brand_id=website.brand_id,
+            asset_key="browser-favicon", version=1, asset_type="favicon",
+            variant_key="default", purpose="Identify a browser tab.",
+            approved_usage=["browser_tab"], restrictions=[],
+            accessibility_description="Temporary browser identity", original_filename="favicon.png",
+            stored_filename="favicon.png", asset_url="/media/favicon.png",
+            optimized_url="/media/favicon.webp", mime_type="image/png", file_size=100,
+            width=32, height=32, checksum_sha256="c" * 64,
+            provenance_type="company_original", rights_status="owned", status="approved",
+            created_by="Operator", approved_by="Operator",
+        )
+        session.add(asset); session.flush()
+        session.add(WebsiteIdentityAssetAssignment(
+            website_identity_id=identity.id, website_id=website.id,
+            brand_id=website.brand_id, brand_asset_id=asset.id,
+            slot="header_logo", version=1, status="active", assigned_by="Operator",
+        ))
+        session.commit()
+        result = refresh_site_plan_compositions(session, plan.id)
+        assert result.created == 0
+        assert result.blocked
+        assert all(
+            "invalid or crosses an ownership boundary" in item["reason"]
+            for item in result.blocked
+        )
+
+
+def test_backup_050_round_trip_preserves_registry_and_scoped_compositions(tmp_path):
     source_engine = _engine(); SQLModel.metadata.create_all(source_engine)
     with Session(source_engine) as session:
         _seed_registry(session); website, plan, _ = _scope(session, suffix="backup")

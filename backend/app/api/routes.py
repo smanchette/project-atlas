@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.backup_routes import router as backup_router
+from app.api.brand_asset_routes import router as brand_asset_router
 from app.api.media_routes import router as media_router
 from app.api.page_generation_routes import router as page_generation_router
 from app.api.page_editor_routes import router as page_editor_router
@@ -50,6 +51,7 @@ from app.schemas.entities import (
 
 api_router = APIRouter()
 api_router.include_router(backup_router)
+api_router.include_router(brand_asset_router)
 api_router.include_router(media_router)
 api_router.include_router(page_generation_router)
 api_router.include_router(page_editor_router)

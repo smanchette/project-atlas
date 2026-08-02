@@ -549,13 +549,14 @@ def test_coverage_readiness_preserves_navigation_and_future_dimensions():
         assert "coverage_core_pages" in keys
         assert "coverage_city_service_matrix" in keys
         assert "site_connections_navigation_sets" in keys
+        assert "approved_brand_assets" in keys
+        assert "website_identity_asset_selections" in keys
         future = next(
             category
             for category in report.categories
             if category.key == "future_readiness"
         )
         assert {
-            "brand_assets",
             "complete_site_preview",
             "media",
             "media_ingestion",

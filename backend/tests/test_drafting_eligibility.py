@@ -351,7 +351,7 @@ def test_backup_round_trip_preserves_assessment_and_operator_provenance(tmp_path
         )
         exported = export_backup(session, backup_dir=tmp_path)
     payload = load_backup(tmp_path / exported["file_name"])
-    assert payload["metadata"]["version"] == "0.49"
+    assert payload["metadata"]["version"] == "0.50"
     assert len(payload["data"]["drafting_eligibility_assessments"]) == 1
     assert len(payload["data"]["drafting_eligibility_dispositions"]) == 1
 
