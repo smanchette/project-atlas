@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import mimetypes
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +14,10 @@ from sqlmodel import Session
 
 settings = get_settings()
 media_root = ensure_media_directories(settings)
+
+# Python's strict MIME registry omits WebP in the slim backend image, so
+# Starlette's FileResponse otherwise falls back to text/plain for .webp files.
+mimetypes.add_type("image/webp", ".webp", strict=True)
 
 
 @asynccontextmanager

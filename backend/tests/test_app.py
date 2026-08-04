@@ -32,6 +32,10 @@ from app.models import (
     Service,
     Setting,
     WordPressDraftAudit,
+    WordPressDeploymentAudit,
+    WordPressActivationAudit,
+    WordPressMetadataLifecycleAudit,
+    WordPressCacheAwareRenderingAudit,
     WordPressPublishAudit,
     WordPressQualityReview,
 )
@@ -63,7 +67,7 @@ from app.services import wordpress_publish
 from app.schemas.qa import QABatchRequest
 from app.services.page_qa import evaluate_page_qa, preview_qa_batch, run_qa_batch, save_page_qa
 from fastapi.testclient import TestClient
-from sqlmodel import Session, select
+from sqlmodel import SQLModel, Session, create_engine, select
 
 
 FLO_ZONE_COMPANY_NAME = "Flo-Zone Pest And Termite Solutions Inc"
@@ -4810,6 +4814,208 @@ def test_backup_restore_preserves_wordpress_audits_and_safe_references_idempoten
     )
     assert len(restored_audits) == 1
     assert restored_post_id == 911
+
+
+def test_backup_restore_preserves_cache_aware_rendering_audits_idempotently(
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(UTC)
+    with TestClient(app):
+        with Session(engine) as session:
+            page = session.exec(select(GeneratedPage).order_by(GeneratedPage.id)).first()
+            assert page is not None and page.id is not None
+
+            installation = WordPressDeploymentAudit(
+                generated_page_id=page.id,
+                wordpress_post_id=8,
+                action_type="install_metadata_bridge",
+                status="verified",
+                operator="Shawn Manchette",
+                shawn_approved_at=now,
+                confirmation_phrase_hash="1" * 64,
+                atlas_version="v0.59.99",
+                atlas_commit="2" * 40,
+                atlas_tag="v0.59.99",
+                plugin_version="0.57.7",
+                plugin_slug="project-atlas-metadata-bridge",
+                plugin_path="project-atlas-metadata-bridge/project-atlas-metadata-bridge.php",
+                zip_file_name="project-atlas-metadata-bridge-0.57.7.zip",
+                zip_sha256="3" * 64,
+                plugin_source_sha256="4" * 64,
+                backup_reference="Atlas Backup",
+                backup_completed_at=now,
+                backup_deadline=now + timedelta(hours=4),
+                authorization_jti="5" * 64,
+                deployment_key="6" * 64,
+                backup_evidence={},
+                pre_snapshot={},
+                post_snapshot={},
+                evidence_directory="docs/deployment-records/test",
+                completed_at=now,
+            )
+            session.add(installation)
+            session.commit()
+            session.refresh(installation)
+
+            activation = WordPressActivationAudit(
+                generated_page_id=page.id,
+                wordpress_post_id=8,
+                installation_audit_id=installation.id,
+                status="verified",
+                operator="Shawn Manchette",
+                confirmation_phrase_hash="7" * 64,
+                handle_fingerprint="8" * 64,
+                binding_hash="9" * 64,
+                atlas_version="v0.59.99",
+                atlas_commit="a" * 40,
+                atlas_tag="v0.59.99",
+                manifest_sha256="b" * 64,
+                plugin_slug="project-atlas-metadata-bridge",
+                plugin_path="project-atlas-metadata-bridge/project-atlas-metadata-bridge.php",
+                plugin_version="0.57.7",
+                zip_sha256="c" * 64,
+                backup_evidence={},
+                browser_evidence_id="cache-backup-evidence",
+                browser_evidence_schema="project-atlas-manual-browser-evidence",
+                browser_evidence_schema_version=1,
+                pre_snapshot={},
+                post_snapshot={},
+                gate_results=[],
+                transition_history=["pending", "verified"],
+                completed_at=now,
+            )
+            session.add(activation)
+            session.commit()
+            session.refresh(activation)
+
+            lifecycle_audits = []
+            for index, action_type in enumerate(
+                ("stage_metadata_payload", "disable_metadata_rendering"),
+                start=1,
+            ):
+                lifecycle_audit = WordPressMetadataLifecycleAudit(
+                    generated_page_id=page.id,
+                    wordpress_post_id=8,
+                    installation_audit_id=installation.id,
+                    activation_audit_id=activation.id,
+                    action_type=action_type,
+                    status="verified",
+                    operator="Shawn Manchette",
+                    confirmation_phrase_hash=str(index) * 64,
+                    handle_fingerprint=f"{index + 1:x}" * 64,
+                    binding_hash=f"{index + 3:x}" * 64,
+                    release_identity={},
+                    backup_evidence={},
+                    browser_evidence_id=f"lifecycle-evidence-{index}",
+                    browser_evidence_hashes={},
+                    payload_hash="d" * 64,
+                    previous_revision="1",
+                    final_revision="1",
+                    previous_rendering_enabled=action_type == "disable_metadata_rendering",
+                    final_rendering_enabled=False,
+                    pre_snapshot={},
+                    post_snapshot={},
+                    page_media_snapshots={},
+                    gate_results=[],
+                    transition_history=["pending", "verified"],
+                    completed_at=now,
+                )
+                session.add(lifecycle_audit)
+                lifecycle_audits.append(lifecycle_audit)
+            session.commit()
+            for lifecycle_audit in lifecycle_audits:
+                session.refresh(lifecycle_audit)
+            staging_audit_id = lifecycle_audits[0].id
+            recovery_disable_audit_id = lifecycle_audits[1].id
+
+            rendering_audit = WordPressCacheAwareRenderingAudit(
+                generated_page_id=page.id,
+                wordpress_post_id=8,
+                staging_audit_id=staging_audit_id,
+                recovery_disable_audit_id=recovery_disable_audit_id,
+                status="verified",
+                operator="Shawn Manchette",
+                rendering_handle_fingerprint="e" * 64,
+                cache_handle_fingerprint="f" * 64,
+                rendering_binding_hash="1" * 64,
+                cache_binding_hash="2" * 64,
+                rendering_phrase_hash="3" * 64,
+                cache_phrase_hash="4" * 64,
+                release_identity={},
+                backup_evidence={},
+                payload_hash="d" * 64,
+                revision="1",
+                cache_provider="siteground",
+                cache_scope="single_canonical_url",
+                cache_target="https://example.test/page/",
+                pre_purge_headers={},
+                post_purge_headers={},
+                origin_verification={},
+                public_verification={},
+                public_evidence=[],
+                page_media_snapshots={},
+                gate_results=[],
+                wordpress_write_count=1,
+                cache_write_count=1,
+                atlas_write_count=2,
+                transition_history=["pending_rendering", "verified"],
+                final_state={"rendering_enabled": True},
+                attempted_at=now,
+                completed_at=now,
+            )
+            session.add(rendering_audit)
+            session.commit()
+
+            export = export_backup(session, backup_dir=tmp_path)
+
+    backup_path = Path(export["path"])
+    payload = json.loads(backup_path.read_text(encoding="utf-8"))
+    lifecycle_records = payload["data"]["wordpress_metadata_lifecycle_audits"]
+    staging_record = next(
+        record for record in lifecycle_records if record["handle_fingerprint"] == "2" * 64
+    )
+    recovery_record = next(
+        record for record in lifecycle_records if record["handle_fingerprint"] == "3" * 64
+    )
+    staging_record["id"] = 900_001
+    recovery_record["id"] = 900_002
+    rendering_record = next(
+        record
+        for record in payload["data"]["wordpress_cache_aware_rendering_audits"]
+        if record["rendering_handle_fingerprint"] == "e" * 64
+    )
+    rendering_record["staging_audit_id"] = 900_001
+    rendering_record["recovery_disable_audit_id"] = 900_002
+    backup_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restored_engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(restored_engine)
+    with Session(restored_engine) as restored_session:
+        restore_backup(restored_session, backup_path)
+        restore_backup(restored_session, backup_path)
+        restored = restored_session.exec(
+            select(WordPressCacheAwareRenderingAudit).where(
+                WordPressCacheAwareRenderingAudit.rendering_handle_fingerprint
+                == "e" * 64
+            )
+        ).all()
+        restored_staging = restored_session.exec(
+            select(WordPressMetadataLifecycleAudit).where(
+                WordPressMetadataLifecycleAudit.handle_fingerprint == "2" * 64
+            )
+        ).one()
+        restored_recovery = restored_session.exec(
+            select(WordPressMetadataLifecycleAudit).where(
+                WordPressMetadataLifecycleAudit.handle_fingerprint == "3" * 64
+            )
+        ).one()
+
+    assert len(restored) == 1
+    assert restored[0].status == "verified"
+    assert restored_staging.id != 900_001
+    assert restored_recovery.id != 900_002
+    assert restored[0].staging_audit_id == restored_staging.id
+    assert restored[0].recovery_disable_audit_id == restored_recovery.id
 
 
 def _database_counts(session: Session) -> dict[str, int]:

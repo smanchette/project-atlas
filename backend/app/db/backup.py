@@ -1515,6 +1515,58 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 restored_record,
             )
 
+        metadata_lifecycle_audit_ids = {
+            record["id"]: session.exec(
+                select(WordPressMetadataLifecycleAudit).where(
+                    WordPressMetadataLifecycleAudit.handle_fingerprint
+                    == record["handle_fingerprint"]
+                )
+            ).one().id
+            for record in data["wordpress_metadata_lifecycle_audits"]
+        }
+
+        for record in data["wordpress_cache_aware_rendering_audits"]:
+            attempted_at = _datetime_value(
+                record["attempted_at"],
+                "wordpress_cache_aware_rendering_audits.attempted_at",
+            )
+            restored_record = {
+                **record,
+                "generated_page_id": _mapped_id(
+                    generated_page_ids,
+                    record["generated_page_id"],
+                    "wordpress_cache_aware_rendering_audits.generated_page_id",
+                ),
+                "staging_audit_id": _mapped_id(
+                    metadata_lifecycle_audit_ids,
+                    record["staging_audit_id"],
+                    "wordpress_cache_aware_rendering_audits.staging_audit_id",
+                ),
+                "recovery_disable_audit_id": _mapped_id(
+                    metadata_lifecycle_audit_ids,
+                    record["recovery_disable_audit_id"],
+                    "wordpress_cache_aware_rendering_audits.recovery_disable_audit_id",
+                ),
+                "attempted_at": attempted_at,
+                "completed_at": (
+                    _datetime_value(
+                        record["completed_at"],
+                        "wordpress_cache_aware_rendering_audits.completed_at",
+                    )
+                    if record.get("completed_at")
+                    else None
+                ),
+            }
+            _upsert(
+                session,
+                WordPressCacheAwareRenderingAudit,
+                select(WordPressCacheAwareRenderingAudit).where(
+                    WordPressCacheAwareRenderingAudit.rendering_handle_fingerprint
+                    == record["rendering_handle_fingerprint"]
+                ),
+                restored_record,
+            )
+
         for record in data["wordpress_deployment_nonces"]:
             restored_record = {
                 **record,
@@ -1675,6 +1727,9 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "wordpress_metadata_lifecycle_audits" not in data:
         data["wordpress_metadata_lifecycle_audits"] = []
         counts["wordpress_metadata_lifecycle_audits"] = 0
+    if "wordpress_cache_aware_rendering_audits" not in data:
+        data["wordpress_cache_aware_rendering_audits"] = []
+        counts["wordpress_cache_aware_rendering_audits"] = 0
     if backup_version != "0.42" and backup_version != "0.43":
         for group in ("brands", "websites", "website_identities"):
             if group not in data:
@@ -2095,6 +2150,7 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         "wordpress_bootstrap_cleanup_audits": ("deactivation_handle_fingerprint",),
         "wordpress_bootstrap_establishment_audits": ("manual_handle_fingerprint",),
         "wordpress_metadata_lifecycle_audits": ("handle_fingerprint",),
+        "wordpress_cache_aware_rendering_audits": ("rendering_handle_fingerprint",),
         "wordpress_publish_audits": ("generated_page_id", "attempted_at", "publish_payload_hash"),
         "wordpress_media_sync_audits": ("generated_page_id", "attempted_at", "source_checksum"),
         "wordpress_metadata_states": ("generated_page_id",),
@@ -2319,6 +2375,11 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
             ("generated_page_id", "generated_pages", False),
             ("installation_audit_id", "wordpress_deployment_audits", False),
             ("activation_audit_id", "wordpress_activation_audits", False),
+        ),
+        "wordpress_cache_aware_rendering_audits": (
+            ("generated_page_id", "generated_pages", False),
+            ("staging_audit_id", "wordpress_metadata_lifecycle_audits", False),
+            ("recovery_disable_audit_id", "wordpress_metadata_lifecycle_audits", False),
         ),
         "wordpress_metadata_sync_audits": (
             ("generated_page_id", "generated_pages", False),
