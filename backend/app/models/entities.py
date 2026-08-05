@@ -376,6 +376,14 @@ class SiteConnectionPlanningRecord(TimestampMixin, table=True):
 
 class NavigationSet(TimestampMixin, table=True):
     __table_args__ = (
+        CheckConstraint(
+            "(decision_version IS NULL AND decided_by IS NULL AND rationale IS NULL "
+            "AND decided_at IS NULL AND source_suggestion_key IS NULL) "
+            "OR (decision_version IS NOT NULL "
+            "AND decision_version >= 1 AND decided_by IS NOT NULL "
+            "AND rationale IS NOT NULL AND decided_at IS NOT NULL)",
+            name="ck_navigationset_decision_provenance",
+        ),
         UniqueConstraint(
             "site_plan_id",
             "set_type",
@@ -390,10 +398,23 @@ class NavigationSet(TimestampMixin, table=True):
     label: str
     status: str = Field(default="draft", max_length=24, index=True)
     version: int = Field(default=1, ge=1)
+    rationale: str | None = None
+    decided_by: str | None = None
+    decision_version: int | None = Field(default=None, ge=1)
+    decided_at: datetime | None = Field(default=None, index=True)
+    source_suggestion_key: str | None = Field(default=None, max_length=200)
 
 
 class NavigationItem(TimestampMixin, table=True):
     __table_args__ = (
+        CheckConstraint(
+            "(decision_version IS NULL AND decided_by IS NULL AND rationale IS NULL "
+            "AND decided_at IS NULL AND source_suggestion_key IS NULL) "
+            "OR (decision_version IS NOT NULL "
+            "AND decision_version >= 1 AND decided_by IS NOT NULL "
+            "AND rationale IS NOT NULL AND decided_at IS NOT NULL)",
+            name="ck_navigationitem_decision_provenance",
+        ),
         UniqueConstraint(
             "navigation_set_id",
             "target_planned_page_id",
@@ -414,10 +435,23 @@ class NavigationItem(TimestampMixin, table=True):
     label: str
     position: int = Field(default=0, ge=0)
     status: str = Field(default="active", max_length=24, index=True)
+    rationale: str | None = None
+    decided_by: str | None = None
+    decision_version: int | None = Field(default=None, ge=1)
+    decided_at: datetime | None = Field(default=None, index=True)
+    source_suggestion_key: str | None = Field(default=None, max_length=200)
 
 
 class InternalLinkIntent(TimestampMixin, table=True):
     __table_args__ = (
+        CheckConstraint(
+            "(decision_version IS NULL AND decided_by IS NULL AND rationale IS NULL "
+            "AND decided_at IS NULL AND source_suggestion_key IS NULL) "
+            "OR (decision_version IS NOT NULL "
+            "AND decision_version >= 1 AND decided_by IS NOT NULL "
+            "AND rationale IS NOT NULL AND decided_at IS NOT NULL)",
+            name="ck_internallinkintent_decision_provenance",
+        ),
         UniqueConstraint(
             "site_plan_id",
             "source_planned_page_id",
@@ -436,6 +470,11 @@ class InternalLinkIntent(TimestampMixin, table=True):
     relationship_type: str = Field(max_length=40, index=True)
     anchor_guidance: str | None = None
     approval_state: str = Field(default="proposed", max_length=24, index=True)
+    rationale: str | None = None
+    decided_by: str | None = None
+    decision_version: int | None = Field(default=None, ge=1)
+    decided_at: datetime | None = Field(default=None, index=True)
+    source_suggestion_key: str | None = Field(default=None, max_length=200)
 
 
 class SemanticComponentDefinition(TimestampMixin, table=True):

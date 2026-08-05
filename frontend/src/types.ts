@@ -240,6 +240,11 @@ export type NavigationSet = {
   label: string;
   status: "draft" | "active" | "disabled";
   version: number;
+  decided_by?: string | null;
+  rationale?: string | null;
+  decision_version?: number | null;
+  decided_at?: string | null;
+  source_suggestion_key?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -254,6 +259,11 @@ export type NavigationItem = {
   label: string;
   position: number;
   status: "draft" | "active" | "disabled";
+  decided_by?: string | null;
+  rationale?: string | null;
+  decision_version?: number | null;
+  decided_at?: string | null;
+  source_suggestion_key?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -272,6 +282,11 @@ export type InternalLinkIntent = {
     | "supporting_information";
   anchor_guidance?: string | null;
   approval_state: "proposed" | "approved" | "rejected";
+  decided_by?: string | null;
+  rationale?: string | null;
+  decision_version?: number | null;
+  decided_at?: string | null;
+  source_suggestion_key?: string | null;
   created_at: string;
   updated_at: string;
 };

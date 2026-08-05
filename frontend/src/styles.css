@@ -2456,6 +2456,29 @@ th {
   padding: 0.7rem 0;
 }
 
+.semanticNavigation .semanticNavigationChildren {
+  display: grid;
+  gap: calc(var(--atlas-nav-item-spacing, 0.5rem) * 0.5);
+  margin: 0 0 0 1rem;
+  padding: 0 0 0.45rem 0.75rem;
+  border-left: var(--atlas-border-thin, 1px) solid currentColor;
+}
+
+.semanticNavigationUnavailable,
+.semanticDestinationUnavailable {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--atlas-nav-min-target, 44px);
+  color: inherit;
+  font-weight: 650;
+  opacity: 0.75;
+}
+
+.semanticDestinationUnavailable small {
+  margin-left: 0.35rem;
+  font-weight: 500;
+}
+
 .semanticNavigation a {
   display: inline-flex;
   align-items: center;
@@ -4851,7 +4874,31 @@ th {
 }
 
 .navigationRecord {
-  grid-template-columns: minmax(160px, 1fr) minmax(120px, 1fr) 90px minmax(120px, 1fr) auto auto;
+  grid-template-columns: repeat(3, minmax(140px, 1fr));
+}
+
+.internalLinkRecord {
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+}
+
+.navigationSetDecision {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: minmax(180px, 1fr) minmax(150px, 1fr) minmax(200px, 2fr) auto;
+  align-items: end;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.75rem;
+  padding: 0.85rem;
+}
+
+.navigationSetDecision > div:first-child,
+.navigationSetDecision label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.navigationSetDecision small {
+  color: #64748b;
 }
 
 .connectionRecord small {
@@ -4861,7 +4908,9 @@ th {
 
 @media (max-width: 800px) {
   .connectionRecord,
-  .navigationRecord {
+  .navigationRecord,
+  .internalLinkRecord,
+  .navigationSetDecision {
     grid-template-columns: 1fr;
   }
 }

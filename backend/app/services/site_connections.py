@@ -21,6 +21,7 @@ from app.schemas.site_connections import (
     NavigationItemCreate,
     NavigationItemRead,
     NavigationItemUpdate,
+    NavigationSetDecisionUpdate,
     NavigationSetRead,
     SiteConnectionDiagnostic,
     SiteConnectionPlanRead,
@@ -154,6 +155,31 @@ def read_site_connection_plan(
     )
 
 
+def update_navigation_set(
+    session: Session,
+    navigation_set_id: int,
+    payload: NavigationSetDecisionUpdate,
+) -> NavigationSetRead:
+    navigation_set = session.get(NavigationSet, navigation_set_id)
+    if not navigation_set:
+        raise SiteConnectionError("Navigation Set not found.")
+    plan = _plan(session, navigation_set.site_plan_id)
+    if navigation_set.website_id != plan.website_id:
+        raise SiteConnectionError(
+            "Navigation Set does not belong to the selected Website and Site Plan."
+        )
+    _apply_decision_provenance(
+        navigation_set,
+        payload,
+        source_suggestion_key=None,
+    )
+    navigation_set.status = payload.status
+    session.add(navigation_set)
+    session.commit()
+    session.refresh(navigation_set)
+    return NavigationSetRead.model_validate(navigation_set)
+
+
 def create_navigation_item(
     session: Session,
     payload: NavigationItemCreate,
@@ -177,6 +203,7 @@ def create_navigation_item(
         nav_set,
         payload.parent_navigation_item_id,
     )
+    _require_authoritative_navigation_parent(parent, payload.status)
     label = _required_text(payload.label, "Navigation label")
     _validate_navigation_uniqueness(
         session,
@@ -186,9 +213,24 @@ def create_navigation_item(
         label,
         payload.position,
     )
-    values = payload.model_dump()
+    source_suggestion_key = _decision_source_suggestion(payload, None)
+    _validate_navigation_suggestion(
+        session,
+        plan,
+        source_suggestion_key,
+        set_type=nav_set.set_type,
+        target_planned_page_id=target.id or 0,
+    )
+    values = payload.model_dump(
+        exclude={"decided_by", "rationale", "source_suggestion_key"}
+    )
     values["label"] = label
     item = NavigationItem(**values)
+    _apply_decision_provenance(
+        item,
+        payload,
+        source_suggestion_key=source_suggestion_key,
+    )
     session.add(item)
     session.commit()
     session.refresh(item)
@@ -205,7 +247,25 @@ def update_navigation_item(
     nav_set = session.get(NavigationSet, item.navigation_set_id)
     if not nav_set:
         raise SiteConnectionError("Navigation Set not found.")
-    updates = payload.model_dump(exclude_unset=True)
+    if (
+        item.website_id != plan.website_id
+        or nav_set.website_id != plan.website_id
+        or nav_set.site_plan_id != plan.id
+        or item.navigation_set_id != nav_set.id
+    ):
+        raise SiteConnectionError(
+            "Navigation Item does not belong to the selected Website and Site Plan."
+        )
+    _eligible_page(
+        session,
+        plan,
+        item.target_planned_page_id,
+        "target",
+    )
+    updates = payload.model_dump(
+        exclude_unset=True,
+        exclude={"decided_by", "rationale", "source_suggestion_key"},
+    )
     parent_id = updates.get(
         "parent_navigation_item_id",
         item.parent_navigation_item_id,
@@ -213,6 +273,19 @@ def update_navigation_item(
     parent = _navigation_parent(session, plan, nav_set, parent_id)
     if parent and parent.id == item.id:
         raise SiteConnectionError("A Navigation Item cannot be its own parent.")
+    resulting_status = updates.get("status", item.status)
+    _require_authoritative_navigation_parent(parent, resulting_status)
+    if resulting_status != "active":
+        active_child = session.exec(
+            select(NavigationItem).where(
+                NavigationItem.parent_navigation_item_id == item.id,
+                NavigationItem.status == "active",
+            )
+        ).first()
+        if active_child:
+            raise SiteConnectionError(
+                "Disable active child Navigation Items before disabling their parent."
+            )
     label = _required_text(updates.get("label", item.label), "Navigation label")
     position = updates.get("position", item.position)
     _validate_navigation_uniqueness(
@@ -224,10 +297,25 @@ def update_navigation_item(
         position,
         item_id=item.id,
     )
+    source_suggestion_key = _decision_source_suggestion(
+        payload,
+        item.source_suggestion_key,
+    )
+    _validate_navigation_suggestion(
+        session,
+        plan,
+        source_suggestion_key,
+        set_type=nav_set.set_type,
+        target_planned_page_id=item.target_planned_page_id,
+    )
     for key, value in updates.items():
         setattr(item, key, value)
     item.label = label
-    item.updated_at = datetime.now(UTC)
+    _apply_decision_provenance(
+        item,
+        payload,
+        source_suggestion_key=source_suggestion_key,
+    )
     session.add(item)
     session.flush()
     if _navigation_cycle_ids(_items(session, plan)):
@@ -239,18 +327,10 @@ def update_navigation_item(
 
 
 def delete_navigation_item(session: Session, item_id: int) -> None:
-    item = _navigation_item(session, item_id)
-    child = session.exec(
-        select(NavigationItem).where(
-            NavigationItem.parent_navigation_item_id == item.id
-        )
-    ).first()
-    if child:
-        raise SiteConnectionError(
-            "Remove or reparent child Navigation Items before deleting this item."
-        )
-    session.delete(item)
-    session.commit()
+    _navigation_item(session, item_id)
+    raise SiteConnectionError(
+        "Navigation decisions cannot be hard-deleted; record a provenance-bearing disabled status instead."
+    )
 
 
 def create_internal_link_intent(
@@ -280,9 +360,19 @@ def create_internal_link_intent(
         plan,
         source.id or 0,
         target.id or 0,
-        relationship_type,
     )
-    values = payload.model_dump()
+    source_suggestion_key = _decision_source_suggestion(payload, None)
+    _validate_internal_link_suggestion(
+        session,
+        plan,
+        source_suggestion_key,
+        source_planned_page_id=source.id or 0,
+        target_planned_page_id=target.id or 0,
+        relationship_type=relationship_type,
+    )
+    values = payload.model_dump(
+        exclude={"decided_by", "rationale", "source_suggestion_key"}
+    )
     values.update(
         {
             "purpose": purpose,
@@ -291,6 +381,11 @@ def create_internal_link_intent(
         }
     )
     intent = InternalLinkIntent(**values)
+    _apply_decision_provenance(
+        intent,
+        payload,
+        source_suggestion_key=source_suggestion_key,
+    )
     session.add(intent)
     session.commit()
     session.refresh(intent)
@@ -304,7 +399,28 @@ def update_internal_link_intent(
 ) -> InternalLinkIntentRead:
     intent = _internal_link_intent(session, intent_id)
     plan = _plan(session, intent.site_plan_id)
-    updates = payload.model_dump(exclude_unset=True)
+    if intent.website_id != plan.website_id:
+        raise SiteConnectionError(
+            "Internal-link intent does not belong to the selected Website and Site Plan."
+        )
+    source = _eligible_page(
+        session,
+        plan,
+        intent.source_planned_page_id,
+        "source",
+    )
+    target = _eligible_page(
+        session,
+        plan,
+        intent.target_planned_page_id,
+        "target",
+    )
+    if source.id == target.id:
+        raise SiteConnectionError("An internal-link intent cannot link a page to itself.")
+    updates = payload.model_dump(
+        exclude_unset=True,
+        exclude={"decided_by", "rationale", "source_suggestion_key"},
+    )
     relationship_type = _relationship_type(
         updates.get("relationship_type", intent.relationship_type)
     )
@@ -317,8 +433,19 @@ def update_internal_link_intent(
         plan,
         intent.source_planned_page_id,
         intent.target_planned_page_id,
-        relationship_type,
         intent_id=intent.id,
+    )
+    source_suggestion_key = _decision_source_suggestion(
+        payload,
+        intent.source_suggestion_key,
+    )
+    _validate_internal_link_suggestion(
+        session,
+        plan,
+        source_suggestion_key,
+        source_planned_page_id=intent.source_planned_page_id,
+        target_planned_page_id=intent.target_planned_page_id,
+        relationship_type=relationship_type,
     )
     for key, value in updates.items():
         setattr(intent, key, value)
@@ -326,7 +453,11 @@ def update_internal_link_intent(
     intent.purpose = purpose
     if "anchor_guidance" in updates:
         intent.anchor_guidance = _optional_text(updates["anchor_guidance"])
-    intent.updated_at = datetime.now(UTC)
+    _apply_decision_provenance(
+        intent,
+        payload,
+        source_suggestion_key=source_suggestion_key,
+    )
     session.add(intent)
     session.commit()
     session.refresh(intent)
@@ -334,9 +465,10 @@ def update_internal_link_intent(
 
 
 def delete_internal_link_intent(session: Session, intent_id: int) -> None:
-    intent = _internal_link_intent(session, intent_id)
-    session.delete(intent)
-    session.commit()
+    _internal_link_intent(session, intent_id)
+    raise SiteConnectionError(
+        "Internal-link decisions cannot be hard-deleted; record a provenance-bearing rejected state instead."
+    )
 
 
 def evaluate_site_connection_diagnostics(
@@ -361,6 +493,12 @@ def evaluate_site_connection_diagnostics(
     set_by_id = {item.id: item for item in sets if item.id is not None}
     invalid_records: set[int] = set()
     deferred_pages: set[int] = set()
+    for navigation_set in sets:
+        if (
+            navigation_set.website_id != plan.website_id
+            or navigation_set.site_plan_id != plan.id
+        ):
+            invalid_records.add(navigation_set.id or 0)
     for item in items:
         target = page_by_id.get(item.target_planned_page_id)
         nav_set = set_by_id.get(item.navigation_set_id)
@@ -413,26 +551,92 @@ def evaluate_site_connection_diagnostics(
         for intent in intents
         if intent.source_planned_page_id == intent.target_planned_page_id
     }
-    active_nav_targets = {
-        item.target_planned_page_id for item in items if item.status == "active"
+    incomplete_provenance = {
+        record.id or 0
+        for record in [*sets, *items, *intents]
+        if not _decision_is_authoritative(record)
     }
-    approved_incoming = {
-        intent.target_planned_page_id
+    authoritative_set_ids = {
+        navigation_set.id
+        for navigation_set in sets
+        if navigation_set.id is not None
+        and navigation_set.status == "active"
+        and _decision_is_authoritative(navigation_set)
+    }
+    authoritative_items = [
+        item
+        for item in items
+        if item.status == "active"
+        and item.navigation_set_id in authoritative_set_ids
+        and _decision_is_authoritative(item)
+    ]
+    authoritative_item_ids = {
+        item.id for item in authoritative_items if item.id is not None
+    }
+    invalid_active_parent_ids = {
+        item.id or 0
+        for item in items
+        if item.status == "active"
+        and item.parent_navigation_item_id is not None
+        and item.parent_navigation_item_id not in authoritative_item_ids
+    }
+    authoritative_intents = [
+        intent
         for intent in intents
         if intent.approval_state == "approved"
-    }
+        and _decision_is_authoritative(intent)
+    ]
     supported_pages = [
         page for page in pages if page.page_type not in DEFERRED_PAGE_TYPES
     ]
+    supported_page_ids = {page.id or 0 for page in supported_pages}
+    reachable_navigation_item_ids = _reachable_navigation_item_ids(
+        authoritative_items
+    )
+    navigation_roots = {
+        item.target_planned_page_id
+        for item in authoritative_items
+        if item.id in reachable_navigation_item_ids
+    }
+    home_roots = {
+        page.id or 0 for page in supported_pages if page.page_type == "home"
+    }
+    reachable_pages = _reachable_pages(
+        (navigation_roots | home_roots) & supported_page_ids,
+        authoritative_intents,
+    )
     orphaned = [
         page.id or 0
         for page in supported_pages
         if page.page_type != "home"
-        and page.id not in active_nav_targets
-        and page.id not in approved_incoming
+        and page.id not in reachable_pages
     ]
-    conversion_broken = _broken_conversion_pages(supported_pages, intents)
+    conversion_broken = _broken_conversion_pages(
+        supported_pages,
+        authoritative_intents,
+    )
+    service_county_journey_broken = _broken_service_county_journey_pages(
+        supported_pages,
+        authoritative_intents,
+    )
     missing_sets = sorted(set(NAVIGATION_SET_TYPES) - {item.set_type for item in sets})
+    active_set_types = {
+        navigation_set.set_type
+        for navigation_set in sets
+        if navigation_set.id in authoritative_set_ids
+    }
+    inactive_set_types = sorted(set(NAVIGATION_SET_TYPES) - active_set_types)
+    populated_set_ids = {
+        item.navigation_set_id
+        for item in authoritative_items
+        if item.id in reachable_navigation_item_ids
+    }
+    unpopulated_set_types = sorted(
+        navigation_set.set_type
+        for navigation_set in sets
+        if navigation_set.id in authoritative_set_ids
+        and navigation_set.id not in populated_set_ids
+    )
 
     return [
         _diagnostic(
@@ -445,6 +649,40 @@ def evaluate_site_connection_diagnostics(
                 if missing_sets
                 else ""
             ),
+        ),
+        _diagnostic(
+            "navigation_set_decisions",
+            "Authoritative navigation sets",
+            not inactive_set_types and not unpopulated_set_types,
+            "Primary, utility, and footer navigation sets are active, provenanced, and populated.",
+            (
+                "Required navigation sets are not authoritative or populated: "
+                + ", ".join(sorted(set(inactive_set_types + unpopulated_set_types)))
+                if inactive_set_types or unpopulated_set_types
+                else ""
+            ),
+            record_ids=sorted(
+                navigation_set.id or 0
+                for navigation_set in sets
+                if navigation_set.set_type
+                in set(inactive_set_types + unpopulated_set_types)
+            ),
+        ),
+        _diagnostic(
+            "decision_provenance",
+            "Operator decision provenance",
+            not incomplete_provenance,
+            "All navigation and internal-link decisions have durable operator provenance.",
+            "One or more legacy or incomplete decisions lack operator, rationale, version, or decision time.",
+            record_ids=sorted(incomplete_provenance),
+        ),
+        _diagnostic(
+            "navigation_parent_authority",
+            "Navigation parent authority",
+            not invalid_active_parent_ids,
+            "Every active child Navigation Item has an active, provenance-complete parent.",
+            "One or more active child Navigation Items has a disabled, draft, missing, or under-governed parent.",
+            record_ids=sorted(invalid_active_parent_ids),
         ),
         _diagnostic(
             "website_scope",
@@ -483,7 +721,7 @@ def evaluate_site_connection_diagnostics(
             "Deferred page targets",
             not deferred_pages,
             "No navigation or internal-link decision targets a deferred page type.",
-            "County or standalone City pages remain deferred and cannot be connection targets.",
+            "Standalone City pages remain deferred and cannot be connection targets.",
             page_ids=sorted(deferred_pages),
         ),
         _diagnostic(
@@ -501,6 +739,14 @@ def evaluate_site_connection_diagnostics(
             "Required Home, Service, and Contact visitor paths are connected.",
             "One or more core visitor conversion paths are broken.",
             page_ids=conversion_broken,
+        ),
+        _diagnostic(
+            "service_county_city_service_journeys",
+            "Service-County and City-Service journeys",
+            not service_county_journey_broken,
+            "Every City-Service page has approved bidirectional links to its exact owning Service-County page.",
+            "One or more City-Service pages lacks an approved bidirectional journey to its exact same-Service, same-County owner.",
+            page_ids=service_county_journey_broken,
         ),
     ]
 
@@ -633,7 +879,10 @@ def _broken_conversion_pages(
 ) -> list[int]:
     approved_edges: dict[int, set[int]] = defaultdict(set)
     for intent in intents:
-        if intent.approval_state == "approved":
+        if (
+            intent.approval_state == "approved"
+            and _decision_is_authoritative(intent)
+        ):
             approved_edges[intent.source_planned_page_id].add(
                 intent.target_planned_page_id
             )
@@ -655,6 +904,100 @@ def _broken_conversion_pages(
             if not _reaches_any(service.id or 0, contact_ids, approved_edges):
                 broken.add(service.id or 0)
     return sorted(broken)
+
+
+def _broken_service_county_journey_pages(
+    pages: list[PlannedPage],
+    intents: list[InternalLinkIntent],
+) -> list[int]:
+    """Require each City-Service page to link both ways with its exact owner.
+
+    A global County page or a Service-County page for another county cannot
+    satisfy this gate. Relationship type remains descriptive metadata; the
+    authoritative source and target identities define the required journey.
+    """
+
+    approved_edges = {
+        (intent.source_planned_page_id, intent.target_planned_page_id)
+        for intent in intents
+        if intent.approval_state == "approved"
+        and _decision_is_authoritative(intent)
+    }
+    service_county_pages: dict[tuple[int, int], list[PlannedPage]] = defaultdict(list)
+    for page in pages:
+        if (
+            page.page_type == "county"
+            and page.service_id is not None
+            and page.county_id is not None
+        ):
+            service_county_pages[(page.service_id, page.county_id)].append(page)
+
+    broken: set[int] = set()
+    for city_service in pages:
+        if city_service.page_type != "city_service":
+            continue
+        city_service_id = city_service.id or 0
+        if city_service.service_id is None or city_service.county_id is None:
+            broken.add(city_service_id)
+            continue
+        owners = service_county_pages.get(
+            (city_service.service_id, city_service.county_id),
+            [],
+        )
+        if len(owners) != 1 or owners[0].id is None:
+            broken.add(city_service_id)
+            broken.update(owner.id or 0 for owner in owners)
+            continue
+        owner_id = owners[0].id
+        if (owner_id, city_service_id) not in approved_edges:
+            broken.add(owner_id)
+        if (city_service_id, owner_id) not in approved_edges:
+            broken.add(city_service_id)
+    return sorted(broken)
+
+
+def _reachable_navigation_item_ids(items: list[NavigationItem]) -> set[int]:
+    item_by_id = {item.id: item for item in items if item.id is not None}
+    reachable_item_ids = {
+        item.id
+        for item in items
+        if item.id is not None and item.parent_navigation_item_id is None
+    }
+    changed = True
+    while changed:
+        changed = False
+        for item_id, item in item_by_id.items():
+            if (
+                item_id not in reachable_item_ids
+                and item.parent_navigation_item_id in reachable_item_ids
+            ):
+                reachable_item_ids.add(item_id)
+                changed = True
+    return reachable_item_ids
+
+
+def _reachable_pages(
+    roots: set[int],
+    intents: list[InternalLinkIntent],
+) -> set[int]:
+    edges: dict[int, set[int]] = defaultdict(set)
+    for intent in intents:
+        if (
+            intent.approval_state == "approved"
+            and _decision_is_authoritative(intent)
+        ):
+            edges[intent.source_planned_page_id].add(
+                intent.target_planned_page_id
+            )
+    reachable: set[int] = set()
+    queue: deque[int] = deque(sorted(roots))
+    while queue:
+        current = queue.popleft()
+        if current in reachable:
+            continue
+        reachable.add(current)
+        queue.extend(sorted(edges.get(current, set()) - reachable))
+    return reachable
 
 
 def _reaches_any(
@@ -710,7 +1053,6 @@ def _duplicate_link_record_ids(intents: list[InternalLinkIntent]) -> set[int]:
             (
                 intent.source_planned_page_id,
                 intent.target_planned_page_id,
-                intent.relationship_type,
             )
         ].append(intent)
     return {
@@ -785,7 +1127,6 @@ def _validate_link_uniqueness(
     plan: SitePlan,
     source_id: int,
     target_id: int,
-    relationship_type: str,
     *,
     intent_id: int | None = None,
 ) -> None:
@@ -793,13 +1134,12 @@ def _validate_link_uniqueness(
         InternalLinkIntent.site_plan_id == plan.id,
         InternalLinkIntent.source_planned_page_id == source_id,
         InternalLinkIntent.target_planned_page_id == target_id,
-        InternalLinkIntent.relationship_type == relationship_type,
     )
     if intent_id is not None:
         statement = statement.where(InternalLinkIntent.id != intent_id)
     if session.exec(statement).first():
         raise SiteConnectionError(
-            "This internal-link source, target, and relationship type already exists."
+            "This internal-link source and target edge already exists."
         )
 
 
@@ -824,6 +1164,18 @@ def _navigation_parent(
     return parent
 
 
+def _require_authoritative_navigation_parent(
+    parent: NavigationItem | None,
+    resulting_status: str,
+) -> None:
+    if resulting_status != "active" or parent is None:
+        return
+    if parent.status != "active" or not _decision_is_authoritative(parent):
+        raise SiteConnectionError(
+            "An active Navigation Item requires an active, provenance-complete parent."
+        )
+
+
 def _eligible_page(
     session: Session,
     plan: SitePlan,
@@ -845,6 +1197,131 @@ def _eligible_page(
             "and cannot participate in connection decisions."
         )
     return page
+
+
+def _decision_is_authoritative(record: Any) -> bool:
+    version = getattr(record, "decision_version", None)
+    return (
+        type(version) is int
+        and version >= 1
+        and bool(str(getattr(record, "decided_by", "") or "").strip())
+        and bool(str(getattr(record, "rationale", "") or "").strip())
+        and isinstance(getattr(record, "decided_at", None), datetime)
+    )
+
+
+def _decision_source_suggestion(payload: Any, current: str | None) -> str | None:
+    if "source_suggestion_key" not in payload.model_fields_set:
+        return current
+    return _optional_text(payload.source_suggestion_key)
+
+
+def _apply_decision_provenance(
+    record: Any,
+    payload: Any,
+    *,
+    source_suggestion_key: str | None,
+) -> None:
+    operator = _required_text(payload.decided_by, "Decision operator")
+    rationale = _required_text(payload.rationale, "Decision rationale")
+    current_version = getattr(record, "decision_version", None)
+    now = datetime.now(UTC)
+    record.decided_by = operator
+    record.rationale = rationale
+    record.decision_version = (
+        current_version + 1
+        if type(current_version) is int and current_version >= 1
+        else 1
+    )
+    record.decided_at = now
+    record.source_suggestion_key = source_suggestion_key
+    record.updated_at = now
+
+
+def _site_connection_planning_record(
+    session: Session,
+    plan: SitePlan,
+) -> SiteConnectionPlanningRecord:
+    record = session.exec(
+        select(SiteConnectionPlanningRecord).where(
+            SiteConnectionPlanningRecord.site_plan_id == plan.id
+        )
+    ).first()
+    if not record:
+        raise SiteConnectionError(
+            "Site connection planning record is missing; refresh suggestions first."
+        )
+    if record.website_id != plan.website_id:
+        raise SiteConnectionError(
+            "Site connection suggestions cross the selected Website boundary."
+        )
+    return record
+
+
+def _validate_navigation_suggestion(
+    session: Session,
+    plan: SitePlan,
+    suggestion_key: str | None,
+    *,
+    set_type: str,
+    target_planned_page_id: int | None = None,
+) -> None:
+    if suggestion_key is None:
+        return
+    record = _site_connection_planning_record(session, plan)
+    suggestion = next(
+        (
+            item
+            for item in record.generated_navigation_suggestions
+            if item.get("suggestion_key") == suggestion_key
+        ),
+        None,
+    )
+    if not suggestion:
+        raise SiteConnectionError(
+            "Navigation decision references an unknown or stale Atlas suggestion."
+        )
+    if suggestion.get("set_type") != set_type or (
+        target_planned_page_id is not None
+        and suggestion.get("target_planned_page_id") != target_planned_page_id
+    ):
+        raise SiteConnectionError(
+            "Navigation suggestion does not match the selected set and target."
+        )
+
+
+def _validate_internal_link_suggestion(
+    session: Session,
+    plan: SitePlan,
+    suggestion_key: str | None,
+    *,
+    source_planned_page_id: int,
+    target_planned_page_id: int,
+    relationship_type: str,
+) -> None:
+    if suggestion_key is None:
+        return
+    record = _site_connection_planning_record(session, plan)
+    suggestion = next(
+        (
+            item
+            for item in record.generated_internal_link_suggestions
+            if item.get("suggestion_key") == suggestion_key
+        ),
+        None,
+    )
+    if not suggestion:
+        raise SiteConnectionError(
+            "Internal-link decision references an unknown or stale Atlas suggestion."
+        )
+    if (
+        suggestion.get("source_planned_page_id") != source_planned_page_id
+        or suggestion.get("target_planned_page_id") != target_planned_page_id
+        or suggestion.get("relationship_type") != relationship_type
+    ):
+        raise SiteConnectionError(
+            "Internal-link suggestion does not match the selected source, target, and relationship."
+        )
 
 
 def _relationship_type(value: str) -> str:

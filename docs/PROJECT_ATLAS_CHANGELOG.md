@@ -343,6 +343,32 @@ preview, publication, WordPress rendering, and SiteGround remain deferred.
 
 ---
 
+## Website-Scoped Approved Navigation Population and Visitor-Journey Foundation
+
+Added Website- and Site-Plan-scoped approved primary, utility, and footer
+navigation together with explicit internal-link visitor journeys. Operator
+decisions retain rationale, identity, version, timestamp, and optional exact
+suggestion provenance, while Atlas-generated suggestions remain separate from
+approved decisions.
+
+Navigation and link validation now fails closed for cross-Website references,
+self-links, duplicates, cycles, inactive parents, missing targets, broken
+conversion paths, and under-governed records. Composition previews resolve
+approved navigation and internal links to exact local Generated Page previews
+without rewriting stored page content.
+
+Migration `20260805_0040` adds decision provenance to navigation sets, items,
+and internal-link intents. Atlas Data backup format 0.52 preserves the durable
+graph and exact suggestion bindings while retaining supported 0.51 restore
+compatibility. Website Readiness now assesses approved navigation, visitor
+journeys, and composition freshness.
+
+This milestone does not insert links into content, render or publish WordPress
+menus, modify page content, implement media or complete-site preview, publish,
+deploy, or access WordPress, SiteGround, or other production systems.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.

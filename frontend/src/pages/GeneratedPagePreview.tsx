@@ -27,6 +27,22 @@ type PreviewData = {
   requestKey: string;
 };
 
+export type ResolvedNavigationItem = {
+  navigationItemId: number;
+  targetPlannedPageId: number;
+  targetGeneratedPageId: number | null;
+  parentNavigationItemId: number | null;
+  position: number;
+  label: string;
+  canonicalSlug: string;
+  children: ResolvedNavigationItem[];
+};
+
+export type NavigationTreeResult = {
+  nodes: ResolvedNavigationItem[];
+  error: string | null;
+};
+
 function GeneratedPagePreview() {
   const { id } = useParams();
   const [searchParams] = useSearchParams();
@@ -305,10 +321,37 @@ export function renderComponent(component: PageComponentInstance) {
 
 function Navigation({ component }: { component: PageComponentInstance }) {
   const items = array(component.resolved_data.items);
+  const tree = buildNavigationTree(items);
+  const label = text(component.resolved_data.label) || "Website navigation";
   return (
-    <nav className={`semanticNavigation semanticNavigation-${component.component_key}`} aria-label={text(component.resolved_data.label)}>
-      <div className="previewContainer"><ul>{items.map((item, index) => { const value = record(item); return <li key={`${text(value.slug)}-${index}`}><a href={`/${text(value.slug).replace(/^\/+|\/+$/g, "")}/`}>{text(value.label)}</a></li>; })}</ul></div>
+    <nav className={`semanticNavigation semanticNavigation-${component.component_key}`} aria-label={label}>
+      <div className="previewContainer">
+        {tree.error ? (
+          <p className="semanticNavigationUnavailable" role="status">
+            Navigation unavailable: {tree.error}
+          </p>
+        ) : (
+          <NavigationList nodes={tree.nodes} />
+        )}
+      </div>
     </nav>
+  );
+}
+
+function NavigationList({ nodes, nested = false }: { nodes: ResolvedNavigationItem[]; nested?: boolean }) {
+  return (
+    <ul className={nested ? "semanticNavigationChildren" : "semanticNavigationList"}>
+      {nodes.map((node) => (
+        <li key={node.navigationItemId} data-navigation-item-id={node.navigationItemId}>
+          <LocalPreviewDestination
+            label={node.label}
+            canonicalSlug={node.canonicalSlug}
+            targetGeneratedPageId={node.targetGeneratedPageId}
+          />
+          {node.children.length > 0 && <NavigationList nodes={node.children} nested />}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -317,9 +360,51 @@ function RelatedLinks({ component }: { component: PageComponentInstance }) {
   return (
     <section className="previewBand previewBandMuted" aria-label="Related destinations">
       <div className="previewContainer"><h2>Related pages</h2><div className="semanticDestinationGrid">
-        {links.map((item, index) => { const value = record(item); return <article key={`${text(value.slug)}-${index}`}><h3><a href={`/${text(value.slug).replace(/^\/+|\/+$/g, "")}/`}>{text(value.label)}</a></h3><p>{text(value.purpose)}</p></article>; })}
+        {links.map((item, index) => {
+          const value = record(item);
+          return (
+            <article key={`${text(value.slug)}-${index}`}>
+              <h3>
+                <LocalPreviewDestination
+                  label={text(value.label)}
+                  canonicalSlug={text(value.slug)}
+                  targetGeneratedPageId={nullablePositiveInteger(value.target_generated_page_id)}
+                />
+              </h3>
+              <p>{text(value.purpose)}</p>
+            </article>
+          );
+        })}
       </div></div>
     </section>
+  );
+}
+
+function LocalPreviewDestination({
+  label,
+  canonicalSlug,
+  targetGeneratedPageId
+}: {
+  label: string;
+  canonicalSlug: string;
+  targetGeneratedPageId: number | null;
+}) {
+  const destination = localPreviewDestination(targetGeneratedPageId);
+  if (!destination) {
+    return (
+      <span
+        className="semanticDestinationUnavailable"
+        data-canonical-slug={canonicalSlug}
+        aria-disabled="true"
+      >
+        {label} <small>(local preview unavailable)</small>
+      </span>
+    );
+  }
+  return (
+    <Link to={destination} data-canonical-slug={canonicalSlug} title={`Canonical path: /${canonicalSlug.replace(/^\/+|\/+$/g, "")}/`}>
+      {label}
+    </Link>
   );
 }
 
@@ -332,10 +417,119 @@ function PreviewState({ message, error = false }: { message: string; error?: boo
   return <main className="previewState"><div><p className="previewSectionLabel">{error ? "Preview Error" : "Atlas Preview"}</p><h1>{message}</h1><Link to="/generated-pages" className="previewButton previewButtonPrimary"><ArrowLeft size={18} aria-hidden="true" /> Back to Generated Pages</Link></div></main>;
 }
 
+export function localPreviewDestination(targetGeneratedPageId: unknown): string | null {
+  const id = nullablePositiveInteger(targetGeneratedPageId);
+  return id === null ? null : `/generated-pages/${id}/preview`;
+}
+
+export function buildNavigationTree(values: unknown[]): NavigationTreeResult {
+  const parsed: ResolvedNavigationItem[] = [];
+  const ids = new Set<number>();
+  const targetIds = new Set<number>();
+  for (const raw of values) {
+    const value = record(raw);
+    const status = text(value.status);
+    if (status && status !== "active") continue;
+    const navigationItemId = nullablePositiveInteger(value.navigation_item_id);
+    const targetPlannedPageId = nullablePositiveInteger(value.target_planned_page_id);
+    const parentNavigationItemId = value.parent_navigation_item_id == null
+      ? null
+      : nullablePositiveInteger(value.parent_navigation_item_id);
+    const position = nonNegativeInteger(value.position);
+    const label = text(value.label).trim();
+    const canonicalSlug = text(value.slug).trim();
+    if (navigationItemId === null || targetPlannedPageId === null || position === null || !label || !canonicalSlug) {
+      return { nodes: [], error: "an active item has incomplete authoritative identity or ordering data." };
+    }
+    if (value.parent_navigation_item_id != null && parentNavigationItemId === null) {
+      return { nodes: [], error: `item ${navigationItemId} has an invalid parent identity.` };
+    }
+    if (ids.has(navigationItemId)) {
+      return { nodes: [], error: `duplicate navigation item identity ${navigationItemId}.` };
+    }
+    if (targetIds.has(targetPlannedPageId)) {
+      return { nodes: [], error: `duplicate navigation target Planned Page ${targetPlannedPageId}.` };
+    }
+    ids.add(navigationItemId);
+    targetIds.add(targetPlannedPageId);
+    parsed.push({
+      navigationItemId,
+      targetPlannedPageId,
+      targetGeneratedPageId: nullablePositiveInteger(value.target_generated_page_id),
+      parentNavigationItemId,
+      position,
+      label,
+      canonicalSlug,
+      children: []
+    });
+  }
+
+  const byId = new Map(parsed.map((item) => [item.navigationItemId, item]));
+  for (const item of parsed) {
+    if (item.parentNavigationItemId === item.navigationItemId) {
+      return { nodes: [], error: `item ${item.navigationItemId} cannot be its own parent.` };
+    }
+    if (item.parentNavigationItemId !== null && !byId.has(item.parentNavigationItemId)) {
+      return { nodes: [], error: `item ${item.navigationItemId} references missing parent ${item.parentNavigationItemId}.` };
+    }
+  }
+
+  const visiting = new Set<number>();
+  const visited = new Set<number>();
+  function visit(item: ResolvedNavigationItem): boolean {
+    if (visiting.has(item.navigationItemId)) return false;
+    if (visited.has(item.navigationItemId)) return true;
+    visiting.add(item.navigationItemId);
+    if (item.parentNavigationItemId !== null) {
+      const parent = byId.get(item.parentNavigationItemId);
+      if (!parent || !visit(parent)) return false;
+    }
+    visiting.delete(item.navigationItemId);
+    visited.add(item.navigationItemId);
+    return true;
+  }
+  for (const item of parsed) {
+    if (!visit(item)) {
+      return { nodes: [], error: `navigation hierarchy contains a cycle involving item ${item.navigationItemId}.` };
+    }
+  }
+
+  const groups = new Map<number | null, ResolvedNavigationItem[]>();
+  for (const item of parsed) {
+    const group = groups.get(item.parentNavigationItemId) ?? [];
+    group.push(item);
+    groups.set(item.parentNavigationItemId, group);
+  }
+  for (const [parentId, siblings] of groups) {
+    const positions = new Set<number>();
+    const labels = new Set<string>();
+    for (const sibling of siblings) {
+      const normalizedLabel = sibling.label.toLowerCase().replace(/\s+/g, " ");
+      if (positions.has(sibling.position)) {
+        return { nodes: [], error: `sibling ordering conflict at position ${sibling.position}${parentId === null ? "" : ` under item ${parentId}`}.` };
+      }
+      if (labels.has(normalizedLabel)) {
+        return { nodes: [], error: `duplicate sibling label “${sibling.label}”.` };
+      }
+      positions.add(sibling.position);
+      labels.add(normalizedLabel);
+    }
+    siblings.sort((left, right) => left.position - right.position || left.navigationItemId - right.navigationItemId);
+  }
+  for (const item of parsed) item.children = groups.get(item.navigationItemId) ?? [];
+  return { nodes: groups.get(null) ?? [], error: null };
+}
+
 function text(value: unknown) { return typeof value === "string" || typeof value === "number" ? String(value) : ""; }
 function array(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 function record(value: unknown): Record<string, unknown> { return value && typeof value === "object" ? value as Record<string, unknown> : {}; }
 function number(value: unknown, fallback: number) { return typeof value === "number" && Number.isFinite(value) ? value : fallback; }
+function nullablePositiveInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
+function nonNegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
 
 function useViewportWidth() {
   const [width, setWidth] = useState(() => window.innerWidth);

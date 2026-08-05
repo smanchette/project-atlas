@@ -133,11 +133,55 @@ def _scope(session: Session, *, suffix: str | None = None, phone: str | None = "
         planned = PlannedPage(website_id=website.id, site_plan_id=plan.id, page_type=page_type, working_name=name, intended_slug=generated.page_slug, service_id=generated.service_id, generated_page_id=generated.id)
         session.add(planned); session.flush(); pages.append((planned, generated))
     sets = {value.set_type: value for value in session.exec(select(NavigationSet).where(NavigationSet.site_plan_id == plan.id)).all()}
+    decided_at = datetime(2026, 8, 1, tzinfo=UTC)
+    for nav_set in sets.values():
+        nav_set.status = "active"
+        nav_set.rationale = f"Approve the {nav_set.set_type} navigation set for testing."
+        nav_set.decided_by = "Composition Operator"
+        nav_set.decision_version = 1
+        nav_set.decided_at = decided_at
+        session.add(nav_set)
     for index, (planned, _) in enumerate(pages):
-        session.add(NavigationItem(website_id=website.id, site_plan_id=plan.id, navigation_set_id=sets["primary"].id, target_planned_page_id=planned.id, label=planned.working_name, position=index, status="active"))
-    session.add(NavigationItem(website_id=website.id, site_plan_id=plan.id, navigation_set_id=sets["utility"].id, target_planned_page_id=pages[1][0].id, label="Contact", position=0, status="active"))
-    session.add(NavigationItem(website_id=website.id, site_plan_id=plan.id, navigation_set_id=sets["footer"].id, target_planned_page_id=pages[1][0].id, label="Contact", position=0, status="active"))
-    session.add(InternalLinkIntent(website_id=website.id, site_plan_id=plan.id, source_planned_page_id=pages[0][0].id, target_planned_page_id=pages[1][0].id, purpose="Continue to approved contact options.", relationship_type="conversion", approval_state="approved"))
+        session.add(NavigationItem(
+            website_id=website.id,
+            site_plan_id=plan.id,
+            navigation_set_id=sets["primary"].id,
+            target_planned_page_id=planned.id,
+            label=planned.working_name,
+            position=index,
+            status="active",
+            rationale="Expose an approved destination in primary navigation.",
+            decided_by="Composition Operator",
+            decision_version=1,
+            decided_at=decided_at,
+        ))
+    for set_type in ("utility", "footer"):
+        session.add(NavigationItem(
+            website_id=website.id,
+            site_plan_id=plan.id,
+            navigation_set_id=sets[set_type].id,
+            target_planned_page_id=pages[1][0].id,
+            label="Contact",
+            position=0,
+            status="active",
+            rationale=f"Expose Contact in {set_type} navigation.",
+            decided_by="Composition Operator",
+            decision_version=1,
+            decided_at=decided_at,
+        ))
+    session.add(InternalLinkIntent(
+        website_id=website.id,
+        site_plan_id=plan.id,
+        source_planned_page_id=pages[0][0].id,
+        target_planned_page_id=pages[1][0].id,
+        purpose="Continue to approved contact options.",
+        relationship_type="conversion",
+        approval_state="approved",
+        rationale="Connect Service visitors to the approved Contact destination.",
+        decided_by="Composition Operator",
+        decision_version=1,
+        decided_at=decided_at,
+    ))
     session.commit()
     return website, plan, pages
 
@@ -167,7 +211,18 @@ def test_refresh_builds_fact_free_suggestions_and_resolves_approved_inputs():
         service = read_composition_for_generated_page(session, pages[0][1].id)
         assert service.website_id == website.id and service.status == "current"
         assert service.operator_decisions == []
-        assert any(item.component_key == "destination_cards" for item in service.effective_components)
+        destinations = next(
+            item for item in service.effective_components
+            if item.component_key == "destination_cards"
+        )
+        assert destinations.resolved_data["links"] == [{
+            "target_planned_page_id": pages[1][0].id,
+            "target_generated_page_id": pages[1][1].id,
+            "label": pages[1][0].working_name,
+            "slug": pages[1][0].intended_slug,
+            "purpose": "Continue to approved contact options.",
+            "relationship_type": "conversion",
+        }]
         assert any(item.component_key == "media_placement" for item in service.effective_components)
         assert all("company_name" not in item for item in service.generated_components)
         assert any(item.resolved_data.get("company_name") == f"Composition {website.domain.split('.')[0]}" for item in service.effective_components)
@@ -177,6 +232,328 @@ def test_refresh_builds_fact_free_suggestions_and_resolves_approved_inputs():
         ).one().source_snapshot
         assert service.source_snapshot["theme"]["mode"] == "neutral_fallback"
         assert service.resolved_theme["fallback_used"] is True
+
+
+def test_navigation_resolution_preserves_hierarchy_and_preview_target_identity():
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session); _, plan, pages = _scope(session, suffix="navigation")
+        primary = session.exec(select(NavigationSet).where(
+            NavigationSet.site_plan_id == plan.id,
+            NavigationSet.set_type == "primary",
+        )).one()
+        primary_items = list(session.exec(select(NavigationItem).where(
+            NavigationItem.navigation_set_id == primary.id,
+        ).order_by(NavigationItem.position)).all())
+        parent, child = primary_items
+        child.parent_navigation_item_id = parent.id
+        child.updated_at = datetime(2026, 8, 2, tzinfo=UTC)
+        session.add(child)
+        utility = session.exec(select(NavigationSet).where(
+            NavigationSet.site_plan_id == plan.id,
+            NavigationSet.set_type == "utility",
+        )).one()
+        disabled = session.exec(select(NavigationItem).where(
+            NavigationItem.navigation_set_id == utility.id,
+        )).one()
+        disabled.status = "disabled"
+        disabled.rationale = None
+        disabled.decided_by = None
+        disabled.decision_version = None
+        disabled.decided_at = None
+        session.add(disabled)
+        rejected_link = session.exec(select(InternalLinkIntent).where(
+            InternalLinkIntent.site_plan_id == plan.id,
+            InternalLinkIntent.approval_state == "approved",
+        )).one()
+        rejected_link.approval_state = "rejected"
+        rejected_link.rationale = None
+        rejected_link.decided_by = None
+        rejected_link.decision_version = None
+        rejected_link.decided_at = None
+        session.add(rejected_link)
+        session.commit()
+
+        result = refresh_site_plan_compositions(session, plan.id)
+        assert result.blocked == []
+        composition = read_composition_for_generated_page(session, pages[0][1].id)
+        primary_component = next(
+            item for item in composition.effective_components
+            if item.component_key == "primary_navigation"
+        )
+        assert primary_component.resolved_data["items"] == [
+            {
+                "navigation_item_id": parent.id,
+                "target_planned_page_id": pages[0][0].id,
+                "target_generated_page_id": pages[0][1].id,
+                "label": parent.label,
+                "slug": pages[0][0].intended_slug,
+                "parent_navigation_item_id": None,
+                "position": parent.position,
+                "status": "active",
+            },
+            {
+                "navigation_item_id": child.id,
+                "target_planned_page_id": pages[1][0].id,
+                "target_generated_page_id": pages[1][1].id,
+                "label": child.label,
+                "slug": pages[1][0].intended_slug,
+                "parent_navigation_item_id": parent.id,
+                "position": child.position,
+                "status": "active",
+            },
+        ]
+        utility_component = next(
+            item for item in composition.effective_components
+            if item.component_key == "utility_navigation"
+        )
+        assert utility_component.resolved_data["items"] == []
+        assert all(
+            item["id"] != disabled.id
+            for item in composition.source_snapshot["navigation_items"]
+        )
+        assert composition.source_snapshot["internal_links"] == []
+        assert all(
+            item.component_key != "destination_cards"
+            for item in composition.effective_components
+        )
+
+
+@pytest.mark.parametrize(
+    ("duplicate_kind", "expected_reason"),
+    [
+        (
+            "target",
+            "Active Navigation Items cannot share the same target Planned Page.",
+        ),
+        (
+            "position",
+            "Active sibling Navigation Items cannot share the same position.",
+        ),
+        (
+            "label",
+            "Active sibling Navigation Items cannot share a case-insensitive label.",
+        ),
+    ],
+)
+def test_composition_rejects_duplicate_active_navigation_restored_data(
+    duplicate_kind: str,
+    expected_reason: str,
+):
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session); _, plan, _ = _scope(
+            session,
+            suffix=f"duplicate-{duplicate_kind}",
+        )
+        primary = session.exec(select(NavigationSet).where(
+            NavigationSet.site_plan_id == plan.id,
+            NavigationSet.set_type == "primary",
+        )).one()
+        parent, sibling = list(session.exec(select(NavigationItem).where(
+            NavigationItem.navigation_set_id == primary.id,
+        ).order_by(NavigationItem.position)).all())
+        if duplicate_kind == "target":
+            sibling.target_planned_page_id = parent.target_planned_page_id
+        elif duplicate_kind == "position":
+            sibling.position = parent.position
+        else:
+            sibling.label = f"  {parent.label.swapcase()}  "
+
+        # no_autoflush models a raw/restored row that bypassed the normal
+        # service and relational constraints while exercising the composition gate.
+        with session.no_autoflush:
+            result = refresh_site_plan_compositions(session, plan.id, commit=False)
+        assert result.created == 0
+        assert result.refreshed == 0
+        assert result.unchanged == 0
+        assert result.blocked
+        assert all(item["reason"] == expected_reason for item in result.blocked)
+        session.rollback()
+
+
+@pytest.mark.parametrize("parent_state", ["inactive", "under_governed"])
+def test_active_navigation_child_requires_active_governed_parent(parent_state: str):
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session); _, plan, _ = _scope(
+            session,
+            suffix=f"parent-{parent_state}",
+        )
+        primary = session.exec(select(NavigationSet).where(
+            NavigationSet.site_plan_id == plan.id,
+            NavigationSet.set_type == "primary",
+        )).one()
+        parent, child = list(session.exec(select(NavigationItem).where(
+            NavigationItem.navigation_set_id == primary.id,
+        ).order_by(NavigationItem.position)).all())
+        child.parent_navigation_item_id = parent.id
+        if parent_state == "inactive":
+            parent.status = "disabled"
+            expected_reason = "Active Navigation Item parent is missing or inactive."
+        else:
+            parent.rationale = None
+            parent.decided_by = None
+            parent.decision_version = None
+            parent.decided_at = None
+            expected_reason = (
+                "Active Navigation Item parent lacks authoritative operator decision provenance."
+            )
+        session.add(parent)
+        session.add(child)
+        session.commit()
+
+        result = refresh_site_plan_compositions(session, plan.id)
+        assert result.created == 0
+        assert result.blocked
+        assert all(item["reason"] == expected_reason for item in result.blocked)
+
+
+def test_navigation_target_identity_change_stales_and_rebinds_compositions():
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session); _, plan, pages = _scope(session, suffix="target-stale")
+        initial = refresh_site_plan_compositions(session, plan.id)
+        assert initial.created == 2 and initial.blocked == []
+        target = pages[1][0]
+        before = read_composition_for_generated_page(session, pages[0][1].id)
+        target_bindings = [
+            item["target"] for item in before.source_snapshot["navigation_items"]
+            if item["target"]["planned_page_id"] == target.id
+        ]
+        assert target_bindings
+        assert all(item["generated_page_id"] == pages[1][1].id for item in target_bindings)
+        assert all(item["intended_slug"] == target.intended_slug for item in target_bindings)
+
+        target.working_name = "Updated Contact Destination"
+        target.intended_slug = "updated-contact-destination"
+        session.add(target)
+        session.commit()
+        with pytest.raises(PageCompositionError, match="stale"):
+            read_composition_for_generated_page(session, pages[0][1].id)
+
+        refreshed = refresh_site_plan_compositions(session, plan.id)
+        assert refreshed.refreshed == 2 and refreshed.blocked == []
+        rebound = read_composition_for_generated_page(session, pages[0][1].id)
+        primary = next(
+            item for item in rebound.effective_components
+            if item.component_key == "primary_navigation"
+        )
+        rebound_target = next(
+            item for item in primary.resolved_data["items"]
+            if item["target_planned_page_id"] == target.id
+        )
+        assert rebound_target["slug"] == "updated-contact-destination"
+        assert rebound_target["target_generated_page_id"] == pages[1][1].id
+
+
+def test_active_navigation_and_approved_links_require_decision_provenance():
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session); _, plan, _ = _scope(session, suffix="legacy-nav")
+        nav_item = session.exec(select(NavigationItem).where(
+            NavigationItem.site_plan_id == plan.id,
+            NavigationItem.status == "active",
+        )).first()
+        nav_item.rationale = None
+        nav_item.decided_by = None
+        nav_item.decision_version = None
+        nav_item.decided_at = None
+        session.add(nav_item)
+        session.commit()
+        result = refresh_site_plan_compositions(session, plan.id)
+        assert result.created == 0
+        assert all(
+            "Navigation Item lacks authoritative operator decision provenance"
+            in item["reason"]
+            for item in result.blocked
+        )
+
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session); _, plan, pages = _scope(session, suffix="legacy-link")
+        link = session.exec(select(InternalLinkIntent).where(
+            InternalLinkIntent.site_plan_id == plan.id,
+            InternalLinkIntent.approval_state == "approved",
+        )).one()
+        link.rationale = None
+        link.decided_by = None
+        link.decision_version = None
+        link.decided_at = None
+        session.add(link)
+        session.commit()
+        result = refresh_site_plan_compositions(session, plan.id)
+        blocker = next(
+            item for item in result.blocked
+            if item["planned_page_id"] == pages[0][0].id
+        )
+        assert "internal-link intent lacks authoritative operator decision provenance" in blocker["reason"]
+
+
+def test_approved_internal_links_for_source_cannot_duplicate_target():
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session); _, plan, pages = _scope(session, suffix="duplicate-link-target")
+        session.add(InternalLinkIntent(
+            website_id=plan.website_id,
+            site_plan_id=plan.id,
+            source_planned_page_id=pages[0][0].id,
+            target_planned_page_id=pages[1][0].id,
+            purpose="Explain a second approved relationship to the same destination.",
+            relationship_type="supporting_information",
+            approval_state="approved",
+            rationale="Approve the additional relationship for corruption-boundary testing.",
+            decided_by="Composition Operator",
+            decision_version=1,
+            decided_at=datetime(2026, 8, 1, tzinfo=UTC),
+        ))
+        session.commit()
+
+        result = refresh_site_plan_compositions(session, plan.id)
+        blocker = next(
+            item for item in result.blocked
+            if item["planned_page_id"] == pages[0][0].id
+        )
+        assert blocker["reason"] == (
+            "Approved internal-link intents for one source cannot share a target Planned Page."
+        )
+        assert session.exec(select(PageComposition).where(
+            PageComposition.planned_page_id == pages[0][0].id,
+        )).first() is None
+
+
+def test_navigation_and_link_targets_fail_closed_when_missing_or_cross_scope():
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session); _, plan, _ = _scope(session, suffix="bad-nav-target")
+        _, _, other_pages = _scope(session, suffix="other-nav-target")
+        nav_item = session.exec(select(NavigationItem).where(
+            NavigationItem.site_plan_id == plan.id,
+            NavigationItem.status == "active",
+        )).first()
+        nav_item.target_planned_page_id = other_pages[0][0].id
+        session.add(nav_item)
+        session.commit()
+        result = refresh_site_plan_compositions(session, plan.id)
+        assert result.created == 0
+        assert all("target crosses the Website or Site Plan boundary" in item["reason"] for item in result.blocked)
+
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session); _, plan, pages = _scope(session, suffix="missing-link-target")
+        link = session.exec(select(InternalLinkIntent).where(
+            InternalLinkIntent.site_plan_id == plan.id,
+            InternalLinkIntent.approval_state == "approved",
+        )).one()
+        link.target_planned_page_id = 999_999
+        session.add(link)
+        session.commit()
+        result = refresh_site_plan_compositions(session, plan.id)
+        blocker = next(
+            item for item in result.blocked
+            if item["planned_page_id"] == pages[0][0].id
+        )
+        assert "target Planned Page is missing" in blocker["reason"]
 
 
 def test_operator_decisions_remain_separate_and_cannot_fabricate_components():
@@ -385,6 +762,8 @@ def test_approved_draft_related_pages_render_without_creating_link_decisions():
             if item.component_key == "destination_cards"
         )
         assert destinations.resolved_data["links"] == [{
+            "target_planned_page_id": target.id,
+            "target_generated_page_id": target.generated_page_id,
             "label": target.working_name,
             "slug": target.intended_slug,
             "purpose": "Explore approved related service information.",

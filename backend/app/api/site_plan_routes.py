@@ -24,6 +24,8 @@ from app.schemas.site_connections import (
     NavigationItemCreate,
     NavigationItemRead,
     NavigationItemUpdate,
+    NavigationSetDecisionUpdate,
+    NavigationSetRead,
     SiteConnectionPlanRead,
     SiteConnectionPlanningRecordRead,
 )
@@ -96,6 +98,7 @@ from app.services.site_connections import (
     refresh_site_connection_suggestions,
     update_internal_link_intent,
     update_navigation_item,
+    update_navigation_set,
 )
 from app.services.planned_page_drafting import (
     PlannedPageDraftingError,
@@ -248,6 +251,23 @@ def refresh_site_connections(
         refresh_site_connection_suggestions,
         session,
         plan_id,
+    )
+
+
+@router.patch(
+    "/navigation-sets/{navigation_set_id}",
+    response_model=NavigationSetRead,
+)
+def decide_navigation_set(
+    navigation_set_id: int,
+    payload: NavigationSetDecisionUpdate,
+    session: Session = Depends(get_session),
+):
+    return _connection_call(
+        update_navigation_set,
+        session,
+        navigation_set_id,
+        payload,
     )
 
 

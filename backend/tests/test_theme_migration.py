@@ -66,7 +66,7 @@ def test_0039_adds_theme_tables_on_clean_disposable_database(monkeypatch, tmp_pa
     }
     _assert_version_checks(engine)
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260804_0039"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260805_0040"
     get_settings.cache_clear()
 
 
@@ -82,7 +82,7 @@ def test_0039_adopts_compatible_tables_precreated_by_local_startup(monkeypatch, 
     with engine.connect() as connection:
         assert connection.execute(text("SELECT COUNT(*) FROM theme")).scalar_one() == 0
         assert connection.execute(text("SELECT COUNT(*) FROM websitethemeselection")).scalar_one() == 0
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260804_0039"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260805_0040"
     _assert_version_checks(engine)
     get_settings.cache_clear()
 

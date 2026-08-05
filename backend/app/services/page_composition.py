@@ -289,6 +289,7 @@ def _generate_components(session: Session, plan: SitePlan, planned: PlannedPage,
         nav = nav_sets.get(nav_type)
         if not nav:
             raise PageCompositionError(f"Required {nav_type} Navigation Set is missing.")
+        _require_authoritative_navigation_set(nav, plan)
     add("website_header", "header", {"website_id": plan.website_id})
     add("utility_navigation", "header", {"navigation_set_id": nav_sets["utility"].id})
     add("primary_navigation", "header", {"navigation_set_id": nav_sets["primary"].id})
@@ -335,6 +336,7 @@ def _generate_components(session: Session, plan: SitePlan, planned: PlannedPage,
     footer = nav_sets.get("footer")
     if not footer:
         raise PageCompositionError("Required footer Navigation Set is missing.")
+    _require_authoritative_navigation_set(footer, plan)
     add("footer_navigation", "footer", {"navigation_set_id": footer.id})
     add("website_footer", "footer", {"website_id": plan.website_id})
     return items
@@ -485,49 +487,320 @@ def _available_inputs(session: Session, plan: SitePlan, planned: PlannedPage, ge
             available.add("media_placement")
     nav_id = bindings.get("navigation_set_id")
     if nav_id:
-        nav = session.get(NavigationSet, nav_id)
-        nav_items = list(session.exec(select(NavigationItem).where(
-            NavigationItem.navigation_set_id == nav_id,
-            NavigationItem.status == "active",
-        )).all())
-        nav_targets = [session.get(PlannedPage, value.target_planned_page_id) for value in nav_items]
-        if (
-            nav
-            and nav.website_id == plan.website_id
-            and nav.site_plan_id == plan.id
-            and all(
-                target
-                and target.website_id == plan.website_id
-                and target.site_plan_id == plan.id
-                for target in nav_targets
-            )
-        ):
-            available.add(f"navigation:{nav.set_type}")
+        nav, _ = _resolved_navigation_items(
+            session,
+            website_id=plan.website_id,
+            site_plan_id=plan.id or 0,
+            navigation_set_id=nav_id,
+        )
+        available.add(f"navigation:{nav.set_type}")
     link_ids = bindings.get("internal_link_intent_ids", [])
-    links = [session.get(InternalLinkIntent, link_id) for link_id in link_ids]
-    if link_ids and all(
-        link
-        and link.website_id == plan.website_id
-        and link.site_plan_id == plan.id
-        and link.source_planned_page_id == planned.id
-        and link.approval_state == "approved"
-        and (target := session.get(PlannedPage, link.target_planned_page_id))
-        and target.website_id == plan.website_id
-        and target.site_plan_id == plan.id
-        for link in links
-    ):
+    if link_ids:
+        _resolved_internal_links(
+            session,
+            website_id=plan.website_id,
+            site_plan_id=plan.id or 0,
+            source_planned_page_id=planned.id or 0,
+            internal_link_intent_ids=link_ids,
+        )
         available.add("related_pages")
     draft_related_ids = bindings.get("draft_related_page_ids", [])
-    draft_related = [session.get(PlannedPage, page_id) for page_id in draft_related_ids]
-    if draft_related_ids and all(
-        target
-        and target.id != planned.id
-        and target.website_id == plan.website_id
-        and target.site_plan_id == plan.id
-        for target in draft_related
-    ):
+    if draft_related_ids:
+        _resolved_draft_related_targets(
+            session,
+            website_id=plan.website_id,
+            site_plan_id=plan.id or 0,
+            source_planned_page_id=planned.id or 0,
+            target_planned_page_ids=draft_related_ids,
+        )
         available.add("related_pages")
     return available
+
+
+def _required_record_id(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise PageCompositionError(f"{label} is missing or invalid.")
+    return value
+
+
+def _decision_provenance_complete(record: Any) -> bool:
+    version = getattr(record, "decision_version", None)
+    return (
+        isinstance(getattr(record, "decided_by", None), str)
+        and bool(record.decided_by.strip())
+        and isinstance(getattr(record, "rationale", None), str)
+        and bool(record.rationale.strip())
+        and isinstance(version, int)
+        and not isinstance(version, bool)
+        and version >= 1
+        and getattr(record, "decided_at", None) is not None
+    )
+
+
+def _require_authoritative_navigation_set(
+    nav: NavigationSet,
+    plan: SitePlan,
+) -> None:
+    if nav.website_id != plan.website_id or nav.site_plan_id != plan.id:
+        raise PageCompositionError(
+            "Navigation Set crosses the Website or Site Plan boundary."
+        )
+    if nav.status != "active":
+        raise PageCompositionError("Navigation Set is not active.")
+    if not _decision_provenance_complete(nav):
+        raise PageCompositionError(
+            "Active Navigation Set lacks authoritative operator decision provenance."
+        )
+
+
+def _resolved_target_page(
+    session: Session,
+    *,
+    website_id: int,
+    site_plan_id: int,
+    target_planned_page_id: Any,
+    role: str,
+) -> PlannedPage:
+    target_id = _required_record_id(target_planned_page_id, f"{role} target")
+    target = session.get(PlannedPage, target_id)
+    if target is None:
+        raise PageCompositionError(f"{role} target Planned Page is missing.")
+    if target.website_id != website_id or target.site_plan_id != site_plan_id:
+        raise PageCompositionError(
+            f"{role} target crosses the Website or Site Plan boundary."
+        )
+    if target.generated_page_id is not None:
+        target_generated = session.get(GeneratedPage, target.generated_page_id)
+        if target_generated is None:
+            raise PageCompositionError(f"{role} target Generated Page is missing.")
+        if target_generated.website_id != website_id:
+            raise PageCompositionError(
+                f"{role} target Generated Page crosses the Website boundary."
+            )
+    return target
+
+
+def _resolved_navigation_items(
+    session: Session,
+    *,
+    website_id: int,
+    site_plan_id: int,
+    navigation_set_id: Any,
+) -> tuple[NavigationSet, list[tuple[NavigationItem, PlannedPage]]]:
+    nav_id = _required_record_id(navigation_set_id, "Navigation Set binding")
+    nav = session.get(NavigationSet, nav_id)
+    if nav is None:
+        raise PageCompositionError("Navigation Set binding is missing.")
+    if nav.website_id != website_id or nav.site_plan_id != site_plan_id:
+        raise PageCompositionError(
+            "Navigation Set crosses the Website or Site Plan boundary."
+        )
+    if nav.status != "active":
+        raise PageCompositionError("Navigation Set is not active.")
+    if not _decision_provenance_complete(nav):
+        raise PageCompositionError(
+            "Active Navigation Set lacks authoritative operator decision provenance."
+        )
+    items = list(
+        session.exec(
+            select(NavigationItem)
+            .where(
+                NavigationItem.navigation_set_id == nav.id,
+                NavigationItem.status == "active",
+            )
+            .order_by(NavigationItem.position, NavigationItem.id)
+        ).all()
+    )
+    resolved: list[tuple[NavigationItem, PlannedPage]] = []
+    for nav_item in items:
+        if (
+            nav_item.id is None
+            or nav_item.website_id != website_id
+            or nav_item.site_plan_id != site_plan_id
+            or nav_item.navigation_set_id != nav.id
+        ):
+            raise PageCompositionError(
+                "Navigation Item crosses the Website, Site Plan, or Navigation Set boundary."
+            )
+        target = _resolved_target_page(
+            session,
+            website_id=website_id,
+            site_plan_id=site_plan_id,
+            target_planned_page_id=nav_item.target_planned_page_id,
+            role="Navigation Item",
+        )
+        resolved.append((nav_item, target))
+    items_by_id = {
+        item.id: item
+        for item, _ in resolved
+        if item.id is not None
+    }
+    for nav_item, _ in resolved:
+        parent_id = nav_item.parent_navigation_item_id
+        if parent_id is None:
+            continue
+        parent = items_by_id.get(parent_id)
+        if parent is None:
+            raise PageCompositionError(
+                "Active Navigation Item parent is missing or inactive."
+            )
+        if not _decision_provenance_complete(parent):
+            raise PageCompositionError(
+                "Active Navigation Item parent lacks authoritative operator decision provenance."
+            )
+    for nav_item, _ in resolved:
+        if not _decision_provenance_complete(nav_item):
+            raise PageCompositionError(
+                "Active Navigation Item lacks authoritative operator decision provenance."
+            )
+
+    target_owners: dict[int, int] = {}
+    sibling_position_owners: dict[tuple[int | None, int], int] = {}
+    sibling_label_owners: dict[tuple[int | None, str], int] = {}
+    for nav_item, target in resolved:
+        nav_item_id = nav_item.id or 0
+        target_id = target.id or 0
+        if target_id in target_owners:
+            raise PageCompositionError(
+                "Active Navigation Items cannot share the same target Planned Page."
+            )
+        target_owners[target_id] = nav_item_id
+        position_key = (nav_item.parent_navigation_item_id, nav_item.position)
+        if position_key in sibling_position_owners:
+            raise PageCompositionError(
+                "Active sibling Navigation Items cannot share the same position."
+            )
+        sibling_position_owners[position_key] = nav_item_id
+        label_key = (
+            nav_item.parent_navigation_item_id,
+            nav_item.label.strip().casefold(),
+        )
+        if label_key in sibling_label_owners:
+            raise PageCompositionError(
+                "Active sibling Navigation Items cannot share a case-insensitive label."
+            )
+        sibling_label_owners[label_key] = nav_item_id
+    parent_by_id = {
+        item.id: item.parent_navigation_item_id
+        for item, _ in resolved
+        if item.id is not None
+    }
+    for start in parent_by_id:
+        current: int | None = start
+        seen: set[int] = set()
+        while current is not None:
+            if current in seen:
+                raise PageCompositionError(
+                    "Active Navigation Item hierarchy contains a cycle."
+                )
+            seen.add(current)
+            current = parent_by_id.get(current)
+    return nav, resolved
+
+
+def _resolved_internal_links(
+    session: Session,
+    *,
+    website_id: int,
+    site_plan_id: int,
+    source_planned_page_id: int,
+    internal_link_intent_ids: list[Any],
+) -> list[tuple[InternalLinkIntent, PlannedPage]]:
+    resolved: list[tuple[InternalLinkIntent, PlannedPage]] = []
+    seen_ids: set[int] = set()
+    seen_target_ids: set[int] = set()
+    for raw_link_id in internal_link_intent_ids:
+        link_id = _required_record_id(raw_link_id, "Internal-link intent binding")
+        if link_id in seen_ids:
+            raise PageCompositionError("Internal-link intent binding is duplicated.")
+        seen_ids.add(link_id)
+        link = session.get(InternalLinkIntent, link_id)
+        if link is None:
+            raise PageCompositionError("Internal-link intent binding is missing.")
+        if (
+            link.website_id != website_id
+            or link.site_plan_id != site_plan_id
+            or link.source_planned_page_id != source_planned_page_id
+        ):
+            raise PageCompositionError(
+                "Internal-link intent crosses the Website, Site Plan, or source-page boundary."
+            )
+        if link.approval_state != "approved":
+            raise PageCompositionError("Internal-link intent is not approved.")
+        if not _decision_provenance_complete(link):
+            raise PageCompositionError(
+                "Approved internal-link intent lacks authoritative operator decision provenance."
+            )
+        target = _resolved_target_page(
+            session,
+            website_id=website_id,
+            site_plan_id=site_plan_id,
+            target_planned_page_id=link.target_planned_page_id,
+            role="Internal-link intent",
+        )
+        if target.id == source_planned_page_id:
+            raise PageCompositionError("Internal-link intent cannot target its source page.")
+        target_id = target.id or 0
+        if target_id in seen_target_ids:
+            raise PageCompositionError(
+                "Approved internal-link intents for one source cannot share a target Planned Page."
+            )
+        seen_target_ids.add(target_id)
+        resolved.append((link, target))
+    return resolved
+
+
+def _resolved_draft_related_targets(
+    session: Session,
+    *,
+    website_id: int,
+    site_plan_id: int,
+    source_planned_page_id: int,
+    target_planned_page_ids: list[Any],
+) -> list[PlannedPage]:
+    resolved: list[PlannedPage] = []
+    seen_ids: set[int] = set()
+    for raw_target_id in target_planned_page_ids:
+        target = _resolved_target_page(
+            session,
+            website_id=website_id,
+            site_plan_id=site_plan_id,
+            target_planned_page_id=raw_target_id,
+            role="Draft-related page",
+        )
+        if target.id == source_planned_page_id:
+            raise PageCompositionError("Draft-related page cannot target its source page.")
+        if target.id in seen_ids:
+            raise PageCompositionError("Draft-related page binding is duplicated.")
+        seen_ids.add(target.id or 0)
+        resolved.append(target)
+    return resolved
+
+
+def _target_source_identity(
+    session: Session,
+    *,
+    website_id: int,
+    site_plan_id: int,
+    target_planned_page_id: Any,
+    role: str,
+) -> dict[str, Any]:
+    target = _resolved_target_page(
+        session,
+        website_id=website_id,
+        site_plan_id=site_plan_id,
+        target_planned_page_id=target_planned_page_id,
+        role=role,
+    )
+    return {
+        "planned_page_id": target.id,
+        "website_id": target.website_id,
+        "site_plan_id": target.site_plan_id,
+        "generated_page_id": target.generated_page_id,
+        "working_name": target.working_name,
+        "intended_slug": target.intended_slug,
+        "updated_at": target.updated_at.isoformat(),
+    }
 
 
 def _resolve_instance(session: Session, composition: PageComposition, generated: GeneratedPage, item: dict[str, Any]) -> PageComponentInstance:
@@ -565,13 +838,28 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
         }
     elif key.endswith("navigation"):
         nav_id = bindings["navigation_set_id"]
-        nav = session.get(NavigationSet, nav_id)
-        nav_items = list(session.exec(select(NavigationItem).where(NavigationItem.navigation_set_id == nav_id, NavigationItem.status == "active").order_by(NavigationItem.position, NavigationItem.id)).all())
-        targets = {page.id: page for page in session.exec(select(PlannedPage).where(PlannedPage.site_plan_id == composition.site_plan_id)).all()}
-        data = {"label": nav.label if nav else key.replace("_", " ").title(), "items": [
-            {"label": value.label, "slug": targets[value.target_planned_page_id].intended_slug, "parent_navigation_item_id": value.parent_navigation_item_id}
-            for value in nav_items if value.target_planned_page_id in targets
-        ]}
+        nav, nav_items = _resolved_navigation_items(
+            session,
+            website_id=composition.website_id,
+            site_plan_id=composition.site_plan_id,
+            navigation_set_id=nav_id,
+        )
+        data = {
+            "label": nav.label,
+            "items": [
+                {
+                    "navigation_item_id": value.id,
+                    "target_planned_page_id": target.id,
+                    "target_generated_page_id": target.generated_page_id,
+                    "label": value.label,
+                    "slug": target.intended_slug,
+                    "parent_navigation_item_id": value.parent_navigation_item_id,
+                    "position": value.position,
+                    "status": value.status,
+                }
+                for value, target in nav_items
+            ],
+        }
     elif key == "hero":
         data = {"title": draft.get("h1"), "intro": draft.get("intro"), "phone": context.business.phone, "email": context.business.email, "page_type": generated.page_type}
     elif key in {"content_section", "service_summary"}:
@@ -601,21 +889,40 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
         else:
             data = next(value for value in draft.get("image_placements", []) if value.get("key") == bindings["placement_key"])
     elif key in {"related_page_links", "destination_cards"}:
-        links = [session.get(InternalLinkIntent, value) for value in bindings.get("internal_link_intent_ids", [])]
-        targets = {page.id: page for page in session.exec(select(PlannedPage).where(PlannedPage.site_plan_id == composition.site_plan_id)).all()}
+        links = _resolved_internal_links(
+            session,
+            website_id=composition.website_id,
+            site_plan_id=composition.site_plan_id,
+            source_planned_page_id=composition.planned_page_id,
+            internal_link_intent_ids=bindings.get("internal_link_intent_ids", []),
+        )
         resolved_links = [
-            {"label": targets[link.target_planned_page_id].working_name, "slug": targets[link.target_planned_page_id].intended_slug, "purpose": link.purpose, "relationship_type": link.relationship_type}
-            for link in links if link and link.target_planned_page_id in targets
+            {
+                "target_planned_page_id": target.id,
+                "target_generated_page_id": target.generated_page_id,
+                "label": target.working_name,
+                "slug": target.intended_slug,
+                "purpose": link.purpose,
+                "relationship_type": link.relationship_type,
+            }
+            for link, target in links
         ]
         seen_targets = {
             link.target_planned_page_id
-            for link in links
-            if link and link.target_planned_page_id in targets
+            for link, _ in links
         }
-        for target_id in bindings.get("draft_related_page_ids", []):
-            target = targets.get(target_id)
-            if target and target.id not in seen_targets:
+        draft_related = _resolved_draft_related_targets(
+            session,
+            website_id=composition.website_id,
+            site_plan_id=composition.site_plan_id,
+            source_planned_page_id=composition.planned_page_id,
+            target_planned_page_ids=bindings.get("draft_related_page_ids", []),
+        )
+        for target in draft_related:
+            if target.id not in seen_targets:
                 resolved_links.append({
+                    "target_planned_page_id": target.id,
+                    "target_generated_page_id": target.generated_page_id,
                     "label": target.working_name,
                     "slug": target.intended_slug,
                     "purpose": "Explore approved related service information.",
@@ -632,8 +939,60 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
 
 def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, generated: GeneratedPage) -> dict[str, Any]:
     nav_sets = list(session.exec(select(NavigationSet).where(NavigationSet.site_plan_id == plan.id).order_by(NavigationSet.id)).all())
-    nav_items = list(session.exec(select(NavigationItem).where(NavigationItem.site_plan_id == plan.id).order_by(NavigationItem.id)).all())
-    links = list(session.exec(select(InternalLinkIntent).where(InternalLinkIntent.site_plan_id == plan.id, InternalLinkIntent.source_planned_page_id == planned.id).order_by(InternalLinkIntent.id)).all())
+    links = list(session.exec(select(InternalLinkIntent).where(
+        InternalLinkIntent.site_plan_id == plan.id,
+        InternalLinkIntent.source_planned_page_id == planned.id,
+        InternalLinkIntent.approval_state == "approved",
+    ).order_by(InternalLinkIntent.id)).all())
+    resolved_internal_links = _resolved_internal_links(
+        session,
+        website_id=plan.website_id,
+        site_plan_id=plan.id or 0,
+        source_planned_page_id=planned.id or 0,
+        internal_link_intent_ids=[item.id for item in links],
+    )
+    resolved_navigation_items: list[tuple[NavigationItem, PlannedPage]] = []
+    for nav_set in nav_sets:
+        _require_authoritative_navigation_set(nav_set, plan)
+        _, resolved_items = _resolved_navigation_items(
+            session,
+            website_id=plan.website_id,
+            site_plan_id=plan.id or 0,
+            navigation_set_id=nav_set.id,
+        )
+        resolved_navigation_items.extend(resolved_items)
+    resolved_navigation_items.sort(key=lambda value: value[0].id or 0)
+    nav_items = [item for item, _ in resolved_navigation_items]
+    navigation_targets = {
+        item.id: _target_source_identity(
+            session,
+            website_id=plan.website_id,
+            site_plan_id=plan.id or 0,
+            target_planned_page_id=item.target_planned_page_id,
+            role="Navigation Item",
+        )
+        for item, _ in resolved_navigation_items
+    }
+    internal_link_targets = {
+        item.id: _target_source_identity(
+            session,
+            website_id=plan.website_id,
+            site_plan_id=plan.id or 0,
+            target_planned_page_id=item.target_planned_page_id,
+            role="Internal-link intent",
+        )
+        for item, _ in resolved_internal_links
+    }
+    draft_related_targets = [
+        _target_source_identity(
+            session,
+            website_id=plan.website_id,
+            site_plan_id=plan.id or 0,
+            target_planned_page_id=target.id or 0,
+            role="Draft-related page",
+        )
+        for target in _approved_draft_related_pages(session, plan, planned, generated)
+    ]
     assignments = list(session.exec(select(PageImageAssignment).where(PageImageAssignment.generated_page_id == generated.id).order_by(PageImageAssignment.id)).all())
     images = {
         assignment.image_metadata_id: session.get(ImageMetadata, assignment.image_metadata_id)
@@ -654,9 +1013,43 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
         "website_identity_id": context.identity.id,
         "website_context_hash": _hash(context.model_dump(mode="json")),
         "theme": resolved_theme.source_identity,
-        "navigation_sets": [{"id": item.id, "type": item.set_type, "version": item.version, "updated_at": item.updated_at.isoformat()} for item in nav_sets],
-        "navigation_items": [{"id": item.id, "target": item.target_planned_page_id, "position": item.position, "status": item.status, "updated_at": item.updated_at.isoformat()} for item in nav_items],
-        "internal_links": [{"id": item.id, "target": item.target_planned_page_id, "approval_state": item.approval_state, "updated_at": item.updated_at.isoformat()} for item in links],
+        "navigation_sets": [
+            {
+                "id": item.id,
+                "type": item.set_type,
+                "label": item.label,
+                "status": item.status,
+                "version": item.version,
+                "updated_at": item.updated_at.isoformat(),
+            }
+            for item in nav_sets
+        ],
+        "navigation_items": [
+            {
+                "id": item.id,
+                "navigation_set_id": item.navigation_set_id,
+                "target": navigation_targets[item.id],
+                "parent_navigation_item_id": item.parent_navigation_item_id,
+                "label": item.label,
+                "position": item.position,
+                "status": item.status,
+                "updated_at": item.updated_at.isoformat(),
+            }
+            for item in nav_items
+        ],
+        "internal_links": [
+            {
+                "id": item.id,
+                "target": internal_link_targets[item.id],
+                "purpose": item.purpose,
+                "relationship_type": item.relationship_type,
+                "anchor_guidance": item.anchor_guidance,
+                "approval_state": item.approval_state,
+                "updated_at": item.updated_at.isoformat(),
+            }
+            for item in links
+        ],
+        "draft_related_targets": draft_related_targets,
         "media_assignments": [
             {
                 "id": item.id,
@@ -744,12 +1137,18 @@ def _definitions(
 
 
 def _approved_links(session: Session, plan: SitePlan, planned: PlannedPage) -> list[InternalLinkIntent]:
-    return list(session.exec(select(InternalLinkIntent).where(
+    links = list(session.exec(select(InternalLinkIntent).where(
         InternalLinkIntent.website_id == plan.website_id,
         InternalLinkIntent.site_plan_id == plan.id,
         InternalLinkIntent.source_planned_page_id == planned.id,
         InternalLinkIntent.approval_state == "approved",
     ).order_by(InternalLinkIntent.id)).all())
+    for link in links:
+        if not _decision_provenance_complete(link):
+            raise PageCompositionError(
+                "Approved internal-link intent lacks authoritative operator decision provenance."
+            )
+    return links
 
 
 def _approved_draft_related_pages(

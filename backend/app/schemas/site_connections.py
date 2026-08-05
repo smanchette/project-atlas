@@ -11,6 +11,12 @@ InternalLinkApprovalState = Literal["proposed", "approved", "rejected"]
 ConnectionDiagnosticStatus = Literal["ready", "needs_attention"]
 
 
+class DecisionProvenanceInput(SQLModel):
+    decided_by: str = Field(min_length=1, max_length=160)
+    rationale: str = Field(min_length=1, max_length=2000)
+    source_suggestion_key: str | None = Field(default=None, max_length=200)
+
+
 class NavigationSetRead(SQLModel):
     id: int
     website_id: int
@@ -19,11 +25,22 @@ class NavigationSetRead(SQLModel):
     label: str
     status: NavigationRecordStatus
     version: int
+    decided_by: str | None = None
+    rationale: str | None = None
+    decision_version: int | None = None
+    decided_at: datetime | None = None
+    source_suggestion_key: str | None = None
     created_at: datetime
     updated_at: datetime
 
 
-class NavigationItemCreate(SQLModel):
+class NavigationSetDecisionUpdate(SQLModel):
+    status: NavigationRecordStatus
+    decided_by: str = Field(min_length=1, max_length=160)
+    rationale: str = Field(min_length=1, max_length=2000)
+
+
+class NavigationItemCreate(DecisionProvenanceInput):
     website_id: int
     site_plan_id: int
     navigation_set_id: int
@@ -34,7 +51,7 @@ class NavigationItemCreate(SQLModel):
     status: NavigationRecordStatus = "active"
 
 
-class NavigationItemUpdate(SQLModel):
+class NavigationItemUpdate(DecisionProvenanceInput):
     parent_navigation_item_id: int | None = None
     label: str | None = None
     position: int | None = Field(default=None, ge=0)
@@ -51,11 +68,16 @@ class NavigationItemRead(SQLModel):
     label: str
     position: int
     status: NavigationRecordStatus
+    decided_by: str | None = None
+    rationale: str | None = None
+    decision_version: int | None = None
+    decided_at: datetime | None = None
+    source_suggestion_key: str | None = None
     created_at: datetime
     updated_at: datetime
 
 
-class InternalLinkIntentCreate(SQLModel):
+class InternalLinkIntentCreate(DecisionProvenanceInput):
     website_id: int
     site_plan_id: int
     source_planned_page_id: int
@@ -66,7 +88,7 @@ class InternalLinkIntentCreate(SQLModel):
     approval_state: InternalLinkApprovalState = "proposed"
 
 
-class InternalLinkIntentUpdate(SQLModel):
+class InternalLinkIntentUpdate(DecisionProvenanceInput):
     purpose: str | None = None
     relationship_type: str | None = None
     anchor_guidance: str | None = None
@@ -83,6 +105,11 @@ class InternalLinkIntentRead(SQLModel):
     relationship_type: str
     anchor_guidance: str | None = None
     approval_state: InternalLinkApprovalState
+    decided_by: str | None = None
+    rationale: str | None = None
+    decision_version: int | None = None
+    decided_at: datetime | None = None
+    source_suggestion_key: str | None = None
     created_at: datetime
     updated_at: datetime
 

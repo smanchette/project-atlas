@@ -168,7 +168,7 @@ def _content_category(
             message=(
                 "All Planned Pages use currently supported review contracts."
                 if not deferred
-                else "County and standalone City drafting remain deferred in this milestone."
+                else "Standalone City drafting remains deferred in this milestone."
             ),
             affected_planned_page_ids=deferred,
         )

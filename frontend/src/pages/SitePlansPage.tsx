@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ClipboardList, FilePlus2, RefreshCw, Save, Trash2 } from "lucide-react";
+import { ClipboardList, FilePlus2, RefreshCw, Save } from "lucide-react";
 
 import { apiRequest } from "../api";
 import CoveragePlanningPanel from "../components/CoveragePlanningPanel";
@@ -12,6 +12,7 @@ import type {
   County,
   InternalLinkIntent,
   NavigationItem,
+  NavigationSet,
   PageComposition,
   PageType,
   PlannedPage,
@@ -562,11 +563,18 @@ function SiteConnectionPanel({
   const [navParentId, setNavParentId] = useState("");
   const [navLabel, setNavLabel] = useState("");
   const [navPosition, setNavPosition] = useState("0");
+  const [navOperator, setNavOperator] = useState("");
+  const [navRationale, setNavRationale] = useState("");
+  const [navSuggestionKey, setNavSuggestionKey] = useState("");
   const [linkSourceId, setLinkSourceId] = useState("");
   const [linkTargetId, setLinkTargetId] = useState("");
   const [linkType, setLinkType] = useState<InternalLinkIntent["relationship_type"]>("conversion");
   const [linkPurpose, setLinkPurpose] = useState("");
   const [anchorGuidance, setAnchorGuidance] = useState("");
+  const [linkApprovalState, setLinkApprovalState] = useState<InternalLinkIntent["approval_state"]>("approved");
+  const [linkOperator, setLinkOperator] = useState("");
+  const [linkRationale, setLinkRationale] = useState("");
+  const [linkSuggestionKey, setLinkSuggestionKey] = useState("");
   const [busy, setBusy] = useState(false);
 
   const selectedSet = connections.navigation_sets.find(
@@ -577,6 +585,48 @@ function SiteConnectionPanel({
   );
   const pageName = (id: number) =>
     plan.planned_pages.find((page) => page.id === id)?.working_name ?? `Planned Page #${id}`;
+  const navigationSuggestions = connections.planning_record.generated_navigation_suggestions;
+  const internalLinkSuggestions = connections.planning_record.generated_internal_link_suggestions;
+
+  function chooseNavigationSuggestion(suggestionKey: string) {
+    setNavSuggestionKey(suggestionKey);
+    const suggestion = navigationSuggestions.find(
+      (item) => String(item.suggestion_key ?? "") === suggestionKey
+    );
+    if (!suggestion) return;
+    const targetId = Number(suggestion.target_planned_page_id);
+    const target = eligiblePages.find((page) => page.id === targetId);
+    const set = connections.navigation_sets.find(
+      (item) => item.set_type === String(suggestion.set_type)
+    );
+    if (set) {
+      setNavSetId(String(set.id));
+      setNavParentId("");
+    }
+    if (target) {
+      const defaults = navigationSuggestionDefaults(suggestion, target.working_name);
+      setNavTargetId(String(target.id));
+      setNavLabel(defaults.label);
+      setNavPosition(defaults.position === null ? "" : String(defaults.position));
+    }
+    setNavRationale(String(suggestion.rationale ?? ""));
+  }
+
+  function chooseInternalLinkSuggestion(suggestionKey: string) {
+    setLinkSuggestionKey(suggestionKey);
+    const suggestion = internalLinkSuggestions.find(
+      (item) => String(item.suggestion_key ?? "") === suggestionKey
+    );
+    if (!suggestion) return;
+    setLinkSourceId(String(suggestion.source_planned_page_id ?? ""));
+    setLinkTargetId(String(suggestion.target_planned_page_id ?? ""));
+    setLinkPurpose(String(suggestion.purpose ?? ""));
+    setLinkRationale(String(suggestion.rationale ?? suggestion.purpose ?? ""));
+    const relationship = String(suggestion.relationship_type ?? "");
+    if (["conversion", "hierarchy", "related_content", "supporting_information"].includes(relationship)) {
+      setLinkType(relationship as InternalLinkIntent["relationship_type"]);
+    }
+  }
 
   async function refreshSuggestions() {
     setBusy(true);
@@ -596,7 +646,8 @@ function SiteConnectionPanel({
 
   async function addNavigationItem() {
     const target = eligiblePages.find((page) => page.id === Number(navTargetId));
-    if (!selectedSet || !target) return;
+    const position = parseNonNegativeInteger(navPosition);
+    if (!selectedSet || !target || position === null || !navOperator.trim() || !navRationale.trim()) return;
     setBusy(true);
     try {
       await apiRequest(`/api/site-plans/${plan.id}/navigation-items`, {
@@ -608,14 +659,19 @@ function SiteConnectionPanel({
           target_planned_page_id: target.id,
           parent_navigation_item_id: numberOrNull(navParentId),
           label: navLabel.trim() || target.working_name,
-          position: Number(navPosition) || 0,
-          status: "active"
+          position,
+          status: "active",
+          decided_by: navOperator.trim(),
+          rationale: navRationale.trim(),
+          source_suggestion_key: navSuggestionKey || null
         })
       });
       setNavTargetId("");
       setNavParentId("");
       setNavLabel("");
       setNavPosition("0");
+      setNavRationale("");
+      setNavSuggestionKey("");
       await reload();
       reportMessage("Operator navigation decision added.");
     } catch (error) {
@@ -625,23 +681,8 @@ function SiteConnectionPanel({
     }
   }
 
-  async function removeNavigationItem(itemId: number) {
-    setBusy(true);
-    try {
-      await apiRequest(`/api/site-plans/navigation-items/${itemId}`, {
-        method: "DELETE"
-      });
-      await reload();
-      reportMessage("Navigation item removed.");
-    } catch (error) {
-      reportMessage(error instanceof Error ? error.message : "Unable to remove navigation item.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function addInternalLink() {
-    if (!linkSourceId || !linkTargetId || !linkPurpose.trim()) return;
+    if (!linkSourceId || !linkTargetId || !linkPurpose.trim() || !linkOperator.trim() || !linkRationale.trim()) return;
     setBusy(true);
     try {
       await apiRequest(`/api/site-plans/${plan.id}/internal-link-intents`, {
@@ -654,50 +695,21 @@ function SiteConnectionPanel({
           purpose: linkPurpose,
           relationship_type: linkType,
           anchor_guidance: anchorGuidance.trim() || null,
-          approval_state: "proposed"
+          approval_state: linkApprovalState,
+          decided_by: linkOperator.trim(),
+          rationale: linkRationale.trim(),
+          source_suggestion_key: linkSuggestionKey || null
         })
       });
       setLinkTargetId("");
       setLinkPurpose("");
       setAnchorGuidance("");
+      setLinkRationale("");
+      setLinkSuggestionKey("");
       await reload();
-      reportMessage("Proposed internal-link decision added; no content was modified.");
+      reportMessage(`${linkApprovalState} internal-link decision added; no content was modified.`);
     } catch (error) {
       reportMessage(error instanceof Error ? error.message : "Unable to add internal-link intent.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function updateInternalLink(
-    intent: InternalLinkIntent,
-    approvalState: InternalLinkIntent["approval_state"]
-  ) {
-    setBusy(true);
-    try {
-      await apiRequest(`/api/site-plans/internal-link-intents/${intent.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ approval_state: approvalState })
-      });
-      await reload();
-      reportMessage(`Internal-link decision marked ${approvalState}.`);
-    } catch (error) {
-      reportMessage(error instanceof Error ? error.message : "Unable to update internal-link intent.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function removeInternalLink(intentId: number) {
-    setBusy(true);
-    try {
-      await apiRequest(`/api/site-plans/internal-link-intents/${intentId}`, {
-        method: "DELETE"
-      });
-      await reload();
-      reportMessage("Internal-link decision removed.");
-    } catch (error) {
-      reportMessage(error instanceof Error ? error.message : "Unable to remove internal-link intent.");
     } finally {
       setBusy(false);
     }
@@ -770,6 +782,17 @@ function SiteConnectionPanel({
           <h3>Operator navigation decisions</h3>
           <div className="connectionForm">
             <label>
+              <span>Atlas suggestion source (optional)</span>
+              <select value={navSuggestionKey} onChange={(event) => chooseNavigationSuggestion(event.target.value)}>
+                <option value="">Independent operator decision</option>
+                {navigationSuggestions.map((suggestion) => (
+                  <option key={String(suggestion.suggestion_key)} value={String(suggestion.suggestion_key)}>
+                    {String(suggestion.set_type)} · {pageName(Number(suggestion.target_planned_page_id))}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
               <span>Navigation set</span>
               <select value={navSetId} onChange={(event) => {
                 setNavSetId(event.target.value);
@@ -811,14 +834,30 @@ function SiteConnectionPanel({
               <span>Position</span>
               <input type="number" min="0" value={navPosition} onChange={(event) => setNavPosition(event.target.value)} />
             </label>
-            <button className="primaryButton" disabled={busy || !navTargetId} onClick={addNavigationItem}>
+            <label>
+              <span>Operator</span>
+              <input value={navOperator} onChange={(event) => setNavOperator(event.target.value)} />
+            </label>
+            <label>
+              <span>Decision rationale</span>
+              <textarea value={navRationale} onChange={(event) => setNavRationale(event.target.value)} />
+            </label>
+            <button className="primaryButton" disabled={busy || !navTargetId || parseNonNegativeInteger(navPosition) === null || !navOperator.trim() || !navRationale.trim()} onClick={addNavigationItem}>
               Add Navigation Item
             </button>
           </div>
           <div className="connectionRecordList">
             {connections.navigation_sets.map((navSet) => (
               <div key={navSet.id}>
-                <strong>{navSet.label}</strong>
+                <NavigationSetDecision
+                  navSet={navSet}
+                  disabled={busy}
+                  onSaved={async () => {
+                    await reload();
+                    reportMessage(`${navSet.label} approval updated.`);
+                  }}
+                  onError={reportMessage}
+                />
                 {connections.navigation_items
                   .filter((item) => item.navigation_set_id === navSet.id)
                   .map((item) => (
@@ -837,7 +876,6 @@ function SiteConnectionPanel({
                         reportMessage("Navigation label, order, or hierarchy updated.");
                       }}
                       onError={reportMessage}
-                      onRemove={() => removeNavigationItem(item.id)}
                     />
                   ))}
               </div>
@@ -848,6 +886,17 @@ function SiteConnectionPanel({
         <section>
           <h3>Operator internal-link decisions</h3>
           <div className="connectionForm">
+            <label>
+              <span>Atlas suggestion source (optional)</span>
+              <select value={linkSuggestionKey} onChange={(event) => chooseInternalLinkSuggestion(event.target.value)}>
+                <option value="">Independent operator decision</option>
+                {internalLinkSuggestions.map((suggestion) => (
+                  <option key={String(suggestion.suggestion_key)} value={String(suggestion.suggestion_key)}>
+                    {pageName(Number(suggestion.source_planned_page_id))} → {pageName(Number(suggestion.target_planned_page_id))}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label>
               <span>Source page</span>
               <select value={linkSourceId} onChange={(event) => setLinkSourceId(event.target.value)}>
@@ -879,39 +928,110 @@ function SiteConnectionPanel({
               <span>Anchor guidance</span>
               <input value={anchorGuidance} onChange={(event) => setAnchorGuidance(event.target.value)} />
             </label>
-            <button className="primaryButton" disabled={busy || !linkSourceId || !linkTargetId || !linkPurpose.trim()} onClick={addInternalLink}>
-              Add Proposed Link
+            <label>
+              <span>Approval state</span>
+              <select value={linkApprovalState} onChange={(event) => setLinkApprovalState(event.target.value as InternalLinkIntent["approval_state"])}>
+                <option value="proposed">Proposed</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
+              </select>
+            </label>
+            <label>
+              <span>Operator</span>
+              <input value={linkOperator} onChange={(event) => setLinkOperator(event.target.value)} />
+            </label>
+            <label>
+              <span>Decision rationale</span>
+              <textarea value={linkRationale} onChange={(event) => setLinkRationale(event.target.value)} />
+            </label>
+            <button className="primaryButton" disabled={busy || !linkSourceId || !linkTargetId || !linkPurpose.trim() || !linkOperator.trim() || !linkRationale.trim()} onClick={addInternalLink}>
+              Add Link Decision
             </button>
           </div>
           <div className="connectionRecordList">
             {connections.internal_link_intents.map((intent) => (
-              <div className="connectionRecord" key={intent.id}>
-                <div>
-                  <strong>{pageName(intent.source_planned_page_id)} → {pageName(intent.target_planned_page_id)}</strong>
-                  <p>{intent.relationship_type}: {intent.purpose}</p>
-                </div>
-                <select
-                  aria-label={`Approval state for internal link ${intent.id}`}
-                  value={intent.approval_state}
-                  disabled={busy}
-                  onChange={(event) =>
-                    updateInternalLink(
-                      intent,
-                      event.target.value as InternalLinkIntent["approval_state"]
-                    )
-                  }
-                >
-                  <option value="proposed">Proposed</option>
-                  <option value="approved">Approved</option>
-                  <option value="rejected">Rejected</option>
-                </select>
-                <button className="iconButton" disabled={busy} onClick={() => removeInternalLink(intent.id)} aria-label={`Remove internal link ${intent.id}`}>
-                  <Trash2 size={16} aria-hidden="true" />
-                </button>
-              </div>
+              <InternalLinkIntentEditor
+                key={intent.id}
+                intent={intent}
+                pageName={pageName}
+                disabled={busy}
+                onSaved={async () => {
+                  await reload();
+                  reportMessage("Internal-link decision updated.");
+                }}
+                onError={reportMessage}
+              />
             ))}
           </div>
         </section>
+      </div>
+    </section>
+  );
+}
+
+function NavigationSetDecision({
+  navSet,
+  disabled,
+  onSaved,
+  onError
+}: {
+  navSet: NavigationSet;
+  disabled: boolean;
+  onSaved: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [operator, setOperator] = useState(navSet.decided_by ?? "");
+  const [rationale, setRationale] = useState(navSet.rationale ?? "");
+  const [saving, setSaving] = useState(false);
+
+  async function decide(status: NavigationSet["status"]) {
+    if (!operator.trim() || !rationale.trim()) return;
+    setSaving(true);
+    try {
+      await apiRequest(`/api/site-plans/navigation-sets/${navSet.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          status,
+          decided_by: operator.trim(),
+          rationale: rationale.trim()
+        })
+      });
+      await onSaved();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Unable to approve navigation set.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="navigationSetDecision" aria-label={`${navSet.label} approval`}>
+      <div>
+        <strong>{navSet.label}</strong>
+        <span className={`readinessStatus ${navSet.status === "active" ? "ready" : "needs_attention"}`}>
+          {navSet.status}
+        </span>
+        <small>
+          Decision v{navSet.decision_version ?? navSet.version}
+          {navSet.decided_by ? ` · ${navSet.decided_by}` : ""}
+          {navSet.decided_at ? ` · ${new Date(navSet.decided_at).toLocaleString()}` : ""}
+        </small>
+      </div>
+      <label>
+        <span>Approval operator</span>
+        <input value={operator} onChange={(event) => setOperator(event.target.value)} />
+      </label>
+      <label>
+        <span>Set rationale</span>
+        <textarea value={rationale} onChange={(event) => setRationale(event.target.value)} />
+      </label>
+      <div className="panelActions">
+        <button className="primaryButton" disabled={disabled || saving || !operator.trim() || !rationale.trim()} onClick={() => decide("active")}>
+          Approve Set
+        </button>
+        <button className="secondaryButton" disabled={disabled || saving || !operator.trim() || !rationale.trim()} onClick={() => decide("disabled")}>
+          Disable Set
+        </button>
       </div>
     </section>
   );
@@ -923,8 +1043,7 @@ function NavigationItemEditor({
   pageName,
   disabled,
   onSaved,
-  onError,
-  onRemove
+  onError
 }: {
   item: NavigationItem;
   items: NavigationItem[];
@@ -932,14 +1051,16 @@ function NavigationItemEditor({
   disabled: boolean;
   onSaved: () => Promise<void>;
   onError: (message: string) => void;
-  onRemove: () => void;
 }) {
   const [label, setLabel] = useState(item.label);
   const [position, setPosition] = useState(String(item.position));
   const [parentId, setParentId] = useState(String(item.parent_navigation_item_id ?? ""));
+  const [operator, setOperator] = useState(item.decided_by ?? "");
+  const [rationale, setRationale] = useState(item.rationale ?? "");
+  const [sourceSuggestionKey, setSourceSuggestionKey] = useState(item.source_suggestion_key ?? "");
   const [saving, setSaving] = useState(false);
 
-  async function save() {
+  async function save(status: NavigationItem["status"] = item.status) {
     setSaving(true);
     try {
       await apiRequest(`/api/site-plans/navigation-items/${item.id}`, {
@@ -947,7 +1068,11 @@ function NavigationItemEditor({
         body: JSON.stringify({
           label,
           position: Number(position) || 0,
-          parent_navigation_item_id: numberOrNull(parentId)
+          parent_navigation_item_id: numberOrNull(parentId),
+          status,
+          decided_by: operator.trim(),
+          rationale: rationale.trim(),
+          source_suggestion_key: sourceSuggestionKey.trim() || null
         })
       });
       await onSaved();
@@ -962,7 +1087,10 @@ function NavigationItemEditor({
     <div className="connectionRecord navigationRecord">
       <div>
         <strong>{pageName(item.target_planned_page_id)}</strong>
-        <small>Navigation Item #{item.id}</small>
+        <small>
+          Navigation Item #{item.id} · decision v{item.decision_version ?? "legacy"} · {item.decided_by ?? "legacy provenance unavailable"}
+          {item.decided_at ? ` · ${new Date(item.decided_at).toLocaleString()}` : ""}
+        </small>
       </div>
       <input aria-label={`Label for navigation item ${item.id}`} value={label} onChange={(event) => setLabel(event.target.value)} />
       <input aria-label={`Position for navigation item ${item.id}`} type="number" min="0" value={position} onChange={(event) => setPosition(event.target.value)} />
@@ -970,11 +1098,86 @@ function NavigationItemEditor({
         <option value="">Top level</option>
         {items.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}
       </select>
-      <button className="secondaryButton buttonWithIcon" disabled={disabled || saving} onClick={save}>
+      <input aria-label={`Operator for navigation item ${item.id}`} value={operator} onChange={(event) => setOperator(event.target.value)} />
+      <textarea aria-label={`Rationale for navigation item ${item.id}`} value={rationale} onChange={(event) => setRationale(event.target.value)} />
+      <input aria-label={`Source suggestion for navigation item ${item.id}`} value={sourceSuggestionKey} onChange={(event) => setSourceSuggestionKey(event.target.value)} placeholder="Independent decision" />
+      <button className="secondaryButton buttonWithIcon" disabled={disabled || saving || !operator.trim() || !rationale.trim()} onClick={() => save()}>
         <Save size={15} aria-hidden="true" /> Save
       </button>
-      <button className="iconButton" disabled={disabled || saving} onClick={onRemove} aria-label={`Remove navigation item ${item.id}`}>
-        <Trash2 size={16} aria-hidden="true" />
+      <button className="secondaryButton" disabled={disabled || saving || !operator.trim() || !rationale.trim()} onClick={() => save("disabled")} aria-label={`Disable navigation item ${item.id}`}>
+        Disable
+      </button>
+    </div>
+  );
+}
+
+function InternalLinkIntentEditor({
+  intent,
+  pageName,
+  disabled,
+  onSaved,
+  onError
+}: {
+  intent: InternalLinkIntent;
+  pageName: (id: number) => string;
+  disabled: boolean;
+  onSaved: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [purpose, setPurpose] = useState(intent.purpose);
+  const [approvalState, setApprovalState] = useState(intent.approval_state);
+  const [operator, setOperator] = useState(intent.decided_by ?? "");
+  const [rationale, setRationale] = useState(intent.rationale ?? "");
+  const [sourceSuggestionKey, setSourceSuggestionKey] = useState(intent.source_suggestion_key ?? "");
+  const [saving, setSaving] = useState(false);
+
+  async function save(nextApprovalState: InternalLinkIntent["approval_state"] = approvalState) {
+    if (!purpose.trim() || !operator.trim() || !rationale.trim()) return;
+    setSaving(true);
+    try {
+      await apiRequest(`/api/site-plans/internal-link-intents/${intent.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          purpose: purpose.trim(),
+          approval_state: nextApprovalState,
+          decided_by: operator.trim(),
+          rationale: rationale.trim(),
+          source_suggestion_key: sourceSuggestionKey.trim() || null
+        })
+      });
+      setApprovalState(nextApprovalState);
+      await onSaved();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Unable to update internal-link intent.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="connectionRecord internalLinkRecord">
+      <div>
+        <strong>{pageName(intent.source_planned_page_id)} → {pageName(intent.target_planned_page_id)}</strong>
+        <p>{intent.relationship_type}</p>
+        <small>
+          Decision v{intent.decision_version ?? "legacy"} · {intent.decided_by ?? "legacy provenance unavailable"}
+          {intent.decided_at ? ` · ${new Date(intent.decided_at).toLocaleString()}` : ""}
+        </small>
+      </div>
+      <input aria-label={`Purpose for internal link ${intent.id}`} value={purpose} onChange={(event) => setPurpose(event.target.value)} />
+      <select aria-label={`Approval state for internal link ${intent.id}`} value={approvalState} disabled={disabled || saving} onChange={(event) => setApprovalState(event.target.value as InternalLinkIntent["approval_state"])}>
+        <option value="proposed">Proposed</option>
+        <option value="approved">Approved</option>
+        <option value="rejected">Rejected</option>
+      </select>
+      <input aria-label={`Operator for internal link ${intent.id}`} value={operator} onChange={(event) => setOperator(event.target.value)} />
+      <textarea aria-label={`Rationale for internal link ${intent.id}`} value={rationale} onChange={(event) => setRationale(event.target.value)} />
+      <input aria-label={`Source suggestion for internal link ${intent.id}`} value={sourceSuggestionKey} onChange={(event) => setSourceSuggestionKey(event.target.value)} placeholder="Independent decision" />
+      <button className="secondaryButton buttonWithIcon" disabled={disabled || saving || !purpose.trim() || !operator.trim() || !rationale.trim()} onClick={() => save()}>
+        <Save size={15} aria-hidden="true" /> Save
+      </button>
+      <button className="secondaryButton" disabled={disabled || saving || !purpose.trim() || !operator.trim() || !rationale.trim()} onClick={() => save("rejected")} aria-label={`Reject internal link ${intent.id}`}>
+        Reject
       </button>
     </div>
   );
@@ -1216,4 +1419,28 @@ function labelForPageType(value: PageType) {
 
 function numberOrNull(value: string) {
   return value ? Number(value) : null;
+}
+
+export function navigationSuggestionDefaults(
+  suggestion: Record<string, unknown>,
+  targetWorkingName: string
+) {
+  const suggestedLabel = suggestion.suggested_label;
+  const suggestedPosition = suggestion.suggested_position;
+  return {
+    label: typeof suggestedLabel === "string" && suggestedLabel.trim()
+      ? suggestedLabel.trim()
+      : targetWorkingName,
+    position: typeof suggestedPosition === "number" &&
+      Number.isSafeInteger(suggestedPosition) &&
+      suggestedPosition >= 0
+      ? suggestedPosition
+      : null
+  };
+}
+
+function parseNonNegativeInteger(value: string): number | null {
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }

@@ -70,7 +70,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.51"
+BACKUP_VERSION = "0.52"
 BRAND_ASSET_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
 BRAND_ASSET_MIME_EXTENSIONS = {
     "image/jpeg": {".jpg", ".jpeg"},
@@ -113,6 +113,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.49",
     "0.50",
     "0.51",
+    "0.52",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -977,6 +978,10 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     **record,
                     "site_plan_id": site_plan_id,
                     "website_id": website_id,
+                    "source_suggestion_key": _remap_site_connection_suggestion_key(
+                        record.get("source_suggestion_key"),
+                        planned_page_ids,
+                    ),
                 },
             )
             navigation_set_ids[old_id] = _required_id(restored)
@@ -999,7 +1004,10 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     SiteConnectionPlanningRecord.site_plan_id == site_plan_id
                 ),
                 {
-                    **record,
+                    **_restore_site_connection_planning_payload(
+                        record,
+                        planned_page_ids,
+                    ),
                     "site_plan_id": site_plan_id,
                     "website_id": website_id,
                 },
@@ -1051,6 +1059,10 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                         "navigation_items.target_planned_page_id",
                     ),
                     "parent_navigation_item_id": None,
+                    "source_suggestion_key": _remap_site_connection_suggestion_key(
+                        record.get("source_suggestion_key"),
+                        planned_page_ids,
+                    ),
                 },
             )
             navigation_item_ids[old_id] = _required_id(restored)
@@ -1100,6 +1112,10 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     "site_plan_id": site_plan_id,
                     "source_planned_page_id": source_id,
                     "target_planned_page_id": target_id,
+                    "source_suggestion_key": _remap_site_connection_suggestion_key(
+                        record.get("source_suggestion_key"),
+                        planned_page_ids,
+                    ),
                 },
             )
 
@@ -1689,6 +1705,7 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
 
         if data.get("page_compositions"):
             from app.services.page_composition import refresh_site_plan_compositions
+            from app.services.site_connections import read_site_connection_plan
 
             composition_plan_ids = {
                 _mapped_id(
@@ -1699,11 +1716,58 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 for record in data["page_compositions"]
             }
             for restored_plan_id in sorted(composition_plan_ids):
-                refresh_site_plan_compositions(
-                    session,
-                    restored_plan_id,
-                    commit=False,
+                old_plan_ids = {
+                    old_id
+                    for old_id, new_id in site_plan_ids.items()
+                    if new_id == restored_plan_id
+                }
+                backed_compositions = [
+                    record
+                    for record in data["page_compositions"]
+                    if record.get("site_plan_id") in old_plan_ids
+                ]
+                graph_ready = (
+                    payload["metadata"]["version"] == "0.52"
+                    and read_site_connection_plan(session, restored_plan_id).ready
                 )
+                claims_current = bool(backed_compositions) and all(
+                    record.get("status") == "current"
+                    for record in backed_compositions
+                )
+                if graph_ready and claims_current:
+                    result = refresh_site_plan_compositions(
+                        session,
+                        restored_plan_id,
+                        commit=False,
+                    )
+                    expected_count = len(
+                        session.exec(
+                            select(PlannedPage).where(
+                                PlannedPage.site_plan_id == restored_plan_id,
+                                PlannedPage.generated_page_id.is_not(None),
+                            )
+                        ).all()
+                    )
+                    observed_count = (
+                        result.created + result.refreshed + result.unchanged
+                    )
+                    if (
+                        result.blocked
+                        or observed_count != expected_count
+                        or len(result.compositions) != expected_count
+                    ):
+                        raise BackupValidationError(
+                            "Authoritative Site Connection restore could not refresh every expected composition."
+                        )
+                else:
+                    for composition in session.exec(
+                        select(PageComposition).where(
+                            PageComposition.site_plan_id == restored_plan_id
+                        )
+                    ).all():
+                        composition.status = "stale"
+                        composition.updated_at = datetime.now(UTC)
+                        session.add(composition)
 
         session.commit()
     except Exception as exc:
@@ -1814,12 +1878,12 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51"}:
+    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52"}:
         for group in ("site_plans", "planned_pages", "planning_records"):
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51"}:
+    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52"}:
         for group in (
             "site_connection_planning_records",
             "navigation_sets",
@@ -1829,7 +1893,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51"}:
+    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52"}:
         for group in (
             "website_coverage_planning_records",
             "website_service_coverage_decisions",
@@ -1840,7 +1904,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51"}:
+    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52"}:
         for group in (
             "drafting_eligibility_assessments",
             "drafting_eligibility_dispositions",
@@ -1848,7 +1912,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51"}:
+    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52"}:
         for group in (
             "supporting_page_authorizations",
             "pre_draft_distinctness_briefs",
@@ -1856,7 +1920,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.48", "0.49", "0.50", "0.51"}:
+    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52"}:
         for group in (
             "website_draft_generation_runs",
             "website_draft_generation_items",
@@ -1867,15 +1931,15 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "website_service_county_coverage_decisions" not in data:
         data.setdefault("website_service_county_coverage_decisions", [])
         counts.setdefault("website_service_county_coverage_decisions", 0)
-    if backup_version not in {"0.49", "0.50", "0.51"}:
+    if backup_version not in {"0.49", "0.50", "0.51", "0.52"}:
         for group in ("semantic_component_definitions", "page_compositions"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.50", "0.51"}:
+    if backup_version not in {"0.50", "0.51", "0.52"}:
         for group in ("brand_assets", "website_identity_asset_assignments"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version != "0.51":
+    if backup_version not in {"0.51", "0.52"}:
         for group in ("themes", "website_theme_selections"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
@@ -2165,6 +2229,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
                 "Backup contains an invalid Website draft-generation item outcome."
             )
 
+    _validate_site_connection_decision_provenance(data, backup_version)
     _validate_unique_records(data)
     _validate_backup_references(data)
     _validate_brand_asset_ownership(data)
@@ -2275,6 +2340,125 @@ def _restore_theme_source_binding(
     return restored
 
 
+def _remap_site_connection_suggestion_key(
+    value: Any,
+    planned_page_ids: dict[int, int],
+) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise BackupValidationError(
+            "Backup Site Connection suggestion key must be text."
+        )
+    parts = value.split(":")
+    if len(parts) == 3 and parts[0] == "navigation":
+        try:
+            old_target = int(parts[2])
+        except ValueError as exc:
+            raise BackupValidationError(
+                "Backup Navigation suggestion key is malformed."
+            ) from exc
+        target = _mapped_id(
+            planned_page_ids,
+            old_target,
+            "navigation suggestion target",
+        )
+        return f"navigation:{parts[1]}:{target}"
+    if len(parts) == 4 and parts[0] == "internal-link":
+        try:
+            old_source = int(parts[1])
+            old_target = int(parts[2])
+        except ValueError as exc:
+            raise BackupValidationError(
+                "Backup Internal Link suggestion key is malformed."
+            ) from exc
+        source = _mapped_id(
+            planned_page_ids,
+            old_source,
+            "internal-link suggestion source",
+        )
+        target = _mapped_id(
+            planned_page_ids,
+            old_target,
+            "internal-link suggestion target",
+        )
+        return f"internal-link:{source}:{target}:{parts[3]}"
+    raise BackupValidationError("Backup Site Connection suggestion key is malformed.")
+
+
+def _restore_site_connection_planning_payload(
+    record: dict[str, Any],
+    planned_page_ids: dict[int, int],
+) -> dict[str, Any]:
+    restored = dict(record)
+    navigation_suggestions: list[dict[str, Any]] = []
+    for value in record.get("generated_navigation_suggestions", []):
+        if not isinstance(value, dict):
+            raise BackupValidationError(
+                "Backup Navigation suggestions must contain objects."
+            )
+        item = dict(value)
+        item["target_planned_page_id"] = _mapped_id(
+            planned_page_ids,
+            value.get("target_planned_page_id"),
+            "generated_navigation_suggestions.target_planned_page_id",
+        )
+        item["suggestion_key"] = (
+            f"navigation:{item.get('set_type')}:{item['target_planned_page_id']}"
+        )
+        navigation_suggestions.append(item)
+    restored["generated_navigation_suggestions"] = navigation_suggestions
+
+    link_suggestions: list[dict[str, Any]] = []
+    for value in record.get("generated_internal_link_suggestions", []):
+        if not isinstance(value, dict):
+            raise BackupValidationError(
+                "Backup Internal Link suggestions must contain objects."
+            )
+        item = dict(value)
+        item["source_planned_page_id"] = _mapped_id(
+            planned_page_ids,
+            value.get("source_planned_page_id"),
+            "generated_internal_link_suggestions.source_planned_page_id",
+        )
+        item["target_planned_page_id"] = _mapped_id(
+            planned_page_ids,
+            value.get("target_planned_page_id"),
+            "generated_internal_link_suggestions.target_planned_page_id",
+        )
+        item["suggestion_key"] = (
+            f"internal-link:{item['source_planned_page_id']}:"
+            f"{item['target_planned_page_id']}:{item.get('relationship_type')}"
+        )
+        link_suggestions.append(item)
+    restored["generated_internal_link_suggestions"] = link_suggestions
+
+    snapshot = record.get("source_snapshot")
+    if isinstance(snapshot, dict):
+        restored_snapshot = dict(snapshot)
+        planned_pages: list[dict[str, Any]] = []
+        for value in snapshot.get("planned_pages", []):
+            if not isinstance(value, dict):
+                raise BackupValidationError(
+                    "Backup Site Connection source snapshot contains an invalid page."
+                )
+            page = dict(value)
+            page["id"] = _mapped_id(
+                planned_page_ids,
+                value.get("id"),
+                "site_connection_planning_records.source_snapshot.planned_pages.id",
+            )
+            page["parent_planned_page_id"] = _mapped_optional_id(
+                planned_page_ids,
+                value.get("parent_planned_page_id"),
+                "site_connection_planning_records.source_snapshot.parent_planned_page_id",
+            )
+            planned_pages.append(page)
+        restored_snapshot["planned_pages"] = planned_pages
+        restored["source_snapshot"] = restored_snapshot
+    return restored
+
+
 def _canonical_json_hash(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -2322,6 +2506,465 @@ def _comparable_datetime(value: datetime) -> datetime:
     return value.astimezone(UTC).replace(tzinfo=None)
 
 
+def _validate_site_connection_decision_provenance(
+    data: dict[str, list[dict[str, Any]]],
+    backup_version: str,
+) -> None:
+    if backup_version == "0.52":
+        _validate_052_site_connection_provenance_fields(data)
+
+    planning_by_plan = {
+        record.get("site_plan_id"): record
+        for record in data["site_connection_planning_records"]
+    }
+    sets_by_id = {record.get("id"): record for record in data["navigation_sets"]}
+    items_by_id = {record.get("id"): record for record in data["navigation_items"]}
+    plans_by_id = {record.get("id"): record for record in data["site_plans"]}
+    pages_by_id = {record.get("id"): record for record in data["planned_pages"]}
+
+    for record in data["site_connection_planning_records"]:
+        plan = plans_by_id.get(record.get("site_plan_id"))
+        if not plan or record.get("website_id") != plan.get("website_id"):
+            raise BackupValidationError(
+                "Backup Site Connection planning record crosses a Website or Site Plan boundary."
+            )
+    for record in data["navigation_sets"]:
+        plan = plans_by_id.get(record.get("site_plan_id"))
+        if not plan or record.get("website_id") != plan.get("website_id"):
+            raise BackupValidationError(
+                "Backup Navigation Set crosses a Website or Site Plan boundary."
+            )
+    for record in data["navigation_items"]:
+        plan = plans_by_id.get(record.get("site_plan_id"))
+        navigation_set = sets_by_id.get(record.get("navigation_set_id"))
+        target = pages_by_id.get(record.get("target_planned_page_id"))
+        parent_id = record.get("parent_navigation_item_id")
+        parent = items_by_id.get(parent_id) if parent_id is not None else None
+        if (
+            not plan
+            or not navigation_set
+            or not target
+            or record.get("website_id") != plan.get("website_id")
+            or navigation_set.get("website_id") != record.get("website_id")
+            or navigation_set.get("site_plan_id") != record.get("site_plan_id")
+            or target.get("website_id") != record.get("website_id")
+            or target.get("site_plan_id") != record.get("site_plan_id")
+            or (
+                parent_id is not None
+                and (
+                    not parent
+                    or parent.get("website_id") != record.get("website_id")
+                    or parent.get("site_plan_id") != record.get("site_plan_id")
+                    or parent.get("navigation_set_id")
+                    != record.get("navigation_set_id")
+                )
+            )
+        ):
+            raise BackupValidationError(
+                "Backup Navigation Item crosses a Website, Site Plan, set, or page boundary."
+            )
+    for record in data["internal_link_intents"]:
+        plan = plans_by_id.get(record.get("site_plan_id"))
+        source = pages_by_id.get(record.get("source_planned_page_id"))
+        target = pages_by_id.get(record.get("target_planned_page_id"))
+        if (
+            not plan
+            or not source
+            or not target
+            or record.get("website_id") != plan.get("website_id")
+            or source.get("website_id") != record.get("website_id")
+            or target.get("website_id") != record.get("website_id")
+            or source.get("site_plan_id") != record.get("site_plan_id")
+            or target.get("site_plan_id") != record.get("site_plan_id")
+        ):
+            raise BackupValidationError(
+                "Backup Internal Link Intent crosses a Website, Site Plan, or page boundary."
+            )
+
+    if backup_version != "0.52":
+        return
+
+    _validate_052_composition_connection_bindings(
+        data,
+        plans_by_id=plans_by_id,
+        pages_by_id=pages_by_id,
+        sets_by_id=sets_by_id,
+        items_by_id=items_by_id,
+    )
+    _validate_052_site_connection_suggestion_bindings(
+        data,
+        planning_by_plan=planning_by_plan,
+        sets_by_id=sets_by_id,
+    )
+
+
+def _validate_052_composition_connection_bindings(
+    data: dict[str, list[dict[str, Any]]],
+    *,
+    plans_by_id: dict[Any, dict[str, Any]],
+    pages_by_id: dict[Any, dict[str, Any]],
+    sets_by_id: dict[Any, dict[str, Any]],
+    items_by_id: dict[Any, dict[str, Any]],
+) -> None:
+    links_by_id = {
+        record.get("id"): record for record in data["internal_link_intents"]
+    }
+    generated_by_id = {
+        record.get("id"): record for record in data["generated_pages"]
+    }
+    authoritative_plan_ids = _authoritative_backup_connection_plan_ids(data)
+
+    def require_page_scope(
+        page_id: Any,
+        *,
+        website_id: Any,
+        site_plan_id: Any,
+        field: str,
+    ) -> dict[str, Any]:
+        page = pages_by_id.get(page_id)
+        if (
+            not page
+            or page.get("website_id") != website_id
+            or page.get("site_plan_id") != site_plan_id
+        ):
+            raise BackupValidationError(
+                f"Backup Page Composition contains an out-of-scope {field} binding."
+            )
+        return page
+
+    for composition in data["page_compositions"]:
+        website_id = composition.get("website_id")
+        site_plan_id = composition.get("site_plan_id")
+        plan = plans_by_id.get(site_plan_id)
+        planned = require_page_scope(
+            composition.get("planned_page_id"),
+            website_id=website_id,
+            site_plan_id=site_plan_id,
+            field="Planned Page",
+        )
+        generated = generated_by_id.get(composition.get("generated_page_id"))
+        if (
+            not plan
+            or plan.get("website_id") != website_id
+            or not generated
+            or generated.get("website_id") != website_id
+            or planned.get("generated_page_id") != composition.get("generated_page_id")
+        ):
+            raise BackupValidationError(
+                "Backup Page Composition crosses its Website, Site Plan, Planned Page, or draft boundary."
+            )
+
+        # A 0.52 backup can be exported immediately after migration 0040 while
+        # existing compositions still contain the legacy connection snapshot.
+        # Such a graph has draft/legacy decisions and is restored explicitly
+        # stale. Only a composition that claims to be current against a fully
+        # provenance-complete, active graph may claim the strict nested schema.
+        if (
+            composition.get("status") != "current"
+            or site_plan_id not in authoritative_plan_ids
+        ):
+            continue
+
+        for component in composition.get("generated_components", []):
+            if not isinstance(component, dict):
+                raise BackupValidationError(
+                    "Backup Page Composition contains an invalid generated component."
+                )
+            bindings = component.get("input_bindings", {})
+            if not isinstance(bindings, dict):
+                raise BackupValidationError(
+                    "Backup Page Composition component bindings must be an object."
+                )
+            navigation_set_id = bindings.get("navigation_set_id")
+            if navigation_set_id is not None:
+                navigation_set = sets_by_id.get(navigation_set_id)
+                if (
+                    not navigation_set
+                    or navigation_set.get("website_id") != website_id
+                    or navigation_set.get("site_plan_id") != site_plan_id
+                ):
+                    raise BackupValidationError(
+                        "Backup Page Composition Navigation Set binding is out of scope."
+                    )
+            for link_id in bindings.get("internal_link_intent_ids", []):
+                link = links_by_id.get(link_id)
+                if (
+                    not link
+                    or link.get("website_id") != website_id
+                    or link.get("site_plan_id") != site_plan_id
+                    or link.get("source_planned_page_id") != planned.get("id")
+                ):
+                    raise BackupValidationError(
+                        "Backup Page Composition Internal Link binding is out of scope."
+                    )
+            for page_id in bindings.get("draft_related_page_ids", []):
+                require_page_scope(
+                    page_id,
+                    website_id=website_id,
+                    site_plan_id=site_plan_id,
+                    field="related Planned Page",
+                )
+
+        snapshot = composition.get("source_snapshot", {})
+        if not isinstance(snapshot, dict):
+            raise BackupValidationError(
+                "Backup Page Composition source snapshot must be an object."
+            )
+        if (
+            snapshot.get("website_id") != website_id
+            or snapshot.get("site_plan_id") != site_plan_id
+            or snapshot.get("planned_page_id") != planned.get("id")
+            or snapshot.get("generated_page_id") != generated.get("id")
+        ):
+            raise BackupValidationError(
+                "Backup Page Composition source identity is out of scope."
+            )
+        for value in snapshot.get("navigation_sets", []):
+            navigation_set = sets_by_id.get(value.get("id")) if isinstance(value, dict) else None
+            if (
+                not navigation_set
+                or navigation_set.get("website_id") != website_id
+                or navigation_set.get("site_plan_id") != site_plan_id
+            ):
+                raise BackupValidationError(
+                    "Backup Page Composition Navigation Set snapshot is out of scope."
+                )
+        for value in snapshot.get("navigation_items", []):
+            item = items_by_id.get(value.get("id")) if isinstance(value, dict) else None
+            target = value.get("target") if isinstance(value, dict) else None
+            if (
+                not item
+                or item.get("website_id") != website_id
+                or item.get("site_plan_id") != site_plan_id
+                or not isinstance(target, dict)
+                or target.get("planned_page_id") != item.get("target_planned_page_id")
+            ):
+                raise BackupValidationError(
+                    "Backup Page Composition Navigation Item snapshot is out of scope."
+                )
+            require_page_scope(
+                target.get("planned_page_id"),
+                website_id=website_id,
+                site_plan_id=site_plan_id,
+                field="Navigation target",
+            )
+        for value in snapshot.get("internal_links", []):
+            link = links_by_id.get(value.get("id")) if isinstance(value, dict) else None
+            target = value.get("target") if isinstance(value, dict) else None
+            if (
+                not link
+                or link.get("website_id") != website_id
+                or link.get("site_plan_id") != site_plan_id
+                or link.get("source_planned_page_id") != planned.get("id")
+                or not isinstance(target, dict)
+                or target.get("planned_page_id") != link.get("target_planned_page_id")
+            ):
+                raise BackupValidationError(
+                    "Backup Page Composition Internal Link snapshot is out of scope."
+                )
+            require_page_scope(
+                target.get("planned_page_id"),
+                website_id=website_id,
+                site_plan_id=site_plan_id,
+                field="Internal Link target",
+            )
+
+
+def _authoritative_backup_connection_plan_ids(
+    data: dict[str, list[dict[str, Any]]],
+) -> set[Any]:
+    """Return plans whose complete operator graph may back a current snapshot."""
+
+    def complete(record: dict[str, Any]) -> bool:
+        return (
+            isinstance(record.get("rationale"), str)
+            and bool(record["rationale"].strip())
+            and isinstance(record.get("decided_by"), str)
+            and bool(record["decided_by"].strip())
+            and type(record.get("decision_version")) is int
+            and record["decision_version"] >= 1
+            and record.get("decided_at") is not None
+        )
+
+    plans: set[Any] = set()
+    plan_ids = {record.get("id") for record in data["site_plans"]}
+    for plan_id in plan_ids:
+        navigation_sets = [
+            record
+            for record in data["navigation_sets"]
+            if record.get("site_plan_id") == plan_id
+        ]
+        navigation_items = [
+            record
+            for record in data["navigation_items"]
+            if record.get("site_plan_id") == plan_id
+        ]
+        internal_links = [
+            record
+            for record in data["internal_link_intents"]
+            if record.get("site_plan_id") == plan_id
+        ]
+        if (
+            {record.get("set_type") for record in navigation_sets}
+            != {"primary", "utility", "footer"}
+            or any(
+                record.get("status") != "active" or not complete(record)
+                for record in navigation_sets
+            )
+            or any(not complete(record) for record in navigation_items)
+            or any(not complete(record) for record in internal_links)
+        ):
+            continue
+        active_item_set_ids = {
+            record.get("navigation_set_id")
+            for record in navigation_items
+            if record.get("status") == "active"
+        }
+        if all(record.get("id") in active_item_set_ids for record in navigation_sets):
+            plans.add(plan_id)
+    return plans
+
+
+def _validate_052_site_connection_provenance_fields(
+    data: dict[str, list[dict[str, Any]]],
+) -> None:
+    provenance_fields = {
+        "rationale",
+        "decided_by",
+        "decision_version",
+        "decided_at",
+        "source_suggestion_key",
+    }
+    group_statuses = {
+        "navigation_sets": ("status", {"draft", "active", "disabled"}),
+        "navigation_items": ("status", {"draft", "active", "disabled"}),
+        "internal_link_intents": (
+            "approval_state",
+            {"proposed", "approved", "rejected"},
+        ),
+    }
+    for group, (status_field, valid_statuses) in group_statuses.items():
+        for record in data[group]:
+            if not provenance_fields.issubset(record):
+                raise BackupValidationError(
+                    f"Backup 0.52 '{group}' record omits decision provenance fields."
+                )
+            if record.get(status_field) not in valid_statuses:
+                raise BackupValidationError(
+                    f"Backup contains an invalid decision state in '{group}'."
+                )
+            core_values = (
+                record.get("rationale"),
+                record.get("decided_by"),
+                record.get("decision_version"),
+                record.get("decided_at"),
+            )
+            if all(value is None for value in core_values):
+                if record.get("source_suggestion_key") is not None:
+                    raise BackupValidationError(
+                        f"Backup contains suggestion provenance without an operator decision in '{group}'."
+                    )
+                continue
+            if any(value is None for value in core_values):
+                raise BackupValidationError(
+                    f"Backup contains partial decision provenance in '{group}'."
+                )
+            if (
+                not isinstance(record["rationale"], str)
+                or not record["rationale"].strip()
+                or not isinstance(record["decided_by"], str)
+                or not record["decided_by"].strip()
+                or type(record["decision_version"]) is not int
+                or record["decision_version"] < 1
+            ):
+                raise BackupValidationError(
+                    f"Backup contains invalid decision provenance in '{group}'."
+                )
+            _datetime_value(record["decided_at"], f"{group}.decided_at")
+            source_key = record.get("source_suggestion_key")
+            if group == "navigation_sets" and source_key is not None:
+                raise BackupValidationError(
+                    "Backup Navigation Set cannot reference an item-level Atlas suggestion."
+                )
+            if source_key is not None and (
+                not isinstance(source_key, str)
+                or not source_key.strip()
+                or len(source_key) > 200
+            ):
+                raise BackupValidationError(
+                    f"Backup contains invalid suggestion provenance in '{group}'."
+                )
+
+
+def _validate_052_site_connection_suggestion_bindings(
+    data: dict[str, list[dict[str, Any]]],
+    *,
+    planning_by_plan: dict[Any, dict[str, Any]],
+    sets_by_id: dict[Any, dict[str, Any]],
+) -> None:
+
+    def suggestion(record: dict[str, Any], group: str) -> dict[str, Any] | None:
+        source_key = record.get("source_suggestion_key")
+        if source_key is None:
+            return None
+        planning = planning_by_plan.get(record.get("site_plan_id"))
+        if not planning:
+            raise BackupValidationError(
+                f"Backup '{group}' suggestion provenance has no planning record."
+            )
+        field = (
+            "generated_navigation_suggestions"
+            if group != "internal_link_intents"
+            else "generated_internal_link_suggestions"
+        )
+        candidates = planning.get(field)
+        if not isinstance(candidates, list):
+            raise BackupValidationError(
+                f"Backup '{group}' suggestion source is not a list."
+            )
+        match = next(
+            (
+                item
+                for item in candidates
+                if isinstance(item, dict)
+                and item.get("suggestion_key") == source_key
+            ),
+            None,
+        )
+        if match is None:
+            raise BackupValidationError(
+                f"Backup '{group}' references an unknown or stale suggestion."
+            )
+        return match
+
+    for record in data["navigation_items"]:
+        match = suggestion(record, "navigation_items")
+        if match is None:
+            continue
+        navigation_set = sets_by_id.get(record.get("navigation_set_id"))
+        if (
+            not navigation_set
+            or match.get("set_type") != navigation_set.get("set_type")
+            or match.get("target_planned_page_id")
+            != record.get("target_planned_page_id")
+        ):
+            raise BackupValidationError(
+                "Backup Navigation Item suggestion provenance does not match its decision identity."
+            )
+    for record in data["internal_link_intents"]:
+        match = suggestion(record, "internal_link_intents")
+        if match is not None and (
+            match.get("source_planned_page_id")
+            != record.get("source_planned_page_id")
+            or match.get("target_planned_page_id")
+            != record.get("target_planned_page_id")
+            or match.get("relationship_type") != record.get("relationship_type")
+        ):
+            raise BackupValidationError(
+                "Backup Internal Link suggestion provenance does not match its decision identity."
+            )
+
+
 def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
     key_fields: dict[str, tuple[str, ...]] = {
         "businesses": ("company_name",),
@@ -2359,7 +3002,6 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
             "site_plan_id",
             "source_planned_page_id",
             "target_planned_page_id",
-            "relationship_type",
         ),
         "semantic_component_definitions": ("component_key", "contract_version"),
         "page_compositions": ("planned_page_id",),
