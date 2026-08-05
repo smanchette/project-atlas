@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+import hashlib
+import json
 from uuid import uuid4
 
 import pytest
@@ -22,9 +25,11 @@ from app.models import (
     SemanticComponentDefinition,
     Service,
     SitePlan,
+    Theme,
     Website,
     WebsiteIdentity,
     WebsiteIdentityAssetAssignment,
+    WebsiteThemeSelection,
 )
 from app.schemas.page_composition import PageCompositionDecisionUpdate
 from app.services.page_composition import (
@@ -35,6 +40,13 @@ from app.services.page_composition import (
     update_operator_composition_decisions,
 )
 from app.services.site_connections import ensure_site_connection_foundation
+from app.services.themes import (
+    DEFAULT_THEME_TOKENS,
+    approve_theme,
+    create_theme,
+    select_website_theme,
+)
+from app.schemas.themes import ThemeCreate
 
 
 CONTRACTS = {
@@ -163,6 +175,8 @@ def test_refresh_builds_fact_free_suggestions_and_resolves_approved_inputs():
         assert "website_identity_assets" not in session.exec(
             select(PageComposition).where(PageComposition.generated_page_id == pages[0][1].id)
         ).one().source_snapshot
+        assert service.source_snapshot["theme"]["mode"] == "neutral_fallback"
+        assert service.resolved_theme["fallback_used"] is True
 
 
 def test_operator_decisions_remain_separate_and_cannot_fabricate_components():
@@ -211,6 +225,89 @@ def test_approved_website_context_change_makes_composition_stale():
         business.phone = "407-555-0199"; session.add(business); session.commit()
         with pytest.raises(PageCompositionError, match="stale"):
             read_composition_for_generated_page(session, pages[0][1].id)
+
+
+def test_selected_theme_exact_identity_invalidates_and_rebinds_compositions():
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session); website, plan, pages = _scope(session, suffix="theme")
+        refresh_site_plan_compositions(session, plan.id)
+        before = read_composition_for_generated_page(session, pages[0][1].id)
+        assert before.source_snapshot["theme"]["mode"] == "neutral_fallback"
+
+        theme = create_theme(
+            session,
+            website.id,
+            ThemeCreate(
+                theme_key="approved-theme",
+                theme_name="Approved Theme",
+                design_tokens=DEFAULT_THEME_TOKENS,
+                created_by="Theme Operator",
+                provenance_type="operator_configured",
+                provenance_notes="Approved test Theme configuration.",
+            ),
+        )
+        approve_theme(session, theme.id, approved_by="Theme Approver")
+        selection = select_website_theme(
+            session,
+            website.id,
+            theme_id=theme.id,
+            selected_by="Theme Operator",
+            rationale="Select the approved Website presentation.",
+        )
+        with pytest.raises(PageCompositionError, match="stale"):
+            read_composition_for_generated_page(session, pages[0][1].id)
+
+        result = refresh_site_plan_compositions(session, plan.id)
+        assert result.refreshed == 2 and result.blocked == []
+        after = read_composition_for_generated_page(session, pages[0][1].id)
+        binding = after.source_snapshot["theme"]
+        assert binding == {
+            "mode": "selected",
+            "website_id": website.id,
+            "theme_id": theme.id,
+            "theme_key": theme.theme_key,
+            "theme_version": theme.version,
+            "token_contract_version": theme.token_contract_version,
+            "token_hash_sha256": theme.token_hash_sha256,
+            "selection_id": selection.id,
+            "selection_version": selection.version,
+        }
+        assert after.resolved_theme["fallback_used"] is False
+        assert after.resolved_theme["effective_tokens"]["colors"]["background"] == "#FFFFFF"
+
+
+def test_invalid_cross_website_theme_selection_fails_composition_closed():
+    engine = _engine(); SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session); website, plan, _ = _scope(session, suffix="theme-owner")
+        other, _, _ = _scope(session, suffix="theme-other")
+        theme = create_theme(
+            session,
+            other.id,
+            ThemeCreate(
+                theme_key="other-theme",
+                theme_name="Other Theme",
+                design_tokens=DEFAULT_THEME_TOKENS,
+                created_by="Theme Operator",
+                provenance_type="operator_configured",
+                provenance_notes="Second Website Theme.",
+            ),
+        )
+        approve_theme(session, theme.id, approved_by="Theme Approver")
+        session.add(WebsiteThemeSelection(
+            website_id=website.id,
+            theme_id=theme.id,
+            version=1,
+            status="active",
+            selected_by="Corrupt fixture",
+            rationale="Exercise fail-closed ownership validation.",
+        ))
+        session.commit()
+        result = refresh_site_plan_compositions(session, plan.id)
+        assert result.created == 0
+        assert result.blocked
+        assert all("crosses a Website" in item["reason"] for item in result.blocked)
 
 
 def test_missing_required_approved_contact_input_blocks_composition():
@@ -422,13 +519,61 @@ def test_incompatible_active_identity_asset_selection_fails_composition_closed()
         )
 
 
-def test_backup_050_round_trip_preserves_registry_and_scoped_compositions(tmp_path):
+def test_backup_051_round_trip_preserves_assets_theme_and_scoped_compositions(tmp_path):
     source_engine = _engine(); SQLModel.metadata.create_all(source_engine)
     with Session(source_engine) as session:
         _seed_registry(session); website, plan, _ = _scope(session, suffix="backup")
+        identity = session.exec(
+            select(WebsiteIdentity).where(WebsiteIdentity.website_id == website.id)
+        ).one()
+        from app.db import backup as backup_service
+        media_public_base = str(backup_service.get_settings().media_public_url).rstrip("/")
+        asset = BrandAsset(
+            business_id=website.business_id, brand_id=website.brand_id,
+            asset_key="backup-logo", version=1, asset_type="primary_logo",
+            variant_key="default", purpose="Identify the Website Brand.",
+            approved_usage=["website_header"], restrictions=["social_preview"],
+            accessibility_description="Approved test logo", original_filename="backup-logo.png",
+            stored_filename="backup-logo.png",
+            asset_url=f"{media_public_base}/originals/backup-logo.png",
+            optimized_url=f"{media_public_base}/optimized/backup-logo-optimized.webp",
+            thumbnail_url=f"{media_public_base}/thumbnails/backup-logo-thumbnail.webp",
+            mime_type="image/png", file_size=100,
+            width=400, height=120, checksum_sha256="d" * 64,
+            provenance_type="company_original", provenance_notes="Approved test source.",
+            rights_status="owned", rights_holder="Test Owner", rights_notes="Owned test fixture.",
+            status="approved", created_by="Operator", approved_by="Operator",
+            approved_at=datetime.now(UTC),
+        )
+        session.add(asset); session.flush()
+        session.add(WebsiteIdentityAssetAssignment(
+            website_identity_id=identity.id, website_id=website.id,
+            brand_id=website.brand_id, brand_asset_id=asset.id,
+            slot="header_logo", version=1, status="active",
+            assigned_by="Operator", rationale="Approved Website header identity.",
+        ))
+        session.commit()
+        theme = create_theme(
+            session,
+            website.id,
+            ThemeCreate(
+                theme_key="backup-theme", theme_name="Backup Theme",
+                design_tokens=DEFAULT_THEME_TOKENS,
+                created_by="Theme Operator", provenance_type="operator_configured",
+                provenance_notes="Backup round-trip Theme.",
+            ),
+        )
+        approve_theme(session, theme.id, approved_by="Theme Approver")
+        selection = select_website_theme(
+            session, website.id, theme_id=theme.id,
+            selected_by="Theme Operator", rationale="Backup round-trip selection.",
+        )
         refresh_site_plan_compositions(session, plan.id)
         website_id = website.id
         exported = export_backup(session, backup_dir=tmp_path)
+        assert exported["table_counts"]["website_identity_asset_assignments"] == 1
+        assert exported["table_counts"]["themes"] == 1
+        assert exported["table_counts"]["website_theme_selections"] == 1
         assert exported["table_counts"]["semantic_component_definitions"] == 15
         assert exported["table_counts"]["page_compositions"] == 2
 
@@ -440,3 +585,60 @@ def test_backup_050_round_trip_preserves_registry_and_scoped_compositions(tmp_pa
         rows = list(session.exec(select(PageComposition)).all())
         assert len(rows) == 2
         assert all(row.website_id == website_id for row in rows)
+        assert len(session.exec(select(WebsiteIdentityAssetAssignment)).all()) == 1
+        restored_theme = session.exec(select(Theme)).one()
+        restored_selection = session.exec(select(WebsiteThemeSelection)).one()
+        assert restored_theme.token_hash_sha256 == theme.token_hash_sha256
+        assert restored_selection.version == selection.version
+        restored_composition = read_composition_for_generated_page(
+            session, rows[0].generated_page_id
+        )
+        assert restored_composition.source_snapshot["theme"]["theme_id"] == restored_theme.id
+        assert restored_composition.source_snapshot["theme"]["selection_id"] == restored_selection.id
+
+
+def test_real_050_backup_without_theme_groups_restores_with_neutral_fallback(tmp_path):
+    source_engine = _engine(); SQLModel.metadata.create_all(source_engine)
+    with Session(source_engine) as session:
+        _seed_registry(session); _, plan, pages = _scope(session, suffix="legacy050")
+        refresh_site_plan_compositions(session, plan.id)
+        exported = export_backup(session, backup_dir=tmp_path)
+
+    backup_path = tmp_path / "legacy-050.json"
+    payload = json.loads((tmp_path / exported["file_name"]).read_text(encoding="utf-8"))
+    payload["metadata"]["version"] = "0.50"
+    for group in ("themes", "website_theme_selections"):
+        payload["data"].pop(group, None)
+        payload["metadata"]["table_counts"].pop(group, None)
+    for composition in payload["data"]["page_compositions"]:
+        source_snapshot = dict(composition["source_snapshot"])
+        source_snapshot.pop("theme", None)
+        composition["source_snapshot"] = source_snapshot
+        composition["source_hash"] = hashlib.sha256(
+            json.dumps(
+                source_snapshot,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+    backup_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restored_engine = _engine(); SQLModel.metadata.create_all(restored_engine)
+    with Session(restored_engine) as session:
+        restored = restore_backup(session, backup_path)
+        assert restored["status"] == "restored"
+        assert session.exec(select(Theme)).all() == []
+        assert session.exec(select(WebsiteThemeSelection)).all() == []
+        restored_plan = session.exec(select(SitePlan)).one()
+        generated_id = session.exec(
+            select(GeneratedPage).order_by(GeneratedPage.id)
+        ).first().id
+        try:
+            current = read_composition_for_generated_page(session, generated_id)
+        except PageCompositionError as exc:
+            assert "stale" in str(exc)
+            result = refresh_site_plan_compositions(session, restored_plan.id)
+            assert result.refreshed == 2 and result.blocked == []
+            current = read_composition_for_generated_page(session, generated_id)
+        assert current.resolved_theme["fallback_used"] is True

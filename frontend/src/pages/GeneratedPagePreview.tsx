@@ -8,6 +8,10 @@ import {
   installIdentityHeadTags,
   removeIdentityHeadTags,
 } from "../components/WebsiteIdentityPresentation";
+import {
+  themePresentation,
+  themeValidationError,
+} from "../components/themeAdapter";
 import type {
   ApprovalAudit,
   GeneratedPage,
@@ -36,6 +40,7 @@ function GeneratedPagePreview() {
   const [error, setError] = useState<string | null>(null);
   const [requestStateKey, setRequestStateKey] = useState("");
   const loadGeneration = useRef(0);
+  const viewportWidth = useViewportWidth();
 
   useLayoutEffect(() => {
     removeIdentityHeadTags(document);
@@ -129,8 +134,17 @@ function GeneratedPagePreview() {
   }
 
   const components = currentData.composition.effective_components;
+  const presentation = themePresentation(
+    currentData.composition.resolved_theme,
+    currentData.composition.website_id,
+    viewportWidth,
+  );
   return (
-    <div className="servicePreview atlasBasePresentation">
+    <div
+      className="servicePreview atlasBasePresentation"
+      style={presentation.style}
+      {...presentation.attributes}
+    >
       <div className="previewReviewBar">
         <div className="previewReviewInner">
           <Link to="/site-plans" className="previewBackLink">
@@ -323,6 +337,18 @@ function array(value: unknown): unknown[] { return Array.isArray(value) ? value 
 function record(value: unknown): Record<string, unknown> { return value && typeof value === "object" ? value as Record<string, unknown> : {}; }
 function number(value: unknown, fallback: number) { return typeof value === "number" && Number.isFinite(value) ? value : fallback; }
 
+function useViewportWidth() {
+  const [width, setWidth] = useState(() => window.innerWidth);
+  useEffect(() => {
+    function update() {
+      setWidth(window.innerWidth);
+    }
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+  return width;
+}
+
 export function compositionValidationError(composition: PageComposition): string | null {
   if (composition.validation_errors.length) {
     return composition.validation_errors.join(" ");
@@ -330,6 +356,11 @@ export function compositionValidationError(composition: PageComposition): string
   if (composition.status !== "current") {
     return "The semantic page composition is not current.";
   }
+  const themeError = themeValidationError(
+    composition.resolved_theme,
+    composition.website_id,
+  );
+  if (themeError) return themeError;
   return null;
 }
 

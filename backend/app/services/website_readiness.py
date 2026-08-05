@@ -722,6 +722,89 @@ def _website_category(
             ),
         ]
     )
+    from app.services.themes import ThemeError, resolve_website_theme
+
+    try:
+        resolved_theme = resolve_website_theme(session, plan.website_id)
+    except ThemeError as exc:
+        theme_error = str(exc)
+        items.extend(
+            WebsiteReadinessItem(
+                key=key,
+                label=label,
+                status="needs_attention",
+                message=f"Website Theme validation failed closed: {theme_error}",
+            )
+            for key, label in (
+                ("theme_selection", "Selected Website Theme"),
+                ("theme_approval", "Theme approval"),
+                ("theme_token_contract", "Design token contract"),
+                ("theme_accessibility", "Theme accessibility validation"),
+                ("theme_composition_freshness", "Theme composition freshness"),
+            )
+        )
+    else:
+        selected = not resolved_theme.fallback_used
+        selected_theme = resolved_theme.theme
+        items.extend(
+            [
+                WebsiteReadinessItem(
+                    key="theme_selection",
+                    label="Selected Website Theme",
+                    status="ready" if selected else "needs_attention",
+                    message=(
+                        "The Website has exactly one active governed Theme selection."
+                        if selected
+                        else "No governed Theme is selected; local previews use the explicit neutral fallback."
+                    ),
+                ),
+                WebsiteReadinessItem(
+                    key="theme_approval",
+                    label="Theme approval",
+                    status="ready" if selected else "not_assessed",
+                    message=(
+                        "The selected Theme is approved and available."
+                        if selected
+                        else "Theme approval is not assessed until a governed Theme is selected."
+                    ),
+                ),
+                WebsiteReadinessItem(
+                    key="theme_token_contract",
+                    label="Design token contract",
+                    status="ready" if selected else "not_assessed",
+                    message=(
+                        f"Theme {selected_theme.theme_key} v{selected_theme.version} has a current typed token contract."
+                        if selected and selected_theme is not None
+                        else "Design tokens are not assessed until a governed Theme is selected."
+                    ),
+                ),
+                WebsiteReadinessItem(
+                    key="theme_accessibility",
+                    label="Theme accessibility validation",
+                    status="ready" if selected else "not_assessed",
+                    message=(
+                        "The selected Theme passed deterministic contrast, focus, motion, target-size, and layout validation."
+                        if selected
+                        else "Theme accessibility is not assessed until a governed Theme is selected."
+                    ),
+                ),
+                WebsiteReadinessItem(
+                    key="theme_composition_freshness",
+                    label="Theme composition freshness",
+                    status="ready" if selected and not stale_compositions else (
+                        "needs_attention" if selected else "not_assessed"
+                    ),
+                    message=(
+                        "Every semantic composition is bound to the exact selected Theme identity and token hash."
+                        if selected and not stale_compositions
+                        else "One or more semantic compositions must be refreshed for the selected Theme."
+                        if selected
+                        else "Theme-bound composition freshness is not assessed until a governed Theme is selected."
+                    ),
+                    affected_planned_page_ids=stale_compositions if selected else [],
+                ),
+            ]
+        )
     return _category("website_readiness", "Website Readiness", items)
 
 
@@ -745,12 +828,6 @@ def _future_category() -> WebsiteReadinessCategory:
                 "Media ingestion and generation",
                 "deferred",
                 "Deferred to a separately approved media milestone; not a current failure.",
-            ),
-            (
-                "theme",
-                "Theme and design system",
-                "deferred",
-                "Deferred to a separately approved presentation milestone; not a current failure.",
             ),
             (
                 "complete_site_preview",

@@ -36,6 +36,7 @@ import type {
   WebsiteIdentityAssetAssignment,
   WebsiteIdentityAssets,
 } from "../src/types";
+import { fallbackTheme } from "./theme-fixtures";
 
 const website: Website = {
   id: 31,
@@ -503,6 +504,7 @@ test("stale composition after an identity replacement remains fail-closed", () =
     effective_components: [],
     source_snapshot: {},
     source_hash: "a".repeat(64),
+    resolved_theme: fallbackTheme(31),
     status: "stale",
     validation_errors: [],
     generated_at: "2026-08-01T00:00:00Z",
@@ -519,7 +521,10 @@ test("responsive logo constraints are explicit for header, footer, and mobile", 
   assert.match(css, /\.previewBrandLogo\s*\{[^}]*max-width:\s*min\(180px, 42vw\)/s);
   assert.match(css, /\.previewBrandLogo\s*\{[^}]*max-height:\s*48px[^}]*object-fit:\s*contain/s);
   assert.match(css, /\.previewFooterLogo\s*\{[^}]*max-width:\s*min\(150px, 42vw\)[^}]*max-height:\s*42px/s);
-  assert.match(css, /@media \(max-width: 620px\)[\s\S]*?\.previewBrandLogo\s*\{[^}]*max-width:\s*min\(150px, 48vw\)/);
+  assert.match(
+    css,
+    /data-atlas-theme-viewport="mobile"\][\s\S]*?\.previewBrandLogo\s*\{[^}]*max-width:\s*min\(150px, 48vw\)/,
+  );
 });
 
 test("Brand Assets UI does not independently list Brand or Website Identity selectors", () => {

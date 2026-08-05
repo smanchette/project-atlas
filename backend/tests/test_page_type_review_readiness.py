@@ -254,8 +254,22 @@ def test_planned_page_contract_supports_edit_qa_export_and_readiness() -> None:
                 and item.status == "needs_attention"
                 for item in website_readiness.items
             )
+            theme_items = {
+                item.key: item for item in website_readiness.items
+                if item.key.startswith("theme_")
+            }
+            assert set(theme_items) == {
+                "theme_selection",
+                "theme_approval",
+                "theme_token_contract",
+                "theme_accessibility",
+                "theme_composition_freshness",
+            }
+            assert theme_items["theme_selection"].status == "needs_attention"
+            assert theme_items["theme_approval"].status == "not_assessed"
             future = report.categories[-1]
             assert future.status == "deferred"
+            assert all(item.key != "theme" for item in future.items)
             assert all(
                 item.status in {"deferred", "not_assessed"} for item in future.items
             )

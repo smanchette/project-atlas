@@ -354,11 +354,13 @@ def _read(session: Session, composition: PageComposition, *, require_current: bo
         raise PageCompositionError(" ".join(errors))
     effective = _effective(composition)
     resolved = [_resolve_instance(session, composition, generated, item) for item in effective]
+    resolved_theme = _resolved_theme(session, composition.website_id)
     values = composition.model_dump()
     values["status"] = "current" if not errors else "stale"
     return PageCompositionRead(
         **values,
         effective_components=resolved,
+        resolved_theme=resolved_theme.model_dump(mode="json"),
         validation_errors=errors,
     )
 
@@ -639,6 +641,7 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
     }
     context = build_website_context(session, page_id=generated.id)
     identity_assets = _active_identity_assets(session, plan.website_id)
+    resolved_theme = _resolved_theme(session, plan.website_id)
     snapshot = {
         "website_id": plan.website_id,
         "site_plan_id": plan.id,
@@ -650,6 +653,7 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
         "draft_hash": _hash(generated.draft_content),
         "website_identity_id": context.identity.id,
         "website_context_hash": _hash(context.model_dump(mode="json")),
+        "theme": resolved_theme.source_identity,
         "navigation_sets": [{"id": item.id, "type": item.set_type, "version": item.version, "updated_at": item.updated_at.isoformat()} for item in nav_sets],
         "navigation_items": [{"id": item.id, "target": item.target_planned_page_id, "position": item.position, "status": item.status, "updated_at": item.updated_at.isoformat()} for item in nav_items],
         "internal_links": [{"id": item.id, "target": item.target_planned_page_id, "approval_state": item.approval_state, "updated_at": item.updated_at.isoformat()} for item in links],
@@ -681,6 +685,17 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
             for slot, asset in sorted(identity_assets.items())
         ]
     return snapshot
+
+
+def _resolved_theme(session: Session, website_id: int):
+    """Resolve the single authoritative Website Theme or its explicit neutral fallback."""
+
+    from app.services.themes import ThemeError, resolve_website_theme
+
+    try:
+        return resolve_website_theme(session, website_id)
+    except ThemeError as exc:
+        raise PageCompositionError(f"Website Theme resolution failed closed: {exc}") from exc
 
 
 def _active_identity_assets(session: Session, website_id: int) -> dict[str, BrandAsset]:

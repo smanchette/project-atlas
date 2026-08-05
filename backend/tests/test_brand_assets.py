@@ -645,7 +645,7 @@ def test_approval_fails_closed_when_governed_metadata_is_incomplete(
         assert asset.approved_at is None
 
 
-def test_backup_050_includes_asset_and_assignment_provenance(tmp_path: Path):
+def test_backup_051_includes_asset_and_assignment_provenance(tmp_path: Path):
     engine = _engine(); SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
         business, brand, _, identity = _scope(session, "backup")
@@ -654,8 +654,8 @@ def test_backup_050_includes_asset_and_assignment_provenance(tmp_path: Path):
         assign_identity_asset(session, identity.id, asset_id=asset.id, slot="header_logo", assigned_by="Operator", rationale="Approved")
         result = export_backup(session, backup_dir=tmp_path)
     payload = load_backup(Path(result["path"]))
-    assert BACKUP_VERSION == "0.50"
-    assert payload["metadata"]["version"] == "0.50"
+    assert BACKUP_VERSION == "0.51"
+    assert payload["metadata"]["version"] == "0.51"
     assert payload["data"]["brand_assets"][0]["purpose"]
     assert payload["data"]["brand_assets"][0]["accessibility_description"]
     assert payload["data"]["brand_assets"][0]["provenance_notes"]
@@ -669,7 +669,7 @@ def test_backup_050_includes_asset_and_assignment_provenance(tmp_path: Path):
         restored_asset = target.exec(select(BrandAsset)).one()
         restored_assignment = target.exec(select(WebsiteIdentityAssetAssignment)).one()
         assert restored["status"] == "restored"
-        assert payload["metadata"]["version"] == "0.50"
+        assert payload["metadata"]["version"] == "0.51"
         assert restored_asset.checksum_sha256 == asset.checksum_sha256
         assert restored_asset.approved_usage == ["website_header"]
         assert restored_asset.restrictions == ["social_preview"]

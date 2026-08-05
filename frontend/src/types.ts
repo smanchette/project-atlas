@@ -1076,6 +1076,185 @@ export type PageComponentInstance = {
   resolved_data: Record<string, unknown>;
 };
 
+export type ThemeColorTokenName =
+  | "primary"
+  | "primary_foreground"
+  | "secondary"
+  | "secondary_foreground"
+  | "accent"
+  | "accent_foreground"
+  | "neutral"
+  | "neutral_foreground"
+  | "background"
+  | "surface"
+  | "text"
+  | "heading"
+  | "success"
+  | "success_foreground"
+  | "warning"
+  | "warning_foreground"
+  | "error"
+  | "error_foreground"
+  | "focus";
+
+export type ThemeSpacingTokenName =
+  | "zero"
+  | "xs"
+  | "sm"
+  | "md"
+  | "lg"
+  | "xl"
+  | "xxl";
+
+export type ThemeDesignTokens = {
+  colors: Record<ThemeColorTokenName, string>;
+  typography: {
+    heading_family: string;
+    body_family: string;
+    heading_weight: number;
+    body_weight: number;
+    font_scale: Record<"xs" | "sm" | "base" | "lg" | "xl" | "xxl" | "display", number>;
+    line_height: Record<"heading" | "body", number>;
+    letter_spacing: Record<"heading" | "body", number>;
+  };
+  spacing: {
+    scale: Record<ThemeSpacingTokenName, number>;
+    section_spacing: Record<"mobile" | "tablet" | "desktop", number>;
+  };
+  content_widths: Record<"narrow" | "content" | "wide", number>;
+  borders: {
+    widths: Record<"thin" | "medium" | "thick", number>;
+    radii: Record<"small" | "medium" | "large" | "pill", number>;
+  };
+  shadows: Record<"none" | "low" | "medium" | "high", string>;
+  buttons: {
+    background: ThemeColorTokenName;
+    text: ThemeColorTokenName;
+    border: ThemeColorTokenName;
+    hover_background: ThemeColorTokenName;
+    focus: ThemeColorTokenName;
+    border_width: "thin" | "medium" | "thick";
+    border_radius: "small" | "medium" | "large" | "pill";
+    padding_inline: ThemeSpacingTokenName;
+    padding_block: ThemeSpacingTokenName;
+    min_height: number;
+    font_weight: number;
+  };
+  cards: {
+    background: ThemeColorTokenName;
+    text: ThemeColorTokenName;
+    border: ThemeColorTokenName;
+    border_width: "thin" | "medium" | "thick";
+    border_radius: "small" | "medium" | "large" | "pill";
+    shadow: "none" | "low" | "medium" | "high";
+    padding: ThemeSpacingTokenName;
+  };
+  navigation: {
+    background: ThemeColorTokenName;
+    text: ThemeColorTokenName;
+    hover: ThemeColorTokenName;
+    active: ThemeColorTokenName;
+    focus: ThemeColorTokenName;
+    item_spacing: ThemeSpacingTokenName;
+    min_target_size: number;
+  };
+  cta: {
+    background: ThemeColorTokenName;
+    text: ThemeColorTokenName;
+    button_background: ThemeColorTokenName;
+    button_text: ThemeColorTokenName;
+    focus: ThemeColorTokenName;
+    border_radius: "small" | "medium" | "large" | "pill";
+    section_spacing: ThemeSpacingTokenName;
+    min_target_size: number;
+  };
+  responsive: {
+    mobile_max: number;
+    tablet_min: number;
+    tablet_max: number;
+    desktop_min: number;
+  };
+  layout: {
+    max_content_columns: number;
+    content_alignment: "left" | "center";
+    mobile_stack: boolean;
+    gutter: ThemeSpacingTokenName;
+    overflow_behavior: "wrap" | "scroll_explicit";
+  };
+  motion: {
+    duration_fast_ms: number;
+    duration_normal_ms: number;
+    duration_slow_ms: number;
+    easing: string;
+    reduced_motion: "disable_nonessential" | "reduce_to_instant";
+  };
+};
+
+export type WebsiteTheme = {
+  id: number;
+  website_id: number;
+  business_id: number;
+  brand_id: number;
+  theme_key: string;
+  theme_name: string;
+  version: number;
+  token_contract_version: number;
+  design_tokens: ThemeDesignTokens;
+  token_hash_sha256: string;
+  description?: string | null;
+  lifecycle_status: string;
+  approval_status: string;
+  created_by: string;
+  provenance_type: string;
+  provenance_notes: string;
+  approved_by?: string | null;
+  approved_at?: string | null;
+  retired_by?: string | null;
+  retirement_rationale?: string | null;
+  retired_at?: string | null;
+  replaces_theme_id?: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WebsiteThemeSelection = {
+  id: number;
+  website_id: number;
+  theme_id: number;
+  version: number;
+  status: string;
+  selected_by: string;
+  rationale: string;
+  selected_at: string;
+  replaced_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ThemeAccessibilityResult = {
+  valid: boolean;
+  ratios: Record<string, number>;
+  failures: string[];
+};
+
+export type ResolvedWebsiteTheme = {
+  website_id: number;
+  theme?: WebsiteTheme | null;
+  selection?: WebsiteThemeSelection | null;
+  effective_tokens: ThemeDesignTokens;
+  accessibility: ThemeAccessibilityResult;
+  fallback_used: boolean;
+  fallback_reason?: string | null;
+  source_identity: Record<string, string | number | boolean | null>;
+};
+
+export type WebsiteThemeState = {
+  website_id: number;
+  resolved: ResolvedWebsiteTheme;
+  active?: WebsiteThemeSelection | null;
+  history: WebsiteThemeSelection[];
+};
+
 export type PageComposition = {
   id: number;
   website_id: number;
@@ -1088,6 +1267,7 @@ export type PageComposition = {
   effective_components: PageComponentInstance[];
   source_snapshot: Record<string, unknown>;
   source_hash: string;
+  resolved_theme: ResolvedWebsiteTheme;
   status: "current" | "stale" | string;
   validation_errors: string[];
   generated_at: string;

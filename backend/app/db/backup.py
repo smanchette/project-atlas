@@ -1,5 +1,6 @@
 import argparse
 from datetime import UTC, datetime, timedelta
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -39,12 +40,14 @@ from app.models import (
     Setting,
     SitePlan,
     SupportingPageAuthorization,
+    Theme,
     Website,
     WebsiteCityCoverageDecision,
     WebsiteCountyCoverageDecision,
     WebsiteCoveragePlanningRecord,
     WebsiteIdentity,
     WebsiteIdentityAssetAssignment,
+    WebsiteThemeSelection,
     WebsiteServiceCityCoverageDecision,
     WebsiteServiceCountyCoverageDecision,
     WebsiteServiceCoverageDecision,
@@ -67,7 +70,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.50"
+BACKUP_VERSION = "0.51"
 BRAND_ASSET_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
 BRAND_ASSET_MIME_EXTENSIONS = {
     "image/jpeg": {".jpg", ".jpeg"},
@@ -109,6 +112,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.48",
     "0.49",
     "0.50",
+    "0.51",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -128,6 +132,8 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "website_identities": WebsiteIdentity,
     "brand_assets": BrandAsset,
     "website_identity_asset_assignments": WebsiteIdentityAssetAssignment,
+    "themes": Theme,
+    "website_theme_selections": WebsiteThemeSelection,
     "services": Service,
     "counties": County,
     "cities": City,
@@ -377,6 +383,71 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     "brand_asset_id": _mapped_id(brand_asset_ids, record["brand_asset_id"], "website_identity_asset_assignments.brand_asset_id"),
                 },
             )
+
+        theme_ids: dict[int, int] = {}
+        pending_theme_replacements: list[tuple[dict[str, Any], Theme]] = []
+        for record in data.get("themes", []):
+            old_id = _record_id(record, "themes")
+            website_id = _mapped_id(
+                website_ids, record["website_id"], "themes.website_id"
+            )
+            restored = _upsert(
+                session,
+                Theme,
+                select(Theme).where(
+                    Theme.website_id == website_id,
+                    Theme.theme_key == record["theme_key"],
+                    Theme.version == record["version"],
+                ),
+                {
+                    **record,
+                    "website_id": website_id,
+                    "business_id": _mapped_id(
+                        business_ids, record["business_id"], "themes.business_id"
+                    ),
+                    "brand_id": _mapped_id(
+                        brand_ids, record["brand_id"], "themes.brand_id"
+                    ),
+                    "replaces_theme_id": None,
+                },
+            )
+            theme_ids[old_id] = _required_id(restored)
+            pending_theme_replacements.append((record, restored))
+        for record, restored in pending_theme_replacements:
+            restored.replaces_theme_id = _mapped_optional_id(
+                theme_ids,
+                record.get("replaces_theme_id"),
+                "themes.replaces_theme_id",
+            )
+            session.add(restored)
+        session.flush()
+
+        website_theme_selection_ids: dict[int, int] = {}
+        for record in data.get("website_theme_selections", []):
+            old_id = _record_id(record, "website_theme_selections")
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "website_theme_selections.website_id",
+            )
+            restored = _upsert(
+                session,
+                WebsiteThemeSelection,
+                select(WebsiteThemeSelection).where(
+                    WebsiteThemeSelection.website_id == website_id,
+                    WebsiteThemeSelection.version == record["version"],
+                ),
+                {
+                    **record,
+                    "website_id": website_id,
+                    "theme_id": _mapped_id(
+                        theme_ids,
+                        record["theme_id"],
+                        "website_theme_selections.theme_id",
+                    ),
+                },
+            )
+            website_theme_selection_ids[old_id] = _required_id(restored)
 
         service_ids: dict[int, int] = {}
         for record in data["services"]:
@@ -1049,6 +1120,12 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 record["planned_page_id"],
                 "page_compositions.planned_page_id",
             )
+            restored_snapshot = _restore_theme_source_binding(
+                record.get("source_snapshot", {}),
+                website_ids=website_ids,
+                theme_ids=theme_ids,
+                selection_ids=website_theme_selection_ids,
+            )
             _upsert(
                 session,
                 PageComposition,
@@ -1057,6 +1134,8 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 ),
                 {
                     **record,
+                    "source_snapshot": restored_snapshot,
+                    "source_hash": _canonical_json_hash(restored_snapshot),
                     "website_id": _mapped_id(
                         website_ids, record["website_id"], "page_compositions.website_id"
                     ),
@@ -1735,12 +1814,12 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50"}:
+    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51"}:
         for group in ("site_plans", "planned_pages", "planning_records"):
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50"}:
+    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51"}:
         for group in (
             "site_connection_planning_records",
             "navigation_sets",
@@ -1750,7 +1829,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50"}:
+    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51"}:
         for group in (
             "website_coverage_planning_records",
             "website_service_coverage_decisions",
@@ -1761,7 +1840,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50"}:
+    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51"}:
         for group in (
             "drafting_eligibility_assessments",
             "drafting_eligibility_dispositions",
@@ -1769,7 +1848,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.47", "0.48", "0.49", "0.50"}:
+    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51"}:
         for group in (
             "supporting_page_authorizations",
             "pre_draft_distinctness_briefs",
@@ -1777,7 +1856,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.48", "0.49", "0.50"}:
+    if backup_version not in {"0.48", "0.49", "0.50", "0.51"}:
         for group in (
             "website_draft_generation_runs",
             "website_draft_generation_items",
@@ -1788,12 +1867,16 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "website_service_county_coverage_decisions" not in data:
         data.setdefault("website_service_county_coverage_decisions", [])
         counts.setdefault("website_service_county_coverage_decisions", 0)
-    if backup_version not in {"0.49", "0.50"}:
+    if backup_version not in {"0.49", "0.50", "0.51"}:
         for group in ("semantic_component_definitions", "page_compositions"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version != "0.50":
+    if backup_version not in {"0.50", "0.51"}:
         for group in ("brand_assets", "website_identity_asset_assignments"):
+            data.setdefault(group, [])
+            counts.setdefault(group, 0)
+    if backup_version != "0.51":
+        for group in ("themes", "website_theme_selections"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
 
@@ -1932,6 +2015,101 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
                 raise BackupValidationError("Backup contains multiple active selections for one Website Identity slot.")
             active_slot_keys.add(key)
 
+    valid_theme_lifecycle_statuses = {"draft", "available", "retired"}
+    valid_theme_approval_statuses = {"pending_review", "approved", "rejected"}
+    from app.schemas.themes import ThemeDesignTokens
+
+    for record in data["themes"]:
+        tokens = record.get("design_tokens")
+        token_hash = record.get("token_hash_sha256")
+        if (
+            record.get("lifecycle_status") not in valid_theme_lifecycle_statuses
+            or record.get("approval_status") not in valid_theme_approval_statuses
+            or not str(record.get("theme_key") or "").strip()
+            or not str(record.get("theme_name") or "").strip()
+            or not isinstance(record.get("version"), int)
+            or record["version"] < 1
+            or not isinstance(record.get("token_contract_version"), int)
+            or record["token_contract_version"] < 1
+            or not isinstance(tokens, dict)
+            or not tokens
+            or not isinstance(token_hash, str)
+            or len(token_hash) != 64
+            or any(character not in "0123456789abcdef" for character in token_hash)
+            or token_hash != _canonical_json_hash(tokens)
+            or not str(record.get("created_by") or "").strip()
+            or not str(record.get("provenance_type") or "").strip()
+            or not str(record.get("provenance_notes") or "").strip()
+        ):
+            raise BackupValidationError("Backup contains an invalid governed Theme.")
+        try:
+            ThemeDesignTokens.model_validate(tokens)
+        except ValueError as exc:
+            raise BackupValidationError(
+                "Backup contains a Theme with an invalid design-token contract."
+            ) from exc
+        if record["approval_status"] == "approved":
+            if (
+                not str(record.get("approved_by") or "").strip()
+                or record.get("approved_at") is None
+            ):
+                raise BackupValidationError(
+                    "Backup contains an approved Theme without approval provenance."
+                )
+            _datetime_value(record["approved_at"], "themes.approved_at")
+        if record["lifecycle_status"] == "retired":
+            if (
+                not str(record.get("retired_by") or "").strip()
+                or not str(record.get("retirement_rationale") or "").strip()
+                or record.get("retired_at") is None
+            ):
+                raise BackupValidationError(
+                    "Backup contains a retired Theme without retirement provenance."
+                )
+            _datetime_value(record["retired_at"], "themes.retired_at")
+
+    valid_theme_selection_statuses = {"active", "replaced", "retired"}
+    active_theme_websites: set[int] = set()
+    for record in data["website_theme_selections"]:
+        if (
+            record.get("status") not in valid_theme_selection_statuses
+            or not isinstance(record.get("version"), int)
+            or record["version"] < 1
+            or not str(record.get("selected_by") or "").strip()
+            or not str(record.get("rationale") or "").strip()
+            or record.get("selected_at") is None
+        ):
+            raise BackupValidationError(
+                "Backup contains an invalid Website Theme selection."
+            )
+        selected_at = _datetime_value(
+            record["selected_at"], "website_theme_selections.selected_at"
+        )
+        replaced_at = record.get("replaced_at")
+        if record["status"] == "active" and replaced_at is not None:
+            raise BackupValidationError(
+                "Backup contains an active Website Theme selection with replacement provenance."
+            )
+        if record["status"] == "replaced" and replaced_at is None:
+            raise BackupValidationError(
+                "Backup contains a replaced Website Theme selection without replacement provenance."
+            )
+        if replaced_at is not None and _comparable_datetime(
+            _datetime_value(
+                replaced_at, "website_theme_selections.replaced_at"
+            )
+        ) < _comparable_datetime(selected_at):
+            raise BackupValidationError(
+                "Backup contains Website Theme replacement provenance before selection."
+            )
+        if record["status"] == "active":
+            website_id = record["website_id"]
+            if website_id in active_theme_websites:
+                raise BackupValidationError(
+                    "Backup contains multiple active Theme selections for one Website."
+                )
+            active_theme_websites.add(website_id)
+
     for group in (
         "website_service_coverage_decisions",
         "website_county_coverage_decisions",
@@ -1990,6 +2168,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     _validate_unique_records(data)
     _validate_backup_references(data)
     _validate_brand_asset_ownership(data)
+    _validate_theme_ownership(data)
     return payload
 
 
@@ -2053,6 +2232,58 @@ def _record_id(record: dict[str, Any], group: str) -> int:
     if not isinstance(record_id, int):
         raise BackupValidationError(f"Every '{group}' record must have an integer id.")
     return record_id
+
+
+def _restore_theme_source_binding(
+    source_snapshot: Any,
+    *,
+    website_ids: dict[int, int],
+    theme_ids: dict[int, int],
+    selection_ids: dict[int, int],
+) -> dict[str, Any]:
+    """Remap durable Theme identities embedded in composition source bindings."""
+
+    if not isinstance(source_snapshot, dict):
+        raise BackupValidationError(
+            "Backup Page Composition source snapshot must be an object."
+        )
+    restored = dict(source_snapshot)
+    theme_source = restored.get("theme")
+    if theme_source is None:
+        return restored
+    if not isinstance(theme_source, dict):
+        raise BackupValidationError(
+            "Backup Page Composition Theme source binding must be an object."
+        )
+    binding = dict(theme_source)
+    if binding.get("website_id") is not None:
+        binding["website_id"] = _mapped_id(
+            website_ids, binding["website_id"], "page_compositions.theme.website_id"
+        )
+    if binding.get("theme_id") is not None:
+        binding["theme_id"] = _mapped_id(
+            theme_ids, binding["theme_id"], "page_compositions.theme.theme_id"
+        )
+    for field in ("selection_id", "theme_selection_id"):
+        if binding.get(field) is not None:
+            binding[field] = _mapped_id(
+                selection_ids,
+                binding[field],
+                f"page_compositions.theme.{field}",
+            )
+    restored["theme"] = binding
+    return restored
+
+
+def _canonical_json_hash(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _required_id(record: SQLModel) -> int:
@@ -2138,6 +2369,8 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
             "slot",
             "version",
         ),
+        "themes": ("website_id", "theme_key", "version"),
+        "website_theme_selections": ("website_id", "version"),
         "approval_audits": ("generated_page_id", "approved_at", "draft_hash_at_approval"),
         "page_revisions": ("generated_page_id", "created_at", "draft_hash_after"),
         "wordpress_draft_audits": ("generated_page_id", "attempted_at", "payload_hash"),
@@ -2200,6 +2433,16 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
             ("website_id", "websites", False),
             ("brand_id", "brands", False),
             ("brand_asset_id", "brand_assets", False),
+        ),
+        "themes": (
+            ("website_id", "websites", False),
+            ("business_id", "businesses", False),
+            ("brand_id", "brands", False),
+            ("replaces_theme_id", "themes", True),
+        ),
+        "website_theme_selections": (
+            ("website_id", "websites", False),
+            ("theme_id", "themes", False),
         ),
         "services": (("business_id", "businesses", False),),
         "cities": (("county_id", "counties", False),),
@@ -2478,6 +2721,139 @@ def _validate_brand_asset_ownership(data: dict[str, list[dict[str, Any]]]) -> No
         if assignment["status"] == "active" and asset["status"] != "approved":
             raise BackupValidationError(
                 "Backup active Website Identity asset selection does not reference a currently approved asset."
+            )
+
+
+def _validate_theme_ownership(data: dict[str, list[dict[str, Any]]]) -> None:
+    """Reject cross-Website Theme, selection, and composition binding graphs."""
+
+    brands = {record["id"]: record for record in data["brands"]}
+    websites = {record["id"]: record for record in data["websites"]}
+    themes = {record["id"]: record for record in data["themes"]}
+    selections = {
+        record["id"]: record for record in data["website_theme_selections"]
+    }
+    for theme in themes.values():
+        website = websites[theme["website_id"]]
+        brand = brands[theme["brand_id"]]
+        if (
+            theme["business_id"] != website["business_id"]
+            or website.get("brand_id") != theme["brand_id"]
+            or brand["business_id"] != theme["business_id"]
+        ):
+            raise BackupValidationError(
+                "Backup Theme crosses a Website, Business, or Brand ownership boundary."
+            )
+        replacement_id = theme.get("replaces_theme_id")
+        if replacement_id is None:
+            if theme["version"] != 1:
+                raise BackupValidationError(
+                    "Backup root Theme must begin at version 1."
+                )
+            continue
+        replacement = themes[replacement_id]
+        if (
+            replacement["website_id"] != theme["website_id"]
+            or replacement["business_id"] != theme["business_id"]
+            or replacement["brand_id"] != theme["brand_id"]
+            or replacement["theme_key"] != theme["theme_key"]
+            or theme["version"] != replacement["version"] + 1
+        ):
+            raise BackupValidationError(
+                "Backup Theme replacement crosses ownership, changes its key, or does not increase the version."
+            )
+
+    for selection in selections.values():
+        theme = themes[selection["theme_id"]]
+        if theme["website_id"] != selection["website_id"]:
+            raise BackupValidationError(
+                "Backup Website Theme selection crosses a Website ownership boundary."
+            )
+        if selection["status"] == "active" and (
+            theme["lifecycle_status"] != "available"
+            or theme["approval_status"] != "approved"
+        ):
+            raise BackupValidationError(
+                "Backup active Website Theme selection does not reference an approved available Theme."
+            )
+
+    for composition in data["page_compositions"]:
+        source_snapshot = composition.get("source_snapshot")
+        if not isinstance(source_snapshot, dict):
+            raise BackupValidationError(
+                "Backup Page Composition source snapshot must be an object."
+            )
+        binding = source_snapshot.get("theme")
+        if binding is None:
+            continue
+        if not isinstance(binding, dict):
+            raise BackupValidationError(
+                "Backup Page Composition Theme binding must be an object."
+            )
+        if binding.get("website_id") != composition["website_id"]:
+            raise BackupValidationError(
+                "Backup Page Composition Theme binding crosses a Website boundary."
+            )
+        theme_id = binding.get("theme_id")
+        if theme_id is not None:
+            theme = themes.get(theme_id)
+            if not theme or theme["website_id"] != composition["website_id"]:
+                raise BackupValidationError(
+                    "Backup Page Composition references an unknown or cross-Website Theme."
+                )
+            if (
+                binding.get("mode") != "selected"
+                or binding.get("theme_key") != theme["theme_key"]
+                or binding.get("theme_version") != theme["version"]
+                or binding.get("token_contract_version")
+                != theme["token_contract_version"]
+                or binding.get("token_hash_sha256")
+                != theme["token_hash_sha256"]
+            ):
+                raise BackupValidationError(
+                    "Backup Page Composition Theme binding does not match its exact governed Theme identity."
+                )
+        else:
+            from app.services.themes import (
+                DEFAULT_THEME_TOKENS,
+                SUPPORTED_TOKEN_CONTRACT_VERSION,
+                canonical_token_hash,
+            )
+
+            if (
+                binding.get("mode") != "neutral_fallback"
+                or binding.get("theme_key") != "atlas-neutral"
+                or binding.get("theme_version") != 1
+                or binding.get("token_contract_version")
+                != SUPPORTED_TOKEN_CONTRACT_VERSION
+                or binding.get("token_hash_sha256")
+                != canonical_token_hash(DEFAULT_THEME_TOKENS)
+                or binding.get("selection_id") is not None
+                or binding.get("selection_version") is not None
+            ):
+                raise BackupValidationError(
+                    "Backup Page Composition neutral Theme binding is not the exact deterministic fallback identity."
+                )
+        selection_id = binding.get(
+            "selection_id", binding.get("theme_selection_id")
+        )
+        if selection_id is not None:
+            selection = selections.get(selection_id)
+            if (
+                not selection
+                or selection["website_id"] != composition["website_id"]
+                or (theme_id is not None and selection["theme_id"] != theme_id)
+            ):
+                raise BackupValidationError(
+                    "Backup Page Composition references an unknown or cross-Website Theme selection."
+                )
+            if binding.get("selection_version") != selection["version"]:
+                raise BackupValidationError(
+                    "Backup Page Composition Theme binding does not match its exact selection version."
+                )
+        elif theme_id is not None:
+            raise BackupValidationError(
+                "Backup Page Composition governed Theme binding lacks its selection identity."
             )
 
 

@@ -23,7 +23,7 @@ def _config(monkeypatch, database: Path) -> Config:
 def test_0038_adds_brand_asset_tables_on_disposable_database(monkeypatch, tmp_path):
     database = tmp_path / "brand-assets.sqlite3"
     config = _config(monkeypatch, database)
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260801_0038")
     engine = create_engine(f"sqlite:///{database.as_posix()}")
     assert {"brandasset", "websiteidentityassetassignment"} <= set(inspect(engine).get_table_names())
     with engine.connect() as connection:
@@ -36,7 +36,7 @@ def test_0038_adopts_compatible_tables_precreated_by_local_startup(monkeypatch, 
     command.upgrade(config, "20260801_0037")
     engine = create_engine(f"sqlite:///{database.as_posix()}")
     SQLModel.metadata.create_all(engine)
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260801_0038")
     with engine.connect() as connection:
         assert connection.execute(text("SELECT COUNT(*) FROM brandasset")).scalar_one() == 0
         assert connection.execute(text("SELECT COUNT(*) FROM websiteidentityassetassignment")).scalar_one() == 0
@@ -53,7 +53,7 @@ def test_0038_repairs_empty_early_precreated_asset_table(monkeypatch, tmp_path):
         connection.execute(text("ALTER TABLE brandasset DROP COLUMN retired_by"))
         connection.execute(text("ALTER TABLE brandasset DROP COLUMN retirement_rationale"))
         connection.execute(text("ALTER TABLE brandasset DROP COLUMN retired_at"))
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260801_0038")
     columns = {column["name"] for column in inspect(engine).get_columns("brandasset")}
     assert {"retired_by", "retirement_rationale", "retired_at"} <= columns
     with engine.connect() as connection:

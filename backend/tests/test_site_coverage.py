@@ -551,6 +551,13 @@ def test_coverage_readiness_preserves_navigation_and_future_dimensions():
         assert "site_connections_navigation_sets" in keys
         assert "approved_brand_assets" in keys
         assert "website_identity_asset_selections" in keys
+        assert {
+            "theme_selection",
+            "theme_approval",
+            "theme_token_contract",
+            "theme_accessibility",
+            "theme_composition_freshness",
+        } <= keys
         future = next(
             category
             for category in report.categories
@@ -560,11 +567,11 @@ def test_coverage_readiness_preserves_navigation_and_future_dimensions():
             "complete_site_preview",
             "media",
             "media_ingestion",
-            "theme",
             "publication",
         } <= {
             item.key for item in future.items
         }
+        assert "theme" not in {item.key for item in future.items}
         assert all(item.status in {"deferred", "not_assessed"} for item in future.items)
 
 

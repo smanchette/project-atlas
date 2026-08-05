@@ -237,12 +237,19 @@ def test_operator_decisions_make_navigation_and_conversion_paths_ready():
             item.key for item in website_category.items
         }
         assert {
+            "theme_selection",
+            "theme_approval",
+            "theme_token_contract",
+            "theme_accessibility",
+            "theme_composition_freshness",
+        } <= {item.key for item in website_category.items}
+        assert {
             "complete_site_preview",
             "media",
             "media_ingestion",
-            "theme",
             "publication",
         } <= {item.key for item in future.items}
+        assert "theme" not in {item.key for item in future.items}
 
 
 def test_scope_self_link_deferred_target_and_duplicate_guards_fail_closed():

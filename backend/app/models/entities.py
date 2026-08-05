@@ -184,6 +184,96 @@ class WebsiteIdentityAssetAssignment(TimestampMixin, table=True):
     replaced_at: datetime | None = None
 
 
+class Theme(TimestampMixin, table=True):
+    """Versioned Website-owned presentation tokens with governed approval history."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "website_id",
+            "theme_key",
+            "version",
+            name="uq_theme_website_key_version",
+        ),
+        CheckConstraint(
+            "lifecycle_status IN ('draft','available','retired')",
+            name="ck_theme_lifecycle_status",
+        ),
+        CheckConstraint(
+            "approval_status IN ('pending_review','approved','rejected')",
+            name="ck_theme_approval_status",
+        ),
+        CheckConstraint(
+            "provenance_type IN ('operator_configured','company_original','licensed','third_party')",
+            name="ck_theme_provenance_type",
+        ),
+        CheckConstraint("version >= 1", name="ck_theme_version"),
+        CheckConstraint(
+            "token_contract_version >= 1",
+            name="ck_theme_token_contract_version",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    business_id: int = Field(foreign_key="business.id", index=True)
+    brand_id: int = Field(foreign_key="brand.id", index=True)
+    theme_key: str = Field(max_length=120, index=True)
+    theme_name: str = Field(max_length=160)
+    version: int = Field(default=1, ge=1)
+    token_contract_version: int = Field(default=1, ge=1)
+    design_tokens: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    token_hash_sha256: str = Field(max_length=64, index=True)
+    description: str | None = Field(default=None, max_length=2000)
+    lifecycle_status: str = Field(default="draft", max_length=24, index=True)
+    approval_status: str = Field(default="pending_review", max_length=24, index=True)
+    created_by: str = Field(max_length=160)
+    provenance_type: str = Field(max_length=40, index=True)
+    provenance_notes: str = Field(max_length=2000)
+    approved_by: str | None = Field(default=None, max_length=160)
+    approved_at: datetime | None = None
+    retired_by: str | None = Field(default=None, max_length=160)
+    retirement_rationale: str | None = Field(default=None, max_length=2000)
+    retired_at: datetime | None = None
+    replaces_theme_id: int | None = Field(
+        default=None,
+        foreign_key="theme.id",
+        index=True,
+    )
+
+
+class WebsiteThemeSelection(TimestampMixin, table=True):
+    """Durable, versioned selection history for one effective Theme per Website."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "website_id",
+            "version",
+            name="uq_websitethemeselection_website_version",
+        ),
+        CheckConstraint(
+            "status IN ('active','replaced','retired')",
+            name="ck_websitethemeselection_status",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_websitethemeselection_version",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    theme_id: int = Field(foreign_key="theme.id", index=True)
+    version: int = Field(default=1, ge=1)
+    status: str = Field(default="active", max_length=24, index=True)
+    selected_by: str = Field(max_length=160)
+    rationale: str = Field(max_length=2000)
+    selected_at: datetime = Field(default_factory=utc_now, nullable=False)
+    replaced_at: datetime | None = None
+
+
 class SitePlan(TimestampMixin, table=True):
     __table_args__ = (
         UniqueConstraint("website_id", "plan_key", name="uq_siteplan_website_key"),

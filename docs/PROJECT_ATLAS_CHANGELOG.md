@@ -316,6 +316,33 @@ preview, publication, WordPress rendering, and SiteGround remain deferred.
 
 ---
 
+## Website-Scoped Theme and Design Token Foundation
+
+Added Website-, Business-, and Brand-bound, versioned Themes with governed
+lifecycle, approval, operator provenance, replacement and retirement history,
+and one active Website selection. A typed design-token contract now governs
+color, typography, spacing, widths, borders, elevation, controls, navigation,
+CTAs, responsive behavior, layout, motion, and reduced-motion behavior without
+owning business facts, content, media, navigation decisions, or Brand Assets.
+
+One authoritative Theme adapter styles the existing semantic component
+renderer. Composition source identity now includes the selected Theme,
+selection version, token-contract version, and canonical token checksum, so
+Theme changes make affected compositions stale until explicitly refreshed.
+Theme approval fails closed when required accessibility or contrast checks do
+not pass, and Website Readiness now assesses selection, approval, token
+validity, accessibility, and composition freshness.
+
+Migration `20260804_0039` adds the Theme and Website Theme selection records.
+Atlas Data backup format 0.51 preserves Theme lifecycle and selection history
+and exact composition bindings while remaining compatible with supported 0.50
+backups. The local Flo-Zone reference Theme demonstrates the reusable contract
+without embedding Flo-Zone presentation values in shared component contracts
+or Theme services. Page-media planning, AI image generation, complete-site
+preview, publication, WordPress rendering, and SiteGround remain deferred.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.

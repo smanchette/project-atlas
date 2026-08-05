@@ -54,6 +54,7 @@ class PageCompositionRead(SQLModel):
     effective_components: list[PageComponentInstance]
     source_snapshot: dict[str, Any]
     source_hash: str
+    resolved_theme: dict[str, Any] = Field(default_factory=dict)
     status: str
     validation_errors: list[str] = Field(default_factory=list)
     generated_at: datetime

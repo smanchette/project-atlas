@@ -1075,7 +1075,7 @@ function CompositionFoundationPanel({
           <h2>Semantic Page Compositions</h2>
           <p>
             Atlas suggestions remain separate from operator decisions and bind to exact
-            Website Context, draft, navigation, and internal-link sources.
+            Website Context, draft, navigation, internal-link, and governed Theme sources.
           </p>
         </div>
         <span className={`readinessStatus ${current.length === generatedCount ? "ready" : "needs_attention"}`}>
@@ -1095,6 +1095,11 @@ function CompositionFoundationPanel({
               <strong>{page?.working_name ?? `Planned Page ${composition.planned_page_id}`}</strong>
               <span>{composition.effective_components.length} semantic components</span>
               <span>{composition.operator_decisions.length} operator decision(s)</span>
+              <span>
+                Theme: {composition.resolved_theme.fallback_used
+                  ? "neutral fallback"
+                  : `${composition.resolved_theme.theme?.theme_name ?? "selected"} v${composition.resolved_theme.theme?.version ?? "?"}`}
+              </span>
               <span className={`readinessStatus ${composition.validation_errors.length ? "needs_attention" : "ready"}`}>
                 {composition.validation_errors.length ? "Stale or invalid" : "Current"}
               </span>
