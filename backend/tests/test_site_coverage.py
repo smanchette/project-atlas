@@ -558,6 +558,15 @@ def test_coverage_readiness_preserves_navigation_and_future_dimensions():
             "theme_accessibility",
             "theme_composition_freshness",
         } <= keys
+        assert {
+            "page_media_plan_coverage",
+            "page_media_operator_decisions",
+            "page_media_required_assignments",
+            "page_media_provenance_rights",
+            "page_media_assignment_compatibility",
+            "page_media_composition_freshness",
+            "page_media_page_type_coverage",
+        } <= keys
         future = next(
             category
             for category in report.categories
@@ -565,7 +574,6 @@ def test_coverage_readiness_preserves_navigation_and_future_dimensions():
         )
         assert {
             "complete_site_preview",
-            "media",
             "media_ingestion",
             "publication",
         } <= {

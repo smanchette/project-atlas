@@ -30,6 +30,7 @@ import GeneratedPagePreview from "./pages/GeneratedPagePreview";
 import ExportPackagePage from "./pages/ExportPackagePage";
 import KnowledgeBlocksPage from "./pages/KnowledgeBlocksPage";
 import MediaLibraryPage from "./pages/MediaLibraryPage";
+import PageMediaPlanningPage from "./pages/PageMediaPlanningPage";
 import SitePlansPage from "./pages/SitePlansPage";
 import ThemesPage from "./pages/ThemesPage";
 import ModulePage from "./pages/ModulePage";
@@ -53,6 +54,7 @@ const navItems = [
   { to: "/brand-assets", label: "Brand Assets", icon: Images },
   { to: "/themes", label: "Themes", icon: Palette },
   { to: "/site-plans", label: "Site Plans", icon: ClipboardList },
+  { to: "/page-media", label: "Page Media", icon: Images },
   { to: "/services", label: "Services", icon: Wrench },
   { to: "/knowledge-blocks", label: "Knowledge Blocks", icon: BookOpenText },
   { to: "/counties", label: "Counties", icon: Map },
@@ -230,6 +232,7 @@ function DashboardShell() {
             }
           />
           <Route path="/site-plans" element={<SitePlansPage />} />
+          <Route path="/page-media" element={<PageMediaPlanningPage />} />
           <Route path="/brand-assets" element={<BrandAssetsPage />} />
           <Route path="/themes" element={<ThemesPage />} />
           <Route

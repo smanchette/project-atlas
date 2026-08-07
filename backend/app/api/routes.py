@@ -7,6 +7,7 @@ from app.api.page_generation_routes import router as page_generation_router
 from app.api.page_editor_routes import router as page_editor_router
 from app.api.page_export_routes import router as page_export_router
 from app.api.page_media_routes import router as page_media_router
+from app.api.page_media_planning_routes import router as page_media_planning_router
 from app.api.qa_routes import router as qa_router
 from app.api.wordpress_routes import router as wordpress_router
 from app.api.website_context_routes import router as website_context_router
@@ -58,6 +59,7 @@ api_router.include_router(page_generation_router)
 api_router.include_router(page_editor_router)
 api_router.include_router(page_export_router)
 api_router.include_router(page_media_router)
+api_router.include_router(page_media_planning_router)
 api_router.include_router(qa_router)
 api_router.include_router(wordpress_router)
 api_router.include_router(website_context_router)

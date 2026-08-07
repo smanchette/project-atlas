@@ -22,6 +22,7 @@ from app.models import (
     PageComposition,
     PageImageAssignment,
     PlannedPage,
+    PlannedPageMediaRequirement,
     SemanticComponentDefinition,
     Service,
     SitePlan,
@@ -29,15 +30,21 @@ from app.models import (
     Website,
     WebsiteIdentity,
     WebsiteIdentityAssetAssignment,
+    WebsiteMediaPlanningRecord,
     WebsiteThemeSelection,
 )
 from app.schemas.page_composition import PageCompositionDecisionUpdate
+from app.schemas.page_media_planning import PageMediaPlacementDecisionRequest
 from app.services.page_composition import (
     PageCompositionError,
     list_component_registry,
     read_composition_for_generated_page,
     refresh_site_plan_compositions,
     update_operator_composition_decisions,
+)
+from app.services.page_media_planning import (
+    decide_media_placement,
+    refresh_site_plan_media_suggestions,
 )
 from app.services.site_connections import ensure_site_connection_foundation
 from app.services.themes import (
@@ -1021,3 +1028,140 @@ def test_real_050_backup_without_theme_groups_restores_with_neutral_fallback(tmp
             assert result.refreshed == 2 and result.blocked == []
             current = read_composition_for_generated_page(session, generated_id)
         assert current.resolved_theme["fallback_used"] is True
+
+
+def test_governed_media_placements_bind_to_exact_semantic_regions_and_versions():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session)
+        website, plan, pages = _scope(session)
+        service_draft = dict(pages[0][1].draft_content)
+        service_draft["sections"] = [
+            *service_draft["sections"],
+            {
+                "key": "guidance",
+                "heading": "Guidance",
+                "body": "Approved customer guidance.",
+            },
+        ]
+        pages[0][1].draft_content = service_draft
+        session.add(pages[0][1])
+        session.commit()
+        workspace = refresh_site_plan_media_suggestions(session, plan.id)
+        assert workspace.planning_record is not None
+        for placement in workspace.placements:
+            suggestion = placement.suggestion
+            assert suggestion is not None
+            decide_media_placement(
+                session,
+                plan.id,
+                PageMediaPlacementDecisionRequest(
+                    website_id=website.id,
+                    site_plan_id=plan.id,
+                    planned_page_id=placement.planned_page.id,
+                    placement_key=suggestion["placement_key"],
+                    requirement_state="advisory",
+                    decided_by="Composition Media Operator",
+                    rationale="Approve the exact governed semantic media placement.",
+                    expected_planning_version=workspace.planning_record.version,
+                    source_suggestion_key=suggestion["suggestion_key"],
+                ),
+            )
+
+        initial_refresh = refresh_site_plan_compositions(session, plan.id)
+        assert initial_refresh.blocked == []
+        service_page = pages[0][0]
+        composition = session.exec(
+            select(PageComposition).where(
+                PageComposition.planned_page_id == service_page.id
+            )
+        ).one()
+        components = composition.generated_components
+        media_components = [
+            item for item in components if item["component_key"] == "media_placement"
+        ]
+        assert media_components
+        for media in media_components:
+            bindings = media["input_bindings"]
+            target_index = next(
+                index
+                for index, item in enumerate(components)
+                if item["instance_key"]
+                == bindings["target_component_instance_key"]
+            )
+            media_index = components.index(media)
+            assert media_index > target_index
+            assert all(
+                item["component_key"] == "media_placement"
+                and item["input_bindings"]["target_component_instance_key"]
+                == bindings["target_component_instance_key"]
+                for item in components[target_index + 1 : media_index + 1]
+            )
+            assert media["region"] == bindings["target_region"]
+            requirement = session.get(
+                PlannedPageMediaRequirement,
+                bindings["media_requirement_id"],
+            )
+            assert requirement is not None
+            assert bindings["target_component_key"] == requirement.component_or_section
+
+        requirements = composition.source_snapshot["page_media"]["requirements"]
+        assert all(item["component_contract_version"] == 1 for item in requirements)
+        session.add(
+            SemanticComponentDefinition(
+                component_key="hero",
+                contract_version=2,
+                purpose="Purpose for the updated governed hero contract.",
+                required_inputs=CONTRACTS["hero"][0],
+                customer_outcome="Customer outcome for the updated hero contract.",
+                compatible_page_types=["all"],
+                supported_variants=CONTRACTS["hero"][2],
+                accessibility_requirements=["Provide an accessible responsive hero."],
+                status="active",
+            )
+        )
+        session.commit()
+
+        stale_refresh = refresh_site_plan_compositions(session, plan.id)
+        assert stale_refresh.compositions == []
+        assert all(
+            "Page Media planning suggestions are stale" in item["reason"]
+            for item in stale_refresh.blocked
+        )
+        updated_workspace = refresh_site_plan_media_suggestions(session, plan.id)
+        assert updated_workspace.planning_record is not None
+        for placement in updated_workspace.placements:
+            suggestion = placement.suggestion
+            assert suggestion is not None
+            decide_media_placement(
+                session,
+                plan.id,
+                PageMediaPlacementDecisionRequest(
+                    website_id=website.id,
+                    site_plan_id=plan.id,
+                    planned_page_id=placement.planned_page.id,
+                    placement_key=suggestion["placement_key"],
+                    requirement_state="advisory",
+                    decided_by="Composition Media Operator",
+                    rationale="Reapprove the exact placement after its component contract changed.",
+                    expected_planning_version=updated_workspace.planning_record.version,
+                    source_suggestion_key=suggestion["suggestion_key"],
+                ),
+            )
+        refreshed = refresh_site_plan_compositions(session, plan.id)
+        assert refreshed.blocked == []
+        refreshed_service = next(
+            item
+            for item in refreshed.compositions
+            if item.planned_page_id == service_page.id
+        )
+        refreshed_requirements = refreshed_service.source_snapshot["page_media"][
+            "requirements"
+        ]
+        hero_requirement = next(
+            item
+            for item in refreshed_requirements
+            if item["component_or_section"] == "hero"
+        )
+        assert hero_requirement["component_contract_version"] == 2

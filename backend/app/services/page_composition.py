@@ -17,6 +17,7 @@ from app.models import (
     PageComposition,
     PageImageAssignment,
     PlannedPage,
+    PlannedPageMediaRequirement,
     SemanticComponentDefinition,
     Service,
     SitePlan,
@@ -219,6 +220,11 @@ def _compose(session: Session, plan: SitePlan, planned: PlannedPage) -> tuple[Pa
         raise PageCompositionError("Generated draft is missing or crosses the Website boundary.")
     if generated.page_type not in ALL_PAGE_TYPES:
         raise PageCompositionError(f"Unsupported page type: {generated.page_type}.")
+    from app.services.page_media_planning import validate_required_media_for_page
+
+    media_errors = validate_required_media_for_page(session, planned)
+    if media_errors:
+        raise PageCompositionError(" ".join(media_errors))
     snapshot = _source_snapshot(session, plan, planned, generated)
     source_hash = _hash(snapshot)
     components = _generate_components(session, plan, planned, generated)
@@ -300,21 +306,51 @@ def _generate_components(session: Session, plan: SitePlan, planned: PlannedPage,
     for index, section in enumerate(sections):
         key = "service_summary" if index == 0 and planned.page_type in {"service", "county", "city_service"} else "content_section"
         add(key, "main", {"generated_page_id": generated.id, "section_key": section["key"]}, "muted" if index % 2 else "default", section["key"])
-    assignments = list(session.exec(select(PageImageAssignment).where(
-        PageImageAssignment.generated_page_id == generated.id,
-        PageImageAssignment.status == "active",
-    ).order_by(PageImageAssignment.sort_order, PageImageAssignment.id)).all())
-    for assignment in assignments:
-        add(
-            "media_placement",
-            "main",
-            {"page_image_assignment_id": assignment.id},
-            "approved_media",
-            f"assignment-{assignment.id}",
-        )
-    for placement in draft.get("image_placements", []) if isinstance(draft, dict) else []:
-        if isinstance(placement, dict) and placement.get("key"):
-            add("media_placement", "main", {"generated_page_id": generated.id, "placement_key": placement["key"]}, "placeholder", str(placement["key"]))
+    from app.services.page_media_planning import (
+        effective_media_requirements,
+        governed_assignment_for_requirement,
+    )
+
+    media_requirements = effective_media_requirements(session, planned.id or 0)
+    if media_requirements:
+        for requirement in media_requirements:
+            if requirement.requirement_state in {"excluded", "deferred"}:
+                continue
+            assignment = governed_assignment_for_requirement(
+                session,
+                requirement.id or 0,
+            )
+            bindings: dict[str, Any] = {
+                "media_requirement_id": requirement.id,
+                "target_component_key": requirement.component_or_section,
+            }
+            if assignment:
+                bindings["page_image_assignment_id"] = assignment.id
+            add(
+                "media_placement",
+                "main",
+                bindings,
+                "approved_media" if assignment else "placeholder",
+                f"requirement-{requirement.id}",
+            )
+    else:
+        # Preserve legacy compositions exactly until an operator creates a governed
+        # Page Media plan for this Site Plan.
+        assignments = list(session.exec(select(PageImageAssignment).where(
+            PageImageAssignment.generated_page_id == generated.id,
+            PageImageAssignment.status == "active",
+        ).order_by(PageImageAssignment.sort_order, PageImageAssignment.id)).all())
+        for assignment in assignments:
+            add(
+                "media_placement",
+                "main",
+                {"page_image_assignment_id": assignment.id},
+                "approved_media",
+                f"assignment-{assignment.id}",
+            )
+        for placement in draft.get("image_placements", []) if isinstance(draft, dict) else []:
+            if isinstance(placement, dict) and placement.get("key"):
+                add("media_placement", "main", {"generated_page_id": generated.id, "placement_key": placement["key"]}, "placeholder", str(placement["key"]))
     approved_links = _approved_links(session, plan, planned)
     draft_related_pages = _approved_draft_related_pages(session, plan, planned, generated)
     if approved_links or draft_related_pages:
@@ -339,7 +375,49 @@ def _generate_components(session: Session, plan: SitePlan, planned: PlannedPage,
     _require_authoritative_navigation_set(footer, plan)
     add("footer_navigation", "footer", {"navigation_set_id": footer.id})
     add("website_footer", "footer", {"website_id": plan.website_id})
-    return items
+    return _bind_governed_media_regions(items)
+
+
+def _bind_governed_media_regions(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    governed_media: list[dict[str, Any]] = []
+    base_items: list[dict[str, Any]] = []
+    for item in items:
+        bindings = item.get("input_bindings") or {}
+        if (
+            item.get("component_key") == "media_placement"
+            and bindings.get("media_requirement_id")
+        ):
+            governed_media.append(item)
+        else:
+            base_items.append(item)
+
+    media_by_target: dict[str, list[dict[str, Any]]] = {}
+    for media in governed_media:
+        bindings = media["input_bindings"]
+        target_key = bindings.get("target_component_key")
+        candidates = [
+            item for item in base_items if item.get("component_key") == target_key
+        ]
+        if not candidates:
+            raise PageCompositionError(
+                "Approved Page Media placement cannot resolve its semantic component or region: "
+                f"{target_key}."
+            )
+        target = candidates[-1]
+        bindings["target_component_instance_key"] = target["instance_key"]
+        bindings["target_region"] = target["region"]
+        media["region"] = target["region"]
+        media_by_target.setdefault(target["instance_key"], []).append(media)
+
+    ordered: list[dict[str, Any]] = []
+    for item in base_items:
+        ordered.append(item)
+        ordered.extend(media_by_target.get(item["instance_key"], []))
+    for position, item in enumerate(ordered):
+        item["position"] = position
+    return ordered
 
 
 def _read(session: Session, composition: PageComposition, *, require_current: bool) -> PageCompositionRead:
@@ -391,6 +469,9 @@ def _validate(session: Session, composition: PageComposition, plan: SitePlan, pl
         errors.append("Composition crosses a Website ownership boundary.")
     if composition.site_plan_id != planned.site_plan_id or composition.generated_page_id != planned.generated_page_id:
         errors.append("Composition source relationships do not match.")
+    from app.services.page_media_planning import validate_required_media_for_page
+
+    errors.extend(validate_required_media_for_page(session, planned))
     try:
         _active_identity_assets(session, plan.website_id)
     except PageCompositionError as exc:
@@ -472,17 +553,52 @@ def _available_inputs(session: Session, plan: SitePlan, planned: PlannedPage, ge
     placement_keys = {value.get("key") for value in draft.get("image_placements", []) if isinstance(value, dict)}
     if bindings.get("placement_key") in placement_keys:
         available.add("media_placement")
+    requirement_id = bindings.get("media_requirement_id")
+    requirement = None
+    if requirement_id:
+        requirement = session.get(PlannedPageMediaRequirement, requirement_id)
+        if (
+            requirement
+            and requirement.website_id == plan.website_id
+            and requirement.site_plan_id == plan.id
+            and requirement.planned_page_id == planned.id
+            and requirement.lifecycle_status == "active"
+            and requirement.requirement_state in {"required", "advisory"}
+            and bindings.get("target_component_key")
+            == requirement.component_or_section
+        ):
+            available.add("media_placement")
     assignment_id = bindings.get("page_image_assignment_id")
     if assignment_id:
         assignment = session.get(PageImageAssignment, assignment_id)
         image = session.get(ImageMetadata, assignment.image_metadata_id) if assignment else None
+        governed_binding_valid = (
+            requirement is not None
+            and assignment is not None
+            and assignment.media_requirement_id == requirement.id
+            and assignment.website_id == plan.website_id
+            and assignment.site_plan_id == plan.id
+            and assignment.planned_page_id == planned.id
+            and image is not None
+            and assignment.media_version == image.media_version
+            and assignment.placement_contract_version == requirement.contract_version
+            and image.website_id == plan.website_id
+            and image.governance_status == "approved"
+            and image.retired_at is None
+        )
+        legacy_binding_valid = (
+            requirement is None
+            and assignment is not None
+            and image is not None
+            and image.review_status == "reviewed"
+        )
         if (
             assignment
             and assignment.generated_page_id == generated.id
             and assignment.status == "active"
             and image
             and image.business_id == generated.business_id
-            and image.review_status == "reviewed"
+            and (governed_binding_valid or legacy_binding_valid)
         ):
             available.add("media_placement")
     nav_id = bindings.get("navigation_set_id")
@@ -876,15 +992,65 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
             )
             image = session.get(ImageMetadata, assignment.image_metadata_id) if assignment else None
             if assignment and image:
+                requirement = (
+                    session.get(
+                        PlannedPageMediaRequirement,
+                        bindings["media_requirement_id"],
+                    )
+                    if bindings.get("media_requirement_id")
+                    else None
+                )
                 data = {
-                    "purpose": assignment.image_role.replace("_", " ").title(),
+                    "purpose": (
+                        requirement.purpose
+                        if requirement
+                        else assignment.image_role.replace("_", " ").title()
+                    ),
+                    "customer_outcome": requirement.customer_outcome if requirement else None,
+                    "placement_key": requirement.placement_key if requirement else None,
+                    "component_or_section": (
+                        requirement.component_or_section if requirement else None
+                    ),
+                    "target_component_instance_key": bindings.get(
+                        "target_component_instance_key"
+                    ),
+                    "target_region": bindings.get("target_region"),
+                    "media_requirement_id": requirement.id if requirement else None,
+                    "placement_contract_version": (
+                        requirement.contract_version if requirement else None
+                    ),
                     "image_role": assignment.image_role,
                     "asset_url": image.optimized_url or image.asset_url,
                     "alt_text": assignment.override_alt_text or image.reviewed_alt_text or image.alt_text,
                     "image_title": image.image_title,
                     "caption": image.caption,
+                    "media_key": image.media_key,
+                    "media_version": image.media_version,
+                    "provenance_type": image.provenance_type,
+                    "rights_status": image.rights_status,
                     "focal_x": assignment.override_focal_x if assignment.override_focal_x is not None else image.focal_x,
                     "focal_y": assignment.override_focal_y if assignment.override_focal_y is not None else image.focal_y,
+                }
+        elif bindings.get("media_requirement_id"):
+            requirement = session.get(
+                PlannedPageMediaRequirement,
+                bindings["media_requirement_id"],
+            )
+            if requirement:
+                data = {
+                    "purpose": requirement.purpose,
+                    "customer_outcome": requirement.customer_outcome,
+                    "placement_key": requirement.placement_key,
+                    "component_or_section": requirement.component_or_section,
+                    "target_component_instance_key": bindings.get(
+                        "target_component_instance_key"
+                    ),
+                    "target_region": bindings.get("target_region"),
+                    "intended_subject": requirement.intended_subject,
+                    "accessibility_intent": requirement.accessibility_intent,
+                    "requirement_state": requirement.requirement_state,
+                    "media_requirement_id": requirement.id,
+                    "placement_contract_version": requirement.contract_version,
                 }
         else:
             data = next(value for value in draft.get("image_placements", []) if value.get("key") == bindings["placement_key"])
@@ -1077,6 +1243,11 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
             }
             for slot, asset in sorted(identity_assets.items())
         ]
+    from app.services.page_media_planning import media_source_snapshot
+
+    page_media = media_source_snapshot(session, planned)
+    if page_media["planning_record"] is not None or page_media["requirements"]:
+        snapshot["page_media"] = page_media
     return snapshot
 
 

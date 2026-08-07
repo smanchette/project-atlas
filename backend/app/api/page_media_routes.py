@@ -4,7 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
 from app.db.session import get_session
-from app.models import GeneratedPage, ImageMetadata, PageImageAssignment
+from app.models import (
+    GeneratedPage,
+    ImageMetadata,
+    PageImageAssignment,
+    PlannedPage,
+    WebsiteMediaPlanningRecord,
+)
 from app.schemas.entities import ImageMetadataRead
 from app.schemas.media import (
     AssignedMediaRead,
@@ -59,6 +65,7 @@ def create_page_media(
     session: Session = Depends(get_session),
 ) -> AssignedMediaRead:
     page = _get_page(session, page_id)
+    _require_legacy_page_media_workflow(session, page)
     role = _normalize_role(payload.image_role)
     image = _get_compatible_image(session, page, payload.image_metadata_id)
     _ensure_not_duplicate(session, page_id, image.id or 0, role)
@@ -99,7 +106,9 @@ def update_page_media(
     session: Session = Depends(get_session),
 ) -> AssignedMediaRead:
     page = _get_page(session, page_id)
+    _require_legacy_page_media_workflow(session, page)
     assignment = _get_assignment(session, page_id, assignment_id)
+    _require_legacy_assignment_mutation(assignment)
     updates = payload.model_dump(exclude_unset=True)
     if "display_preset" in updates:
         assignment.display_preset = _normalize_preset(
@@ -128,7 +137,9 @@ def remove_page_media_assignment(
     session: Session = Depends(get_session),
 ) -> dict[str, bool]:
     page = _get_page(session, page_id)
+    _require_legacy_page_media_workflow(session, page)
     assignment = _get_assignment(session, page_id, assignment_id)
+    _require_legacy_assignment_mutation(assignment)
     _invalidate_page_qa(page)
     session.add(page)
     session.delete(assignment)
@@ -145,6 +156,7 @@ def reorder_page_media(
 ) -> list[AssignedMediaRead]:
     role = _normalize_role(image_role)
     page = _get_page(session, page_id)
+    _require_legacy_page_media_workflow(session, page)
     assignments = session.exec(
         select(PageImageAssignment).where(
             PageImageAssignment.generated_page_id == page_id,
@@ -152,6 +164,8 @@ def reorder_page_media(
             PageImageAssignment.status == "active",
         )
     ).all()
+    for assignment in assignments:
+        _require_legacy_assignment_mutation(assignment)
     assignment_by_id = {
         assignment.id: assignment
         for assignment in assignments
@@ -188,6 +202,7 @@ def assign_page_media(
 ) -> AssignedMediaRead:
     role = _normalize_role(image_role)
     page = _get_page(session, page_id)
+    _require_legacy_page_media_workflow(session, page)
     image = _get_compatible_image(session, page, payload.image_metadata_id)
 
     if role == "hero":
@@ -198,6 +213,7 @@ def assign_page_media(
             )
         ).first()
         if assignment:
+            _require_legacy_assignment_mutation(assignment)
             duplicate = session.exec(
                 select(PageImageAssignment).where(
                     PageImageAssignment.generated_page_id == page_id,
@@ -232,6 +248,7 @@ def assign_page_media(
             )
         ).first()
         if existing:
+            _require_legacy_assignment_mutation(existing)
             return _serialize_assignment(session, existing)
         assignment = PageImageAssignment(
             generated_page_id=page_id,
@@ -258,6 +275,7 @@ def remove_page_media(
 ) -> dict[str, bool]:
     role = _normalize_role(image_role)
     page = _get_page(session, page_id)
+    _require_legacy_page_media_workflow(session, page)
     assignment = session.exec(
         select(PageImageAssignment)
         .where(
@@ -268,6 +286,7 @@ def remove_page_media(
     ).first()
     if not assignment:
         raise HTTPException(status_code=404, detail="Page media assignment not found")
+    _require_legacy_assignment_mutation(assignment)
     _invalidate_page_qa(page)
     session.add(page)
     session.delete(assignment)
@@ -280,6 +299,32 @@ def _get_page(session: Session, page_id: int) -> GeneratedPage:
     if not page:
         raise HTTPException(status_code=404, detail="Generated page not found")
     return page
+
+
+def _require_legacy_page_media_workflow(
+    session: Session,
+    page: GeneratedPage,
+) -> None:
+    planned_page = session.exec(
+        select(PlannedPage).where(
+            PlannedPage.generated_page_id == page.id,
+        )
+    ).first()
+    if planned_page is None:
+        return
+    planning_record = session.exec(
+        select(WebsiteMediaPlanningRecord).where(
+            WebsiteMediaPlanningRecord.site_plan_id == planned_page.site_plan_id,
+        )
+    ).first()
+    if planning_record is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Governed page-media assignments must use the Website-scoped Page Media "
+                "workspace after a media plan exists for this Site Plan."
+            ),
+        )
 
 
 def _get_assignment(
@@ -375,6 +420,24 @@ def _validate_image_for_page(
     page: GeneratedPage,
     image: ImageMetadata,
 ) -> None:
+    governed_identity = any(
+        value is not None
+        for value in (
+            image.website_id,
+            image.media_key,
+            image.media_version,
+            image.managed_storage_path,
+            image.approval_version,
+        )
+    )
+    if image.governance_status != "legacy_unverified" or governed_identity:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Governed page media must be assigned through its Website-scoped "
+                "media requirement."
+            ),
+        )
     if image.business_id != page.business_id:
         raise HTTPException(status_code=409, detail="Image belongs to a different business")
     if image.service_id is not None and image.service_id != page.service_id:
@@ -436,6 +499,29 @@ def _serialize_assignment(
 def _clean_optional(value: str | None) -> str | None:
     cleaned = value.strip() if value else ""
     return cleaned or None
+
+
+def _require_legacy_assignment_mutation(assignment: PageImageAssignment) -> None:
+    governed_binding = any(
+        value is not None
+        for value in (
+            assignment.website_id,
+            assignment.site_plan_id,
+            assignment.planned_page_id,
+            assignment.media_requirement_id,
+            assignment.assignment_version,
+            assignment.media_version,
+            assignment.placement_contract_version,
+        )
+    )
+    if governed_binding:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Governed page-media assignments cannot be changed through the legacy "
+                "Generated Page media endpoint. Use the Website-scoped page-media workflow."
+            ),
+        )
 
 
 def _invalidate_page_qa(page: GeneratedPage) -> None:

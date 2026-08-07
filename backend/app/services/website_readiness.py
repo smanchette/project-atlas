@@ -805,6 +805,153 @@ def _website_category(
                 ),
             ]
         )
+    from app.services.page_media_planning import (
+        PageMediaPlanningError,
+        read_page_media_workspace,
+    )
+
+    try:
+        media = read_page_media_workspace(session, plan.id or 0)
+    except PageMediaPlanningError as exc:
+        items.append(
+            WebsiteReadinessItem(
+                key="page_media_foundation",
+                label="Page Media planning and provenance",
+                status="needs_attention",
+                message=f"Page Media validation failed closed: {exc}",
+            )
+        )
+    else:
+        no_plan_ids = sorted(
+            {
+                placement.planned_page.id
+                for placement in media.placements
+                if placement.readiness == "missing_plan"
+            }
+        )
+        undecided_ids = sorted(
+            {
+                placement.planned_page.id
+                for placement in media.placements
+                if placement.effective_requirement is None
+                and placement.suggestion is not None
+            }
+        )
+        missing_required_ids = sorted(
+            {
+                placement.planned_page.id
+                for placement in media.placements
+                if placement.effective_requirement is not None
+                and placement.effective_requirement.requirement_state == "required"
+                and placement.active_assignment is None
+            }
+        )
+        incompatible_ids = sorted(
+            {
+                placement.planned_page.id
+                for placement in media.placements
+                if placement.active_assignment is not None
+                and placement.blocking_reasons
+            }
+        )
+        stale_ids = sorted(
+            {
+                placement.planned_page.id
+                for placement in media.placements
+                if placement.composition_status == "stale"
+            }
+        )
+        incomplete_asset_count = media.summary.incomplete_governance
+        page_type_summary = ", ".join(
+            f"{page_type}: {values.get('ready', 0)}/{values.get('pages', 0)} ready"
+            for page_type, values in sorted(media.summary.page_type_coverage.items())
+        ) or "No page-type media coverage is available."
+        items.extend(
+            [
+                WebsiteReadinessItem(
+                    key="page_media_plan_coverage",
+                    label="Page Media plan coverage",
+                    status="ready" if not no_plan_ids else "needs_attention",
+                    message=(
+                        f"All {media.summary.planned_pages} Planned Pages have a current media plan."
+                        if not no_plan_ids
+                        else f"{len(no_plan_ids)} Planned Page(s) have no current Page Media plan."
+                    ),
+                    affected_planned_page_ids=no_plan_ids,
+                ),
+                WebsiteReadinessItem(
+                    key="page_media_operator_decisions",
+                    label="Page Media operator decisions",
+                    status="ready" if not undecided_ids else "needs_attention",
+                    message=(
+                        "Every Atlas media suggestion has an explicit operator decision."
+                        if not undecided_ids
+                        else "One or more Atlas media suggestions still require an operator decision."
+                    ),
+                    affected_planned_page_ids=undecided_ids,
+                ),
+                WebsiteReadinessItem(
+                    key="page_media_required_assignments",
+                    label="Required Page Media assignments",
+                    status="ready" if not missing_required_ids else "needs_attention",
+                    message=(
+                        f"All {media.summary.required_placements} required placements have approved assignments."
+                        if not missing_required_ids
+                        else f"{media.summary.missing_required_media} required placement(s) lack approved media."
+                    ),
+                    affected_planned_page_ids=missing_required_ids,
+                ),
+                WebsiteReadinessItem(
+                    key="page_media_provenance_rights",
+                    label="Page Media provenance and rights",
+                    status="ready" if incomplete_asset_count == 0 else "needs_attention",
+                    message=(
+                        "Every media asset observed in this Site Plan has complete governed provenance and rights."
+                        if incomplete_asset_count == 0
+                        else f"{incomplete_asset_count} media asset(s) remain legacy or governance-incomplete."
+                    ),
+                ),
+                WebsiteReadinessItem(
+                    key="page_media_assignment_compatibility",
+                    label="Page Media assignment compatibility",
+                    status="ready" if not incompatible_ids else "needs_attention",
+                    message=(
+                        "Every governed assignment matches its Website, placement, page type, technical contract, and approved use."
+                        if not incompatible_ids
+                        else "One or more governed assignments are incompatible or cross a protected boundary."
+                    ),
+                    affected_planned_page_ids=incompatible_ids,
+                ),
+                WebsiteReadinessItem(
+                    key="page_media_composition_freshness",
+                    label="Page Media composition freshness",
+                    status="ready" if not stale_ids else "needs_attention",
+                    message=(
+                        "Compositions are current for exact Page Media plan, placement, assignment, and media versions."
+                        if not stale_ids
+                        else "One or more compositions are stale because governed Page Media changed."
+                    ),
+                    affected_planned_page_ids=stale_ids,
+                ),
+                WebsiteReadinessItem(
+                    key="page_media_page_type_coverage",
+                    label="Page Media coverage by page type",
+                    status=(
+                        "ready"
+                        if media.summary.pages_media_ready == media.summary.planned_pages
+                        else "needs_attention"
+                    ),
+                    message=page_type_summary,
+                    affected_planned_page_ids=sorted(
+                        {
+                            placement.planned_page.id
+                            for placement in media.placements
+                            if placement.blocking_reasons
+                        }
+                    ),
+                ),
+            ]
+        )
     return _category("website_readiness", "Website Readiness", items)
 
 
@@ -817,12 +964,6 @@ def _future_category() -> WebsiteReadinessCategory:
             message=message,
         )
         for key, label, status, message in (
-            (
-                "media",
-                "Page-media planning and provenance",
-                "deferred",
-                "Deferred to a separately approved page-media milestone; not a current failure.",
-            ),
             (
                 "media_ingestion",
                 "Media ingestion and generation",

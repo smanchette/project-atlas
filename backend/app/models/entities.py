@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, Column, JSON, UniqueConstraint
+from sqlalchemy import CheckConstraint, Column, Index, JSON, UniqueConstraint, text
 from sqlmodel import Field, SQLModel
 
 
@@ -346,6 +346,141 @@ class PlanningRecord(TimestampMixin, table=True):
     )
     generated_at: datetime = Field(default_factory=utc_now, nullable=False)
     reviewed_at: datetime | None = None
+
+
+class WebsiteMediaPlanningRecord(TimestampMixin, table=True):
+    """Versioned Atlas-generated page-media suggestions for one Website Site Plan."""
+
+    __table_args__ = (
+        CheckConstraint(
+            "version >= 1",
+            name="ck_websitemediaplanningrecord_version",
+        ),
+        UniqueConstraint(
+            "site_plan_id",
+            "version",
+            name="uq_websitemediaplanningrecord_plan_version",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    business_id: int = Field(foreign_key="business.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    version: int = Field(default=1, ge=1)
+    algorithm_version: str = Field(max_length=80, index=True)
+    generated_media_suggestions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    source_snapshot: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    source_hash: str = Field(max_length=64, index=True)
+    generated_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    replaces_record_id: int | None = Field(
+        default=None,
+        foreign_key="websitemediaplanningrecord.id",
+        index=True,
+    )
+
+
+class PlannedPageMediaRequirement(TimestampMixin, table=True):
+    """One versioned, operator-governed media placement contract for a Planned Page."""
+
+    __table_args__ = (
+        CheckConstraint(
+            "contract_version >= 1",
+            name="ck_plannedpagemediarequirement_contract_version",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_plannedpagemediarequirement_version",
+        ),
+        CheckConstraint(
+            "minimum_width >= 1",
+            name="ck_plannedpagemediarequirement_minimum_width",
+        ),
+        CheckConstraint(
+            "minimum_height >= 1",
+            name="ck_plannedpagemediarequirement_minimum_height",
+        ),
+        CheckConstraint(
+            "requirement_state IN ('required','advisory','excluded','deferred')",
+            name="ck_plannedpagemediarequirement_state",
+        ),
+        CheckConstraint(
+            "lifecycle_status IN ('active','superseded','retired')",
+            name="ck_plannedpagemediarequirement_lifecycle",
+        ),
+        CheckConstraint(
+            "(version = 1 AND replaces_requirement_id IS NULL) "
+            "OR (version > 1 AND replaces_requirement_id IS NOT NULL)",
+            name="ck_plannedpagemediarequirement_replacement",
+        ),
+        UniqueConstraint(
+            "planned_page_id",
+            "placement_key",
+            "version",
+            name="uq_plannedpagemediarequirement_page_key_version",
+        ),
+        Index(
+            "uq_plannedpagemediarequirement_active_placement",
+            "planned_page_id",
+            "placement_key",
+            unique=True,
+            postgresql_where=text("lifecycle_status = 'active'"),
+            sqlite_where=text("lifecycle_status = 'active'"),
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    business_id: int = Field(foreign_key="business.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    planned_page_id: int = Field(foreign_key="plannedpage.id", index=True)
+    planning_record_id: int = Field(
+        foreign_key="websitemediaplanningrecord.id",
+        index=True,
+    )
+    component_or_section: str = Field(max_length=120, index=True)
+    placement_key: str = Field(max_length=120, index=True)
+    contract_version: int = Field(default=1, ge=1)
+    version: int = Field(default=1, ge=1)
+    requirement_state: str = Field(index=True)
+    purpose: str
+    customer_outcome: str
+    intended_subject: str
+    orientation: str = Field(max_length=40)
+    aspect_ratio: str = Field(max_length=40)
+    minimum_width: int = Field(ge=1)
+    minimum_height: int = Field(ge=1)
+    crop_intent: str
+    focal_point_intent: str
+    responsive_behavior: str
+    accessibility_intent: str
+    caption_intent: str | None = None
+    approved_source_constraints: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    permitted_reuse_policy: str
+    replacement_policy: str
+    compatible_page_types: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    source_suggestion_key: str | None = Field(default=None, max_length=200)
+    decided_by: str = Field(max_length=160)
+    rationale: str
+    decided_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    lifecycle_status: str = Field(default="active", max_length=24, index=True)
+    replaces_requirement_id: int | None = Field(
+        default=None,
+        foreign_key="plannedpagemediarequirement.id",
+        index=True,
+    )
 
 
 class SiteConnectionPlanningRecord(TimestampMixin, table=True):
@@ -1159,13 +1294,84 @@ class ImageMetadata(TimestampMixin, table=True):
     __table_args__ = (
         CheckConstraint("focal_x >= 0 AND focal_x <= 1", name="ck_imagemetadata_focal_x_range"),
         CheckConstraint("focal_y >= 0 AND focal_y <= 1", name="ck_imagemetadata_focal_y_range"),
+        CheckConstraint(
+            "governance_status IN ('legacy_unverified','pending_review','approved','rejected','retired')",
+            name="ck_imagemetadata_governance_status",
+        ),
+        CheckConstraint(
+            "gps_metadata_status IS NULL OR gps_metadata_status IN "
+            "('absent','stripped','present_unverified','verified_authorized')",
+            name="ck_imagemetadata_gps_status",
+        ),
+        CheckConstraint(
+            "media_version IS NULL OR media_version >= 1",
+            name="ck_imagemetadata_media_version",
+        ),
+        CheckConstraint(
+            "approval_version IS NULL OR approval_version >= 1",
+            name="ck_imagemetadata_approval_version",
+        ),
+        CheckConstraint(
+            "(media_version IS NULL AND replaces_image_metadata_id IS NULL) OR "
+            "(media_version = 1 AND replaces_image_metadata_id IS NULL) OR "
+            "(media_version > 1 AND replaces_image_metadata_id IS NOT NULL)",
+            name="ck_imagemetadata_replacement",
+        ),
+        CheckConstraint(
+            "(file_size IS NULL AND width IS NULL AND height IS NULL "
+            "AND mime_type IS NULL AND checksum_sha256 IS NULL) OR "
+            "(file_size >= 1 AND width >= 1 AND height >= 1 "
+            "AND mime_type IS NOT NULL AND checksum_sha256 IS NOT NULL "
+            "AND length(checksum_sha256) = 64)",
+            name="ck_imagemetadata_binary_identity",
+        ),
+        CheckConstraint(
+            "governance_status = 'legacy_unverified' OR "
+            "(website_id IS NOT NULL AND media_key IS NOT NULL "
+            "AND media_version IS NOT NULL AND managed_storage_path IS NOT NULL "
+            "AND acquisition_source IS NOT NULL AND creator_source_identity IS NOT NULL "
+            "AND provenance_type IS NOT NULL AND provenance_notes IS NOT NULL "
+            "AND rights_status IS NOT NULL AND rights_holder IS NOT NULL "
+            "AND rights_notes IS NOT NULL AND approved_usage IS NOT NULL "
+            "AND prohibited_usage IS NOT NULL AND permitted_placement_keys IS NOT NULL "
+            "AND accessibility_intent IS NOT NULL AND created_by IS NOT NULL "
+            "AND file_size IS NOT NULL)",
+            name="ck_imagemetadata_governed_completeness",
+        ),
+        CheckConstraint(
+            "governance_status NOT IN ('approved','retired') OR "
+            "(approval_version IS NOT NULL AND approved_by IS NOT NULL "
+            "AND approved_at IS NOT NULL)",
+            name="ck_imagemetadata_approval_provenance",
+        ),
+        CheckConstraint(
+            "governance_status != 'retired' OR "
+            "(retired_by IS NOT NULL AND retirement_rationale IS NOT NULL "
+            "AND retired_at IS NOT NULL)",
+            name="ck_imagemetadata_retirement_provenance",
+        ),
+        CheckConstraint(
+            "gps_metadata_status != 'verified_authorized' OR "
+            "(gps_metadata IS NOT NULL AND gps_authorized_by IS NOT NULL "
+            "AND gps_authorized_at IS NOT NULL AND gps_authorization_notes IS NOT NULL)",
+            name="ck_imagemetadata_gps_authorization",
+        ),
+        UniqueConstraint(
+            "website_id",
+            "media_key",
+            "media_version",
+            name="uq_imagemetadata_website_key_version",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
     business_id: int = Field(foreign_key="business.id", index=True)
+    website_id: int | None = Field(default=None, foreign_key="website.id", index=True)
     service_id: int | None = Field(default=None, foreign_key="service.id", index=True)
     city_id: int | None = Field(default=None, foreign_key="city.id", index=True)
     county_id: int | None = Field(default=None, foreign_key="county.id", index=True)
+    media_key: str | None = Field(default=None, max_length=120, index=True)
+    media_version: int | None = Field(default=None, ge=1)
     file_name: str = Field(index=True)
     image_title: str | None = None
     alt_text: str | None = None
@@ -1176,6 +1382,41 @@ class ImageMetadata(TimestampMixin, table=True):
     optimized_url: str | None = None
     original_filename: str | None = None
     stored_filename: str | None = None
+    mime_type: str | None = None
+    file_size: int | None = Field(default=None, ge=1)
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
+    checksum_sha256: str | None = Field(default=None, max_length=64, index=True)
+    managed_storage_path: str | None = None
+    acquisition_source: str | None = None
+    creator_source_identity: str | None = None
+    created_by: str | None = None
+    provenance_type: str | None = Field(default=None, index=True)
+    provenance_notes: str | None = None
+    rights_status: str | None = Field(default=None, index=True)
+    rights_holder: str | None = None
+    rights_notes: str | None = None
+    approved_usage: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    prohibited_usage: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    permitted_placement_keys: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    accessibility_intent: str | None = None
+    governance_status: str = Field(default="legacy_unverified", max_length=32, index=True)
+    approval_version: int | None = Field(default=None, ge=1)
+    approved_by: str | None = None
+    approved_at: datetime | None = Field(default=None, index=True)
+    retired_by: str | None = None
+    retirement_rationale: str | None = None
+    retired_at: datetime | None = Field(default=None, index=True)
+    replaces_image_metadata_id: int | None = Field(
+        default=None,
+        foreign_key="imagemetadata.id",
+        index=True,
+    )
+    gps_metadata_status: str | None = Field(default=None, max_length=32, index=True)
+    gps_metadata: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    gps_authorized_by: str | None = None
+    gps_authorized_at: datetime | None = Field(default=None, index=True)
+    gps_authorization_notes: str | None = None
     notes: str | None = None
     focal_x: float = Field(default=0.5, ge=0, le=1)
     focal_y: float = Field(default=0.5, ge=0, le=1)
@@ -1782,11 +2023,95 @@ class PageImageAssignment(TimestampMixin, table=True):
             "override_focal_y IS NULL OR (override_focal_y >= 0 AND override_focal_y <= 1)",
             name="ck_pageimageassignment_override_focal_y_range",
         ),
+        CheckConstraint(
+            "assignment_version IS NULL OR assignment_version >= 1",
+            name="ck_pageimageassignment_assignment_version",
+        ),
+        CheckConstraint(
+            "media_version IS NULL OR media_version >= 1",
+            name="ck_pageimageassignment_media_version",
+        ),
+        CheckConstraint(
+            "placement_contract_version IS NULL OR placement_contract_version >= 1",
+            name="ck_pageimageassignment_contract_version",
+        ),
+        CheckConstraint(
+            "status IN ('active','replaced','retired')",
+            name="ck_pageimageassignment_status",
+        ),
+        CheckConstraint(
+            "(assignment_version IS NULL AND replaces_page_image_assignment_id IS NULL) OR "
+            "(assignment_version = 1 AND replaces_page_image_assignment_id IS NULL) OR "
+            "(assignment_version > 1 AND replaces_page_image_assignment_id IS NOT NULL)",
+            name="ck_pageimageassignment_replacement",
+        ),
+        CheckConstraint(
+            "(website_id IS NULL AND site_plan_id IS NULL AND planned_page_id IS NULL "
+            "AND media_requirement_id IS NULL AND assignment_version IS NULL "
+            "AND media_version IS NULL AND placement_contract_version IS NULL "
+            "AND assigned_by IS NULL AND assignment_rationale IS NULL "
+            "AND assigned_at IS NULL) OR "
+            "(website_id IS NOT NULL AND site_plan_id IS NOT NULL "
+            "AND planned_page_id IS NOT NULL AND media_requirement_id IS NOT NULL "
+            "AND assignment_version IS NOT NULL AND media_version IS NOT NULL "
+            "AND placement_contract_version IS NOT NULL AND assigned_by IS NOT NULL "
+            "AND assignment_rationale IS NOT NULL AND assigned_at IS NOT NULL)",
+            name="ck_pageimageassignment_governed_binding",
+        ),
+        CheckConstraint(
+            "status != 'replaced' OR "
+            "(replaced_by IS NOT NULL AND replacement_rationale IS NOT NULL "
+            "AND replaced_at IS NOT NULL)",
+            name="ck_pageimageassignment_replacement_provenance",
+        ),
+        CheckConstraint(
+            "status != 'retired' OR "
+            "(retired_by IS NOT NULL AND retirement_rationale IS NOT NULL "
+            "AND retired_at IS NOT NULL)",
+            name="ck_pageimageassignment_retirement_provenance",
+        ),
+        UniqueConstraint(
+            "media_requirement_id",
+            "assignment_version",
+            name="uq_pageimageassignment_requirement_version",
+        ),
+        Index(
+            "uq_pageimageassignment_active_requirement",
+            "media_requirement_id",
+            unique=True,
+            postgresql_where=text("status = 'active' AND media_requirement_id IS NOT NULL"),
+            sqlite_where=text("status = 'active' AND media_requirement_id IS NOT NULL"),
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
     generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
     image_metadata_id: int = Field(foreign_key="imagemetadata.id", index=True)
+    website_id: int | None = Field(default=None, foreign_key="website.id", index=True)
+    site_plan_id: int | None = Field(default=None, foreign_key="siteplan.id", index=True)
+    planned_page_id: int | None = Field(default=None, foreign_key="plannedpage.id", index=True)
+    media_requirement_id: int | None = Field(
+        default=None,
+        foreign_key="plannedpagemediarequirement.id",
+        index=True,
+    )
+    assignment_version: int | None = Field(default=None, ge=1)
+    media_version: int | None = Field(default=None, ge=1)
+    placement_contract_version: int | None = Field(default=None, ge=1)
+    assigned_by: str | None = None
+    assignment_rationale: str | None = None
+    assigned_at: datetime | None = Field(default=None, index=True)
+    replaced_by: str | None = None
+    replacement_rationale: str | None = None
+    replaced_at: datetime | None = Field(default=None, index=True)
+    retired_by: str | None = None
+    retirement_rationale: str | None = None
+    retired_at: datetime | None = Field(default=None, index=True)
+    replaces_page_image_assignment_id: int | None = Field(
+        default=None,
+        foreign_key="pageimageassignment.id",
+        index=True,
+    )
     image_role: str = Field(default="hero", index=True)
     sort_order: int = Field(default=0)
     override_focal_x: float | None = Field(default=None, ge=0, le=1)

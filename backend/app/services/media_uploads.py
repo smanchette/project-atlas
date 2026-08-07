@@ -187,6 +187,41 @@ def inspect_managed_original(stored_filename: str, settings: Settings) -> Manage
     )
 
 
+def managed_original_contains_gps(stored_filename: str, settings: Settings) -> bool:
+    """Return whether an intact managed original contains an EXIF GPS directory.
+
+    The check deliberately reports presence only. It neither copies location values into
+    Atlas nor treats their presence as authorization to retain or use them. Callers must
+    record a separate, explicit operator decision before any verified GPS data can become
+    governed media metadata.
+    """
+
+    # Reuse the complete fail-closed binary/path validation before opening the original
+    # for metadata inspection.
+    inspect_managed_original(stored_filename, settings)
+    originals_root = (settings.media_root.resolve() / "originals").resolve()
+    original_path = (originals_root / stored_filename).resolve()
+    if original_path.parent != originals_root or not original_path.is_relative_to(originals_root):
+        raise HTTPException(status_code=422, detail="Managed original filename is unsafe")
+    try:
+        with Image.open(original_path) as image:
+            exif = image.getexif()
+            if not exif or 34853 not in exif:  # 34853 is the EXIF GPSInfo tag.
+                return False
+            try:
+                gps_values = exif.get_ifd(34853)
+            except (KeyError, TypeError, ValueError, SyntaxError):
+                return True
+            return bool(gps_values) or exif.get(34853) is not None
+    except HTTPException:
+        raise
+    except (Image.DecompressionBombError, UnidentifiedImageError, OSError, SyntaxError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Managed original metadata could not be inspected",
+        ) from exc
+
+
 def is_safe_image_filename(filename: str) -> bool:
     return bool(
         filename

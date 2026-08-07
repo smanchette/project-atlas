@@ -1,4 +1,5 @@
 import argparse
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
@@ -32,6 +33,7 @@ from app.models import (
     PageComposition,
     PageImageAssignment,
     PlannedPage,
+    PlannedPageMediaRequirement,
     PlanningRecord,
     PreDraftDistinctnessBrief,
     SiteConnectionPlanningRecord,
@@ -47,6 +49,7 @@ from app.models import (
     WebsiteCoveragePlanningRecord,
     WebsiteIdentity,
     WebsiteIdentityAssetAssignment,
+    WebsiteMediaPlanningRecord,
     WebsiteThemeSelection,
     WebsiteServiceCityCoverageDecision,
     WebsiteServiceCountyCoverageDecision,
@@ -70,7 +73,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.52"
+BACKUP_VERSION = "0.53"
 BRAND_ASSET_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
 BRAND_ASSET_MIME_EXTENSIONS = {
     "image/jpeg": {".jpg", ".jpeg"},
@@ -114,6 +117,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.50",
     "0.51",
     "0.52",
+    "0.53",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -142,6 +146,8 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "site_plans": SitePlan,
     "planned_pages": PlannedPage,
     "planning_records": PlanningRecord,
+    "website_media_planning_records": WebsiteMediaPlanningRecord,
+    "planned_page_media_requirements": PlannedPageMediaRequirement,
     "site_connection_planning_records": SiteConnectionPlanningRecord,
     "website_coverage_planning_records": WebsiteCoveragePlanningRecord,
     "website_service_coverage_decisions": WebsiteServiceCoverageDecision,
@@ -608,6 +614,108 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 ),
                 {**record, "planned_page_id": planned_page_id},
             )
+
+        website_media_planning_record_ids: dict[int, int] = {}
+        for record in sorted(
+            data.get("website_media_planning_records", []),
+            key=lambda value: value["version"],
+        ):
+            old_id = _record_id(record, "website_media_planning_records")
+            site_plan_id = _mapped_id(
+                site_plan_ids,
+                record["site_plan_id"],
+                "website_media_planning_records.site_plan_id",
+            )
+            restored = _upsert(
+                session,
+                WebsiteMediaPlanningRecord,
+                select(WebsiteMediaPlanningRecord).where(
+                    WebsiteMediaPlanningRecord.site_plan_id == site_plan_id,
+                    WebsiteMediaPlanningRecord.version == record["version"],
+                ),
+                {
+                    **_restore_page_media_planning_payload(
+                        record,
+                        website_ids=website_ids,
+                        business_ids=business_ids,
+                        site_plan_ids=site_plan_ids,
+                        planned_page_ids=planned_page_ids,
+                        generated_page_ids=generated_page_ids,
+                        service_ids=service_ids,
+                        city_ids=city_ids,
+                        county_ids=county_ids,
+                    ),
+                    "website_id": _mapped_id(
+                        website_ids,
+                        record["website_id"],
+                        "website_media_planning_records.website_id",
+                    ),
+                    "business_id": _mapped_id(
+                        business_ids,
+                        record["business_id"],
+                        "website_media_planning_records.business_id",
+                    ),
+                    "site_plan_id": site_plan_id,
+                    "replaces_record_id": _mapped_optional_id(
+                        website_media_planning_record_ids,
+                        record.get("replaces_record_id"),
+                        "website_media_planning_records.replaces_record_id",
+                    ),
+                },
+            )
+            website_media_planning_record_ids[old_id] = _required_id(restored)
+
+        planned_page_media_requirement_ids: dict[int, int] = {}
+        for record in sorted(
+            data.get("planned_page_media_requirements", []),
+            key=lambda value: value["version"],
+        ):
+            old_id = _record_id(record, "planned_page_media_requirements")
+            planned_page_id = _mapped_id(
+                planned_page_ids,
+                record["planned_page_id"],
+                "planned_page_media_requirements.planned_page_id",
+            )
+            restored = _upsert(
+                session,
+                PlannedPageMediaRequirement,
+                select(PlannedPageMediaRequirement).where(
+                    PlannedPageMediaRequirement.planned_page_id == planned_page_id,
+                    PlannedPageMediaRequirement.placement_key
+                    == record["placement_key"],
+                    PlannedPageMediaRequirement.version == record["version"],
+                ),
+                {
+                    **record,
+                    "website_id": _mapped_id(
+                        website_ids,
+                        record["website_id"],
+                        "planned_page_media_requirements.website_id",
+                    ),
+                    "business_id": _mapped_id(
+                        business_ids,
+                        record["business_id"],
+                        "planned_page_media_requirements.business_id",
+                    ),
+                    "site_plan_id": _mapped_id(
+                        site_plan_ids,
+                        record["site_plan_id"],
+                        "planned_page_media_requirements.site_plan_id",
+                    ),
+                    "planned_page_id": planned_page_id,
+                    "planning_record_id": _mapped_id(
+                        website_media_planning_record_ids,
+                        record["planning_record_id"],
+                        "planned_page_media_requirements.planning_record_id",
+                    ),
+                    "replaces_requirement_id": _mapped_optional_id(
+                        planned_page_media_requirement_ids,
+                        record.get("replaces_requirement_id"),
+                        "planned_page_media_requirements.replaces_requirement_id",
+                    ),
+                },
+            )
+            planned_page_media_requirement_ids[old_id] = _required_id(restored)
 
         for record in data.get("website_coverage_planning_records", []):
             site_plan_id = _mapped_id(
@@ -1355,29 +1463,58 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             )
 
         image_metadata_ids: dict[int, int] = {}
-        for record in data["image_metadata"]:
+        for record in sorted(
+            data["image_metadata"],
+            key=lambda value: value.get("media_version") or 0,
+        ):
             old_id = _record_id(record, "image_metadata")
             business_id = _mapped_id(business_ids, record["business_id"], "image_metadata.business_id")
+            website_id = _mapped_optional_id(
+                website_ids,
+                record.get("website_id"),
+                "image_metadata.website_id",
+            )
             restored_record = {
                 **record,
                 "business_id": business_id,
+                "website_id": website_id,
                 "service_id": _mapped_optional_id(service_ids, record.get("service_id"), "image_metadata.service_id"),
                 "city_id": _mapped_optional_id(city_ids, record.get("city_id"), "image_metadata.city_id"),
                 "county_id": _mapped_optional_id(county_ids, record.get("county_id"), "image_metadata.county_id"),
+                "replaces_image_metadata_id": _mapped_optional_id(
+                    image_metadata_ids,
+                    record.get("replaces_image_metadata_id"),
+                    "image_metadata.replaces_image_metadata_id",
+                ),
             }
+            if (
+                website_id is not None
+                and record.get("media_key") is not None
+                and record.get("media_version") is not None
+            ):
+                image_statement = select(ImageMetadata).where(
+                    ImageMetadata.website_id == website_id,
+                    ImageMetadata.media_key == record["media_key"],
+                    ImageMetadata.media_version == record["media_version"],
+                )
+            else:
+                image_statement = select(ImageMetadata).where(
+                    ImageMetadata.business_id == business_id,
+                    ImageMetadata.file_name == record["file_name"],
+                )
             restored = _upsert(
                 session,
                 ImageMetadata,
-                select(ImageMetadata).where(
-                    ImageMetadata.business_id == business_id,
-                    ImageMetadata.file_name == record["file_name"],
-                ),
+                image_statement,
                 restored_record,
             )
             image_metadata_ids[old_id] = _required_id(restored)
 
         page_image_assignment_ids: dict[int, int] = {}
-        for record in data["page_image_assignments"]:
+        for record in sorted(
+            data["page_image_assignments"],
+            key=lambda value: value.get("assignment_version") or 0,
+        ):
             old_assignment_id = _record_id(record, "page_image_assignments")
             page_id = _mapped_id(
                 generated_page_ids,
@@ -1392,18 +1529,92 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     record["image_metadata_id"],
                     "page_image_assignments.image_metadata_id",
                 ),
+                "website_id": _mapped_optional_id(
+                    website_ids,
+                    record.get("website_id"),
+                    "page_image_assignments.website_id",
+                ),
+                "site_plan_id": _mapped_optional_id(
+                    site_plan_ids,
+                    record.get("site_plan_id"),
+                    "page_image_assignments.site_plan_id",
+                ),
+                "planned_page_id": _mapped_optional_id(
+                    planned_page_ids,
+                    record.get("planned_page_id"),
+                    "page_image_assignments.planned_page_id",
+                ),
+                "media_requirement_id": _mapped_optional_id(
+                    planned_page_media_requirement_ids,
+                    record.get("media_requirement_id"),
+                    "page_image_assignments.media_requirement_id",
+                ),
+                "replaces_page_image_assignment_id": _mapped_optional_id(
+                    page_image_assignment_ids,
+                    record.get("replaces_page_image_assignment_id"),
+                    "page_image_assignments.replaces_page_image_assignment_id",
+                ),
             }
+            if (
+                restored_record["media_requirement_id"] is not None
+                and record.get("assignment_version") is not None
+            ):
+                assignment_statement = select(PageImageAssignment).where(
+                    PageImageAssignment.media_requirement_id
+                    == restored_record["media_requirement_id"],
+                    PageImageAssignment.assignment_version
+                    == record["assignment_version"],
+                )
+            else:
+                assignment_statement = select(PageImageAssignment).where(
+                    PageImageAssignment.generated_page_id == page_id,
+                    PageImageAssignment.image_metadata_id
+                    == restored_record["image_metadata_id"],
+                    PageImageAssignment.image_role == record["image_role"],
+                )
             restored_assignment = _upsert(
                 session,
                 PageImageAssignment,
-                select(PageImageAssignment).where(
-                    PageImageAssignment.generated_page_id == page_id,
-                    PageImageAssignment.image_metadata_id == restored_record["image_metadata_id"],
-                    PageImageAssignment.image_role == record["image_role"],
-                ),
+                assignment_statement,
                 restored_record,
             )
             page_image_assignment_ids[old_assignment_id] = _required_id(restored_assignment)
+
+        # Page Compositions are created before media assignments so their primary
+        # ownership graph can be restored in dependency order. Remap every durable
+        # Page Media identity now that the complete governed media graph exists.
+        for record in data.get("page_compositions", []):
+            planned_page_id = _mapped_id(
+                planned_page_ids,
+                record["planned_page_id"],
+                "page_compositions.planned_page_id",
+            )
+            composition = session.exec(
+                select(PageComposition).where(
+                    PageComposition.planned_page_id == planned_page_id
+                )
+            ).one()
+            composition.generated_components = _restore_page_media_component_bindings(
+                composition.generated_components,
+                requirement_ids=planned_page_media_requirement_ids,
+                assignment_ids=page_image_assignment_ids,
+            )
+            composition.operator_decisions = _restore_page_media_component_bindings(
+                composition.operator_decisions,
+                requirement_ids=planned_page_media_requirement_ids,
+                assignment_ids=page_image_assignment_ids,
+            )
+            composition.source_snapshot = _restore_page_media_source_binding(
+                composition.source_snapshot,
+                planning_record_ids=website_media_planning_record_ids,
+                requirement_ids=planned_page_media_requirement_ids,
+                assignment_ids=page_image_assignment_ids,
+                image_ids=image_metadata_ids,
+            )
+            composition.source_hash = _canonical_json_hash(
+                composition.source_snapshot
+            )
+            session.add(composition)
 
         for record in data["wordpress_media_sync_audits"]:
             attempted_at = _datetime_value(record["attempted_at"], "wordpress_media_sync_audits.attempted_at")
@@ -1727,7 +1938,7 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     if record.get("site_plan_id") in old_plan_ids
                 ]
                 graph_ready = (
-                    payload["metadata"]["version"] == "0.52"
+                    payload["metadata"]["version"] in {"0.52", "0.53"}
                     and read_site_connection_plan(session, restored_plan_id).ready
                 )
                 claims_current = bool(backed_compositions) and all(
@@ -1878,12 +2089,12 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52"}:
+    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53"}:
         for group in ("site_plans", "planned_pages", "planning_records"):
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52"}:
+    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53"}:
         for group in (
             "site_connection_planning_records",
             "navigation_sets",
@@ -1893,7 +2104,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52"}:
+    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53"}:
         for group in (
             "website_coverage_planning_records",
             "website_service_coverage_decisions",
@@ -1904,7 +2115,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52"}:
+    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53"}:
         for group in (
             "drafting_eligibility_assessments",
             "drafting_eligibility_dispositions",
@@ -1912,7 +2123,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52"}:
+    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53"}:
         for group in (
             "supporting_page_authorizations",
             "pre_draft_distinctness_briefs",
@@ -1920,7 +2131,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52"}:
+    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52", "0.53"}:
         for group in (
             "website_draft_generation_runs",
             "website_draft_generation_items",
@@ -1931,16 +2142,23 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "website_service_county_coverage_decisions" not in data:
         data.setdefault("website_service_county_coverage_decisions", [])
         counts.setdefault("website_service_county_coverage_decisions", 0)
-    if backup_version not in {"0.49", "0.50", "0.51", "0.52"}:
+    if backup_version not in {"0.49", "0.50", "0.51", "0.52", "0.53"}:
         for group in ("semantic_component_definitions", "page_compositions"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.50", "0.51", "0.52"}:
+    if backup_version not in {"0.50", "0.51", "0.52", "0.53"}:
         for group in ("brand_assets", "website_identity_asset_assignments"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.51", "0.52"}:
+    if backup_version not in {"0.51", "0.52", "0.53"}:
         for group in ("themes", "website_theme_selections"):
+            data.setdefault(group, [])
+            counts.setdefault(group, 0)
+    if backup_version != "0.53":
+        for group in (
+            "website_media_planning_records",
+            "planned_page_media_requirements",
+        ):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
 
@@ -2234,6 +2452,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     _validate_backup_references(data)
     _validate_brand_asset_ownership(data)
     _validate_theme_ownership(data)
+    _validate_page_media_ownership(data, backup_version)
     return payload
 
 
@@ -2337,6 +2556,124 @@ def _restore_theme_source_binding(
                 f"page_compositions.theme.{field}",
             )
     restored["theme"] = binding
+    return restored
+
+
+def _restore_page_media_component_bindings(
+    components: Any,
+    *,
+    requirement_ids: dict[int, int],
+    assignment_ids: dict[int, int],
+) -> list[dict[str, Any]]:
+    """Remap exact governed Page Media identities embedded in components."""
+
+    if not isinstance(components, list) or not all(
+        isinstance(item, dict) for item in components
+    ):
+        raise BackupValidationError(
+            "Backup Page Composition component records must be a list of objects."
+        )
+    restored = deepcopy(components)
+    for component in restored:
+        bindings = component.get("input_bindings")
+        if bindings is None:
+            continue
+        if not isinstance(bindings, dict):
+            raise BackupValidationError(
+                "Backup Page Composition component bindings must be an object."
+            )
+        if bindings.get("media_requirement_id") is not None:
+            bindings["media_requirement_id"] = _mapped_id(
+                requirement_ids,
+                bindings["media_requirement_id"],
+                "page_compositions.generated_components.media_requirement_id",
+            )
+        if bindings.get("page_image_assignment_id") is not None:
+            bindings["page_image_assignment_id"] = _mapped_id(
+                assignment_ids,
+                bindings["page_image_assignment_id"],
+                "page_compositions.generated_components.page_image_assignment_id",
+            )
+    return restored
+
+
+def _restore_page_media_source_binding(
+    source_snapshot: Any,
+    *,
+    planning_record_ids: dict[int, int],
+    requirement_ids: dict[int, int],
+    assignment_ids: dict[int, int],
+    image_ids: dict[int, int],
+) -> dict[str, Any]:
+    """Remap governed Page Media identities embedded in composition snapshots."""
+
+    if not isinstance(source_snapshot, dict):
+        raise BackupValidationError(
+            "Backup Page Composition source snapshot must be an object."
+        )
+    restored = deepcopy(source_snapshot)
+    page_media = restored.get("page_media")
+    if page_media is None:
+        return restored
+    if not isinstance(page_media, dict):
+        raise BackupValidationError(
+            "Backup Page Composition Page Media source binding must be an object."
+        )
+    planning = page_media.get("planning_record")
+    if planning is not None:
+        if not isinstance(planning, dict):
+            raise BackupValidationError(
+                "Backup Page Composition Page Media planning binding must be an object."
+            )
+        for field in ("id", "record_id", "planning_record_id"):
+            if planning.get(field) is not None:
+                planning[field] = _mapped_id(
+                    planning_record_ids,
+                    planning[field],
+                    f"page_compositions.page_media.planning_record.{field}",
+                )
+    requirements = page_media.get("requirements", [])
+    assignments = page_media.get("assignments", [])
+    if not isinstance(requirements, list) or not isinstance(assignments, list):
+        raise BackupValidationError(
+            "Backup Page Composition Page Media requirements and assignments must be lists."
+        )
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            raise BackupValidationError(
+                "Backup Page Composition Page Media requirement binding must be an object."
+            )
+        requirement["id"] = _mapped_id(
+            requirement_ids,
+            requirement.get("id"),
+            "page_compositions.page_media.requirements.id",
+        )
+        if requirement.get("planning_record_id") is not None:
+            requirement["planning_record_id"] = _mapped_id(
+                planning_record_ids,
+                requirement["planning_record_id"],
+                "page_compositions.page_media.requirements.planning_record_id",
+            )
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            raise BackupValidationError(
+                "Backup Page Composition Page Media assignment binding must be an object."
+            )
+        assignment["requirement_id"] = _mapped_id(
+            requirement_ids,
+            assignment.get("requirement_id"),
+            "page_compositions.page_media.assignments.requirement_id",
+        )
+        assignment["assignment_id"] = _mapped_optional_id(
+            assignment_ids,
+            assignment.get("assignment_id"),
+            "page_compositions.page_media.assignments.assignment_id",
+        )
+        assignment["asset_id"] = _mapped_optional_id(
+            image_ids,
+            assignment.get("asset_id"),
+            "page_compositions.page_media.assignments.asset_id",
+        )
     return restored
 
 
@@ -2459,6 +2796,106 @@ def _restore_site_connection_planning_payload(
     return restored
 
 
+def _restore_page_media_planning_payload(
+    record: dict[str, Any],
+    *,
+    website_ids: dict[int, int],
+    business_ids: dict[int, int],
+    site_plan_ids: dict[int, int],
+    planned_page_ids: dict[int, int],
+    generated_page_ids: dict[int, int],
+    service_ids: dict[int, int],
+    city_ids: dict[int, int],
+    county_ids: dict[int, int],
+) -> dict[str, Any]:
+    """Remap durable identities embedded in page-media planning snapshots."""
+
+    restored = dict(record)
+    suggestions: list[dict[str, Any]] = []
+    for value in record.get("generated_media_suggestions", []):
+        if not isinstance(value, dict):
+            raise BackupValidationError(
+                "Backup Page Media suggestions must contain objects."
+            )
+        item = dict(value)
+        item["website_id"] = _mapped_id(
+            website_ids,
+            value.get("website_id"),
+            "website_media_planning_records.generated_media_suggestions.website_id",
+        )
+        item["business_id"] = _mapped_id(
+            business_ids,
+            value.get("business_id"),
+            "website_media_planning_records.generated_media_suggestions.business_id",
+        )
+        item["site_plan_id"] = _mapped_id(
+            site_plan_ids,
+            value.get("site_plan_id"),
+            "website_media_planning_records.generated_media_suggestions.site_plan_id",
+        )
+        item["planned_page_id"] = _mapped_id(
+            planned_page_ids,
+            value.get("planned_page_id"),
+            "website_media_planning_records.generated_media_suggestions.planned_page_id",
+        )
+        suggestions.append(item)
+    restored["generated_media_suggestions"] = suggestions
+
+    source_snapshot = record.get("source_snapshot")
+    if not isinstance(source_snapshot, dict):
+        raise BackupValidationError(
+            "Backup Page Media planning source snapshot must be an object."
+        )
+    snapshot = dict(source_snapshot)
+    snapshot["website_id"] = _mapped_id(
+        website_ids,
+        source_snapshot.get("website_id"),
+        "website_media_planning_records.source_snapshot.website_id",
+    )
+    snapshot["site_plan_id"] = _mapped_id(
+        site_plan_ids,
+        source_snapshot.get("site_plan_id"),
+        "website_media_planning_records.source_snapshot.site_plan_id",
+    )
+    planned_pages: list[dict[str, Any]] = []
+    for value in source_snapshot.get("planned_pages", []):
+        if not isinstance(value, dict):
+            raise BackupValidationError(
+                "Backup Page Media source snapshot contains an invalid Planned Page."
+            )
+        page = dict(value)
+        page["id"] = _mapped_id(
+            planned_page_ids,
+            value.get("id"),
+            "website_media_planning_records.source_snapshot.planned_pages.id",
+        )
+        page["service_id"] = _mapped_optional_id(
+            service_ids,
+            value.get("service_id"),
+            "website_media_planning_records.source_snapshot.planned_pages.service_id",
+        )
+        page["city_id"] = _mapped_optional_id(
+            city_ids,
+            value.get("city_id"),
+            "website_media_planning_records.source_snapshot.planned_pages.city_id",
+        )
+        page["county_id"] = _mapped_optional_id(
+            county_ids,
+            value.get("county_id"),
+            "website_media_planning_records.source_snapshot.planned_pages.county_id",
+        )
+        page["generated_page_id"] = _mapped_optional_id(
+            generated_page_ids,
+            value.get("generated_page_id"),
+            "website_media_planning_records.source_snapshot.planned_pages.generated_page_id",
+        )
+        planned_pages.append(page)
+    snapshot["planned_pages"] = planned_pages
+    restored["source_snapshot"] = snapshot
+    restored["source_hash"] = _canonical_json_hash(snapshot)
+    return restored
+
+
 def _canonical_json_hash(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -2510,7 +2947,7 @@ def _validate_site_connection_decision_provenance(
     data: dict[str, list[dict[str, Any]]],
     backup_version: str,
 ) -> None:
-    if backup_version == "0.52":
+    if backup_version in {"0.52", "0.53"}:
         _validate_052_site_connection_provenance_fields(data)
 
     planning_by_plan = {
@@ -2581,7 +3018,7 @@ def _validate_site_connection_decision_provenance(
                 "Backup Internal Link Intent crosses a Website, Site Plan, or page boundary."
             )
 
-    if backup_version != "0.52":
+    if backup_version not in {"0.52", "0.53"}:
         return
 
     _validate_052_composition_connection_bindings(
@@ -2975,6 +3412,12 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         "site_plans": ("website_id", "plan_key"),
         "planned_pages": ("website_id", "intended_slug"),
         "planning_records": ("planned_page_id",),
+        "website_media_planning_records": ("site_plan_id", "version"),
+        "planned_page_media_requirements": (
+            "planned_page_id",
+            "placement_key",
+            "version",
+        ),
         "site_connection_planning_records": ("site_plan_id",),
         "website_coverage_planning_records": ("site_plan_id",),
         "website_service_coverage_decisions": ("website_id", "service_id"),
@@ -3046,6 +3489,23 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
                 if owner is None:
                     owner = f"legacy-business:{record.get('business_id')}"
                 key = (owner, record.get("page_slug"))
+            elif group == "image_metadata" and all(
+                record.get(field) is not None
+                for field in ("website_id", "media_key", "media_version")
+            ):
+                key = (
+                    record.get("website_id"),
+                    record.get("media_key"),
+                    record.get("media_version"),
+                )
+            elif group == "page_image_assignments" and all(
+                record.get(field) is not None
+                for field in ("media_requirement_id", "assignment_version")
+            ):
+                key = (
+                    record.get("media_requirement_id"),
+                    record.get("assignment_version"),
+                )
             else:
                 key = tuple(record.get(field) for field in fields)
             if any(value is None or value == "" for value in key):
@@ -3107,6 +3567,32 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
         ),
         "planning_records": (
             ("planned_page_id", "planned_pages", False),
+        ),
+        "website_media_planning_records": (
+            ("website_id", "websites", False),
+            ("business_id", "businesses", False),
+            ("site_plan_id", "site_plans", False),
+            (
+                "replaces_record_id",
+                "website_media_planning_records",
+                True,
+            ),
+        ),
+        "planned_page_media_requirements": (
+            ("website_id", "websites", False),
+            ("business_id", "businesses", False),
+            ("site_plan_id", "site_plans", False),
+            ("planned_page_id", "planned_pages", False),
+            (
+                "planning_record_id",
+                "website_media_planning_records",
+                False,
+            ),
+            (
+                "replaces_requirement_id",
+                "planned_page_media_requirements",
+                True,
+            ),
         ),
         "site_connection_planning_records": (
             ("website_id", "websites", False),
@@ -3196,9 +3682,11 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
         ),
         "image_metadata": (
             ("business_id", "businesses", False),
+            ("website_id", "websites", True),
             ("service_id", "services", True),
             ("city_id", "cities", True),
             ("county_id", "counties", True),
+            ("replaces_image_metadata_id", "image_metadata", True),
         ),
         "knowledge_blocks": (
             ("business_id", "businesses", False),
@@ -3207,6 +3695,19 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
         "page_image_assignments": (
             ("generated_page_id", "generated_pages", False),
             ("image_metadata_id", "image_metadata", False),
+            ("website_id", "websites", True),
+            ("site_plan_id", "site_plans", True),
+            ("planned_page_id", "planned_pages", True),
+            (
+                "media_requirement_id",
+                "planned_page_media_requirements",
+                True,
+            ),
+            (
+                "replaces_page_image_assignment_id",
+                "page_image_assignments",
+                True,
+            ),
         ),
         "approval_audits": (
             ("generated_page_id", "generated_pages", False),
@@ -3499,6 +4000,672 @@ def _validate_theme_ownership(data: dict[str, list[dict[str, Any]]]) -> None:
             )
 
 
+def _validate_page_media_ownership(
+    data: dict[str, list[dict[str, Any]]],
+    backup_version: str,
+) -> None:
+    """Reject malformed or cross-scope page-media governance before restore."""
+
+    businesses = {record["id"]: record for record in data["businesses"]}
+    websites = {record["id"]: record for record in data["websites"]}
+    site_plans = {record["id"]: record for record in data["site_plans"]}
+    planned_pages = {record["id"]: record for record in data["planned_pages"]}
+    generated_pages = {record["id"]: record for record in data["generated_pages"]}
+    services = {record["id"]: record for record in data["services"]}
+    planning_records = {
+        record["id"]: record for record in data["website_media_planning_records"]
+    }
+    requirements = {
+        record["id"]: record for record in data["planned_page_media_requirements"]
+    }
+    images = {record["id"]: record for record in data["image_metadata"]}
+    assignments = {record["id"]: record for record in data["page_image_assignments"]}
+
+    active_requirements: set[tuple[int, str]] = set()
+    for record in planning_records.values():
+        website = websites[record["website_id"]]
+        plan = site_plans[record["site_plan_id"]]
+        if (
+            record["business_id"] not in businesses
+            or website["business_id"] != record["business_id"]
+            or plan["website_id"] != record["website_id"]
+            or not isinstance(record.get("version"), int)
+            or record["version"] < 1
+            or not str(record.get("algorithm_version") or "").strip()
+            or not _is_lower_sha256(record.get("source_hash"))
+            or not isinstance(record.get("generated_media_suggestions"), list)
+            or not isinstance(record.get("source_snapshot"), dict)
+        ):
+            raise BackupValidationError(
+                "Backup Page Media planning record crosses a Website, Business, or Site Plan boundary or is malformed."
+            )
+        _datetime_value(
+            record.get("generated_at"),
+            "website_media_planning_records.generated_at",
+        )
+        snapshot = record["source_snapshot"]
+        if (
+            snapshot.get("website_id") != record["website_id"]
+            or snapshot.get("site_plan_id") != record["site_plan_id"]
+            or _canonical_json_hash(snapshot) != record["source_hash"]
+            or not isinstance(snapshot.get("planned_pages"), list)
+        ):
+            raise BackupValidationError(
+                "Backup Page Media planning source snapshot is stale, malformed, or out of scope."
+            )
+        snapshot_page_ids: set[int] = set()
+        for snapshot_page in snapshot["planned_pages"]:
+            if not isinstance(snapshot_page, dict):
+                raise BackupValidationError(
+                    "Backup Page Media planning source snapshot contains an invalid Planned Page."
+                )
+            page = planned_pages.get(snapshot_page.get("id"))
+            if (
+                not page
+                or page["website_id"] != record["website_id"]
+                or page["site_plan_id"] != record["site_plan_id"]
+                or snapshot_page.get("service_id") != page.get("service_id")
+                or snapshot_page.get("city_id") != page.get("city_id")
+                or snapshot_page.get("county_id") != page.get("county_id")
+                or snapshot_page.get("generated_page_id")
+                != page.get("generated_page_id")
+            ):
+                raise BackupValidationError(
+                    "Backup Page Media planning snapshot crosses a Planned Page relationship."
+                )
+            snapshot_page_ids.add(page["id"])
+        for suggestion in record["generated_media_suggestions"]:
+            if not isinstance(suggestion, dict):
+                raise BackupValidationError(
+                    "Backup Page Media suggestions must contain objects."
+                )
+            page = planned_pages.get(suggestion.get("planned_page_id"))
+            if (
+                not page
+                or suggestion.get("website_id") != record["website_id"]
+                or suggestion.get("business_id") != record["business_id"]
+                or suggestion.get("site_plan_id") != record["site_plan_id"]
+                or page["website_id"] != record["website_id"]
+                or page["site_plan_id"] != record["site_plan_id"]
+                or page["id"] not in snapshot_page_ids
+                or not str(suggestion.get("suggestion_key") or "").strip()
+                or not str(suggestion.get("placement_key") or "").strip()
+            ):
+                raise BackupValidationError(
+                    "Backup Page Media suggestion crosses a Website, Business, Site Plan, or Planned Page boundary."
+                )
+        replacement_id = record.get("replaces_record_id")
+        if replacement_id is None:
+            if record["version"] != 1:
+                raise BackupValidationError(
+                    "Backup root Page Media planning record must begin at version 1."
+                )
+        else:
+            replacement = planning_records[replacement_id]
+            if (
+                replacement["website_id"] != record["website_id"]
+                or replacement["business_id"] != record["business_id"]
+                or replacement["site_plan_id"] != record["site_plan_id"]
+                or record["version"] != replacement["version"] + 1
+            ):
+                raise BackupValidationError(
+                    "Backup Page Media planning replacement crosses ownership or skips a version."
+                )
+
+    for record in requirements.values():
+        website = websites[record["website_id"]]
+        plan = site_plans[record["site_plan_id"]]
+        page = planned_pages[record["planned_page_id"]]
+        planning = planning_records[record["planning_record_id"]]
+        if (
+            website["business_id"] != record["business_id"]
+            or plan["website_id"] != record["website_id"]
+            or page["website_id"] != record["website_id"]
+            or page["site_plan_id"] != record["site_plan_id"]
+            or planning["website_id"] != record["website_id"]
+            or planning["business_id"] != record["business_id"]
+            or planning["site_plan_id"] != record["site_plan_id"]
+            or record.get("requirement_state")
+            not in {"required", "advisory", "excluded", "deferred"}
+            or record.get("lifecycle_status")
+            not in {"active", "superseded", "retired"}
+            or not isinstance(record.get("contract_version"), int)
+            or record["contract_version"] < 1
+            or not isinstance(record.get("version"), int)
+            or record["version"] < 1
+            or not _is_positive_int(record.get("minimum_width"))
+            or not _is_positive_int(record.get("minimum_height"))
+            or not all(
+                str(record.get(field) or "").strip()
+                for field in (
+                    "component_or_section",
+                    "placement_key",
+                    "purpose",
+                    "customer_outcome",
+                    "intended_subject",
+                    "orientation",
+                    "aspect_ratio",
+                    "decided_by",
+                    "rationale",
+                )
+            )
+            or not all(
+                str(record.get(field) or "").strip()
+                for field in (
+                    "crop_intent",
+                    "focal_point_intent",
+                    "responsive_behavior",
+                    "accessibility_intent",
+                    "permitted_reuse_policy",
+                    "replacement_policy",
+                )
+            )
+            or not _is_nonempty_normalized_string_list(
+                record.get("approved_source_constraints")
+            )
+            or not isinstance(record.get("compatible_page_types"), list)
+            or page.get("page_type") not in record["compatible_page_types"]
+        ):
+            raise BackupValidationError(
+                "Backup Planned Page media requirement is malformed or crosses a Website, Business, Site Plan, planning-record, or page boundary."
+            )
+        _datetime_value(
+            record.get("decided_at"),
+            "planned_page_media_requirements.decided_at",
+        )
+        source_key = record.get("source_suggestion_key")
+        if source_key is not None and not any(
+            suggestion.get("suggestion_key") == source_key
+            and suggestion.get("planned_page_id") == record["planned_page_id"]
+            and suggestion.get("placement_key") == record["placement_key"]
+            for suggestion in planning["generated_media_suggestions"]
+        ):
+            raise BackupValidationError(
+                "Backup Planned Page media requirement references an unknown or out-of-scope suggestion."
+            )
+        replacement_id = record.get("replaces_requirement_id")
+        if replacement_id is None:
+            if record["version"] != 1:
+                raise BackupValidationError(
+                    "Backup root Planned Page media requirement must begin at version 1."
+                )
+        else:
+            replacement = requirements[replacement_id]
+            if (
+                replacement["website_id"] != record["website_id"]
+                or replacement["business_id"] != record["business_id"]
+                or replacement["site_plan_id"] != record["site_plan_id"]
+                or replacement["planned_page_id"] != record["planned_page_id"]
+                or replacement["placement_key"] != record["placement_key"]
+                or record["version"] != replacement["version"] + 1
+            ):
+                raise BackupValidationError(
+                    "Backup Planned Page media requirement replacement crosses ownership, changes placement, or skips a version."
+                )
+        if record["lifecycle_status"] == "active":
+            key = (record["planned_page_id"], record["placement_key"])
+            if key in active_requirements:
+                raise BackupValidationError(
+                    "Backup contains multiple active media requirements for one Planned Page placement."
+                )
+            active_requirements.add(key)
+
+    governed_statuses = {
+        "legacy_unverified",
+        "pending_review",
+        "approved",
+        "rejected",
+        "retired",
+    }
+    provenance_types = {
+        "company_original",
+        "commissioned",
+        "licensed",
+        "stock",
+        "generated",
+        "public_domain",
+    }
+    rights_statuses = {"owned", "commissioned", "licensed", "public_domain"}
+    acquisition_sources = {
+        "company_photograph",
+        "commissioned",
+        "licensed",
+        "stock",
+        "generated",
+        "operator_upload",
+        "public_domain",
+    }
+    acquisition_provenance = {
+        "company_photograph": {"company_original"},
+        "commissioned": {"commissioned"},
+        "licensed": {"licensed"},
+        "stock": {"stock", "licensed"},
+        "generated": {"generated"},
+        "operator_upload": provenance_types,
+        "public_domain": {"public_domain"},
+    }
+    provenance_rights = {
+        "company_original": {"owned"},
+        "commissioned": {"commissioned", "owned"},
+        "licensed": {"licensed"},
+        "stock": {"licensed"},
+        "generated": {"owned", "licensed"},
+        "public_domain": {"public_domain"},
+    }
+    gps_statuses = {"absent", "stripped", "present_unverified", "verified_authorized"}
+    media_settings = get_settings()
+    for record in images.values():
+        website_id = record.get("website_id")
+        if website_id is not None and websites[website_id]["business_id"] != record["business_id"]:
+            raise BackupValidationError(
+                "Backup Image Metadata crosses a Website or Business ownership boundary."
+            )
+        service_id = record.get("service_id")
+        if service_id is not None and services[service_id]["business_id"] != record["business_id"]:
+            raise BackupValidationError(
+                "Backup Image Metadata crosses a Service or Business ownership boundary."
+            )
+        status = record.get("governance_status", "legacy_unverified")
+        if status not in governed_statuses:
+            raise BackupValidationError(
+                "Backup Image Metadata has an invalid governance status."
+            )
+        if status != "legacy_unverified":
+            if (
+                website_id is None
+                or not str(record.get("media_key") or "").strip()
+                or not _is_positive_int(record.get("media_version"))
+                or record.get("acquisition_source") not in acquisition_sources
+                or record.get("provenance_type") not in provenance_types
+                or record.get("rights_status") not in rights_statuses
+                or record.get("provenance_type")
+                not in acquisition_provenance.get(
+                    record.get("acquisition_source"),
+                    set(),
+                )
+                or record.get("rights_status")
+                not in provenance_rights.get(
+                    record.get("provenance_type"),
+                    set(),
+                )
+                or record.get("gps_metadata_status") not in gps_statuses
+                or not all(
+                    str(record.get(field) or "").strip()
+                    for field in (
+                        "managed_storage_path",
+                        "creator_source_identity",
+                        "created_by",
+                        "provenance_notes",
+                        "rights_holder",
+                        "rights_notes",
+                        "accessibility_intent",
+                        "mime_type",
+                        "original_filename",
+                        "stored_filename",
+                    )
+                )
+                or not _is_positive_int(record.get("file_size"))
+                or not _is_positive_int(record.get("width"))
+                or not _is_positive_int(record.get("height"))
+                or not _is_lower_sha256(record.get("checksum_sha256"))
+                or not all(
+                    _is_nonempty_normalized_string_list(record.get(field))
+                    for field in (
+                        "approved_usage",
+                        "prohibited_usage",
+                        "permitted_placement_keys",
+                    )
+                )
+                or set(record["approved_usage"]) & set(record["prohibited_usage"])
+                or not _is_safe_backup_filename(record.get("stored_filename"))
+                or not _is_safe_backup_filename(record.get("original_filename"))
+                or record.get("mime_type") not in BRAND_ASSET_MIME_EXTENSIONS
+                or Path(record["original_filename"]).suffix.lower()
+                not in BRAND_ASSET_MIME_EXTENSIONS.get(record.get("mime_type"), set())
+                or Path(record["stored_filename"]).suffix.lower()
+                not in BRAND_ASSET_MIME_EXTENSIONS.get(record.get("mime_type"), set())
+                or record.get("managed_storage_path")
+                != f"originals/{record['stored_filename']}"
+                or not _has_coherent_page_media_urls(
+                    record,
+                    record["stored_filename"],
+                    str(media_settings.media_public_url),
+                )
+            ):
+                raise BackupValidationError(
+                    "Backup contains incomplete or invalid governed page-media provenance, rights, binary identity, usage, or accessibility data."
+                )
+        if status in {"approved", "retired"}:
+            if (
+                not _is_positive_int(record.get("approval_version"))
+                or not str(record.get("approved_by") or "").strip()
+                or record.get("approved_at") is None
+            ):
+                raise BackupValidationError(
+                    "Backup governed page media lacks approval provenance."
+                )
+            _datetime_value(record["approved_at"], "image_metadata.approved_at")
+        if status == "retired":
+            if (
+                not str(record.get("retired_by") or "").strip()
+                or not str(record.get("retirement_rationale") or "").strip()
+                or record.get("retired_at") is None
+            ):
+                raise BackupValidationError(
+                    "Backup retired page media lacks retirement provenance."
+                )
+            _datetime_value(record["retired_at"], "image_metadata.retired_at")
+        if record.get("gps_metadata_status") == "verified_authorized":
+            if (
+                record.get("acquisition_source") != "company_photograph"
+                or not isinstance(record.get("gps_metadata"), dict)
+                or not str(record.get("gps_authorized_by") or "").strip()
+                or record.get("gps_authorized_at") is None
+                or not str(record.get("gps_authorization_notes") or "").strip()
+            ):
+                raise BackupValidationError(
+                    "Backup verified GPS metadata lacks legitimate-company-photo authorization."
+                )
+            _datetime_value(
+                record["gps_authorized_at"], "image_metadata.gps_authorized_at"
+            )
+        if record.get("acquisition_source") in {"generated", "stock"} and record.get(
+            "gps_metadata_status"
+        ) not in {None, "absent", "stripped"}:
+            raise BackupValidationError(
+                "Backup generated or stock media improperly preserves GPS metadata."
+            )
+        replacement_id = record.get("replaces_image_metadata_id")
+        if replacement_id is None:
+            if status != "legacy_unverified" and record.get("media_version") != 1:
+                raise BackupValidationError(
+                    "Backup root governed page media must begin at version 1."
+                )
+        else:
+            replacement = images[replacement_id]
+            if (
+                replacement["business_id"] != record["business_id"]
+                or replacement.get("website_id") != website_id
+                or replacement.get("media_key") != record.get("media_key")
+                or not isinstance(replacement.get("media_version"), int)
+                or record.get("media_version") != replacement["media_version"] + 1
+            ):
+                raise BackupValidationError(
+                    "Backup governed page-media replacement crosses ownership, changes its key, or skips a version."
+                )
+
+    active_assignments: set[int] = set()
+    governance_fields = (
+        "website_id",
+        "site_plan_id",
+        "planned_page_id",
+        "media_requirement_id",
+        "assignment_version",
+        "media_version",
+        "placement_contract_version",
+        "assigned_by",
+        "assignment_rationale",
+        "assigned_at",
+    )
+    for record in assignments.values():
+        assignment_status = record.get("status", "active")
+        if assignment_status not in {"active", "replaced", "retired"}:
+            raise BackupValidationError(
+                "Backup Page Image Assignment has an invalid lifecycle status."
+            )
+        if assignment_status == "replaced":
+            if (
+                not str(record.get("replaced_by") or "").strip()
+                or not str(record.get("replacement_rationale") or "").strip()
+                or record.get("replaced_at") is None
+            ):
+                raise BackupValidationError(
+                    "Backup replaced Page Image Assignment lacks replacement provenance."
+                )
+            _datetime_value(
+                record["replaced_at"], "page_image_assignments.replaced_at"
+            )
+        if assignment_status == "retired":
+            if (
+                not str(record.get("retired_by") or "").strip()
+                or not str(record.get("retirement_rationale") or "").strip()
+                or record.get("retired_at") is None
+            ):
+                raise BackupValidationError(
+                    "Backup retired Page Image Assignment lacks retirement provenance."
+                )
+            _datetime_value(
+                record["retired_at"], "page_image_assignments.retired_at"
+            )
+        populated = [record.get(field) is not None for field in governance_fields]
+        if any(populated) and not all(populated):
+            raise BackupValidationError(
+                "Backup Page Image Assignment has partial governed binding provenance."
+            )
+        if not any(populated):
+            if record.get("replaces_page_image_assignment_id") is not None:
+                raise BackupValidationError(
+                    "Backup legacy Page Image Assignment cannot claim a governed replacement."
+                )
+            continue
+        website = websites[record["website_id"]]
+        plan = site_plans[record["site_plan_id"]]
+        page = planned_pages[record["planned_page_id"]]
+        generated = generated_pages[record["generated_page_id"]]
+        requirement = requirements[record["media_requirement_id"]]
+        image = images[record["image_metadata_id"]]
+        if (
+            plan["website_id"] != record["website_id"]
+            or page["website_id"] != record["website_id"]
+            or page["site_plan_id"] != record["site_plan_id"]
+            or page.get("generated_page_id") != record["generated_page_id"]
+            or generated.get("website_id") != record["website_id"]
+            or generated.get("business_id") != website["business_id"]
+            or requirement["website_id"] != record["website_id"]
+            or requirement["business_id"] != website["business_id"]
+            or requirement["site_plan_id"] != record["site_plan_id"]
+            or requirement["planned_page_id"] != record["planned_page_id"]
+            or image.get("website_id") != record["website_id"]
+            or image["business_id"] != website["business_id"]
+            or image.get("media_version") != record["media_version"]
+            or requirement["contract_version"]
+            != record["placement_contract_version"]
+            or not _is_positive_int(record.get("assignment_version"))
+        ):
+            raise BackupValidationError(
+                "Backup governed Page Image Assignment crosses a Website, Business, Site Plan, Planned Page, requirement, draft, or media boundary."
+            )
+        _datetime_value(record["assigned_at"], "page_image_assignments.assigned_at")
+        if record["status"] == "active":
+            if (
+                record["media_requirement_id"] in active_assignments
+                or requirement["lifecycle_status"] != "active"
+                or requirement["requirement_state"] not in {"required", "advisory"}
+                or image.get("governance_status") != "approved"
+            ):
+                raise BackupValidationError(
+                    "Backup active Page Image Assignment is duplicate, stale, disallowed, or references unapproved media."
+                )
+            active_assignments.add(record["media_requirement_id"])
+        replacement_id = record.get("replaces_page_image_assignment_id")
+        if replacement_id is None:
+            if record["assignment_version"] != 1:
+                raise BackupValidationError(
+                    "Backup root governed Page Image Assignment must begin at version 1."
+                )
+        else:
+            replacement = assignments[replacement_id]
+            if (
+                replacement.get("website_id") != record["website_id"]
+                or replacement.get("site_plan_id") != record["site_plan_id"]
+                or replacement.get("planned_page_id") != record["planned_page_id"]
+                or replacement.get("media_requirement_id")
+                != record["media_requirement_id"]
+                or not isinstance(replacement.get("assignment_version"), int)
+                or record["assignment_version"]
+                != replacement["assignment_version"] + 1
+            ):
+                raise BackupValidationError(
+                    "Backup Page Image Assignment replacement crosses ownership, changes its requirement, or skips a version."
+                )
+
+    for composition in data["page_compositions"]:
+        snapshot = composition.get("source_snapshot")
+        if not isinstance(snapshot, dict):
+            raise BackupValidationError(
+                "Backup Page Composition source snapshot must be an object."
+            )
+        if _canonical_json_hash(snapshot) != composition.get("source_hash"):
+            raise BackupValidationError(
+                "Backup Page Composition source hash does not match its exact snapshot."
+            )
+        page_media = snapshot.get("page_media")
+        if page_media is None:
+            continue
+        if not isinstance(page_media, dict):
+            raise BackupValidationError(
+                "Backup Page Composition Page Media binding must be an object."
+            )
+        source_requirements = page_media.get("requirements")
+        source_assignments = page_media.get("assignments")
+        if not isinstance(source_requirements, list) or not isinstance(
+            source_assignments, list
+        ):
+            raise BackupValidationError(
+                "Backup Page Composition Page Media requirements and assignments must be lists."
+            )
+        bound_requirement_ids: set[int] = set()
+        for binding in source_requirements:
+            if not isinstance(binding, dict):
+                raise BackupValidationError(
+                    "Backup Page Composition Page Media requirement binding is malformed."
+                )
+            requirement = requirements.get(binding.get("id"))
+            if (
+                requirement is None
+                or requirement["website_id"] != composition["website_id"]
+                or requirement["site_plan_id"] != composition["site_plan_id"]
+                or requirement["planned_page_id"] != composition["planned_page_id"]
+                or binding.get("planning_record_id")
+                != requirement["planning_record_id"]
+                or binding.get("version") != requirement["version"]
+                or binding.get("contract_version")
+                != requirement["contract_version"]
+                or binding.get("component_or_section")
+                != requirement["component_or_section"]
+                or not _is_positive_int(binding.get("component_contract_version"))
+                or binding.get("lifecycle_status")
+                != requirement["lifecycle_status"]
+            ):
+                raise BackupValidationError(
+                    "Backup Page Composition Page Media requirement crosses scope or loses its exact contract identity."
+                )
+            if requirement["id"] in bound_requirement_ids:
+                raise BackupValidationError(
+                    "Backup Page Composition duplicates a Page Media requirement binding."
+                )
+            bound_requirement_ids.add(requirement["id"])
+        for binding in source_assignments:
+            if not isinstance(binding, dict):
+                raise BackupValidationError(
+                    "Backup Page Composition Page Media assignment binding is malformed."
+                )
+            requirement = requirements.get(binding.get("requirement_id"))
+            if (
+                requirement is None
+                or requirement["id"] not in bound_requirement_ids
+                or requirement["planned_page_id"] != composition["planned_page_id"]
+                or binding.get("requirement_version") != requirement["version"]
+                or binding.get("placement_contract_version")
+                != requirement["contract_version"]
+            ):
+                raise BackupValidationError(
+                    "Backup Page Composition Page Media assignment loses its requirement identity."
+                )
+            assignment_id = binding.get("assignment_id")
+            asset_id = binding.get("asset_id")
+            if assignment_id is None:
+                if asset_id is not None:
+                    raise BackupValidationError(
+                        "Backup Page Composition has an asset without a governed assignment."
+                    )
+                continue
+            assignment = assignments.get(assignment_id)
+            if (
+                assignment is None
+                or assignment.get("media_requirement_id") != requirement["id"]
+                or assignment.get("planned_page_id")
+                != composition["planned_page_id"]
+                or assignment.get("generated_page_id")
+                != composition["generated_page_id"]
+                or assignment.get("image_metadata_id") != asset_id
+                or binding.get("assignment_version")
+                != assignment.get("assignment_version")
+                or binding.get("media_version") != assignment.get("media_version")
+            ):
+                raise BackupValidationError(
+                    "Backup Page Composition Page Media assignment crosses scope or loses its exact version identity."
+                )
+        for component in composition.get("generated_components", []):
+            if not isinstance(component, dict):
+                raise BackupValidationError(
+                    "Backup Page Composition generated component is malformed."
+                )
+            bindings = component.get("input_bindings") or {}
+            if not isinstance(bindings, dict):
+                raise BackupValidationError(
+                    "Backup Page Composition generated component bindings are malformed."
+                )
+            requirement_id = bindings.get("media_requirement_id")
+            if requirement_id is None:
+                continue
+            requirement = requirements.get(requirement_id)
+            assignment_id = bindings.get("page_image_assignment_id")
+            if (
+                requirement is None
+                or requirement_id not in bound_requirement_ids
+                or requirement["planned_page_id"] != composition["planned_page_id"]
+                or bindings.get("target_component_key")
+                != requirement["component_or_section"]
+                or (
+                    assignment_id is not None
+                    and (
+                        assignment_id not in assignments
+                        or assignments[assignment_id].get("media_requirement_id")
+                        != requirement_id
+                    )
+                )
+            ):
+                raise BackupValidationError(
+                    "Backup Page Composition generated media component crosses its governed placement binding."
+                )
+
+    if backup_version != "0.53" and (planning_records or requirements):
+        raise BackupValidationError(
+            "Legacy backup versions cannot claim Page Media planning governance."
+        )
+
+
+def _is_lower_sha256(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_nonempty_normalized_string_list(value: object) -> bool:
+    return bool(
+        isinstance(value, list)
+        and value
+        and all(
+            isinstance(item, str) and item == item.strip().lower() and item
+            for item in value
+        )
+        and len(set(value)) == len(value)
+    )
+
+
 def _is_safe_backup_filename(value: object) -> bool:
     return bool(
         isinstance(value, str)
@@ -3572,6 +4739,30 @@ def _has_coherent_managed_asset_urls(
         record.get("asset_url") == f"{public_base}/originals/{stored_filename}"
         and record.get("optimized_url") in expected_optimized
         and record.get("thumbnail_url") in expected_thumbnail
+    )
+
+
+def _has_coherent_page_media_urls(
+    record: dict[str, Any],
+    stored_filename: str,
+    configured_media_public_url: str,
+) -> bool:
+    public_base = _safe_configured_media_base(configured_media_public_url)
+    if public_base is None:
+        return False
+    stem = Path(stored_filename).stem
+    expected_optimized = {
+        f"{public_base}/optimized/{stem}-optimized.webp",
+        f"{public_base}/optimized/{stem}-optimized.jpg",
+    }
+    expected_thumbnail = {
+        f"{public_base}/thumbnails/{stem}-thumbnail.webp",
+        f"{public_base}/thumbnails/{stem}-thumbnail.jpg",
+    }
+    return bool(
+        record.get("optimized_url") in expected_optimized
+        and record.get("thumbnail_url") in expected_thumbnail
+        and record.get("asset_url") == record.get("optimized_url")
     )
 
 

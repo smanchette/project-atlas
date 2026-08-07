@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -547,8 +548,16 @@ def test_operator_decisions_make_navigation_and_conversion_paths_ready():
             "theme_composition_freshness",
         } <= {item.key for item in website_category.items}
         assert {
+            "page_media_plan_coverage",
+            "page_media_operator_decisions",
+            "page_media_required_assignments",
+            "page_media_provenance_rights",
+            "page_media_assignment_compatibility",
+            "page_media_composition_freshness",
+            "page_media_page_type_coverage",
+        } <= {item.key for item in website_category.items}
+        assert {
             "complete_site_preview",
-            "media",
             "media_ingestion",
             "publication",
         } <= {item.key for item in future.items}
@@ -914,10 +923,10 @@ def test_backup_052_rejects_partial_navigation_provenance(tmp_path):
         _add_nav(session, website, plan, pages["home"], "primary", 0)
         exported = export_backup(session, backup_dir=tmp_path)
 
-    assert BACKUP_VERSION == "0.52"
+    assert BACKUP_VERSION == "0.53"
     path = tmp_path / "partial-navigation-provenance.json"
     payload = json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
-    assert payload["metadata"]["version"] == "0.52"
+    assert payload["metadata"]["version"] == "0.53"
     payload["data"]["navigation_items"][0]["decided_at"] = None
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(BackupValidationError, match="partial decision provenance"):
@@ -972,6 +981,28 @@ def test_backup_052_allows_legacy_composition_snapshot_for_draft_graph_and_resto
         session.flush()
         pages["home"].generated_page_id = generated.id
         session.add(pages["home"])
+        source_snapshot = {
+            "website_id": website.id,
+            "site_plan_id": plan.id,
+            "planned_page_id": pages["home"].id,
+            "generated_page_id": generated.id,
+            "navigation_sets": [],
+            "navigation_items": [
+                {
+                    "id": navigation_item.id,
+                    "target": pages["home"].id,
+                }
+            ],
+            "internal_links": [],
+        }
+        source_hash = hashlib.sha256(
+            json.dumps(
+                source_snapshot,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
         session.add(
             PageComposition(
                 website_id=website.id,
@@ -980,21 +1011,8 @@ def test_backup_052_allows_legacy_composition_snapshot_for_draft_graph_and_resto
                 generated_page_id=generated.id,
                 generated_components=[],
                 operator_decisions=[],
-                source_snapshot={
-                    "website_id": website.id,
-                    "site_plan_id": plan.id,
-                    "planned_page_id": pages["home"].id,
-                    "generated_page_id": generated.id,
-                    "navigation_sets": [],
-                    "navigation_items": [
-                        {
-                            "id": navigation_item.id,
-                            "target": pages["home"].id,
-                        }
-                    ],
-                    "internal_links": [],
-                },
-                source_hash="0" * 64,
+                source_snapshot=source_snapshot,
+                source_hash=source_hash,
                 status="current",
             )
         )
@@ -1002,7 +1020,7 @@ def test_backup_052_allows_legacy_composition_snapshot_for_draft_graph_and_resto
         exported = export_backup(session, backup_dir=tmp_path)
 
     loaded = load_backup(Path(exported["path"]))
-    assert loaded["metadata"]["version"] == "0.52"
+    assert loaded["metadata"]["version"] == "0.53"
 
     target_engine = _engine()
     SQLModel.metadata.create_all(target_engine)

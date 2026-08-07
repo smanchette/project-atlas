@@ -230,6 +230,240 @@ export type WebsiteReadinessReport = {
   categories: WebsiteReadinessCategory[];
 };
 
+export type PageMediaRequirementState =
+  | "required"
+  | "advisory"
+  | "excluded"
+  | "deferred";
+
+export type PageMediaSuggestion = {
+  suggestion_key: string;
+  website_id: number;
+  business_id: number;
+  site_plan_id: number;
+  planned_page_id: number;
+  page_type: PageType;
+  contract_page_type: string;
+  compatible_page_types: string[];
+  placement_key: string;
+  component_or_section: string;
+  requirement_state: PageMediaRequirementState;
+  purpose: string;
+  customer_outcome: string;
+  intended_subject: string;
+  orientation: string;
+  aspect_ratio: string;
+  minimum_width: number | null;
+  minimum_height: number | null;
+  crop_intent: string;
+  focal_point_intent: string;
+  responsive_behavior: string;
+  accessibility_intent: string;
+  caption_intent: string | null;
+  approved_source_constraints: string[];
+  permitted_reuse_policy: string;
+  replacement_policy: string;
+  contract_version: number;
+};
+
+export type PageMediaPlanningRecord = {
+  id: number;
+  website_id: number;
+  business_id: number;
+  site_plan_id: number;
+  version: number;
+  algorithm_version: string;
+  generated_media_suggestions: PageMediaSuggestion[];
+  source_snapshot: Record<string, unknown>;
+  source_hash: string;
+  generated_at: string;
+  replaces_record_id: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PageMediaAssetCandidate = {
+  id: number;
+  business_id: number;
+  website_id: number | null;
+  media_key: string | null;
+  media_version: number | null;
+  image_title: string | null;
+  original_filename: string | null;
+  stored_filename: string | null;
+  managed_storage_path: string | null;
+  asset_url: string | null;
+  optimized_url: string | null;
+  thumbnail_url: string | null;
+  mime_type: string | null;
+  file_size: number | null;
+  width: number | null;
+  height: number | null;
+  checksum_sha256: string | null;
+  acquisition_source: string | null;
+  creator_source_identity: string | null;
+  provenance_type: string | null;
+  provenance_notes: string | null;
+  rights_status: string | null;
+  rights_holder: string | null;
+  rights_notes: string | null;
+  approved_usage: string[];
+  prohibited_usage: string[];
+  permitted_placement_keys: string[];
+  accessibility_intent: string | null;
+  reviewed_alt_text: string | null;
+  governance_status: string;
+  approval_version: number | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  retired_by: string | null;
+  retirement_rationale: string | null;
+  retired_at: string | null;
+  replaces_image_metadata_id: number | null;
+  gps_metadata_status: string;
+  gps_metadata: Record<string, unknown>;
+  gps_authorized_by: string | null;
+  gps_authorized_at: string | null;
+  gps_authorization_notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PageMediaRequirementDecision = {
+  id: number;
+  website_id: number;
+  business_id: number;
+  site_plan_id: number;
+  planned_page_id: number;
+  planning_record_id: number | null;
+  component_or_section: string;
+  placement_key: string;
+  contract_version: number;
+  version: number;
+  requirement_state: PageMediaRequirementState;
+  purpose: string;
+  customer_outcome: string;
+  intended_subject: string;
+  orientation: string;
+  aspect_ratio: string;
+  minimum_width: number | null;
+  minimum_height: number | null;
+  crop_intent: string;
+  focal_point_intent: string;
+  responsive_behavior: string;
+  accessibility_intent: string;
+  caption_intent: string | null;
+  approved_source_constraints: string[];
+  permitted_reuse_policy: string;
+  replacement_policy: string;
+  compatible_page_types: string[];
+  decided_by: string;
+  rationale: string;
+  source_suggestion_key: string | null;
+  decided_at: string;
+  lifecycle_status: string;
+  replaces_requirement_id: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PageMediaAssignment = {
+  id: number;
+  generated_page_id: number;
+  image_metadata_id: number;
+  website_id: number | null;
+  site_plan_id: number | null;
+  planned_page_id: number | null;
+  media_requirement_id: number | null;
+  assignment_version: number | null;
+  media_version: number | null;
+  placement_contract_version: number | null;
+  image_role: string;
+  sort_order: number;
+  override_focal_x: number | null;
+  override_focal_y: number | null;
+  override_alt_text: string | null;
+  display_preset: string;
+  status: string;
+  assigned_by: string | null;
+  assignment_rationale: string | null;
+  assigned_at: string | null;
+  replaced_at: string | null;
+  replaced_by: string | null;
+  replacement_rationale: string | null;
+  retired_by: string | null;
+  retirement_rationale: string | null;
+  retired_at: string | null;
+  replaces_page_image_assignment_id: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PageMediaPlannedPage = {
+  id: number;
+  website_id: number;
+  site_plan_id: number;
+  page_type: PageType;
+  working_name: string;
+  intended_slug: string;
+  generated_page_id?: number | null;
+};
+
+export type PageMediaPlacement = {
+  placement_id: number | null;
+  planned_page: PageMediaPlannedPage;
+  suggestion: PageMediaSuggestion | null;
+  effective_requirement: PageMediaRequirementDecision | null;
+  requirement_history: PageMediaRequirementDecision[];
+  active_assignment: PageMediaAssignment | null;
+  legacy_assignments: PageMediaAssignment[];
+  compatible_asset_ids: number[];
+  blocking_reasons: string[];
+  composition_status: string;
+  readiness: string;
+};
+
+export type PageMediaDiagnostic = {
+  category: string;
+  status: string;
+  message: string;
+  planned_page_id: number | null;
+  placement_key: string | null;
+  record_id: number | null;
+};
+
+export type PageMediaPlanningSummary = {
+  planned_pages: number;
+  pages_with_current_plan: number;
+  pages_without_plan: number;
+  suggested_placements: number;
+  required_placements: number;
+  advisory_placements: number;
+  excluded_placements: number;
+  deferred_placements: number;
+  approved_assignments: number;
+  missing_required_media: number;
+  incomplete_governance: number;
+  incompatible_assignments: number;
+  stale_compositions: number;
+  pages_media_ready: number;
+  page_type_coverage: Record<string, Record<string, number>>;
+};
+
+export type PageMediaPlanningWorkspace = {
+  website_id: number;
+  business_id: number;
+  site_plan_id: number;
+  site_plan_version: number;
+  planning_record: PageMediaPlanningRecord | null;
+  summary: PageMediaPlanningSummary;
+  placements: PageMediaPlacement[];
+  assets: PageMediaAssetCandidate[];
+  diagnostics: PageMediaDiagnostic[];
+  ready: boolean;
+  evaluated_at: string;
+};
+
 export type NavigationSetType = "primary" | "utility" | "footer";
 
 export type NavigationSet = {

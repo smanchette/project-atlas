@@ -4955,3 +4955,355 @@ th {
     grid-template-columns: 1fr;
   }
 }
+
+.pageMediaPlanningPage {
+  --page-media-accent: #1f6f5f;
+}
+
+.pageMediaContextSelectors,
+.pageMediaFilters,
+.pageMediaDecisionForm,
+.pageMediaAssignmentForm {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.pageMediaContextSelectors label,
+.pageMediaFilters label,
+.pageMediaDecisionForm label,
+.pageMediaAssignmentForm label {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.pageMediaContextSummary {
+  margin-top: 1rem;
+}
+
+.pageMediaSummaryGrid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  margin: 1rem 0;
+}
+
+.pageMediaSummaryGrid article {
+  align-content: center;
+  background: var(--surface-subtle, #f7faf9);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  display: grid;
+  min-height: 5.5rem;
+  padding: 0.85rem;
+}
+
+.pageMediaSummaryGrid strong {
+  color: var(--page-media-accent);
+  font-size: 1.55rem;
+}
+
+.pageMediaSummaryGrid span,
+.pageMediaAssetCard small,
+.pageMediaActiveAsset p {
+  color: var(--muted);
+}
+
+.pageMediaDiagnosticList,
+.legacyObservationSection ul,
+.pageMediaBlockers ul {
+  display: grid;
+  gap: 0.65rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.pageMediaDiagnosticList li {
+  align-items: start;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 0.8rem 0;
+}
+
+.pageMediaDiagnosticList p {
+  margin: 0.25rem 0 0;
+}
+
+.pageMediaWorkspace {
+  align-items: start;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(18rem, 0.8fr) minmax(0, 1.7fr);
+}
+
+.pageMediaInventoryPanel,
+.pageMediaPlacementPanel {
+  margin: 0;
+}
+
+.pageMediaPlacementList {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  max-height: 64rem;
+  overflow: auto;
+}
+
+.pageMediaPlacementList > button {
+  align-items: center;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  color: inherit;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+  min-height: 3.5rem;
+  padding: 0.7rem;
+  text-align: left;
+  width: 100%;
+}
+
+.pageMediaPlacementList > button.selected {
+  border-color: var(--page-media-accent);
+  box-shadow: 0 0 0 2px rgb(31 111 95 / 12%);
+}
+
+.pageMediaPlacementList > button > span:first-child {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.pageMediaPlacementList small {
+  color: var(--muted);
+}
+
+.pageMediaPlacementWorkspace,
+.pageMediaEvidenceSection {
+  display: grid;
+  gap: 1rem;
+}
+
+.pageMediaEvidenceSection {
+  border-top: 1px solid var(--border);
+  padding-top: 1.25rem;
+}
+
+.pageMediaEvidenceSection h3 {
+  margin: 0;
+}
+
+.atlasSuggestionSection {
+  background: #f5f8ff;
+  border: 1px solid #cfdcf4;
+  border-radius: 0.75rem;
+  padding: 1rem;
+}
+
+.operatorDecisionSection {
+  background: #fbfaf5;
+  border: 1px solid #e8dfbd;
+  border-radius: 0.75rem;
+  padding: 1rem;
+}
+
+.pageMediaEvidenceGrid {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.pageMediaEvidenceGrid > div {
+  border-left: 3px solid var(--border);
+  padding-left: 0.65rem;
+}
+
+.pageMediaEvidenceGrid dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.pageMediaEvidenceGrid dd {
+  margin: 0.2rem 0 0;
+}
+
+.pageMediaWideField {
+  grid-column: 1 / -1;
+}
+
+.pageMediaContractEditor,
+.pageMediaAssetGovernance {
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  padding: 0.75rem;
+}
+
+.pageMediaContractEditor > summary,
+.pageMediaAssetGovernance > summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.pageMediaContractGrid {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 0.75rem;
+}
+
+.pageMediaContractGrid label {
+  min-width: 0;
+}
+
+.pageMediaDecisionForm button,
+.pageMediaAssignmentForm button {
+  justify-self: start;
+}
+
+.pageMediaCandidateGrid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+}
+
+.pageMediaAssetCard,
+.pageMediaActiveAsset {
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  overflow: hidden;
+}
+
+.pageMediaAssetCard > img,
+.pageMediaMissingAsset {
+  aspect-ratio: 16 / 9;
+  background: var(--surface-subtle, #f4f5f5);
+  display: grid;
+  object-fit: cover;
+  place-items: center;
+  width: 100%;
+}
+
+.pageMediaMissingAsset {
+  color: var(--muted);
+  gap: 0.35rem;
+}
+
+.pageMediaAssetCard > div:not(.pageMediaMissingAsset),
+.pageMediaActiveAsset > p {
+  padding: 0.75rem;
+}
+
+.pageMediaAssetCard > div:not(.pageMediaMissingAsset) {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.pageMediaAssetCard span {
+  align-items: center;
+  display: flex;
+  gap: 0.3rem;
+}
+
+.pageMediaAssetGovernance {
+  margin-top: 0.5rem;
+}
+
+.pageMediaAssetGovernance dl {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.75rem 0 0;
+}
+
+.pageMediaAssetGovernance dl > div {
+  border-top: 1px solid var(--border);
+  padding-top: 0.45rem;
+}
+
+.pageMediaAssetGovernance dt {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.pageMediaAssetGovernance dd {
+  margin: 0.15rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.pageMediaBlockers {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 0.75rem;
+  padding: 0.85rem;
+}
+
+.pageMediaBlockers strong {
+  align-items: center;
+  display: flex;
+  gap: 0.4rem;
+}
+
+.pageMediaBlockers ul,
+.legacyObservationSection ul {
+  list-style: disc;
+  padding-left: 1.25rem;
+}
+
+.pageMediaPlanningPage .readinessStatus.blocked,
+.pageMediaPlanningPage .readinessStatus.needs_attention {
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.pageMediaPlanningPage .readinessStatus.stale {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.pageMediaPlanningPage .readinessStatus.deferred,
+.pageMediaPlanningPage .readinessStatus.excluded {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+@media (max-width: 1050px) {
+  .pageMediaWorkspace {
+    grid-template-columns: 1fr;
+  }
+
+  .pageMediaPlacementList {
+    max-height: 28rem;
+  }
+}
+
+@media (max-width: 700px) {
+  .pageMediaContextSelectors,
+  .pageMediaFilters,
+  .pageMediaDecisionForm,
+  .pageMediaAssignmentForm,
+  .pageMediaEvidenceGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .pageMediaContractGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .pageMediaWideField {
+    grid-column: auto;
+  }
+
+  .pageMediaPlacementList > button,
+  .pageMediaDiagnosticList li {
+    align-items: start;
+    grid-template-columns: 1fr;
+  }
+}

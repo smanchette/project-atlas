@@ -40,7 +40,10 @@ def create_record(session: Session, model: type[ModelT], payload: SQLModel) -> M
 def update_record(session: Session, model: type[ModelT], record_id: int, payload: SQLModel) -> ModelT:
     record = get_record(session, model, record_id)
     updates: dict[str, Any] = payload.model_dump(exclude_unset=True)
-    from app.models import GeneratedPage, PlannedPage
+    from app.models import GeneratedPage, ImageMetadata, PlannedPage
+
+    if model is ImageMetadata:
+        _require_legacy_image_metadata_mutation(record)
 
     drafting_fields = {
         "page_title",
@@ -99,9 +102,36 @@ def update_record(session: Session, model: type[ModelT], record_id: int, payload
 
 def delete_record(session: Session, model: type[ModelT], record_id: int) -> dict[str, bool]:
     record = get_record(session, model, record_id)
+    from app.models import ImageMetadata
+
+    if model is ImageMetadata:
+        _require_legacy_image_metadata_mutation(record)
     session.delete(record)
     session.commit()
     return {"ok": True}
+
+
+def _require_legacy_image_metadata_mutation(record: SQLModel) -> None:
+    """Keep governed page media behind its versioned approval lifecycle."""
+
+    governed_identity = any(
+        getattr(record, field_name, None) is not None
+        for field_name in (
+            "website_id",
+            "media_key",
+            "media_version",
+            "managed_storage_path",
+            "approval_version",
+        )
+    )
+    if getattr(record, "governance_status", "legacy_unverified") != "legacy_unverified" or governed_identity:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Governed page media cannot be changed through the generic Image Metadata "
+                "endpoint. Use the governed page-media approval or retirement workflow."
+            ),
+        )
 
 
 def _validate_relationships(

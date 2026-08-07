@@ -369,6 +369,41 @@ deploy, or access WordPress, SiteGround, or other production systems.
 
 ---
 
+## Website-Scoped Page-Media Planning and Provenance Foundation
+
+Added Website-, Site-Plan-, and Planned-Page-scoped media planning with
+versioned Atlas suggestions and separate, explicit operator placement
+decisions. Reusable page-type contracts define purposeful semantic-component
+placements, customer outcomes, subject and responsive guidance, accessibility
+intent, source constraints, reuse policy, and replacement policy without
+embedding Flo-Zone files or treating image quantity as a quota.
+
+Ordinary page media can now carry exact managed-binary identity, Website and
+Business ownership, provenance, rights, approved and prohibited usage,
+accessibility intent, approval lifecycle, replacement and retirement history,
+and privacy-safe GPS authorization state. Approval re-reads the managed
+original and derivatives and fails closed on unsafe paths, binary drift,
+signature or MIME disagreement, missing governance, or unverified location
+metadata. Governed assignments bind exact media and placement versions to one
+Website, Site Plan, Planned Page, Generated Page, and operator decision.
+
+Page-media plan and assignment identities participate in composition source
+freshness. Required missing or incompatible media blocks governed composition
+refresh, while advisory, excluded, and deferred placements remain accurately
+nonblocking. Existing media and assignments remain unchanged and are not
+silently granted ownership, provenance, rights, or approval. Website Readiness
+now reports Page Media coverage, decisions, required assignments, governance,
+compatibility, composition freshness, and page-type coverage.
+
+Migration `20260807_0041` adds the planning, governance, and assignment fields.
+Atlas Data backup format 0.53 preserves the new lifecycle and version bindings
+while retaining supported 0.52 restore compatibility. This milestone imports,
+generates, approves, and assigns no new Flo-Zone page media and performs no
+WordPress, SiteGround, publication, deployment, Theme, Brand Asset, Website
+Identity, navigation, or content operation.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.
