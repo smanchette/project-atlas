@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   bindPageMediaContext,
@@ -17,16 +18,45 @@ import {
   buildPageMediaAssignmentPayload,
   buildPageMediaDecisionPayload,
 } from "../src/pages/PageMediaPlanningPage";
+import { renderComponent } from "../src/pages/GeneratedPagePreview";
 import type { DecisionFormState } from "../src/pages/PageMediaPlanningPage";
 import type {
   PageMediaAssetCandidate,
   PageMediaPlacement,
   PageMediaPlanningWorkspace,
+  PageComponentInstance,
   PageMediaRequirementDecision,
   SitePlan,
   Website,
   WebsiteContext,
 } from "../src/types";
+
+test("unassigned governed media renders an honest local placeholder", () => {
+  const component: PageComponentInstance = {
+    instance_key: "media_placement:requirement-81",
+    component_key: "media_placement",
+    contract_version: 1,
+    region: "main",
+    position: 5,
+    variant: "placeholder",
+    input_bindings: {
+      media_requirement_id: 81,
+      target_component_key: "hero",
+    },
+    resolved_data: {
+      purpose: "Establish the approved service visually.",
+      intended_subject: "An authentic approved service photograph.",
+      requirement_state: "required",
+    },
+  };
+
+  const markup = renderToStaticMarkup(renderComponent(component));
+
+  assert.match(markup, /Establish the approved service visually\./);
+  assert.match(markup, /Placement reserved for future approved media\./);
+  assert.doesNotMatch(markup, /<img\b/i);
+  assert.doesNotMatch(markup, /\bsrc=/i);
+});
 
 const website: Website = {
   id: 31,

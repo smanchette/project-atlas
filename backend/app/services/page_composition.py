@@ -160,6 +160,21 @@ def update_operator_composition_decisions(
             raise PageCompositionError(
                 f"Required structural component cannot be suppressed: {value.instance_key}."
             )
+        if value.action == "suppress" and any(
+            generated.get("component_key") == "media_placement"
+            and (generated.get("input_bindings") or {}).get(
+                "target_component_instance_key"
+            )
+            == value.instance_key
+            and (generated.get("input_bindings") or {}).get(
+                "media_requirement_id"
+            )
+            for generated in composition.generated_components
+        ):
+            raise PageCompositionError(
+                "Component instance cannot be suppressed while an active Page Media "
+                f"placement targets it: {value.instance_key}."
+            )
         if value.variant is not None:
             definition = definitions.get(
                 (instance["component_key"], instance["contract_version"])
@@ -222,13 +237,30 @@ def _compose(session: Session, plan: SitePlan, planned: PlannedPage) -> tuple[Pa
         raise PageCompositionError(f"Unsupported page type: {generated.page_type}.")
     from app.services.page_media_planning import validate_required_media_for_page
 
-    media_errors = validate_required_media_for_page(session, planned)
+    media_errors = validate_required_media_for_page(
+        session,
+        planned,
+        require_approved_assignments=False,
+    )
     if media_errors:
         raise PageCompositionError(" ".join(media_errors))
     snapshot = _source_snapshot(session, plan, planned, generated)
     source_hash = _hash(snapshot)
-    components = _generate_components(session, plan, planned, generated)
     existing = session.exec(select(PageComposition).where(PageComposition.planned_page_id == planned.id)).first()
+    suppressed_instance_keys = {
+        str(value.get("instance_key") or "").strip()
+        for value in (existing.operator_decisions if existing else [])
+        if isinstance(value, dict)
+        and value.get("action") == "suppress"
+        and str(value.get("instance_key") or "").strip()
+    }
+    components = _generate_components(
+        session,
+        plan,
+        planned,
+        generated,
+        suppressed_instance_keys=suppressed_instance_keys,
+    )
     if existing and existing.source_hash == source_hash and existing.generated_components == components:
         return existing, "unchanged"
     if existing:
@@ -258,7 +290,14 @@ def _compose(session: Session, plan: SitePlan, planned: PlannedPage) -> tuple[Pa
     return row, outcome
 
 
-def _generate_components(session: Session, plan: SitePlan, planned: PlannedPage, generated: GeneratedPage) -> list[dict[str, Any]]:
+def _generate_components(
+    session: Session,
+    plan: SitePlan,
+    planned: PlannedPage,
+    generated: GeneratedPage,
+    *,
+    suppressed_instance_keys: set[str],
+) -> list[dict[str, Any]]:
     draft = generated.draft_content or {}
     definitions = _definitions(session)
     current_versions = {
@@ -375,11 +414,16 @@ def _generate_components(session: Session, plan: SitePlan, planned: PlannedPage,
     _require_authoritative_navigation_set(footer, plan)
     add("footer_navigation", "footer", {"navigation_set_id": footer.id})
     add("website_footer", "footer", {"website_id": plan.website_id})
-    return _bind_governed_media_regions(items)
+    return _bind_governed_media_regions(
+        items,
+        suppressed_instance_keys=suppressed_instance_keys,
+    )
 
 
 def _bind_governed_media_regions(
     items: list[dict[str, Any]],
+    *,
+    suppressed_instance_keys: set[str],
 ) -> list[dict[str, Any]]:
     governed_media: list[dict[str, Any]] = []
     base_items: list[dict[str, Any]] = []
@@ -398,7 +442,10 @@ def _bind_governed_media_regions(
         bindings = media["input_bindings"]
         target_key = bindings.get("target_component_key")
         candidates = [
-            item for item in base_items if item.get("component_key") == target_key
+            item
+            for item in base_items
+            if item.get("component_key") == target_key
+            and item.get("instance_key") not in suppressed_instance_keys
         ]
         if not candidates:
             raise PageCompositionError(
@@ -447,10 +494,23 @@ def _read(session: Session, composition: PageComposition, *, require_current: bo
 
 def _effective(composition: PageComposition) -> list[dict[str, Any]]:
     decisions = {item["instance_key"]: item for item in composition.operator_decisions}
+    suppressed_instance_keys = {
+        instance_key
+        for instance_key, decision in decisions.items()
+        if decision.get("action") == "suppress"
+    }
     effective: list[dict[str, Any]] = []
     for generated in composition.generated_components:
         decision = decisions.get(generated["instance_key"])
         if decision and decision.get("action") == "suppress":
+            continue
+        if (
+            generated.get("component_key") == "media_placement"
+            and (generated.get("input_bindings") or {}).get(
+                "target_component_instance_key"
+            )
+            in suppressed_instance_keys
+        ):
             continue
         value = dict(generated)
         if decision:
@@ -471,7 +531,13 @@ def _validate(session: Session, composition: PageComposition, plan: SitePlan, pl
         errors.append("Composition source relationships do not match.")
     from app.services.page_media_planning import validate_required_media_for_page
 
-    errors.extend(validate_required_media_for_page(session, planned))
+    errors.extend(
+        validate_required_media_for_page(
+            session,
+            planned,
+            require_approved_assignments=False,
+        )
+    )
     try:
         _active_identity_assets(session, plan.website_id)
     except PageCompositionError as exc:

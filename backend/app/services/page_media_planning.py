@@ -167,7 +167,7 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
         ),
         _placement(
             "home-service-overview",
-            "service_summary",
+            "related_page_links",
             "advisory",
             "Help visitors understand the principal service offering.",
             "Connect the business's service to a recognizable customer need.",
@@ -422,6 +422,17 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
     for page in pages:
         page_id = page.id or 0
         identity = _page_identity(page)
+        try:
+            exact_component_keys = _exact_page_composition_component_keys(
+                session,
+                page,
+                plan,
+                website,
+            )
+            exact_target_error = None
+        except PageMediaPlanningError as exc:
+            exact_component_keys = set()
+            exact_target_error = str(exc)
         page_suggestions = suggestions_by_page.get(page_id, {})
         page_keys = set(page_suggestions) | {
             key for candidate_page_id, key in effective_by_key if candidate_page_id == page_id
@@ -496,49 +507,59 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
                 if state in {"excluded", "deferred"}:
                     readiness = state
                 else:
-                    for asset in assets:
-                        if not _asset_compatibility_errors(session, asset, effective, page, website):
-                            compatible_ids.append(asset.id or 0)
-                    active = [
-                        item
-                        for item in assignments_by_requirement.get(effective.id or 0, [])
-                        if item.status == "active"
-                    ]
-                    if len(active) > 1:
-                        blocking.append("Placement has multiple active governed assignments.")
-                        incompatible_count += 1
-                    elif active:
-                        active_assignment = active[0]
-                        asset = session.get(ImageMetadata, active_assignment.image_metadata_id)
-                        errors = (
-                            _assignment_binding_errors(
-                                active_assignment,
-                                asset,
-                                effective,
-                                page,
-                                website,
+                    if effective.component_or_section not in exact_component_keys:
+                        blocking.append(
+                            exact_target_error
+                            or (
+                                "Media placement target is missing from the exact "
+                                "effective Planned Page composition."
                             )
-                            + _asset_compatibility_errors(
-                                session,
-                                asset,
-                                effective,
-                                page,
-                                website,
-                            )
-                            if asset
-                            else ["Assigned governed media is missing."]
                         )
-                        if errors:
-                            blocking.extend(errors)
-                            incompatible_count += 1
-                        else:
-                            approved_assignment_count += 1
-                            readiness = "ready"
-                    elif state == "required":
-                        blocking.append("Required media placement has no approved assignment.")
-                        missing_required += 1
+                        readiness = "stale"
                     else:
-                        readiness = "advisory_unfilled"
+                        for asset in assets:
+                            if not _asset_compatibility_errors(session, asset, effective, page, website):
+                                compatible_ids.append(asset.id or 0)
+                        active = [
+                            item
+                            for item in assignments_by_requirement.get(effective.id or 0, [])
+                            if item.status == "active"
+                        ]
+                        if len(active) > 1:
+                            blocking.append("Placement has multiple active governed assignments.")
+                            incompatible_count += 1
+                        elif active:
+                            active_assignment = active[0]
+                            asset = session.get(ImageMetadata, active_assignment.image_metadata_id)
+                            errors = (
+                                _assignment_binding_errors(
+                                    active_assignment,
+                                    asset,
+                                    effective,
+                                    page,
+                                    website,
+                                )
+                                + _asset_compatibility_errors(
+                                    session,
+                                    asset,
+                                    effective,
+                                    page,
+                                    website,
+                                )
+                                if asset
+                                else ["Assigned governed media is missing."]
+                            )
+                            if errors:
+                                blocking.extend(errors)
+                                incompatible_count += 1
+                            else:
+                                approved_assignment_count += 1
+                                readiness = "ready"
+                        elif state == "required":
+                            blocking.append("Required media placement has no approved assignment.")
+                            missing_required += 1
+                        else:
+                            readiness = "advisory_unfilled"
             if blocking:
                 page_ready = False
                 diagnostics.extend(
@@ -615,45 +636,19 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
 def refresh_site_plan_media_suggestions(
     session: Session,
     plan_id: int,
+    *,
+    commit: bool = True,
 ) -> PageMediaWorkspace:
     plan, website = _plan_context(session, plan_id)
     pages = list(session.exec(
         select(PlannedPage).where(PlannedPage.site_plan_id == plan.id).order_by(PlannedPage.id)
     ).all())
-    active_component_keys = {
-        row.component_key
-        for row in session.exec(
-            select(SemanticComponentDefinition).where(
-                SemanticComponentDefinition.status == "active"
-            )
-        ).all()
-    }
-    suggestions: list[dict[str, Any]] = []
-    for page in pages:
-        contract_key = _page_contract_key(page)
-        contracts = PAGE_TYPE_MEDIA_CONTRACTS.get(contract_key)
-        if contracts is None:
-            continue
-        for contract in contracts:
-            if contract["component_or_section"] not in active_component_keys:
-                raise PageMediaPlanningError(
-                    "Page Media contract references a missing active semantic component: "
-                    f"{contract['component_or_section']}."
-                )
-            value = dict(contract)
-            value.update({
-                "suggestion_key": f"{contract_key}:v{PLACEMENT_CONTRACT_VERSION}:{contract['placement_key']}",
-                "website_id": website.id,
-                "business_id": website.business_id,
-                "site_plan_id": plan.id,
-                "planned_page_id": page.id,
-                "page_type": page.page_type,
-                "contract_page_type": contract_key,
-                "compatible_page_types": [page.page_type],
-            })
-            suggestions.append(value)
-    snapshot = _planning_source_snapshot(session, plan, pages)
-    source_hash = _hash(snapshot)
+    suggestions, snapshot, source_hash = _prepare_site_plan_media_suggestions(
+        session,
+        plan,
+        website,
+        pages,
+    )
     current = _current_planning_record(session, plan.id or plan_id)
     _require_planning_record_scope(current, plan, website)
     if current and current.source_hash == source_hash and current.generated_media_suggestions == suggestions:
@@ -680,15 +675,75 @@ def refresh_site_plan_media_suggestions(
             != _planning_page_binding(record, page_id)
         ):
             _mark_composition_stale(session, page_id)
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
     return read_page_media_workspace(session, plan_id)
+
+
+def _prepare_site_plan_media_suggestions(
+    session: Session,
+    plan: SitePlan,
+    website: Website,
+    pages: list[PlannedPage],
+) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
+    """Build and validate the immutable suggestion manifest without mutating state."""
+    active_component_keys = {
+        row.component_key
+        for row in session.exec(
+            select(SemanticComponentDefinition).where(
+                SemanticComponentDefinition.status == "active"
+            )
+        ).all()
+    }
+    suggestions: list[dict[str, Any]] = []
+    for page in pages:
+        contract_key = _page_contract_key(page)
+        contracts = PAGE_TYPE_MEDIA_CONTRACTS.get(contract_key)
+        if contracts is None:
+            continue
+        composition_component_keys = _exact_page_composition_component_keys(
+            session,
+            page,
+            plan,
+            website,
+        )
+        for contract in contracts:
+            if contract["component_or_section"] not in active_component_keys:
+                raise PageMediaPlanningError(
+                    "Page Media contract references a missing active semantic component: "
+                    f"{contract['component_or_section']}."
+                )
+            _require_exact_page_composition_target(
+                page,
+                contract["component_or_section"],
+                composition_component_keys,
+            )
+            value = dict(contract)
+            value.update({
+                "suggestion_key": f"{contract_key}:v{PLACEMENT_CONTRACT_VERSION}:{contract['placement_key']}",
+                "website_id": website.id,
+                "business_id": website.business_id,
+                "site_plan_id": plan.id,
+                "planned_page_id": page.id,
+                "page_type": page.page_type,
+                "contract_page_type": contract_key,
+                "compatible_page_types": [page.page_type],
+            })
+            suggestions.append(value)
+    snapshot = _planning_source_snapshot(session, plan, pages)
+    return suggestions, snapshot, _hash(snapshot)
 
 
 def decide_media_placement(
     session: Session,
     plan_id: int,
     payload: PageMediaPlacementDecisionRequest,
-) -> PageMediaWorkspace:
+    *,
+    commit: bool = True,
+    return_workspace: bool = True,
+) -> PageMediaWorkspace | None:
     plan, website = _plan_context(session, plan_id)
     if payload.site_plan_id != plan.id or payload.website_id != website.id:
         raise PageMediaPlanningError("Placement decision crosses the selected Website or Site Plan boundary.")
@@ -746,6 +801,11 @@ def decide_media_placement(
         raise PageMediaPlanningError(
             "Placement semantic component is incompatible with this Planned Page type."
         )
+    _require_exact_page_composition_target(
+        page,
+        values["component_or_section"],
+        _exact_page_composition_component_keys(session, page, plan, website),
+    )
     history = list(session.exec(
         select(PlannedPageMediaRequirement).where(
             PlannedPageMediaRequirement.planned_page_id == page.id,
@@ -779,7 +839,11 @@ def decide_media_placement(
                 planning_record,
             )
         ):
-            return read_page_media_workspace(session, plan_id)
+            return (
+                read_page_media_workspace(session, plan_id)
+                if return_workspace
+                else None
+            )
         current.lifecycle_status = "superseded"
         current.updated_at = datetime.now(UTC)
         session.add(current)
@@ -817,8 +881,15 @@ def decide_media_placement(
     )
     session.add(requirement)
     _mark_composition_stale(session, page.id or 0)
-    session.commit()
-    return read_page_media_workspace(session, plan_id)
+    if commit:
+        session.commit()
+    else:
+        session.flush()
+    return (
+        read_page_media_workspace(session, plan_id)
+        if return_workspace
+        else None
+    )
 
 
 async def create_governed_page_media_asset(
@@ -1248,6 +1319,8 @@ def governed_assignment_for_requirement(
 def validate_required_media_for_page(
     session: Session,
     planned_page: PlannedPage,
+    *,
+    require_approved_assignments: bool = True,
 ) -> list[str]:
     errors: list[str] = []
     plan = session.get(SitePlan, planned_page.site_plan_id)
@@ -1269,6 +1342,16 @@ def validate_required_media_for_page(
     )
     if current_planning.source_hash != _hash(_planning_source_snapshot(session, plan, pages)):
         errors.append("Page Media planning suggestions are stale.")
+    try:
+        exact_component_keys = _exact_page_composition_component_keys(
+            session,
+            planned_page,
+            plan,
+            website,
+        )
+    except PageMediaPlanningError as exc:
+        errors.append(str(exc))
+        exact_component_keys = set()
     requirements = effective_media_requirements(session, planned_page.id or 0)
     requirements_by_key = {item.placement_key: item for item in requirements}
     suggestion_keys = {
@@ -1301,9 +1384,19 @@ def validate_required_media_for_page(
             continue
         if requirement.requirement_state not in {"required", "advisory"}:
             continue
+        if requirement.component_or_section not in exact_component_keys:
+            errors.append(
+                "Media placement "
+                f"{requirement.placement_key} target is missing from the exact "
+                "effective Planned Page composition."
+            )
+            continue
         assignment = governed_assignment_for_requirement(session, requirement.id or 0)
         if assignment is None:
-            if requirement.requirement_state == "required":
+            if (
+                require_approved_assignments
+                and requirement.requirement_state == "required"
+            ):
                 errors.append(f"Required media placement {requirement.placement_key} has no approved assignment.")
             continue
         asset = session.get(ImageMetadata, assignment.image_metadata_id)
@@ -1592,7 +1685,7 @@ def _requirement_values(
     compatible = _clean_list(base["compatible_page_types"])
     if page.page_type not in compatible:
         raise PageMediaPlanningError("Placement contract is incompatible with this Planned Page type.")
-    source_constraints = _clean_list(base["approved_source_constraints"])
+    source_constraints = _clean_prose_list(base["approved_source_constraints"])
     if not source_constraints:
         raise PageMediaPlanningError("Approved source constraints are required.")
     return {
@@ -1889,6 +1982,61 @@ def _mark_composition_stale(session: Session, planned_page_id: int) -> None:
         session.add(composition)
 
 
+def _exact_page_composition_component_keys(
+    session: Session,
+    page: PlannedPage,
+    plan: SitePlan,
+    website: Website,
+) -> set[str]:
+    composition = session.exec(
+        select(PageComposition).where(
+            PageComposition.planned_page_id == page.id
+        )
+    ).first()
+    if composition is None:
+        raise PageMediaPlanningError(
+            f"No exact Page Composition exists for Planned Page {page.id}."
+        )
+    if (
+        composition.website_id != website.id
+        or composition.site_plan_id != plan.id
+        or composition.planned_page_id != page.id
+        or composition.generated_page_id != page.generated_page_id
+    ):
+        raise PageMediaPlanningError(
+            "Page Composition crosses its Website, Site Plan, Planned Page, "
+            "or Generated Page boundary."
+        )
+    suppressed_instance_keys = {
+        str(value.get("instance_key") or "").strip()
+        for value in composition.operator_decisions
+        if isinstance(value, dict)
+        and value.get("action") == "suppress"
+        and str(value.get("instance_key") or "").strip()
+    }
+    return {
+        component_key.strip()
+        for value in composition.generated_components
+        if isinstance(value, dict)
+        and str(value.get("instance_key") or "").strip()
+        not in suppressed_instance_keys
+        and isinstance((component_key := value.get("component_key")), str)
+        and component_key.strip()
+    }
+
+
+def _require_exact_page_composition_target(
+    page: PlannedPage,
+    component_key: str,
+    composition_component_keys: set[str],
+) -> None:
+    if component_key not in composition_component_keys:
+        raise PageMediaPlanningError(
+            "Page Media placement target is missing from the exact Planned Page "
+            f"composition: {component_key} (Planned Page {page.id})."
+        )
+
+
 def _plan_context(session: Session, plan_id: int) -> tuple[SitePlan, Website]:
     plan = session.get(SitePlan, plan_id)
     if not plan:
@@ -2063,6 +2211,11 @@ def _identifier(value: str, label: str) -> str:
 
 def _clean_list(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value.strip().lower() for value in values if value.strip()))
+
+
+def _clean_prose_list(values: list[str]) -> list[str]:
+    """Trim and deduplicate governed prose without changing operator wording."""
+    return list(dict.fromkeys(value.strip() for value in values if value.strip()))
 
 
 def _source_governance_valid(

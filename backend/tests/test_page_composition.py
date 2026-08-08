@@ -39,12 +39,14 @@ from app.services.page_composition import (
     PageCompositionError,
     list_component_registry,
     read_composition_for_generated_page,
+    read_site_plan_compositions,
     refresh_site_plan_compositions,
     update_operator_composition_decisions,
 )
 from app.services.page_media_planning import (
     decide_media_placement,
     refresh_site_plan_media_suggestions,
+    validate_required_media_for_page,
 )
 from app.services.site_connections import ensure_site_connection_foundation
 from app.services.themes import (
@@ -1040,6 +1042,11 @@ def test_governed_media_placements_bind_to_exact_semantic_regions_and_versions()
         service_draft["sections"] = [
             *service_draft["sections"],
             {
+                "key": "preparation",
+                "heading": "Preparation",
+                "body": "Approved preparation information.",
+            },
+            {
                 "key": "guidance",
                 "heading": "Guidance",
                 "body": "Approved customer guidance.",
@@ -1048,6 +1055,34 @@ def test_governed_media_placements_bind_to_exact_semantic_regions_and_versions()
         pages[0][1].draft_content = service_draft
         session.add(pages[0][1])
         session.commit()
+        baseline = refresh_site_plan_compositions(session, plan.id)
+        assert baseline.blocked == []
+        initial_composition = session.exec(
+            select(PageComposition).where(
+                PageComposition.planned_page_id == pages[0][0].id
+            )
+        ).one()
+        content_instances = [
+            item["instance_key"]
+            for item in initial_composition.generated_components
+            if item["component_key"] == "content_section"
+        ]
+        assert len(content_instances) >= 2
+        preexisting_suppression = content_instances[-1]
+        update_operator_composition_decisions(
+            session,
+            initial_composition.id,
+            PageCompositionDecisionUpdate(
+                decisions=[
+                    {
+                        "instance_key": preexisting_suppression,
+                        "action": "suppress",
+                        "rationale": "Suppress one optional repeated section.",
+                    }
+                ],
+                decided_by="Composition Media Operator",
+            ),
+        )
         workspace = refresh_site_plan_media_suggestions(session, plan.id)
         assert workspace.planning_record is not None
         for placement in workspace.placements:
@@ -1108,6 +1143,74 @@ def test_governed_media_placements_bind_to_exact_semantic_regions_and_versions()
 
         requirements = composition.source_snapshot["page_media"]["requirements"]
         assert all(item["component_contract_version"] == 1 for item in requirements)
+        guidance_requirement = next(
+            item
+            for item in session.exec(
+                select(PlannedPageMediaRequirement).where(
+                    PlannedPageMediaRequirement.planned_page_id == service_page.id
+                )
+            ).all()
+            if item.placement_key == "service-guidance"
+        )
+        guidance_media = next(
+            item
+            for item in components
+            if item["component_key"] == "media_placement"
+            and item["input_bindings"].get("media_requirement_id")
+            == guidance_requirement.id
+        )
+        suppressed_target = guidance_media["input_bindings"][
+            "target_component_instance_key"
+        ]
+        assert suppressed_target != preexisting_suppression
+        with pytest.raises(
+            PageCompositionError,
+            match="cannot be suppressed while an active Page Media placement targets it",
+        ):
+            update_operator_composition_decisions(
+                session,
+                composition.id,
+                PageCompositionDecisionUpdate(
+                    decisions=[
+                        {
+                            "instance_key": suppressed_target,
+                            "action": "suppress",
+                            "rationale": "Suppress the optional guidance section.",
+                        }
+                    ],
+                    decided_by="Composition Media Operator",
+                ),
+            )
+        session.refresh(composition)
+        assert composition.operator_decisions[0]["instance_key"] == preexisting_suppression
+        composition.operator_decisions = [
+            {
+                "instance_key": suppressed_target,
+                "action": "suppress",
+                "rationale": "Simulate direct suppression drift.",
+                "provenance": "operator",
+            }
+        ]
+        session.add(composition)
+        session.commit()
+        defensive = next(
+            item
+            for item in read_site_plan_compositions(session, plan.id)
+            if item.planned_page_id == service_page.id
+        )
+        assert not any(
+            item.instance_key == suppressed_target
+            for item in defensive.effective_components
+        )
+        assert not any(
+            item.component_key == "media_placement"
+            and item.input_bindings.get("target_component_instance_key")
+            == suppressed_target
+            for item in defensive.effective_components
+        )
+        composition.operator_decisions = []
+        session.add(composition)
+        session.commit()
         session.add(
             SemanticComponentDefinition(
                 component_key="hero",
@@ -1165,3 +1268,66 @@ def test_governed_media_placements_bind_to_exact_semantic_regions_and_versions()
             if item["component_or_section"] == "hero"
         )
         assert hero_requirement["component_contract_version"] == 2
+
+
+def test_required_media_without_assignment_refreshes_as_an_honest_placeholder():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session)
+        website, plan, pages = _scope(session, suffix="required-placeholder")
+        service_draft = dict(pages[0][1].draft_content)
+        service_draft["sections"] = [
+            *service_draft["sections"],
+            {
+                "key": "guidance",
+                "heading": "Guidance",
+                "body": "Approved customer guidance.",
+            },
+        ]
+        pages[0][1].draft_content = service_draft
+        session.add(pages[0][1])
+        session.commit()
+        baseline = refresh_site_plan_compositions(session, plan.id)
+        assert baseline.blocked == []
+        workspace = refresh_site_plan_media_suggestions(session, plan.id)
+        assert workspace.planning_record is not None
+        for placement in workspace.placements:
+            suggestion = placement.suggestion
+            assert suggestion is not None
+            decide_media_placement(
+                session,
+                plan.id,
+                PageMediaPlacementDecisionRequest(
+                    website_id=website.id,
+                    site_plan_id=plan.id,
+                    planned_page_id=placement.planned_page.id,
+                    placement_key=suggestion["placement_key"],
+                    requirement_state=suggestion["requirement_state"],
+                    decided_by="Composition Media Operator",
+                    rationale="Approve the validated placement without implying media exists.",
+                    expected_planning_version=workspace.planning_record.version,
+                    source_suggestion_key=suggestion["suggestion_key"],
+                ),
+            )
+
+        refreshed = refresh_site_plan_compositions(session, plan.id)
+
+        assert refreshed.blocked == []
+        assert refreshed.refreshed == len(pages)
+        assert all(item.status == "current" for item in refreshed.compositions)
+        placeholders = [
+            item
+            for composition in refreshed.compositions
+            for item in composition.effective_components
+            if item.component_key == "media_placement"
+        ]
+        assert placeholders
+        assert all(item.variant == "placeholder" for item in placeholders)
+        assert all(not item.resolved_data.get("asset_url") for item in placeholders)
+        service_page = pages[0][0]
+        strict_errors = validate_required_media_for_page(
+            session,
+            service_page,
+        )
+        assert "Required media placement service-hero has no approved assignment." in strict_errors

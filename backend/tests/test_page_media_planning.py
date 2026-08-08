@@ -64,6 +64,18 @@ from app.services.page_media_planning import (
 from app.services.website_readiness import evaluate_website_readiness
 
 
+COMPOSITION_COMPONENT_KEYS_BY_CONTRACT: dict[str, tuple[str, ...]] = {
+    "home": ("hero", "trust_license", "content_section", "related_page_links"),
+    "about": ("hero", "trust_license", "content_section"),
+    "contact": ("hero", "trust_license", "content_section", "contact_pathways"),
+    "faq": ("hero", "trust_license", "content_section", "faq"),
+    "service": ("hero", "trust_license", "service_summary", "content_section"),
+    "service_county": ("hero", "trust_license", "service_summary", "content_section"),
+    "city_service": ("hero", "trust_license", "service_summary", "content_section"),
+    "informational": ("hero", "trust_license", "content_section"),
+}
+
+
 def _engine():
     return create_engine(
         "sqlite://",
@@ -205,7 +217,16 @@ def _scope(
                 site_plan_id=plan.id,
                 planned_page_id=planned.id,
                 generated_page_id=generated.id,
-                generated_components=[],
+                generated_components=[
+                    {
+                        "instance_key": f"{component_key}:{component_index}",
+                        "component_key": component_key,
+                        "position": component_index,
+                    }
+                    for component_index, component_key in enumerate(
+                        COMPOSITION_COMPONENT_KEYS_BY_CONTRACT[requested_type]
+                    )
+                ],
                 source_snapshot={"baseline": True},
                 source_hash="a" * 64,
                 status="current",
@@ -367,6 +388,15 @@ def test_page_type_contracts_are_bounded_and_define_complete_customer_purpose():
         assert all(item["purpose"] and item["customer_outcome"] for item in contracts)
         assert all(item["approved_source_constraints"] for item in contracts)
 
+    home_service_overview = next(
+        contract
+        for contract in PAGE_TYPE_MEDIA_CONTRACTS["home"]
+        if contract["placement_key"] == "home-service-overview"
+    )
+    assert home_service_overview["component_or_section"] == "related_page_links"
+    assert "related_page_links" in COMPOSITION_COMPONENT_KEYS_BY_CONTRACT["home"]
+    assert "service_summary" not in COMPOSITION_COMPONENT_KEYS_BY_CONTRACT["home"]
+
 
 def test_refresh_creates_versioned_suggestions_without_operator_decisions_for_all_page_types():
     engine = _engine()
@@ -400,6 +430,228 @@ def test_refresh_creates_versioned_suggestions_without_operator_decisions_for_al
         assert len(session.exec(select(WebsiteMediaPlanningRecord)).all()) == 1
 
 
+def test_suggestion_and_decision_writes_can_share_one_rollback_safe_transaction():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _, _, plan, _ = _scope(session, "atomic-population")
+        workspace = refresh_site_plan_media_suggestions(
+            session,
+            plan.id,
+            commit=False,
+        )
+        hero = next(
+            item
+            for item in workspace.placements
+            if item.suggestion
+            and item.suggestion["placement_key"] == "home-hero"
+        )
+        result = decide_media_placement(
+            session,
+            plan.id,
+            _decision(workspace, hero, operator="Shawn Manchette"),
+            commit=False,
+            return_workspace=False,
+        )
+        assert result is None
+        assert len(session.exec(select(WebsiteMediaPlanningRecord)).all()) == 1
+        assert len(session.exec(select(PlannedPageMediaRequirement)).all()) == 1
+
+        session.rollback()
+
+        assert session.exec(select(WebsiteMediaPlanningRecord)).all() == []
+        assert session.exec(select(PlannedPageMediaRequirement)).all() == []
+        composition = session.exec(select(PageComposition)).one()
+        assert composition.status == "current"
+
+
+@pytest.mark.parametrize("contract_page_type", tuple(PAGE_TYPE_MEDIA_CONTRACTS))
+def test_every_page_type_requires_target_in_its_exact_composition_before_decision(
+    contract_page_type: str,
+):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _, _, plan, pages = _scope(
+            session,
+            f"exact-target-{contract_page_type}",
+            page_types=(contract_page_type,),
+        )
+        workspace = refresh_site_plan_media_suggestions(session, plan.id)
+        placement = next(
+            item
+            for item in workspace.placements
+            if item.suggestion
+        )
+        target = placement.suggestion["component_or_section"]
+        assert session.exec(
+            select(SemanticComponentDefinition).where(
+                SemanticComponentDefinition.component_key == target,
+                SemanticComponentDefinition.status == "active",
+            )
+        ).first()
+
+        composition = session.exec(
+            select(PageComposition).where(
+                PageComposition.planned_page_id == pages[0][0].id
+            )
+        ).one()
+        composition.generated_components = [
+            item
+            for item in composition.generated_components
+            if item.get("component_key") != target
+        ]
+        session.add(composition)
+        session.commit()
+
+        with pytest.raises(
+            PageMediaPlanningError,
+            match="exact Planned Page composition",
+        ):
+            decide_media_placement(
+                session,
+                plan.id,
+                _decision(workspace, placement),
+            )
+        assert session.exec(select(PlannedPageMediaRequirement)).all() == []
+
+        with pytest.raises(
+            PageMediaPlanningError,
+            match="exact Planned Page composition",
+        ):
+            refresh_site_plan_media_suggestions(session, plan.id)
+
+
+def test_media_planning_rejects_a_target_when_all_exact_instances_are_suppressed():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _, _, plan, pages = _scope(session, "suppressed-exact-target")
+        workspace = refresh_site_plan_media_suggestions(session, plan.id)
+        placement = next(
+            item
+            for item in workspace.placements
+            if item.suggestion
+            and item.suggestion["placement_key"] == "home-service-overview"
+        )
+        target = placement.suggestion["component_or_section"]
+        composition = session.exec(
+            select(PageComposition).where(
+                PageComposition.planned_page_id == pages[0][0].id
+            )
+        ).one()
+        target_instances = [
+            item["instance_key"]
+            for item in composition.generated_components
+            if item.get("component_key") == target
+        ]
+        assert target_instances
+        composition.operator_decisions = [
+            {
+                "instance_key": instance_key,
+                "action": "suppress",
+                "rationale": "Suppress this exact optional component.",
+                "provenance": "operator",
+            }
+            for instance_key in target_instances
+        ]
+        session.add(composition)
+        session.commit()
+
+        with pytest.raises(
+            PageMediaPlanningError,
+            match="exact Planned Page composition",
+        ):
+            decide_media_placement(
+                session,
+                plan.id,
+                _decision(workspace, placement),
+            )
+        assert session.exec(select(PlannedPageMediaRequirement)).all() == []
+
+        with pytest.raises(
+            PageMediaPlanningError,
+            match="exact Planned Page composition",
+        ):
+            refresh_site_plan_media_suggestions(session, plan.id)
+
+
+def test_existing_media_decision_fails_readiness_after_its_target_is_suppressed():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _, _, plan, pages = _scope(session, "suppressed-target-readiness")
+        workspace = refresh_site_plan_media_suggestions(session, plan.id)
+        placement = next(
+            item
+            for item in workspace.placements
+            if item.suggestion
+            and item.suggestion["placement_key"] == "home-service-overview"
+        )
+        decide_media_placement(
+            session,
+            plan.id,
+            _decision(workspace, placement),
+        )
+        target = placement.suggestion["component_or_section"]
+        composition = session.exec(
+            select(PageComposition).where(
+                PageComposition.planned_page_id == pages[0][0].id
+            )
+        ).one()
+        composition.operator_decisions = [
+            {
+                "instance_key": item["instance_key"],
+                "action": "suppress",
+                "rationale": "Suppress this exact optional component.",
+                "provenance": "operator",
+            }
+            for item in composition.generated_components
+            if item.get("component_key") == target
+        ]
+        assert composition.operator_decisions
+        session.add(composition)
+        session.commit()
+
+        errors = validate_required_media_for_page(
+            session,
+            pages[0][0],
+            require_approved_assignments=False,
+        )
+        assert any(
+            "home-service-overview target is missing from the exact effective"
+            in error
+            for error in errors
+        )
+        refreshed_workspace = read_page_media_workspace(session, plan.id)
+        refreshed_placement = next(
+            item
+            for item in refreshed_workspace.placements
+            if item.placement_id
+            and item.effective_requirement
+            and item.effective_requirement.placement_key
+            == "home-service-overview"
+        )
+        assert refreshed_placement.readiness == "stale"
+        assert any(
+            "exact effective Planned Page composition" in reason
+            for reason in refreshed_placement.blocking_reasons
+        )
+        assert refreshed_workspace.ready is False
+        report = evaluate_website_readiness(session, plan.id)
+        website_category = next(
+            item for item in report.categories if item.key == "website_readiness"
+        )
+        media_items = {
+            item.key: item
+            for item in website_category.items
+            if item.key.startswith("page_media_")
+        }
+        freshness = media_items["page_media_composition_freshness"]
+        assert freshness.status == "needs_attention"
+        assert freshness.affected_planned_page_ids == [pages[0][0].id]
+
+
 def test_operator_decisions_preserve_provenance_history_and_remain_separate_from_suggestions():
     engine = _engine()
     SQLModel.metadata.create_all(engine)
@@ -416,7 +668,15 @@ def test_operator_decisions_preserve_provenance_history_and_remain_separate_from
             hero,
             operator="Shawn Manchette",
             rationale="Approve the authentic Home hero placement contract.",
-        )
+        ).model_copy(update={
+            "approved_source_constraints": [
+                *hero.suggestion["approved_source_constraints"],
+                "County-specific imagery requires authentic or truthfully licensed evidence.",
+            ],
+            "permitted_reuse_policy": (
+                "Never use the same exact asset twice on one page for different purposes."
+            ),
+        })
         decided = decide_media_placement(session, plan.id, payload)
         current = next(
             item.effective_requirement for item in decided.placements
@@ -428,6 +688,13 @@ def test_operator_decisions_preserve_provenance_history_and_remain_separate_from
         assert current.rationale == "Approve the authentic Home hero placement contract."
         assert current.source_suggestion_key == hero.suggestion["suggestion_key"]
         assert current.planning_record_id == workspace.planning_record.id
+        assert current.approved_source_constraints == [
+            *hero.suggestion["approved_source_constraints"],
+            "County-specific imagery requires authentic or truthfully licensed evidence.",
+        ]
+        assert current.permitted_reuse_policy == (
+            "Never use the same exact asset twice on one page for different purposes."
+        )
         assert decided.planning_record.generated_media_suggestions == original_suggestions
 
         same = decide_media_placement(session, plan.id, payload)

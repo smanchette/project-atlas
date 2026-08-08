@@ -859,6 +859,7 @@ def _website_category(
                 placement.planned_page.id
                 for placement in media.placements
                 if placement.composition_status == "stale"
+                or placement.readiness == "stale"
             }
         )
         incomplete_asset_count = media.summary.incomplete_governance
