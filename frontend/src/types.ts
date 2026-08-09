@@ -247,6 +247,7 @@ export type PageMediaSuggestion = {
   compatible_page_types: string[];
   placement_key: string;
   component_or_section: string;
+  target_component_instance_key: string;
   requirement_state: PageMediaRequirementState;
   purpose: string;
   customer_outcome: string;
@@ -337,6 +338,7 @@ export type PageMediaRequirementDecision = {
   planned_page_id: number;
   planning_record_id: number | null;
   component_or_section: string;
+  target_component_instance_key: string | null;
   placement_key: string;
   contract_version: number;
   version: number;

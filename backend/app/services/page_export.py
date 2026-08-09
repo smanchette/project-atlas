@@ -17,6 +17,8 @@ from app.models import (
     GeneratedPageRevision,
     ImageMetadata,
     PageImageAssignment,
+    PlannedPage,
+    PlannedPageMediaRequirement,
     Service,
     Website,
 )
@@ -33,6 +35,10 @@ from app.services.page_type_review import (
     draft_content_sections,
     review_contract_for,
     validate_draft_contract,
+)
+from app.services.page_composition import (
+    PageCompositionError,
+    read_composition_for_generated_page,
 )
 from app.services.website_context import build_website_context
 from app.services.website_scope import require_page_website, require_single_website_selection
@@ -250,14 +256,27 @@ def _media_references(session: Session, page_id: int) -> list[ExportMediaReferen
     ).all()
     references: list[ExportMediaReference] = []
     for assignment in assignments:
+        governed_identity = _governed_media_export_identity(
+            session,
+            page,
+            assignment,
+        )
         image = session.get(ImageMetadata, assignment.image_metadata_id)
-        if not image or is_image_metadata_excluded(website, image):
+        if not image:
+            if assignment.media_requirement_id is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Governed page-media export references a missing media asset.",
+                )
+            continue
+        if is_image_metadata_excluded(website, image):
             continue
         references.append(
             ExportMediaReference(
                 image_id=image.id or 0,
                 image_role=assignment.image_role,
                 sort_order=assignment.sort_order,
+                **governed_identity,
                 image_title=image.image_title,
                 alt_text=assignment.override_alt_text or image.reviewed_alt_text or image.alt_text or "",
                 asset_url=image.asset_url,
@@ -270,6 +289,155 @@ def _media_references(session: Session, page_id: int) -> list[ExportMediaReferen
             )
         )
     return references
+
+
+def _governed_media_export_identity(
+    session: Session,
+    page: GeneratedPage | None,
+    assignment: PageImageAssignment,
+) -> dict[str, Any]:
+    """Return durable placement identity, failing closed for malformed V2 bindings.
+
+    Legacy assignments intentionally retain their prior export semantics by
+    emitting null governed-identity fields. Governed V1 placements expose the
+    identity they already possess. V2 placements additionally require their
+    persisted exact component-instance selector to resolve in the current
+    semantic composition; export never derives or substitutes that selector.
+    """
+
+    empty = {
+        "media_requirement_id": None,
+        "media_requirement_version": None,
+        "placement_key": None,
+        "target_component_key": None,
+        "target_component_instance_key": None,
+        "placement_contract_version": None,
+    }
+    if assignment.media_requirement_id is None:
+        return empty
+    if page is None or page.id is None:
+        _governed_export_conflict("Generated Page identity is missing.")
+
+    requirement = session.get(
+        PlannedPageMediaRequirement,
+        assignment.media_requirement_id,
+    )
+    if requirement is None:
+        _governed_export_conflict("Media requirement is missing.")
+    planned = session.get(PlannedPage, assignment.planned_page_id)
+    if planned is None:
+        _governed_export_conflict("Planned Page identity is missing.")
+    if (
+        assignment.generated_page_id != page.id
+        or assignment.website_id != page.website_id
+        or assignment.planned_page_id != planned.id
+        or planned.generated_page_id != page.id
+        or planned.website_id != page.website_id
+        or requirement.id != assignment.media_requirement_id
+        or requirement.website_id != page.website_id
+        or requirement.business_id != page.business_id
+        or requirement.site_plan_id != planned.site_plan_id
+        or requirement.planned_page_id != planned.id
+    ):
+        _governed_export_conflict(
+            "Media placement crosses its Generated Page, Planned Page, Website, "
+            "Business, or Site Plan boundary."
+        )
+    if (
+        requirement.lifecycle_status != "active"
+        or requirement.requirement_state not in {"required", "advisory"}
+    ):
+        _governed_export_conflict("Media requirement is not an active exportable placement.")
+    if assignment.placement_contract_version != requirement.contract_version:
+        _governed_export_conflict("Placement contract version is stale or inconsistent.")
+
+    target_instance_key = getattr(
+        requirement,
+        "target_component_instance_key",
+        None,
+    )
+    if requirement.contract_version >= 2:
+        if (
+            not isinstance(target_instance_key, str)
+            or not target_instance_key
+            or target_instance_key != target_instance_key.strip()
+        ):
+            _governed_export_conflict(
+                "V2 media requirement is missing its exact component-instance selector."
+            )
+        _validate_v2_export_target(
+            session,
+            page.id,
+            requirement,
+            target_instance_key,
+        )
+
+    return {
+        "media_requirement_id": requirement.id,
+        "media_requirement_version": requirement.version,
+        "placement_key": requirement.placement_key,
+        "target_component_key": requirement.component_or_section,
+        "target_component_instance_key": target_instance_key,
+        "placement_contract_version": requirement.contract_version,
+    }
+
+
+def _validate_v2_export_target(
+    session: Session,
+    generated_page_id: int,
+    requirement: PlannedPageMediaRequirement,
+    target_instance_key: str,
+) -> None:
+    try:
+        composition = read_composition_for_generated_page(
+            session,
+            generated_page_id,
+        )
+    except PageCompositionError as exc:
+        _governed_export_conflict(
+            f"V2 media target cannot be verified in a current composition: {exc}"
+        )
+
+    targets = [
+        item
+        for item in composition.effective_components
+        if item.instance_key == target_instance_key
+        and item.component_key == requirement.component_or_section
+    ]
+    if len(targets) != 1:
+        _governed_export_conflict(
+            "V2 media target does not resolve exactly once to the governed semantic "
+            "component instance."
+        )
+
+    placements = [
+        item
+        for item in composition.effective_components
+        if item.component_key == "media_placement"
+        and item.input_bindings.get("media_requirement_id") == requirement.id
+    ]
+    if len(placements) != 1:
+        _governed_export_conflict(
+            "V2 media requirement does not resolve exactly once in the current composition."
+        )
+    bindings = placements[0].input_bindings
+    if (
+        bindings.get("target_component_key") != requirement.component_or_section
+        or bindings.get("target_component_instance_key") != target_instance_key
+        or bindings.get("placement_contract_version")
+        != requirement.contract_version
+    ):
+        _governed_export_conflict(
+            "V2 media composition binding does not match the durable exact target "
+            "and placement contract version."
+        )
+
+
+def _governed_export_conflict(message: str) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail=f"Governed page-media export blocked: {message}",
+    )
 
 
 def _readiness_warnings(

@@ -296,7 +296,7 @@ def test_0041_adds_page_media_planning_and_governance_on_clean_database(
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260807_0041"
+        ).scalar_one() == "20260809_0042"
     get_settings.cache_clear()
 
 
@@ -419,7 +419,7 @@ def test_0041_adopts_compatible_precreated_planning_tables(
         ).scalar_one() == 0
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260807_0041"
+        ).scalar_one() == "20260809_0042"
     get_settings.cache_clear()
 
 

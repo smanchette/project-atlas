@@ -33,6 +33,7 @@ class PlannedPageMediaRequirementRead(BaseModel):
     planned_page_id: int
     planning_record_id: int | None
     component_or_section: str
+    target_component_instance_key: str | None
     placement_key: str
     contract_version: int
     version: int
@@ -74,6 +75,7 @@ class PageMediaPlacementDecisionRequest(BaseModel):
     expected_planning_version: int = Field(ge=1)
     source_suggestion_key: str | None = Field(default=None, max_length=240)
     component_or_section: str | None = Field(default=None, max_length=120)
+    target_component_instance_key: str | None = Field(default=None, max_length=200)
     purpose: str | None = Field(default=None, max_length=1000)
     customer_outcome: str | None = Field(default=None, max_length=1000)
     intended_subject: str | None = Field(default=None, max_length=1000)

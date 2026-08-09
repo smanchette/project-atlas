@@ -419,6 +419,12 @@ class PlannedPageMediaRequirement(TimestampMixin, table=True):
             "OR (version > 1 AND replaces_requirement_id IS NOT NULL)",
             name="ck_plannedpagemediarequirement_replacement",
         ),
+        CheckConstraint(
+            "contract_version < 2 OR "
+            "(target_component_instance_key IS NOT NULL "
+            "AND length(trim(target_component_instance_key)) > 0)",
+            name="ck_plannedpagemediarequirement_v2_target",
+        ),
         UniqueConstraint(
             "planned_page_id",
             "placement_key",
@@ -433,6 +439,20 @@ class PlannedPageMediaRequirement(TimestampMixin, table=True):
             postgresql_where=text("lifecycle_status = 'active'"),
             sqlite_where=text("lifecycle_status = 'active'"),
         ),
+        Index(
+            "uq_plannedpagemediarequirement_active_target",
+            "planned_page_id",
+            "target_component_instance_key",
+            unique=True,
+            postgresql_where=text(
+                "lifecycle_status = 'active' "
+                "AND target_component_instance_key IS NOT NULL"
+            ),
+            sqlite_where=text(
+                "lifecycle_status = 'active' "
+                "AND target_component_instance_key IS NOT NULL"
+            ),
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -445,6 +465,11 @@ class PlannedPageMediaRequirement(TimestampMixin, table=True):
         index=True,
     )
     component_or_section: str = Field(max_length=120, index=True)
+    target_component_instance_key: str | None = Field(
+        default=None,
+        max_length=200,
+        index=True,
+    )
     placement_key: str = Field(max_length=120, index=True)
     contract_version: int = Field(default=1, ge=1)
     version: int = Field(default=1, ge=1)

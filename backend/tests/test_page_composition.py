@@ -130,7 +130,33 @@ def _scope(session: Session, *, suffix: str | None = None, phone: str | None = "
                 "schema_version": "planned-page-draft-v1", "page_type": page_type,
                 "title": name, "meta_title": name, "meta_description": f"Approved {name}",
                 "h1": name, "intro": f"Approved introduction for {name}.",
-                "sections": [{"key": "overview", "heading": "Overview", "body": "Approved facts only."}],
+                "sections": (
+                    [
+                        {
+                            "key": "service_overview",
+                            "heading": "Overview",
+                            "body": "Approved facts only.",
+                        },
+                        {
+                            "key": "approved_guidance",
+                            "heading": "Guidance",
+                            "body": "Approved guidance only.",
+                        },
+                    ]
+                    if page_type == "service"
+                    else [
+                        {
+                            "key": "ways_to_contact",
+                            "heading": "Ways to contact",
+                            "body": "Approved contact facts only.",
+                        },
+                        {
+                            "key": "service_area",
+                            "heading": "Service area",
+                            "body": "Approved service-area facts only.",
+                        },
+                    ]
+                ),
                 "faq_items": [{"question": "A question?", "answer": "An approved answer."}] if page_type == "service" else [],
                 "image_placements": [{"key": "hero", "purpose": "Support page orientation", "status": "planned"}],
                 "related_pages": [], "call_to_action": "Contact the business.", "internal_notes": "",
@@ -1500,3 +1526,107 @@ def test_required_media_without_assignment_refreshes_as_an_honest_placeholder():
             service_page,
         )
         assert "Required media placement service-hero has no approved assignment." in strict_errors
+
+
+@pytest.mark.parametrize("binding_version", (None, 1))
+def test_v2_composition_rejects_missing_or_mismatched_binding_contract_version(
+    binding_version,
+    monkeypatch,
+):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session)
+        website, plan, pages = _scope(session, suffix=f"binding-version-{binding_version}")
+        baseline = refresh_site_plan_compositions(session, plan.id)
+        assert baseline.blocked == []
+        planned, generated = pages[0]
+        composition = session.exec(
+            select(PageComposition).where(
+                PageComposition.generated_page_id == generated.id
+            )
+        ).one()
+        planning = WebsiteMediaPlanningRecord(
+            website_id=website.id,
+            business_id=website.business_id,
+            site_plan_id=plan.id,
+            version=1,
+            algorithm_version="page-media-planning-v2",
+            generated_media_suggestions=[],
+            source_snapshot={},
+            source_hash="a" * 64,
+        )
+        session.add(planning)
+        session.flush()
+        requirement = PlannedPageMediaRequirement(
+            website_id=website.id,
+            business_id=website.business_id,
+            site_plan_id=plan.id,
+            planned_page_id=planned.id,
+            planning_record_id=planning.id,
+            component_or_section="hero",
+            target_component_instance_key="hero",
+            placement_key="service-hero-contract-test",
+            contract_version=2,
+            version=1,
+            requirement_state="advisory",
+            purpose="Validate the exact hero media contract.",
+            customer_outcome="Understand the approved service.",
+            intended_subject="Approved service evidence.",
+            orientation="landscape",
+            aspect_ratio="16:9",
+            minimum_width=1200,
+            minimum_height=675,
+            crop_intent="Preserve the meaningful subject.",
+            focal_point_intent="Use the approved focal point.",
+            responsive_behavior="Use approved responsive derivatives.",
+            accessibility_intent="informative",
+            approved_source_constraints=["approved_company_media"],
+            permitted_reuse_policy="Reuse only for this approved purpose.",
+            replacement_policy="Replacement requires operator approval.",
+            compatible_page_types=[planned.page_type],
+            decided_by="Composition Contract Operator",
+            rationale="Exercise fail-closed persisted binding validation.",
+            lifecycle_status="active",
+        )
+        session.add(requirement)
+        session.flush()
+        components = list(composition.generated_components)
+        bindings = {
+            "media_requirement_id": requirement.id,
+            "target_component_key": "hero",
+            "target_component_instance_key": "hero",
+        }
+        if binding_version is not None:
+            bindings["placement_contract_version"] = binding_version
+        components.append(
+            {
+                "instance_key": f"media_placement:requirement-{requirement.id}",
+                "component_key": "media_placement",
+                "contract_version": 1,
+                "region": "main",
+                "position": max(item["position"] for item in components) + 1,
+                "variant": "placeholder",
+                "input_bindings": bindings,
+                "provenance": "atlas_generated",
+            }
+        )
+        composition.generated_components = components
+        session.add(composition)
+        session.commit()
+        monkeypatch.setattr(
+            "app.services.page_media_planning.validate_required_media_for_page",
+            lambda *_args, **_kwargs: [],
+        )
+
+        with pytest.raises(
+            PageCompositionError,
+            match="placement contract version does not match",
+        ):
+            composition_service._validate(
+                session,
+                composition,
+                plan,
+                planned,
+                generated,
+            )

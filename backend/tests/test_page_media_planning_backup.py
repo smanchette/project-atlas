@@ -200,15 +200,27 @@ def _seed_governed_graph(
     )
     session.add(planning_v1)
     session.flush()
+    snapshot_v2 = {
+        **snapshot,
+        "algorithm_version": "page-media-planning-v2",
+        "placement_contract_version": 2,
+        "placement_contract_manifest_hash": "a" * 64,
+    }
+    suggestion_v2 = {
+        **suggestion,
+        "suggestion_key": "home:v2:hero:exact-target",
+        "target_component_instance_key": "hero",
+        "contract_version": 2,
+    }
     planning_v2 = WebsiteMediaPlanningRecord(
         website_id=website.id,
         business_id=business.id,
         site_plan_id=plan.id,
         version=2,
-        algorithm_version="page-media-planning-v1",
-        generated_media_suggestions=[suggestion],
-        source_snapshot=snapshot,
-        source_hash=_hash(snapshot),
+        algorithm_version="page-media-planning-v2",
+        generated_media_suggestions=[suggestion_v2],
+        source_snapshot=snapshot_v2,
+        source_hash=_hash(snapshot_v2),
         generated_at=datetime(2026, 8, 7, 6, 5, tzinfo=UTC),
         replaces_record_id=planning_v1.id,
     )
@@ -222,7 +234,6 @@ def _seed_governed_graph(
         "planned_page_id": page.id,
         "component_or_section": "hero",
         "placement_key": "hero",
-        "contract_version": 1,
         "requirement_state": "required",
         "purpose": "Introduce the approved business.",
         "customer_outcome": "Understand the business and request service.",
@@ -240,7 +251,6 @@ def _seed_governed_graph(
         "permitted_reuse_policy": "Reuse only for the same approved purpose.",
         "replacement_policy": "Replacement requires operator approval.",
         "compatible_page_types": ["home"],
-        "source_suggestion_key": "home:v1:hero",
         "decided_by": "Media Operator",
         "rationale": "Approve the governed Home hero placement.",
         "decided_at": datetime(2026, 8, 7, 6, 10, tzinfo=UTC),
@@ -248,6 +258,8 @@ def _seed_governed_graph(
     requirement_v1 = PlannedPageMediaRequirement(
         **requirement_values,
         planning_record_id=planning_v1.id,
+        contract_version=1,
+        source_suggestion_key="home:v1:hero",
         version=1,
         lifecycle_status="superseded",
     )
@@ -256,6 +268,9 @@ def _seed_governed_graph(
     requirement_v2 = PlannedPageMediaRequirement(
         **requirement_values,
         planning_record_id=planning_v2.id,
+        contract_version=2,
+        target_component_instance_key="hero",
+        source_suggestion_key="home:v2:hero:exact-target",
         version=2,
         lifecycle_status="active",
         replaces_requirement_id=requirement_v1.id,
@@ -337,7 +352,7 @@ def _seed_governed_graph(
         media_requirement_id=requirement_v2.id,
         assignment_version=1,
         media_version=1,
-        placement_contract_version=1,
+        placement_contract_version=2,
         image_role="hero",
         display_preset="hero_desktop",
         status="replaced",
@@ -359,7 +374,7 @@ def _seed_governed_graph(
         media_requirement_id=requirement_v2.id,
         assignment_version=2,
         media_version=2,
-        placement_contract_version=1,
+        placement_contract_version=2,
         image_role="hero",
         display_preset="hero_desktop",
         status="active",
@@ -382,6 +397,9 @@ def _seed_governed_graph(
                 "version": requirement_v2.version,
                 "contract_version": requirement_v2.contract_version,
                 "component_or_section": requirement_v2.component_or_section,
+                "target_component_instance_key": (
+                    requirement_v2.target_component_instance_key
+                ),
                 "component_contract_version": 1,
                 "requirement_state": requirement_v2.requirement_state,
                 "planning_record_id": planning_v2.id,
@@ -393,6 +411,9 @@ def _seed_governed_graph(
                 "requirement_id": requirement_v2.id,
                 "requirement_version": requirement_v2.version,
                 "placement_contract_version": requirement_v2.contract_version,
+                "target_component_instance_key": (
+                    requirement_v2.target_component_instance_key
+                ),
                 "assignment_id": assignment_v2.id,
                 "assignment_version": assignment_v2.assignment_version,
                 "asset_id": image_v2.id,
@@ -411,17 +432,28 @@ def _seed_governed_graph(
         composition_version=1,
         generated_components=[
             {
+                "instance_key": "hero",
+                "component_key": "hero",
+                "contract_version": 1,
+                "region": "main",
+                "position": 0,
+                "variant": "default",
+                "input_bindings": {"generated_page_id": generated.id},
+                "provenance": "atlas_generated",
+            },
+            {
                 "instance_key": "media_placement:requirement-2",
                 "component_key": "media_placement",
                 "contract_version": 1,
                 "region": "main",
-                "position": 0,
+                "position": 1,
                 "variant": "approved_media",
                 "input_bindings": {
                     "media_requirement_id": requirement_v2.id,
                     "page_image_assignment_id": assignment_v2.id,
                     "target_component_key": "hero",
-                    "target_component_instance_key": "hero:default",
+                    "target_component_instance_key": "hero",
+                    "placement_contract_version": 2,
                     "target_region": "main",
                 },
                 "provenance": "atlas_generated",
@@ -444,7 +476,7 @@ def _seed_governed_graph(
     }
 
 
-def test_backup_053_round_trip_remaps_complete_page_media_graph_and_is_idempotent(
+def test_backup_054_round_trip_remaps_complete_page_media_graph_and_is_idempotent(
     tmp_path: Path,
 ) -> None:
     source_engine = _engine()
@@ -454,8 +486,8 @@ def test_backup_053_round_trip_remaps_complete_page_media_graph_and_is_idempoten
         exported = export_backup(session, backup_dir=tmp_path)
 
     loaded = load_backup(Path(exported["path"]))
-    assert BACKUP_VERSION == "0.53"
-    assert loaded["metadata"]["version"] == "0.53"
+    assert BACKUP_VERSION == "0.54"
+    assert loaded["metadata"]["version"] == "0.54"
     assert loaded["metadata"]["table_counts"]["website_media_planning_records"] == 2
     assert loaded["metadata"]["table_counts"]["planned_page_media_requirements"] == 2
 
@@ -538,10 +570,21 @@ def test_backup_053_round_trip_remaps_complete_page_media_graph_and_is_idempoten
                 PageComposition.planned_page_id == page.id
             )
         ).one()
-        bindings = composition.generated_components[0]["input_bindings"]
+        media_component = next(
+            item
+            for item in composition.generated_components
+            if item["component_key"] == "media_placement"
+        )
+        bindings = media_component["input_bindings"]
         assert composition.status == "stale"
         assert bindings["media_requirement_id"] == requirements[1].id
         assert bindings["page_image_assignment_id"] == assignments[1].id
+        assert requirements[0].contract_version == 1
+        assert requirements[0].target_component_instance_key is None
+        assert requirements[1].contract_version == 2
+        assert requirements[1].target_component_instance_key == "hero"
+        assert bindings["target_component_instance_key"] == "hero"
+        assert bindings["placement_contract_version"] == 2
         page_media = composition.source_snapshot["page_media"]
         assert page_media["planning_record"]["planning_record_id"] == planning[1].id
         assert page_media["requirements"][0]["id"] == requirements[1].id
@@ -556,6 +599,29 @@ def test_backup_053_round_trip_remaps_complete_page_media_graph_and_is_idempoten
         assert len(session.exec(select(PlannedPageMediaRequirement)).all()) == 2
         assert len(session.exec(select(ImageMetadata)).all()) == 2
         assert len(session.exec(select(PageImageAssignment)).all()) == 2
+
+
+def test_backup_053_accepts_human_readable_approved_source_constraints(
+    tmp_path: Path,
+) -> None:
+    source_engine = _engine()
+    SQLModel.metadata.create_all(source_engine)
+    with Session(source_engine) as session:
+        _seed_governed_graph(session)
+        exported = export_backup(session, backup_dir=tmp_path)
+
+    payload = json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
+    requirement = payload["data"]["planned_page_media_requirements"][0]
+    requirement["approved_source_constraints"].append(
+        "Representative imagery must not be presented as proof of a specific event."
+    )
+    path = _write_payload(tmp_path, payload, "human-readable-source-constraints.json")
+
+    loaded = load_backup(path)
+
+    assert loaded["data"]["planned_page_media_requirements"][0][
+        "approved_source_constraints"
+    ][-1] == "Representative imagery must not be presented as proof of a specific event."
 
 
 def test_backup_052_defaults_new_groups_empty_without_inventing_governance(
@@ -679,4 +745,114 @@ def test_backup_053_rejects_malformed_or_cross_scope_page_media_graphs(
         payload["data"]["image_metadata"][1]["media_key"] = "different-key"
     path = _write_payload(tmp_path, payload, f"tampered-{tamper}.json")
     with pytest.raises(BackupValidationError, match=message):
+        load_backup(path)
+
+
+def test_backup_054_binds_planning_algorithm_to_source_snapshot(
+    tmp_path: Path,
+) -> None:
+    source_engine = _engine()
+    SQLModel.metadata.create_all(source_engine)
+    with Session(source_engine) as session:
+        _seed_governed_graph(session)
+        exported = export_backup(session, backup_dir=tmp_path)
+    payload = json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
+    planning = next(
+        item
+        for item in payload["data"]["website_media_planning_records"]
+        if item["version"] == 2
+    )
+    planning["source_snapshot"]["algorithm_version"] = (
+        "tampered-page-media-planning-v2"
+    )
+    planning["source_hash"] = _hash(planning["source_snapshot"])
+
+    path = _write_payload(tmp_path, payload, "tampered-algorithm-binding.json")
+
+    with pytest.raises(BackupValidationError, match="source snapshot"):
+        load_backup(path)
+
+
+@pytest.mark.parametrize(
+    "v2_signal",
+    ("snapshot", "suggestion", "requirement"),
+)
+def test_backup_054_v2_detection_cannot_be_bypassed_by_relabeling_algorithm(
+    tmp_path: Path,
+    v2_signal: str,
+) -> None:
+    source_engine = _engine()
+    SQLModel.metadata.create_all(source_engine)
+    with Session(source_engine) as session:
+        _seed_governed_graph(session)
+        exported = export_backup(session, backup_dir=tmp_path)
+    payload = json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
+    planning = next(
+        item
+        for item in payload["data"]["website_media_planning_records"]
+        if item["version"] == 2
+    )
+    requirement = next(
+        item
+        for item in payload["data"]["planned_page_media_requirements"]
+        if item["planning_record_id"] == planning["id"]
+    )
+    suggestion = planning["generated_media_suggestions"][0]
+
+    planning["algorithm_version"] = "page-media-planning-v1"
+    planning["source_snapshot"]["algorithm_version"] = "page-media-planning-v1"
+    planning["source_snapshot"]["placement_contract_version"] = 1
+    planning["source_snapshot"].pop("placement_contract_manifest_hash", None)
+    suggestion["contract_version"] = 1
+    suggestion["target_component_instance_key"] = None
+    requirement["contract_version"] = 1
+    requirement["target_component_instance_key"] = None
+
+    if v2_signal == "snapshot":
+        planning["source_snapshot"]["placement_contract_version"] = 2
+    elif v2_signal == "suggestion":
+        suggestion["contract_version"] = 2
+        suggestion["target_component_instance_key"] = "hero"
+    else:
+        requirement["contract_version"] = 2
+        requirement["target_component_instance_key"] = "hero"
+    planning["source_hash"] = _hash(planning["source_snapshot"])
+
+    path = _write_payload(tmp_path, payload, f"tampered-v2-{v2_signal}.json")
+
+    with pytest.raises(
+        BackupValidationError,
+        match="lacks its exact contract manifest identity",
+    ):
+        load_backup(path)
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ("placement_contract_version", "placement_contract_manifest_hash"),
+)
+def test_backup_054_requires_v2_contract_version_and_manifest_fields(
+    tmp_path: Path,
+    missing_field: str,
+) -> None:
+    source_engine = _engine()
+    SQLModel.metadata.create_all(source_engine)
+    with Session(source_engine) as session:
+        _seed_governed_graph(session)
+        exported = export_backup(session, backup_dir=tmp_path)
+    payload = json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
+    planning = next(
+        item
+        for item in payload["data"]["website_media_planning_records"]
+        if item["version"] == 2
+    )
+    planning["source_snapshot"].pop(missing_field)
+    planning["source_hash"] = _hash(planning["source_snapshot"])
+
+    path = _write_payload(tmp_path, payload, f"missing-v2-{missing_field}.json")
+
+    with pytest.raises(
+        BackupValidationError,
+        match="lacks its exact contract manifest identity",
+    ):
         load_backup(path)

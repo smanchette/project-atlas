@@ -240,10 +240,14 @@ def _compose(session: Session, plan: SitePlan, planned: PlannedPage) -> tuple[Pa
         raise PageCompositionError(f"Unsupported page type: {generated.page_type}.")
     from app.services.page_media_planning import validate_required_media_for_page
 
+    # The controlled regeneration path may inspect the stale predecessor's
+    # stable instance identities. The newly generated composition is validated
+    # again below with the normal strict-current rule before it can persist.
     media_errors = validate_required_media_for_page(
         session,
         planned,
         require_approved_assignments=False,
+        allow_composition_refresh_predecessor=True,
     )
     if media_errors:
         raise PageCompositionError(" ".join(media_errors))
@@ -373,6 +377,10 @@ def _generate_components(
             bindings: dict[str, Any] = {
                 "media_requirement_id": requirement.id,
                 "target_component_key": requirement.component_or_section,
+                "target_component_instance_key": (
+                    requirement.target_component_instance_key
+                ),
+                "placement_contract_version": requirement.contract_version,
             }
             if assignment:
                 bindings["page_image_assignment_id"] = assignment.id
@@ -453,25 +461,68 @@ def _bind_governed_media_regions(
             base_items.append(item)
 
     media_by_target: dict[str, list[dict[str, Any]]] = {}
+    base_by_instance: dict[str, dict[str, Any]] = {}
+    for item in base_items:
+        instance_key = str(item.get("instance_key") or "").strip()
+        if not instance_key:
+            raise PageCompositionError(
+                "Page Composition contains a component without an exact instance key."
+            )
+        if instance_key in base_by_instance:
+            raise PageCompositionError(
+                "Page Composition contains a duplicate exact component instance: "
+                f"{instance_key}."
+            )
+        base_by_instance[instance_key] = item
     for media in governed_media:
         bindings = media["input_bindings"]
         target_key = bindings.get("target_component_key")
-        candidates = [
-            item
-            for item in base_items
-            if item.get("component_key") == target_key
-            and item.get("instance_key") not in suppressed_instance_keys
-        ]
-        if not candidates:
+        target_instance_key = str(
+            bindings.get("target_component_instance_key") or ""
+        ).strip()
+        contract_version = int(bindings.get("placement_contract_version") or 1)
+        if target_instance_key:
+            target = base_by_instance.get(target_instance_key)
+            if (
+                target is None
+                or target_instance_key in suppressed_instance_keys
+            ):
+                raise PageCompositionError(
+                    "Approved Page Media placement cannot resolve its exact component "
+                    f"instance: {target_instance_key}."
+                )
+            if target.get("component_key") != target_key:
+                raise PageCompositionError(
+                    "Approved Page Media placement exact instance no longer matches "
+                    f"component {target_key}: {target_instance_key}."
+                )
+        elif contract_version >= 2:
             raise PageCompositionError(
-                "Approved Page Media placement cannot resolve its semantic component or region: "
-                f"{target_key}."
+                "V2 Page Media placement is missing its exact component-instance selector."
             )
-        target = candidates[-1]
-        bindings["target_component_instance_key"] = target["instance_key"]
+        else:
+            candidates = [
+                item
+                for item in base_items
+                if item.get("component_key") == target_key
+                and item.get("instance_key") not in suppressed_instance_keys
+            ]
+            if not candidates:
+                raise PageCompositionError(
+                    "Legacy Page Media placement cannot resolve its semantic component "
+                    f"or region: {target_key}."
+                )
+            target = candidates[-1]
+            target_instance_key = str(target["instance_key"])
+            bindings["target_component_instance_key"] = target_instance_key
         bindings["target_region"] = target["region"]
         media["region"] = target["region"]
-        media_by_target.setdefault(target["instance_key"], []).append(media)
+        if target_instance_key in media_by_target:
+            raise PageCompositionError(
+                "Multiple governed Page Media placements target the same exact "
+                f"component instance: {target_instance_key}."
+            )
+        media_by_target.setdefault(target_instance_key, []).append(media)
 
     ordered: list[dict[str, Any]] = []
     for item in base_items:
@@ -489,9 +540,13 @@ def _read(session: Session, composition: PageComposition, *, require_current: bo
     if not planned or not generated:
         raise PageCompositionError("Composition source records are missing.")
     errors = _validate(session, composition, plan, planned, generated, raise_on_error=False)
-    current_hash = _hash(_source_snapshot(session, plan, planned, generated))
-    if current_hash != composition.source_hash:
-        errors.append("Composition is stale because an authoritative source changed.")
+    try:
+        current_hash = _hash(_source_snapshot(session, plan, planned, generated))
+    except PageCompositionError as exc:
+        errors.append(str(exc))
+    else:
+        if current_hash != composition.source_hash:
+            errors.append("Composition is stale because an authoritative source changed.")
     if require_current and errors:
         raise PageCompositionError(" ".join(errors))
     effective = _effective(composition)
@@ -585,6 +640,24 @@ def _validate(session: Session, composition: PageComposition, plan: SitePlan, pl
             errors.append("Component instance keys must be present and unique.")
             continue
         seen.add(instance_key)
+        bindings = item.get("input_bindings") or {}
+        if (
+            item.get("component_key") == "media_placement"
+            and bindings.get("media_requirement_id")
+        ):
+            requirement = session.get(
+                PlannedPageMediaRequirement,
+                bindings["media_requirement_id"],
+            )
+            if (
+                requirement is not None
+                and bindings.get("placement_contract_version")
+                != requirement.contract_version
+            ):
+                errors.append(
+                    f"Page Media component {instance_key} placement contract version "
+                    "does not match its governed requirement."
+                )
         definition = definitions.get(
             (item.get("component_key"), item.get("contract_version"))
         )
@@ -647,6 +720,16 @@ def _available_inputs(session: Session, plan: SitePlan, planned: PlannedPage, ge
             and requirement.requirement_state in {"required", "advisory"}
             and bindings.get("target_component_key")
             == requirement.component_or_section
+            and bindings.get("placement_contract_version")
+            == requirement.contract_version
+            and (
+                requirement.contract_version < 2
+                or (
+                    requirement.target_component_instance_key
+                    and bindings.get("target_component_instance_key")
+                    == requirement.target_component_instance_key
+                )
+            )
         ):
             available.add("media_placement")
     assignment_id = bindings.get("page_image_assignment_id")
@@ -1341,9 +1424,17 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
             }
             for slot, asset in sorted(identity_assets.items())
         ]
-    from app.services.page_media_planning import media_source_snapshot
+    from app.services.page_media_planning import (
+        PageMediaPlanningError,
+        media_source_snapshot,
+    )
 
-    page_media = media_source_snapshot(session, planned)
+    try:
+        page_media = media_source_snapshot(session, planned)
+    except PageMediaPlanningError as exc:
+        raise PageCompositionError(
+            f"Page Media composition source failed closed: {exc}"
+        ) from exc
     if page_media["planning_record"] is not None or page_media["requirements"]:
         snapshot["page_media"] = page_media
     return snapshot

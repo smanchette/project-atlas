@@ -17,6 +17,7 @@ import {
 import {
   buildPageMediaAssignmentPayload,
   buildPageMediaDecisionPayload,
+  pageMediaTargetLabel,
 } from "../src/pages/PageMediaPlanningPage";
 import { renderComponent } from "../src/pages/GeneratedPagePreview";
 import type { DecisionFormState } from "../src/pages/PageMediaPlanningPage";
@@ -54,6 +55,7 @@ test("unassigned governed media renders an honest local placeholder", () => {
     input_bindings: {
       media_requirement_id: 81,
       target_component_key: "hero",
+      target_component_instance_key: "hero",
     },
     resolved_data: {
       purpose: "Establish the approved service visually.",
@@ -177,8 +179,9 @@ function decision(overrides: Partial<PageMediaRequirementDecision> = {}): PageMe
     planned_page_id: 61,
     planning_record_id: 111,
     component_or_section: "hero",
+    target_component_instance_key: "hero",
     placement_key: "hero",
-    contract_version: 1,
+    contract_version: 2,
     requirement_state: "required",
     purpose: "Help visitors understand the service.",
     customer_outcome: "Understand the service.",
@@ -199,7 +202,7 @@ function decision(overrides: Partial<PageMediaRequirementDecision> = {}): PageMe
     version: 1,
     decided_by: "Operator",
     rationale: "The hero image helps explain the service.",
-    source_suggestion_key: "61:hero:v1",
+    source_suggestion_key: "61:hero:v2",
     decided_at: "2026-08-07T00:05:00Z",
     lifecycle_status: "active",
     replaces_requirement_id: null,
@@ -223,7 +226,7 @@ function placement(overrides: Partial<PageMediaPlacement> = {}): PageMediaPlacem
       generated_page_id: 91,
     },
     suggestion: {
-      suggestion_key: "61:hero:v1",
+      suggestion_key: "61:hero:v2",
       website_id: 31,
       business_id: 11,
       site_plan_id: 51,
@@ -233,6 +236,7 @@ function placement(overrides: Partial<PageMediaPlacement> = {}): PageMediaPlacem
       compatible_page_types: ["service"],
       placement_key: "hero",
       component_or_section: "hero",
+      target_component_instance_key: "hero",
       requirement_state: "required",
       purpose: "Help visitors understand the service.",
       customer_outcome: "Understand the service.",
@@ -249,7 +253,7 @@ function placement(overrides: Partial<PageMediaPlacement> = {}): PageMediaPlacem
       approved_source_constraints: ["approved_company_media"],
       permitted_reuse_policy: "Reuse only for the same approved purpose.",
       replacement_policy: "Replacement requires operator approval.",
-      contract_version: 1,
+      contract_version: 2,
     },
     effective_requirement: requirement,
     requirement_history: [requirement],
@@ -263,7 +267,7 @@ function placement(overrides: Partial<PageMediaPlacement> = {}): PageMediaPlacem
       media_requirement_id: 81,
       assignment_version: 1,
       media_version: 1,
-      placement_contract_version: 1,
+      placement_contract_version: 2,
       image_role: "hero",
       sort_order: 0,
       override_focal_x: null,
@@ -302,6 +306,7 @@ function decisionForm(
     operator: "Operator",
     rationale: "Approved purpose.",
     componentOrSection: source.component_or_section,
+    targetComponentInstanceKey: source.target_component_instance_key ?? "",
     purpose: source.purpose,
     customerOutcome: source.customer_outcome,
     intendedSubject: source.intended_subject,
@@ -335,7 +340,7 @@ function workspace(overrides: Partial<PageMediaPlanningWorkspace> = {}): PageMed
       business_id: 11,
       site_plan_id: 51,
       version: 1,
-      algorithm_version: "page-media-planning-v1",
+      algorithm_version: "page-media-planning-v2",
       generated_media_suggestions: item.suggestion ? [item.suggestion] : [],
       source_snapshot: {},
       source_hash: "b".repeat(64),
@@ -443,9 +448,10 @@ test("operator decision history is deterministic and suggestions remain separate
   }));
   assert.equal(payload.decided_by, "Human Operator");
   assert.equal(payload.rationale, "Awaiting an authentic approved photograph.");
-  assert.equal(payload.source_suggestion_key, "61:hero:v1");
+  assert.equal(payload.source_suggestion_key, "61:hero:v2");
   assert.equal(payload.expected_planning_version, 1);
   assert.equal(payload.requirement_state, "deferred");
+  assert.equal(payload.target_component_instance_key, "hero");
   assert.equal(payload.minimum_width, 1200);
   assert.deepEqual(payload.approved_source_constraints, ["approved_company_media"]);
   assert.deepEqual(Object.keys(payload).sort(), [
@@ -474,8 +480,28 @@ test("operator decision history is deterministic and suggestions remain separate
     "responsive_behavior",
     "site_plan_id",
     "source_suggestion_key",
+    "target_component_instance_key",
     "website_id",
   ]);
+  assert.throws(
+    () => buildPageMediaDecisionPayload(
+      workspace(),
+      placement(),
+      decisionForm({ targetComponentInstanceKey: "  " }),
+    ),
+    /Exact component instance is required/,
+  );
+});
+
+test("exact component-instance targets remain visible while V1 history is explicit", () => {
+  assert.equal(pageMediaTargetLabel(decision()), "hero / hero");
+  assert.equal(
+    pageMediaTargetLabel(decision({
+      contract_version: 1,
+      target_component_instance_key: null,
+    })),
+    "hero / historical component-only target",
+  );
 });
 
 test("only governed local compatible assets may be assigned", () => {
@@ -529,6 +555,8 @@ test("workspace uses only bounded local Page Media and composition endpoints", (
   assert.match(source, /page-media\/placements\/\$\{placementId\}\/assign/);
   assert.match(source, /\/compositions\/refresh/);
   assert.match(source, /Historical assignment observations/);
+  assert.match(source, /Exact component instance \*/);
+  assert.match(source, /target_component_instance_key/);
   assert.match(source, /never treated as Page Media approval/);
   assert.match(source, /never refresh automatically/);
   assert.doesNotMatch(source, /\/api\/wordpress|siteground|drywoodtenting\.com/i);

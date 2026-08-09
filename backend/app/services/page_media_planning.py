@@ -50,8 +50,8 @@ from app.services.website_media_safety import (
 )
 
 
-ALGORITHM_VERSION = "page-media-planning-v1"
-PLACEMENT_CONTRACT_VERSION = 1
+ALGORITHM_VERSION = "page-media-planning-v2"
+PLACEMENT_CONTRACT_VERSION = 2
 REQUIREMENT_STATES = {"required", "advisory", "excluded", "deferred"}
 GOVERNANCE_STATUSES = {
     "legacy_unverified",
@@ -103,6 +103,30 @@ DISPLAY_PRESETS = {
     "square",
     "original",
 }
+DEFAULT_APPROVED_SOURCE_CONSTRAINTS = [
+    "approved_company_media",
+    "licensed_media",
+    "approved_generated_media",
+    (
+        "A representative service image must not be presented as proof that the "
+        "pictured property, customer, technician, or event occurred in a specific "
+        "City or County."
+    ),
+    (
+        "Alt text and captions must never claim a location, event, customer, or "
+        "service history that provenance does not prove."
+    ),
+    "County-specific imagery requires authentic or truthfully licensed evidence.",
+    (
+        "Regional or representative service imagery may be used only with honest "
+        "non-localized wording."
+    ),
+    "No GPS or EXIF location information may be fabricated.",
+    (
+        "Authentic GPS metadata may be retained only under the existing explicit "
+        "authorization, privacy, relevance, and provenance requirements."
+    ),
+]
 
 
 def _placement(
@@ -113,6 +137,7 @@ def _placement(
     outcome: str,
     subject: str,
     *,
+    target_component_instance_key: str,
     orientation: str = "landscape",
     aspect_ratio: str = "16:9",
     minimum_width: int = 1200,
@@ -129,6 +154,7 @@ def _placement(
     return {
         "placement_key": key,
         "component_or_section": component,
+        "target_component_instance_key": target_component_instance_key,
         "requirement_state": state,
         "purpose": purpose,
         "customer_outcome": outcome,
@@ -143,7 +169,7 @@ def _placement(
         "accessibility_intent": accessibility,
         "caption_intent": caption,
         "approved_source_constraints": source_constraints
-        or ["approved_company_media", "licensed_media", "approved_generated_media"],
+        or list(DEFAULT_APPROVED_SOURCE_CONSTRAINTS),
         "permitted_reuse_policy": reuse,
         "replacement_policy": replacement,
         "contract_version": PLACEMENT_CONTRACT_VERSION,
@@ -159,6 +185,7 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Establish the Website's primary service and identity visually.",
             "Understand the business's principal value and next action immediately.",
             "An approved business-appropriate service or company image.",
+            target_component_instance_key="hero",
         ),
         _placement(
             "home-trust",
@@ -167,6 +194,7 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Support trust and credibility without replacing approved factual evidence.",
             "Recognize credible, relevant evidence about the business.",
             "Approved team, equipment, process, or trust-supporting company imagery.",
+            target_component_instance_key="trust_license",
         ),
         _placement(
             "home-service-overview",
@@ -175,6 +203,7 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Help visitors understand the principal service offering.",
             "Connect the business's service to a recognizable customer need.",
             "An approved service process, outcome-neutral illustration, or legitimate company photograph.",
+            target_component_instance_key="related_page_links",
         ),
     ],
     "about": [
@@ -185,6 +214,7 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Introduce the real company and reinforce its identity.",
             "Understand who stands behind the service.",
             "An approved company, team, facility, equipment, or operator image.",
+            target_component_instance_key="hero",
         ),
         _placement(
             "about-trust",
@@ -193,6 +223,16 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Support approved experience, licensing, or service-quality information.",
             "Gain confidence from relevant and truthful visual evidence.",
             "Approved trust-supporting company media.",
+            target_component_instance_key="trust_license",
+        ),
+        _placement(
+            "about-credibility",
+            "content_section",
+            "advisory",
+            "Support approved company credibility, service approach, experience, or trust information.",
+            "Understand the company's approved approach without fabricated people, facilities, or history.",
+            "Truthful brand-supporting company, equipment, process, or approved illustrative media.",
+            target_component_instance_key="content_section:experience",
         ),
     ],
     "contact": [
@@ -203,6 +243,25 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Provide useful context beside contact and estimate pathways.",
             "Feel confident that the contact path belongs to the correct business.",
             "Approved company, office, vehicle, or service-context media.",
+            target_component_instance_key="contact_pathways",
+        ),
+        _placement(
+            "contact-service-area",
+            "content_section",
+            "advisory",
+            "Support the approved Central Florida service-area context.",
+            "Recognize the business's approved coverage without implying an unverified local facility.",
+            "Authentic or truthfully licensed regional service-area context.",
+            target_component_instance_key="content_section:service_area",
+        ),
+        _placement(
+            "contact-estimate-support",
+            "content_section",
+            "advisory",
+            "Support estimate, scheduling, or customer-contact guidance.",
+            "Understand how to contact the company and what information may help the conversation.",
+            "Approved service, scheduling, communication, or process-supporting media.",
+            target_component_instance_key="content_section:ways_to_contact",
         ),
     ],
     "faq": [
@@ -213,6 +272,25 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Clarify a frequently asked service or preparation concept when imagery is useful.",
             "Understand an answer more easily without decorative clutter.",
             "Approved explanatory, process, preparation, or company media.",
+            target_component_instance_key="faq",
+        ),
+        _placement(
+            "faq-preparation",
+            "hero",
+            "advisory",
+            "Orient visitors to approved tenting preparation or process guidance.",
+            "Recognize that the page explains preparation and process without unsupported claims.",
+            "Approved preparation, process, equipment, or explanatory media.",
+            target_component_instance_key="hero",
+        ),
+        _placement(
+            "faq-coordination",
+            "content_section",
+            "advisory",
+            "Support approved coordination, vacancy, re-entry, or what-to-expect guidance.",
+            "Know where to seek confirmed guidance without unsupported safety or timing claims.",
+            "Approved coordination, contact, process, or explanatory media.",
+            target_component_instance_key="content_section:contact",
         ),
     ],
     "service": [
@@ -223,6 +301,7 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Identify the approved service and establish relevance.",
             "Understand which service the page explains.",
             "Approved service-specific company, process, equipment, or illustrative media.",
+            target_component_instance_key="hero",
         ),
         _placement(
             "service-process",
@@ -231,6 +310,7 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Explain an approved part of the service process.",
             "Know what to expect without unsupported promises.",
             "Approved process, equipment, preparation, or guidance media.",
+            target_component_instance_key="service_summary:service_overview",
         ),
         _placement(
             "service-guidance",
@@ -239,6 +319,7 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Support practical preparation or customer guidance.",
             "Take an informed next step.",
             "Approved preparation, guidance, or supporting service media.",
+            target_component_instance_key="content_section:approved_guidance",
         ),
     ],
     "service_county": [
@@ -249,6 +330,7 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Connect the approved service with its legitimate county service area.",
             "Understand the service and geographic scope without fabricated local proof.",
             "Approved service media or authentic, authorized service-area imagery.",
+            target_component_instance_key="hero",
         ),
         _placement(
             "service-county-property",
@@ -257,6 +339,7 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Support useful property or service-area context.",
             "Recognize relevant property or preparation considerations.",
             "Authentic authorized company media, licensed generic property media, or approved illustration.",
+            target_component_instance_key="content_section:cities_served",
         ),
         _placement(
             "service-county-guidance",
@@ -265,6 +348,7 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Explain service or preparation details relevant to the page.",
             "Understand the process and next action.",
             "Approved service-process or preparation media.",
+            target_component_instance_key="service_summary:service_county_intro",
         ),
     ],
     "city_service": [
@@ -275,6 +359,7 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Connect an approved service with a legitimate city coverage page.",
             "Understand the service-area relationship without fabricated local evidence.",
             "Approved service media or authentic, authorized local company photography.",
+            target_component_instance_key="hero",
         ),
         _placement(
             "city-service-process",
@@ -283,6 +368,16 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Explain approved service or preparation details.",
             "Know what to expect and how to proceed.",
             "Approved process, preparation, equipment, or guidance media.",
+            target_component_instance_key="service_summary:why_it_matters",
+        ),
+        _placement(
+            "city-service-evidence",
+            "content_section",
+            "advisory",
+            "Support approved termite evidence, inspection signs, service explanation, or property-risk context.",
+            "Recognize useful service-specific evidence without treating representative imagery as local proof.",
+            "Approved inspection signs, termite evidence, property-risk, or service-explanation media distinct from the hero and preparation imagery.",
+            target_component_instance_key="content_section:signs_section",
         ),
     ],
     "informational": [
@@ -293,6 +388,7 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Orient the reader to the approved informational topic.",
             "Recognize the topic and its relevance.",
             "Approved explanatory or topic-specific media.",
+            target_component_instance_key="hero",
         ),
         _placement(
             "informational-support",
@@ -301,6 +397,7 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
             "Improve understanding of a substantive section.",
             "Understand the guidance more clearly.",
             "Approved explanatory, process, or reference media.",
+            target_component_instance_key="content_section:approved_information",
         ),
     ],
 }
@@ -445,15 +542,16 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
         if excluded_legacy_blocker:
             incompatible_count += len(excluded_legacy_by_page[page_id])
         try:
-            exact_component_keys = _exact_page_composition_component_keys(
+            exact_component_instances = _exact_page_composition_instances(
                 session,
                 page,
                 plan,
                 website,
+                allow_media_only_stale=True,
             )
             exact_target_error = None
         except PageMediaPlanningError as exc:
-            exact_component_keys = set()
+            exact_component_instances = {}
             exact_target_error = str(exc)
         page_suggestions = suggestions_by_page.get(page_id, {})
         page_keys = set(page_suggestions) | {
@@ -534,15 +632,21 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
                 if state in {"excluded", "deferred"}:
                     readiness = state
                 else:
-                    if effective.component_or_section not in exact_component_keys:
+                    try:
+                        _require_exact_page_composition_target(
+                            page,
+                            effective.component_or_section,
+                            effective.target_component_instance_key,
+                            exact_component_instances,
+                            contract_version=effective.contract_version,
+                        )
+                    except PageMediaPlanningError as exc:
                         blocking.append(
                             exact_target_error
-                            or (
-                                "Media placement target is missing from the exact "
-                                "effective Planned Page composition."
-                            )
+                            or str(exc)
                         )
                         readiness = "stale"
+                        page_ready = False
                     else:
                         for asset in assets:
                             if not _asset_compatibility_errors(session, asset, effective, page, website):
@@ -731,7 +835,7 @@ def _prepare_site_plan_media_suggestions(
         contracts = PAGE_TYPE_MEDIA_CONTRACTS.get(contract_key)
         if contracts is None:
             continue
-        composition_component_keys = _exact_page_composition_component_keys(
+        composition_instances = _exact_page_composition_instances(
             session,
             page,
             plan,
@@ -746,11 +850,17 @@ def _prepare_site_plan_media_suggestions(
             _require_exact_page_composition_target(
                 page,
                 contract["component_or_section"],
-                composition_component_keys,
+                contract["target_component_instance_key"],
+                composition_instances,
+                contract_version=contract["contract_version"],
             )
             value = dict(contract)
+            contract_fingerprint = _hash(value)[:16]
             value.update({
-                "suggestion_key": f"{contract_key}:v{PLACEMENT_CONTRACT_VERSION}:{contract['placement_key']}",
+                "suggestion_key": (
+                    f"{contract_key}:v{PLACEMENT_CONTRACT_VERSION}:"
+                    f"{contract['placement_key']}:{contract_fingerprint}"
+                ),
                 "website_id": website.id,
                 "business_id": website.business_id,
                 "site_plan_id": plan.id,
@@ -829,10 +939,19 @@ def decide_media_placement(
         raise PageMediaPlanningError(
             "Placement semantic component is incompatible with this Planned Page type."
         )
+    composition_instances = _exact_page_composition_instances(
+        session,
+        page,
+        plan,
+        website,
+        allow_media_only_stale=True,
+    )
     _require_exact_page_composition_target(
         page,
         values["component_or_section"],
-        _exact_page_composition_component_keys(session, page, plan, website),
+        values.get("target_component_instance_key"),
+        composition_instances,
+        contract_version=values["contract_version"],
     )
     history = list(session.exec(
         select(PlannedPageMediaRequirement).where(
@@ -841,6 +960,26 @@ def decide_media_placement(
         ).order_by(PlannedPageMediaRequirement.version)
     ).all())
     current = history[-1] if history else None
+    duplicate_target = next(
+        (
+            item
+            for item in session.exec(
+                select(PlannedPageMediaRequirement).where(
+                    PlannedPageMediaRequirement.planned_page_id == page.id,
+                    PlannedPageMediaRequirement.lifecycle_status == "active",
+                )
+            ).all()
+            if item.placement_key != payload.placement_key
+            and item.target_component_instance_key
+            == values.get("target_component_instance_key")
+        ),
+        None,
+    )
+    if duplicate_target is not None:
+        raise PageMediaPlanningError(
+            "Another active Page Media placement already targets the exact "
+            f"component instance: {values.get('target_component_instance_key')}."
+        )
     comparison = {
         key: values[key]
         for key in values
@@ -1236,6 +1375,13 @@ def assign_media_to_requirement(
     generated = session.get(GeneratedPage, page.generated_page_id)
     if not generated or generated.website_id != website.id or generated.business_id != website.business_id:
         raise PageMediaPlanningError("Generated Page crosses the Website or Business boundary.")
+    _require_exact_page_composition_target(
+        page,
+        requirement.component_or_section,
+        requirement.target_component_instance_key,
+        _exact_page_composition_instances(session, page, plan, website),
+        contract_version=requirement.contract_version,
+    )
     asset = _asset(session, payload.image_metadata_id)
     errors = _asset_compatibility_errors(session, asset, requirement, page, website)
     if errors:
@@ -1356,6 +1502,7 @@ def validate_required_media_for_page(
     planned_page: PlannedPage,
     *,
     require_approved_assignments: bool = True,
+    allow_composition_refresh_predecessor: bool = False,
 ) -> list[str]:
     errors: list[str] = []
     plan = session.get(SitePlan, planned_page.site_plan_id)
@@ -1378,15 +1525,16 @@ def validate_required_media_for_page(
     if current_planning.source_hash != _hash(_planning_source_snapshot(session, plan, pages)):
         errors.append("Page Media planning suggestions are stale.")
     try:
-        exact_component_keys = _exact_page_composition_component_keys(
+        exact_component_instances = _exact_page_composition_instances(
             session,
             planned_page,
             plan,
             website,
+            require_current=not allow_composition_refresh_predecessor,
         )
     except PageMediaPlanningError as exc:
         errors.append(str(exc))
-        exact_component_keys = set()
+        exact_component_instances = {}
     requirements = effective_media_requirements(session, planned_page.id or 0)
     requirements_by_key = {item.placement_key: item for item in requirements}
     suggestion_keys = {
@@ -1400,6 +1548,7 @@ def validate_required_media_for_page(
             errors.append(
                 f"Media placement {placement_key} has no current operator decision."
             )
+    seen_exact_targets: dict[str, str] = {}
     for requirement in requirements:
         errors.extend(
             _requirement_scope_errors(
@@ -1417,14 +1566,30 @@ def validate_required_media_for_page(
         ):
             errors.append(f"Media placement {requirement.placement_key} is bound to a stale planning record.")
             continue
-        if requirement.requirement_state not in {"required", "advisory"}:
-            continue
-        if requirement.component_or_section not in exact_component_keys:
-            errors.append(
-                "Media placement "
-                f"{requirement.placement_key} target is missing from the exact "
-                "effective Planned Page composition."
+        try:
+            _require_exact_page_composition_target(
+                planned_page,
+                requirement.component_or_section,
+                requirement.target_component_instance_key,
+                exact_component_instances,
+                contract_version=requirement.contract_version,
             )
+        except PageMediaPlanningError as exc:
+            errors.append(str(exc))
+            continue
+        if requirement.target_component_instance_key:
+            prior = seen_exact_targets.get(requirement.target_component_instance_key)
+            if prior is not None:
+                errors.append(
+                    "Page Media placements "
+                    f"{prior} and {requirement.placement_key} target the same exact "
+                    "component instance."
+                )
+                continue
+            seen_exact_targets[requirement.target_component_instance_key] = (
+                requirement.placement_key
+            )
+        if requirement.requirement_state not in {"required", "advisory"}:
             continue
         assignment = governed_assignment_for_requirement(session, requirement.id or 0)
         if assignment is None:
@@ -1476,6 +1641,23 @@ def media_source_snapshot(
         )
     _require_planning_record_scope(planning, plan, website)
     requirements = effective_media_requirements(session, planned_page.id or 0)
+    has_suggestions = bool(
+        planning
+        and any(
+            value.get("planned_page_id") == planned_page.id
+            for value in planning.generated_media_suggestions
+        )
+    )
+    if not has_suggestions and not requirements:
+        return {"planning_record": None, "requirements": [], "assignments": []}
+    composition_instances = _exact_page_composition_instances(
+        session,
+        planned_page,
+        plan,
+        website,
+        require_current=False,
+    )
+    seen_exact_targets: set[str] = set()
     for requirement in requirements:
         scope_errors = _requirement_scope_errors(
             session,
@@ -1486,15 +1668,20 @@ def media_source_snapshot(
         )
         if scope_errors:
             raise PageMediaPlanningError(" ".join(scope_errors))
-    has_suggestions = bool(
-        planning
-        and any(
-            value.get("planned_page_id") == planned_page.id
-            for value in planning.generated_media_suggestions
+        _require_exact_page_composition_target(
+            planned_page,
+            requirement.component_or_section,
+            requirement.target_component_instance_key,
+            composition_instances,
+            contract_version=requirement.contract_version,
         )
-    )
-    if not has_suggestions and not requirements:
-        return {"planning_record": None, "requirements": [], "assignments": []}
+        if requirement.target_component_instance_key:
+            if requirement.target_component_instance_key in seen_exact_targets:
+                raise PageMediaPlanningError(
+                    "Multiple active Page Media placements target the same exact "
+                    "component instance."
+                )
+            seen_exact_targets.add(requirement.target_component_instance_key)
     assignments: list[dict[str, Any]] = []
     for requirement in requirements:
         assignment = governed_assignment_for_requirement(session, requirement.id or 0)
@@ -1506,6 +1693,9 @@ def media_source_snapshot(
             "requirement_id": requirement.id,
             "requirement_version": requirement.version,
             "placement_contract_version": requirement.contract_version,
+            "target_component_instance_key": (
+                requirement.target_component_instance_key
+            ),
             "assignment_id": assignment.id if assignment else None,
             "assignment_version": assignment.assignment_version if assignment else None,
             "asset_id": asset.id if asset else None,
@@ -1526,6 +1716,7 @@ def media_source_snapshot(
                 "version": item.version,
                 "contract_version": item.contract_version,
                 "component_or_section": item.component_or_section,
+                "target_component_instance_key": item.target_component_instance_key,
                 "component_contract_version": _active_component_contract_version(
                     session,
                     item.component_or_section,
@@ -1586,6 +1777,7 @@ def _planning_source_snapshot(
         "site_plan_version": plan.version,
         "algorithm_version": ALGORITHM_VERSION,
         "placement_contract_version": PLACEMENT_CONTRACT_VERSION,
+        "placement_contract_manifest_hash": _hash(PAGE_TYPE_MEDIA_CONTRACTS),
         "component_contract_versions": component_versions,
         "planned_pages": [
             {
@@ -1647,6 +1839,9 @@ def _planning_page_binding(
     return {
         "algorithm_version": planning.algorithm_version,
         "placement_contract_version": snapshot.get("placement_contract_version"),
+        "placement_contract_manifest_hash": snapshot.get(
+            "placement_contract_manifest_hash"
+        ),
         "planned_page": page_snapshot,
         "component_contract_versions": {
             key: component_versions.get(key) for key in sorted(component_keys)
@@ -1696,7 +1891,7 @@ def _requirement_values(
 ) -> dict[str, Any]:
     base = dict(suggestion or {})
     for field in (
-        "component_or_section", "purpose", "customer_outcome", "intended_subject",
+        "component_or_section", "target_component_instance_key", "purpose", "customer_outcome", "intended_subject",
         "orientation", "aspect_ratio", "minimum_width", "minimum_height",
         "crop_intent", "focal_point_intent", "responsive_behavior",
         "accessibility_intent", "caption_intent", "approved_source_constraints",
@@ -1705,6 +1900,7 @@ def _requirement_values(
         value = getattr(payload, field)
         if value is not None:
             base[field] = value
+    contract_version = int(base.get("contract_version") or PLACEMENT_CONTRACT_VERSION)
     required = (
         "component_or_section", "purpose", "customer_outcome", "intended_subject",
         "orientation", "aspect_ratio", "minimum_width", "minimum_height",
@@ -1713,6 +1909,8 @@ def _requirement_values(
         "permitted_reuse_policy", "replacement_policy", "compatible_page_types",
     )
     missing = [field for field in required if not base.get(field)]
+    if contract_version >= 2 and not base.get("target_component_instance_key"):
+        missing.append("target_component_instance_key")
     if missing:
         raise PageMediaPlanningError(
             "Placement decision is missing contract fields: " + ", ".join(missing) + "."
@@ -1733,8 +1931,13 @@ def _requirement_values(
         "planned_page_id": page.id or 0,
         "planning_record_id": base.get("planning_record_id"),
         "component_or_section": str(base["component_or_section"]).strip(),
+        "target_component_instance_key": (
+            str(base["target_component_instance_key"]).strip()
+            if base.get("target_component_instance_key")
+            else None
+        ),
         "placement_key": payload.placement_key.strip().lower(),
-        "contract_version": int(base.get("contract_version") or PLACEMENT_CONTRACT_VERSION),
+        "contract_version": contract_version,
         "requirement_state": payload.requirement_state,
         "purpose": str(base["purpose"]).strip(),
         "customer_outcome": str(base["customer_outcome"]).strip(),
@@ -2030,6 +2233,26 @@ def _exact_page_composition_component_keys(
     plan: SitePlan,
     website: Website,
 ) -> set[str]:
+    return {
+        item["component_key"]
+        for item in _exact_page_composition_instances(
+            session,
+            page,
+            plan,
+            website,
+        ).values()
+    }
+
+
+def _exact_page_composition_instances(
+    session: Session,
+    page: PlannedPage,
+    plan: SitePlan,
+    website: Website,
+    *,
+    require_current: bool = True,
+    allow_media_only_stale: bool = False,
+) -> dict[str, dict[str, str]]:
     composition = session.exec(
         select(PageComposition).where(
             PageComposition.planned_page_id == page.id
@@ -2049,6 +2272,20 @@ def _exact_page_composition_component_keys(
             "Page Composition crosses its Website, Site Plan, Planned Page, "
             "or Generated Page boundary."
         )
+    if require_current and composition.status != "current":
+        if not (
+            allow_media_only_stale
+            and _composition_has_only_page_media_source_drift(
+                session,
+                composition,
+                page,
+                plan,
+            )
+        ):
+            raise PageMediaPlanningError(
+                "Page Composition is stale; refresh it before acquiring, deciding, "
+                "or assigning Page Media placements."
+            )
     suppressed_instance_keys = {
         str(value.get("instance_key") or "").strip()
         for value in composition.operator_decisions
@@ -2056,26 +2293,104 @@ def _exact_page_composition_component_keys(
         and value.get("action") == "suppress"
         and str(value.get("instance_key") or "").strip()
     }
-    return {
-        component_key.strip()
-        for value in composition.generated_components
-        if isinstance(value, dict)
-        and str(value.get("instance_key") or "").strip()
-        not in suppressed_instance_keys
-        and isinstance((component_key := value.get("component_key")), str)
-        and component_key.strip()
+    result: dict[str, dict[str, str]] = {}
+    for value in composition.generated_components:
+        if not isinstance(value, dict):
+            raise PageMediaPlanningError(
+                "Page Composition contains a malformed component instance."
+            )
+        instance_key = str(value.get("instance_key") or "").strip()
+        component_key = str(value.get("component_key") or "").strip()
+        if not instance_key or not component_key:
+            raise PageMediaPlanningError(
+                "Page Composition component instance identity is incomplete."
+            )
+        if instance_key in suppressed_instance_keys or component_key == "media_placement":
+            continue
+        if instance_key in result:
+            raise PageMediaPlanningError(
+                "Page Composition contains a duplicate exact component instance: "
+                f"{instance_key}."
+            )
+        result[instance_key] = {
+            "component_key": component_key,
+            "instance_key": instance_key,
+        }
+    return result
+
+
+def _composition_has_only_page_media_source_drift(
+    session: Session,
+    composition: PageComposition,
+    page: PlannedPage,
+    plan: SitePlan,
+) -> bool:
+    """Permit decisions against only the exact media-staled predecessor.
+
+    Media-plan suggestion and decision changes intentionally stale a composition.
+    The established multi-decision workflow may continue against that predecessor
+    only while every non-media authoritative source remains byte-for-byte
+    equivalent. Suggestion acquisition and media assignment do not use this
+    exception, and composition regeneration resolves the predecessor separately.
+    """
+
+    generated = session.get(GeneratedPage, page.generated_page_id)
+    stored = composition.source_snapshot
+    if generated is None or not isinstance(stored, dict):
+        return False
+    try:
+        from app.services.page_composition import (
+            PageCompositionError,
+            _source_snapshot,
+        )
+
+        current = _source_snapshot(session, plan, page, generated)
+    except (PageCompositionError, PageMediaPlanningError):
+        return False
+    if not isinstance(current, dict):
+        return False
+    stored_without_media = {
+        key: value for key, value in stored.items() if key != "page_media"
     }
+    current_without_media = {
+        key: value for key, value in current.items() if key != "page_media"
+    }
+    return _hash(stored_without_media) == _hash(current_without_media)
 
 
 def _require_exact_page_composition_target(
     page: PlannedPage,
     component_key: str,
-    composition_component_keys: set[str],
+    target_component_instance_key: str | None,
+    composition_instances: dict[str, dict[str, str]],
+    *,
+    contract_version: int,
 ) -> None:
-    if component_key not in composition_component_keys:
+    if contract_version < 2:
+        if any(
+            value["component_key"] == component_key
+            for value in composition_instances.values()
+        ):
+            return
         raise PageMediaPlanningError(
-            "Page Media placement target is missing from the exact Planned Page "
-            f"composition: {component_key} (Planned Page {page.id})."
+            "Legacy Page Media placement component is missing from the exact "
+            f"Planned Page composition: {component_key} (Planned Page {page.id})."
+        )
+    target = str(target_component_instance_key or "").strip()
+    if not target:
+        raise PageMediaPlanningError(
+            "V2 Page Media placement has an incomplete exact component-instance selector."
+        )
+    resolved = composition_instances.get(target)
+    if resolved is None:
+        raise PageMediaPlanningError(
+            "Page Media placement target instance is missing or suppressed in the "
+            f"exact Planned Page composition: {target} (Planned Page {page.id})."
+        )
+    if resolved["component_key"] != component_key:
+        raise PageMediaPlanningError(
+            "Page Media placement target is stale because its exact instance no longer "
+            f"matches component {component_key}: {target} (Planned Page {page.id})."
         )
 
 

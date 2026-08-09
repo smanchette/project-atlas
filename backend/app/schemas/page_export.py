@@ -21,6 +21,12 @@ class ExportMediaReference(SQLModel):
     image_id: int
     image_role: str
     sort_order: int
+    media_requirement_id: int | None = None
+    media_requirement_version: int | None = None
+    placement_key: str | None = None
+    target_component_key: str | None = None
+    target_component_instance_key: str | None = None
+    placement_contract_version: int | None = None
     image_title: str | None = None
     alt_text: str
     asset_url: str | None = None

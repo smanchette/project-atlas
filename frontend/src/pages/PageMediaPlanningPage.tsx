@@ -39,6 +39,7 @@ export type DecisionFormState = {
   operator: string;
   rationale: string;
   componentOrSection: string;
+  targetComponentInstanceKey: string;
   purpose: string;
   customerOutcome: string;
   intendedSubject: string;
@@ -547,6 +548,7 @@ function PlacementWorkspace({
           <dl className="pageMediaEvidenceGrid">
             <div><dt>Purpose</dt><dd>{suggestion.purpose}</dd></div>
             <div><dt>Requirement</dt><dd>{humanize(suggestion.requirement_state)}</dd></div>
+            <div><dt>Exact target</dt><dd>{pageMediaTargetLabel(suggestion)}</dd></div>
             <div><dt>Customer outcome</dt><dd>{suggestion.customer_outcome}</dd></div>
             <div><dt>Subject guidance</dt><dd>{suggestion.intended_subject}</dd></div>
             <div><dt>Accessibility</dt><dd>{humanize(suggestion.accessibility_intent)}</dd></div>
@@ -563,6 +565,7 @@ function PlacementWorkspace({
         {requirement ? (
           <dl className="pageMediaEvidenceGrid">
             <div><dt>Requirement</dt><dd>{humanize(requirement.requirement_state)}</dd></div>
+            <div><dt>Exact target</dt><dd>{pageMediaTargetLabel(requirement)}</dd></div>
             <div><dt>Provenance</dt><dd>{requirement.decided_by} · decision v{requirement.version} · {formatDate(requirement.decided_at)}</dd></div>
             <div><dt>Rationale</dt><dd>{requirement.rationale}</dd></div>
           </dl>
@@ -592,6 +595,7 @@ function PlacementWorkspace({
             </p>
             <div className="pageMediaContractGrid">
               <label><span>Semantic component *</span><input value={decisionForm.componentOrSection} onChange={(event) => setDecisionForm((current) => ({ ...current, componentOrSection: event.target.value }))} required /></label>
+              <label><span>Exact component instance *</span><input value={decisionForm.targetComponentInstanceKey} onChange={(event) => setDecisionForm((current) => ({ ...current, targetComponentInstanceKey: event.target.value }))} required /></label>
               <label><span>Orientation *</span><select value={decisionForm.orientation} onChange={(event) => setDecisionForm((current) => ({ ...current, orientation: event.target.value }))}><option value="any">Any</option><option value="landscape">Landscape</option><option value="portrait">Portrait</option><option value="square">Square</option></select></label>
               <label><span>Aspect ratio *</span><input value={decisionForm.aspectRatio} onChange={(event) => setDecisionForm((current) => ({ ...current, aspectRatio: event.target.value }))} required /></label>
               <label><span>Minimum width *</span><input type="number" min={1} value={decisionForm.minimumWidth} onChange={(event) => setDecisionForm((current) => ({ ...current, minimumWidth: event.target.value }))} required /></label>
@@ -610,7 +614,7 @@ function PlacementWorkspace({
               <label className="pageMediaWideField"><span>Compatible page types * (comma or line separated)</span><textarea value={decisionForm.compatiblePageTypes} onChange={(event) => setDecisionForm((current) => ({ ...current, compatiblePageTypes: event.target.value }))} required /></label>
             </div>
           </details>
-          <button className="primaryButton" disabled={working || !suggestion || planningRecordVersion === null || !decisionForm.operator.trim() || !decisionForm.rationale.trim()}>
+          <button className="primaryButton" disabled={working || !suggestion || planningRecordVersion === null || !decisionForm.operator.trim() || !decisionForm.rationale.trim() || !decisionForm.targetComponentInstanceKey.trim()}>
             Record new decision version
           </button>
         </form>
@@ -720,6 +724,10 @@ export function buildPageMediaDecisionPayload(
     source_suggestion_key: suggestion.suggestion_key,
     expected_planning_version: workspace.planning_record.version,
     component_or_section: requiredValue(form.componentOrSection, "Semantic component"),
+    target_component_instance_key: requiredValue(
+      form.targetComponentInstanceKey,
+      "Exact component instance",
+    ),
     purpose: requiredValue(form.purpose, "Purpose"),
     customer_outcome: requiredValue(form.customerOutcome, "Customer outcome"),
     intended_subject: requiredValue(form.intendedSubject, "Intended subject"),
@@ -746,6 +754,10 @@ function decisionFormFromPlacement(placement: PageMediaPlacement): DecisionFormS
     operator: "",
     rationale: "",
     componentOrSection: source?.component_or_section ?? "",
+    targetComponentInstanceKey:
+      source?.target_component_instance_key
+      ?? placement.suggestion?.target_component_instance_key
+      ?? "",
     purpose: source?.purpose ?? "",
     customerOutcome: source?.customer_outcome ?? "",
     intendedSubject: source?.intended_subject ?? "",
@@ -763,6 +775,17 @@ function decisionFormFromPlacement(placement: PageMediaPlacement): DecisionFormS
     replacementPolicy: source?.replacement_policy ?? "",
     compatiblePageTypes: (source?.compatible_page_types ?? []).join("\n"),
   };
+}
+
+export function pageMediaTargetLabel(source: {
+  component_or_section: string;
+  target_component_instance_key: string | null;
+}) {
+  const component = source.component_or_section.trim();
+  const instance = source.target_component_instance_key?.trim();
+  return instance
+    ? `${component} / ${instance}`
+    : `${component} / historical component-only target`;
 }
 
 function requiredValue(value: string, label: string): string {

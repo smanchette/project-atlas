@@ -73,7 +73,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.53"
+BACKUP_VERSION = "0.54"
 BRAND_ASSET_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
 BRAND_ASSET_MIME_EXTENSIONS = {
     "image/jpeg": {".jpg", ".jpeg"},
@@ -118,6 +118,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.51",
     "0.52",
     "0.53",
+    "0.54",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -1938,7 +1939,7 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     if record.get("site_plan_id") in old_plan_ids
                 ]
                 graph_ready = (
-                    payload["metadata"]["version"] in {"0.52", "0.53"}
+                    payload["metadata"]["version"] in {"0.52", "0.53", "0.54"}
                     and read_site_connection_plan(session, restored_plan_id).ready
                 )
                 claims_current = bool(backed_compositions) and all(
@@ -2089,12 +2090,12 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53"}:
+    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54"}:
         for group in ("site_plans", "planned_pages", "planning_records"):
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53"}:
+    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54"}:
         for group in (
             "site_connection_planning_records",
             "navigation_sets",
@@ -2104,7 +2105,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53"}:
+    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54"}:
         for group in (
             "website_coverage_planning_records",
             "website_service_coverage_decisions",
@@ -2115,7 +2116,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53"}:
+    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54"}:
         for group in (
             "drafting_eligibility_assessments",
             "drafting_eligibility_dispositions",
@@ -2123,7 +2124,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53"}:
+    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54"}:
         for group in (
             "supporting_page_authorizations",
             "pre_draft_distinctness_briefs",
@@ -2131,7 +2132,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52", "0.53"}:
+    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54"}:
         for group in (
             "website_draft_generation_runs",
             "website_draft_generation_items",
@@ -2142,19 +2143,19 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "website_service_county_coverage_decisions" not in data:
         data.setdefault("website_service_county_coverage_decisions", [])
         counts.setdefault("website_service_county_coverage_decisions", 0)
-    if backup_version not in {"0.49", "0.50", "0.51", "0.52", "0.53"}:
+    if backup_version not in {"0.49", "0.50", "0.51", "0.52", "0.53", "0.54"}:
         for group in ("semantic_component_definitions", "page_compositions"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.50", "0.51", "0.52", "0.53"}:
+    if backup_version not in {"0.50", "0.51", "0.52", "0.53", "0.54"}:
         for group in ("brand_assets", "website_identity_asset_assignments"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.51", "0.52", "0.53"}:
+    if backup_version not in {"0.51", "0.52", "0.53", "0.54"}:
         for group in ("themes", "website_theme_selections"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version != "0.53":
+    if backup_version not in {"0.53", "0.54"}:
         for group in (
             "website_media_planning_records",
             "planned_page_media_requirements",
@@ -2947,7 +2948,7 @@ def _validate_site_connection_decision_provenance(
     data: dict[str, list[dict[str, Any]]],
     backup_version: str,
 ) -> None:
-    if backup_version in {"0.52", "0.53"}:
+    if backup_version in {"0.52", "0.53", "0.54"}:
         _validate_052_site_connection_provenance_fields(data)
 
     planning_by_plan = {
@@ -3018,7 +3019,7 @@ def _validate_site_connection_decision_provenance(
                 "Backup Internal Link Intent crosses a Website, Site Plan, or page boundary."
             )
 
-    if backup_version not in {"0.52", "0.53"}:
+    if backup_version not in {"0.52", "0.53", "0.54"}:
         return
 
     _validate_052_composition_connection_bindings(
@@ -4021,7 +4022,15 @@ def _validate_page_media_ownership(
     images = {record["id"]: record for record in data["image_metadata"]}
     assignments = {record["id"]: record for record in data["page_image_assignments"]}
 
+    v2_requirement_planning_ids = {
+        record.get("planning_record_id")
+        for record in requirements.values()
+        if isinstance(record.get("contract_version"), int)
+        and record["contract_version"] >= 2
+    }
+
     active_requirements: set[tuple[int, str]] = set()
+    active_requirement_targets: set[tuple[int, str]] = set()
     for record in planning_records.values():
         website = websites[record["website_id"]]
         plan = site_plans[record["site_plan_id"]]
@@ -4047,11 +4056,34 @@ def _validate_page_media_ownership(
         if (
             snapshot.get("website_id") != record["website_id"]
             or snapshot.get("site_plan_id") != record["site_plan_id"]
+            or snapshot.get("algorithm_version") != record["algorithm_version"]
             or _canonical_json_hash(snapshot) != record["source_hash"]
             or not isinstance(snapshot.get("planned_pages"), list)
         ):
             raise BackupValidationError(
                 "Backup Page Media planning source snapshot is stale, malformed, or out of scope."
+            )
+        claims_v2_contract = (
+            str(record.get("algorithm_version") or "").endswith("-v2")
+            or (
+                isinstance(snapshot.get("placement_contract_version"), int)
+                and snapshot["placement_contract_version"] >= 2
+            )
+            or any(
+                isinstance(suggestion, dict)
+                and isinstance(suggestion.get("contract_version"), int)
+                and suggestion["contract_version"] >= 2
+                for suggestion in record["generated_media_suggestions"]
+            )
+            or record["id"] in v2_requirement_planning_ids
+        )
+        if claims_v2_contract and (
+            not str(record.get("algorithm_version") or "").endswith("-v2")
+            or snapshot.get("placement_contract_version") != 2
+            or not _is_lower_sha256(snapshot.get("placement_contract_manifest_hash"))
+        ):
+            raise BackupValidationError(
+                "Backup V2 Page Media planning snapshot lacks its exact contract manifest identity."
             )
         snapshot_page_ids: set[int] = set()
         for snapshot_page in snapshot["planned_pages"]:
@@ -4074,6 +4106,7 @@ def _validate_page_media_ownership(
                     "Backup Page Media planning snapshot crosses a Planned Page relationship."
                 )
             snapshot_page_ids.add(page["id"])
+        suggestion_targets: set[tuple[int, str]] = set()
         for suggestion in record["generated_media_suggestions"]:
             if not isinstance(suggestion, dict):
                 raise BackupValidationError(
@@ -4090,10 +4123,29 @@ def _validate_page_media_ownership(
                 or page["id"] not in snapshot_page_ids
                 or not str(suggestion.get("suggestion_key") or "").strip()
                 or not str(suggestion.get("placement_key") or "").strip()
+                or not str(suggestion.get("component_or_section") or "").strip()
+                or not isinstance(suggestion.get("contract_version"), int)
+                or suggestion["contract_version"] < 1
+                or (
+                    suggestion["contract_version"] >= 2
+                    and not str(
+                        suggestion.get("target_component_instance_key") or ""
+                    ).strip()
+                )
             ):
                 raise BackupValidationError(
                     "Backup Page Media suggestion crosses a Website, Business, Site Plan, or Planned Page boundary."
                 )
+            target_instance = str(
+                suggestion.get("target_component_instance_key") or ""
+            ).strip()
+            if target_instance:
+                target_key = (page["id"], target_instance)
+                if target_key in suggestion_targets:
+                    raise BackupValidationError(
+                        "Backup Page Media suggestions duplicate an exact component-instance target."
+                    )
+                suggestion_targets.add(target_key)
         replacement_id = record.get("replaces_record_id")
         if replacement_id is None:
             if record["version"] != 1:
@@ -4160,11 +4212,17 @@ def _validate_page_media_ownership(
                     "replacement_policy",
                 )
             )
-            or not _is_nonempty_normalized_string_list(
+            or not _is_nonempty_trimmed_string_list(
                 record.get("approved_source_constraints")
             )
             or not isinstance(record.get("compatible_page_types"), list)
             or page.get("page_type") not in record["compatible_page_types"]
+            or (
+                record["contract_version"] >= 2
+                and not str(
+                    record.get("target_component_instance_key") or ""
+                ).strip()
+            )
         ):
             raise BackupValidationError(
                 "Backup Planned Page media requirement is malformed or crosses a Website, Business, Site Plan, planning-record, or page boundary."
@@ -4178,6 +4236,11 @@ def _validate_page_media_ownership(
             suggestion.get("suggestion_key") == source_key
             and suggestion.get("planned_page_id") == record["planned_page_id"]
             and suggestion.get("placement_key") == record["placement_key"]
+            and suggestion.get("contract_version") == record["contract_version"]
+            and suggestion.get("component_or_section")
+            == record["component_or_section"]
+            and suggestion.get("target_component_instance_key")
+            == record.get("target_component_instance_key")
             for suggestion in planning["generated_media_suggestions"]
         ):
             raise BackupValidationError(
@@ -4209,6 +4272,16 @@ def _validate_page_media_ownership(
                     "Backup contains multiple active media requirements for one Planned Page placement."
                 )
             active_requirements.add(key)
+            target_instance = str(
+                record.get("target_component_instance_key") or ""
+            ).strip()
+            if target_instance:
+                target_key = (record["planned_page_id"], target_instance)
+                if target_key in active_requirement_targets:
+                    raise BackupValidationError(
+                        "Backup contains multiple active media requirements for one exact component instance."
+                    )
+                active_requirement_targets.add(target_key)
 
     governed_statuses = {
         "legacy_unverified",
@@ -4553,6 +4626,8 @@ def _validate_page_media_ownership(
                 != requirement["contract_version"]
                 or binding.get("component_or_section")
                 != requirement["component_or_section"]
+                or binding.get("target_component_instance_key")
+                != requirement.get("target_component_instance_key")
                 or not _is_positive_int(binding.get("component_contract_version"))
                 or binding.get("lifecycle_status")
                 != requirement["lifecycle_status"]
@@ -4578,6 +4653,8 @@ def _validate_page_media_ownership(
                 or binding.get("requirement_version") != requirement["version"]
                 or binding.get("placement_contract_version")
                 != requirement["contract_version"]
+                or binding.get("target_component_instance_key")
+                != requirement.get("target_component_instance_key")
             ):
                 raise BackupValidationError(
                     "Backup Page Composition Page Media assignment loses its requirement identity."
@@ -4628,6 +4705,15 @@ def _validate_page_media_ownership(
                 or bindings.get("target_component_key")
                 != requirement["component_or_section"]
                 or (
+                    requirement["contract_version"] >= 2
+                    and (
+                        bindings.get("target_component_instance_key")
+                        != requirement.get("target_component_instance_key")
+                        or bindings.get("placement_contract_version")
+                        != requirement["contract_version"]
+                    )
+                )
+                or (
                     assignment_id is not None
                     and (
                         assignment_id not in assignments
@@ -4640,7 +4726,7 @@ def _validate_page_media_ownership(
                     "Backup Page Composition generated media component crosses its governed placement binding."
                 )
 
-    if backup_version != "0.53" and (planning_records or requirements):
+    if backup_version not in {"0.53", "0.54"} and (planning_records or requirements):
         raise BackupValidationError(
             "Legacy backup versions cannot claim Page Media planning governance."
         )
@@ -4660,6 +4746,20 @@ def _is_nonempty_normalized_string_list(value: object) -> bool:
         and value
         and all(
             isinstance(item, str) and item == item.strip().lower() and item
+            for item in value
+        )
+        and len(set(value)) == len(value)
+    )
+
+
+def _is_nonempty_trimmed_string_list(value: object) -> bool:
+    """Validate governed prose lists without forcing machine-key casing."""
+
+    return bool(
+        isinstance(value, list)
+        and value
+        and all(
+            isinstance(item, str) and item == item.strip() and item
             for item in value
         )
         and len(set(value)) == len(value)
