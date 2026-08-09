@@ -4,7 +4,13 @@ from typing import Literal
 from sqlmodel import SQLModel
 
 
-HeroImageStatus = Literal["missing", "unreviewed", "missing_alt_text", "reviewed"]
+HeroImageStatus = Literal[
+    "missing",
+    "unreviewed",
+    "missing_alt_text",
+    "reviewed",
+    "excluded",
+]
 
 
 class ApprovalQueueItem(SQLModel):

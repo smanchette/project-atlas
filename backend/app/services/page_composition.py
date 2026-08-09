@@ -34,6 +34,9 @@ from app.schemas.page_composition import (
 )
 from app.services.website_context import build_website_context
 from app.services.brand_assets import identity_asset_contract_error
+from app.services.website_media_safety import (
+    is_image_metadata_excluded,
+)
 
 
 ALL_PAGE_TYPES = {
@@ -359,6 +362,14 @@ def _generate_components(
                 session,
                 requirement.id or 0,
             )
+            if assignment:
+                assigned_image = session.get(
+                    ImageMetadata,
+                    assignment.image_metadata_id,
+                )
+                website = session.get(Website, plan.website_id)
+                if is_image_metadata_excluded(website, assigned_image):
+                    assignment = None
             bindings: dict[str, Any] = {
                 "media_requirement_id": requirement.id,
                 "target_component_key": requirement.component_or_section,
@@ -379,7 +390,11 @@ def _generate_components(
             PageImageAssignment.generated_page_id == generated.id,
             PageImageAssignment.status == "active",
         ).order_by(PageImageAssignment.sort_order, PageImageAssignment.id)).all())
+        website = session.get(Website, plan.website_id)
         for assignment in assignments:
+            image = session.get(ImageMetadata, assignment.image_metadata_id)
+            if is_image_metadata_excluded(website, image):
+                continue
             add(
                 "media_placement",
                 "main",
@@ -638,6 +653,7 @@ def _available_inputs(session: Session, plan: SitePlan, planned: PlannedPage, ge
     if assignment_id:
         assignment = session.get(PageImageAssignment, assignment_id)
         image = session.get(ImageMetadata, assignment.image_metadata_id) if assignment else None
+        website = session.get(Website, plan.website_id)
         governed_binding_valid = (
             requirement is not None
             and assignment is not None
@@ -664,6 +680,7 @@ def _available_inputs(session: Session, plan: SitePlan, planned: PlannedPage, ge
             and assignment.status == "active"
             and image
             and image.business_id == generated.business_id
+            and not is_image_metadata_excluded(website, image)
             and (governed_binding_valid or legacy_binding_valid)
         ):
             available.add("media_placement")
@@ -1058,6 +1075,12 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
             )
             image = session.get(ImageMetadata, assignment.image_metadata_id) if assignment else None
             if assignment and image:
+                website = session.get(Website, composition.website_id)
+                if is_image_metadata_excluded(website, image):
+                    raise PageCompositionError(
+                        "Page composition references media excluded by the Website-scoped "
+                        "external-media safety policy."
+                    )
                 requirement = (
                     session.get(
                         PlannedPageMediaRequirement,
@@ -1225,7 +1248,16 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
         )
         for target in _approved_draft_related_pages(session, plan, planned, generated)
     ]
+    website = session.get(Website, plan.website_id)
     assignments = list(session.exec(select(PageImageAssignment).where(PageImageAssignment.generated_page_id == generated.id).order_by(PageImageAssignment.id)).all())
+    assignments = [
+        assignment
+        for assignment in assignments
+        if not is_image_metadata_excluded(
+            website,
+            session.get(ImageMetadata, assignment.image_metadata_id),
+        )
+    ]
     images = {
         assignment.image_metadata_id: session.get(ImageMetadata, assignment.image_metadata_id)
         for assignment in assignments

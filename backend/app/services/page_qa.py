@@ -13,6 +13,7 @@ from app.models import (
     ImageMetadata,
     PageImageAssignment,
     Service,
+    Website,
 )
 from app.schemas.qa import (
     PageQAResult,
@@ -25,6 +26,7 @@ from app.services.draft_generation import FORBIDDEN_PHRASES
 from app.services.page_type_review import review_contract_for, valid_faqs
 from app.services.website_context import build_website_context
 from app.services.website_scope import require_page_website, require_single_website_selection
+from app.services.website_media_safety import is_image_metadata_excluded
 
 PLACEHOLDER_PATTERNS = (
     "lorem ipsum",
@@ -70,6 +72,10 @@ CHECK_REMEDIATION = {
     "hero_reviewed": ("media", "Review the assigned hero image before approval."),
     "hero_alt_text": ("media", "Add reviewed or page-specific alt text to the hero image."),
     "assigned_images_reviewed": ("media", "Review or remove every unreviewed page image assignment."),
+    "excluded_external_media": (
+        "media",
+        "Remove assignments that reference Website-scoped excluded external media.",
+    ),
     "preview_route": ("preview", "Generate a structured draft so the internal preview can render."),
 }
 
@@ -281,16 +287,40 @@ def evaluate_page_qa(session: Session, page_id: int) -> PageQAResult:
         fail_message=f"Placeholder copy found: {', '.join(placeholder_found)}.",
     )
 
+    website = session.get(Website, page.website_id)
+    assignments = session.exec(
+        select(PageImageAssignment).where(
+            PageImageAssignment.generated_page_id == page.id,
+            PageImageAssignment.status == "active",
+        )
+    ).all()
+    assignment_images = [
+        (assignment, session.get(ImageMetadata, assignment.image_metadata_id))
+        for assignment in assignments
+    ]
+    excluded_assignment_count = sum(
+        1
+        for _, image in assignment_images
+        if is_image_metadata_excluded(website, image)
+    )
+    if excluded_assignment_count:
+        _check(
+            checks,
+            key="excluded_external_media",
+            label="No excluded external media assigned",
+            passed=False,
+            pass_message="No assigned image is excluded by Website media policy.",
+            fail_message=(
+                f"{excluded_assignment_count} assignment(s) reference excluded "
+                "external media."
+            ),
+        )
+
     if contract.media_policy == "required":
-        assignments = session.exec(
-            select(PageImageAssignment).where(
-                PageImageAssignment.generated_page_id == page.id,
-                PageImageAssignment.status == "active",
-            )
-        ).all()
         assignment_images = [
-            (assignment, session.get(ImageMetadata, assignment.image_metadata_id))
-            for assignment in assignments
+            pair
+            for pair in assignment_images
+            if not is_image_metadata_excluded(website, pair[1])
         ]
         hero_pair = next(
             (
@@ -399,9 +429,29 @@ def get_page_qa(session: Session, page_id: int) -> PageQAResult:
     page = session.get(GeneratedPage, page_id)
     if not page:
         raise HTTPException(status_code=404, detail="Generated page not found")
-    if page.qa_result:
+    if page.qa_result and not _page_has_excluded_external_media(session, page):
         return PageQAResult.model_validate({**page.qa_result, "persisted": True})
     return evaluate_page_qa(session, page_id)
+
+
+def _page_has_excluded_external_media(
+    session: Session,
+    page: GeneratedPage,
+) -> bool:
+    website = session.get(Website, page.website_id)
+    assignments = session.exec(
+        select(PageImageAssignment).where(
+            PageImageAssignment.generated_page_id == page.id,
+            PageImageAssignment.status == "active",
+        )
+    ).all()
+    return any(
+        is_image_metadata_excluded(
+            website,
+            session.get(ImageMetadata, assignment.image_metadata_id),
+        )
+        for assignment in assignments
+    )
 
 
 def preview_qa_batch(session: Session, payload: QABatchRequest) -> QABatchResponse:

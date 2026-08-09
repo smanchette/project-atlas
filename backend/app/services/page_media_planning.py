@@ -45,6 +45,9 @@ from app.services.media_uploads import (
     remove_stored_media_files,
     store_uploaded_image,
 )
+from app.services.website_media_safety import (
+    is_image_metadata_excluded,
+)
 
 
 ALGORITHM_VERSION = "page-media-planning-v1"
@@ -371,6 +374,9 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
             .order_by(ImageMetadata.media_key, ImageMetadata.media_version)
         ).all()
     )
+    assets = [
+        asset for asset in assets if not is_image_metadata_excluded(website, asset)
+    ]
     assignments = list(
         session.exec(
             select(PageImageAssignment)
@@ -382,6 +388,7 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
     ) if any(page.generated_page_id for page in pages) else []
     assignments_by_requirement: dict[int, list[PageImageAssignment]] = defaultdict(list)
     legacy_by_page: dict[int, list[PageImageAssignment]] = defaultdict(list)
+    excluded_legacy_by_page: dict[int, list[PageImageAssignment]] = defaultdict(list)
     page_by_generated = {
         page.generated_page_id: page for page in pages if page.generated_page_id
     }
@@ -390,8 +397,14 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
             assignments_by_requirement[assignment.media_requirement_id].append(assignment)
         else:
             page = page_by_generated.get(assignment.generated_page_id)
+            image = session.get(ImageMetadata, assignment.image_metadata_id)
             if page and page.id:
-                legacy_by_page[page.id].append(assignment)
+                target = (
+                    excluded_legacy_by_page
+                    if is_image_metadata_excluded(website, image)
+                    else legacy_by_page
+                )
+                target[page.id].append(assignment)
     known_asset_ids = {asset.id for asset in assets if asset.id is not None}
     for image_id in sorted({assignment.image_metadata_id for assignment in assignments}):
         if image_id in known_asset_ids:
@@ -401,6 +414,7 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
             legacy_asset
             and legacy_asset.website_id is None
             and legacy_asset.business_id == website.business_id
+            and not is_image_metadata_excluded(website, legacy_asset)
         ):
             assets.append(legacy_asset)
 
@@ -422,6 +436,14 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
     for page in pages:
         page_id = page.id or 0
         identity = _page_identity(page)
+        excluded_legacy_blocker = (
+            "Active legacy assignment references media excluded by the Website-scoped "
+            "external-media safety policy."
+            if excluded_legacy_by_page.get(page_id)
+            else None
+        )
+        if excluded_legacy_blocker:
+            incompatible_count += len(excluded_legacy_by_page[page_id])
         try:
             exact_component_keys = _exact_page_composition_component_keys(
                 session,
@@ -449,7 +471,10 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
                     active_assignment=None,
                     legacy_assignments=[_assignment_read(item) for item in legacy_by_page.get(page_id, [])],
                     compatible_asset_ids=[],
-                    blocking_reasons=["No current Page Media plan exists for this Planned Page."],
+                    blocking_reasons=[
+                        "No current Page Media plan exists for this Planned Page.",
+                        *([excluded_legacy_blocker] if excluded_legacy_blocker else []),
+                    ],
                     composition_status=_composition_status(compositions.get(page_id)),
                     readiness="missing_plan",
                 )
@@ -473,6 +498,8 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
             history = history_by_key.get((page_id, placement_key), [])
             effective = effective_by_key.get((page_id, placement_key))
             blocking: list[str] = []
+            if excluded_legacy_blocker:
+                blocking.append(excluded_legacy_blocker)
             active_assignment = None
             compatible_ids: list[int] = []
             readiness = "awaiting_operator_decision"
@@ -558,6 +585,7 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
                         elif state == "required":
                             blocking.append("Required media placement has no approved assignment.")
                             missing_required += 1
+                            readiness = "awaiting_assignment"
                         else:
                             readiness = "advisory_unfilled"
             if blocking:
@@ -1050,6 +1078,13 @@ def approve_page_media_asset(
         )
     if asset.media_version != expected_media_version:
         raise PageMediaPlanningError("Page media version changed before approval.")
+    website = session.get(Website, expected_website_id)
+    if not website:
+        raise PageMediaPlanningError("Page-media approval Website is missing.")
+    if is_image_metadata_excluded(website, asset):
+        raise PageMediaPlanningError(
+            "Page media is excluded by the Website-scoped external-media safety policy."
+        )
     if asset.governance_status == "approved":
         if asset.approved_by != approved_by.strip():
             raise PageMediaPlanningError(
@@ -1464,6 +1499,9 @@ def media_source_snapshot(
     for requirement in requirements:
         assignment = governed_assignment_for_requirement(session, requirement.id or 0)
         asset = session.get(ImageMetadata, assignment.image_metadata_id) if assignment else None
+        if is_image_metadata_excluded(website, asset):
+            assignment = None
+            asset = None
         assignments.append({
             "requirement_id": requirement.id,
             "requirement_version": requirement.version,
@@ -1732,6 +1770,10 @@ def _asset_compatibility_errors(
     errors: list[str] = []
     if asset.website_id != website.id or asset.business_id != website.business_id:
         errors.append("Media asset crosses the Website or Business boundary.")
+    if is_image_metadata_excluded(website, asset):
+        errors.append(
+            "Media asset is excluded by the Website-scoped external-media safety policy."
+        )
     if asset.governance_status != "approved":
         errors.append("Media asset is not approved through governed page-media approval.")
     if asset.retired_at or _is_asset_superseded(session, asset):

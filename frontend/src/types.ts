@@ -819,7 +819,7 @@ export type ApprovalQueueItem = {
   latest_revision_at?: string | null;
   revision_count: number;
   approval_history_count: number;
-  hero_image_status: "missing" | "unreviewed" | "missing_alt_text" | "reviewed";
+  hero_image_status: "missing" | "unreviewed" | "missing_alt_text" | "reviewed" | "excluded";
   last_reviewed_at?: string | null;
   internal_notes_snippet?: string | null;
   is_ready_for_approval: boolean;

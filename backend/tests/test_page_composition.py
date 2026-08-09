@@ -43,6 +43,7 @@ from app.services.page_composition import (
     refresh_site_plan_compositions,
     update_operator_composition_decisions,
 )
+from app.services import page_composition as composition_service
 from app.services.page_media_planning import (
     decide_media_placement,
     refresh_site_plan_media_suggestions,
@@ -837,6 +838,174 @@ def test_existing_reviewed_media_is_consumed_without_becoming_component_owned():
             if item["instance_key"] == media.instance_key
         )
         assert "asset_url" not in generated_record
+
+
+def test_flo_zone_media_32_is_excluded_from_legacy_composition_fallback():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session)
+        website, plan, pages = _scope(session, suffix="excludedlegacy32")
+        website.website_name = "Flo-Zone Tenting"
+        website.domain = "www.flo-zonetenting.com"
+        website.public_url = "https://www.Flo-ZoneTenting.com"
+        generated = pages[0][1]
+        image = ImageMetadata(
+            business_id=generated.business_id,
+            file_name="excluded-32.webp",
+            asset_url="/media/excluded-32.webp",
+            reviewed_alt_text="Excluded external media",
+            review_status="reviewed",
+            wordpress_media_id=32,
+        )
+        session.add(website)
+        session.add(image)
+        session.flush()
+        assignment = PageImageAssignment(
+            generated_page_id=generated.id,
+            image_metadata_id=image.id,
+            image_role="hero",
+            status="active",
+        )
+        session.add(assignment)
+        session.commit()
+
+        refresh_site_plan_compositions(session, plan.id)
+        composition = read_composition_for_generated_page(session, generated.id)
+        assert not any(
+            item.input_bindings.get("page_image_assignment_id") == assignment.id
+            for item in composition.effective_components
+        )
+        assert not any(
+            item["image_metadata_id"] == image.id
+            for item in composition.source_snapshot["media_assignments"]
+        )
+
+
+def test_flo_zone_media_32_fails_closed_in_generic_composition_resolution():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session)
+        website, plan, pages = _scope(session, suffix="excludedresolve32")
+        website.website_name = "Flo-Zone Tenting"
+        website.domain = "www.flo-zonetenting.com"
+        website.public_url = "https://www.Flo-ZoneTenting.com"
+        generated = pages[0][1]
+        image = ImageMetadata(
+            business_id=generated.business_id,
+            file_name="excluded-resolution-32.webp",
+            asset_url="/media/excluded-resolution-32.webp",
+            reviewed_alt_text="Excluded external media",
+            review_status="reviewed",
+            wordpress_media_id=32,
+        )
+        session.add(website)
+        session.add(image)
+        session.flush()
+        assignment = PageImageAssignment(
+            generated_page_id=generated.id,
+            image_metadata_id=image.id,
+            image_role="hero",
+            status="active",
+        )
+        session.add(assignment)
+        session.commit()
+        refresh_site_plan_compositions(session, plan.id)
+        composition = session.exec(
+            select(PageComposition).where(
+                PageComposition.generated_page_id == generated.id
+            )
+        ).one()
+
+        with pytest.raises(PageCompositionError, match="Website-scoped"):
+            composition_service._resolve_instance(
+                session,
+                composition,
+                generated,
+                {
+                    "instance_key": "media_placement:forced-32",
+                    "component_key": "media_placement",
+                    "contract_version": 1,
+                    "region": "main",
+                    "position": 99,
+                    "variant": "approved_media",
+                    "input_bindings": {
+                        "page_image_assignment_id": assignment.id,
+                    },
+                },
+            )
+
+
+def test_scoped_media_exclusion_does_not_change_website_identity_assets():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session)
+        website, plan, pages = _scope(session, suffix="identitypreserved")
+        website.website_name = "Flo-Zone Tenting"
+        website.domain = "www.flo-zonetenting.com"
+        website.public_url = "https://www.Flo-ZoneTenting.com"
+        identity = session.exec(
+            select(WebsiteIdentity).where(WebsiteIdentity.website_id == website.id)
+        ).one()
+        asset = BrandAsset(
+            business_id=website.business_id,
+            brand_id=website.brand_id,
+            asset_key="preserved-logo",
+            version=1,
+            asset_type="primary_logo",
+            variant_key="default",
+            purpose="Identify the approved Website Brand.",
+            approved_usage=["website_header"],
+            restrictions=["social_preview"],
+            accessibility_description="Approved preserved logo",
+            original_filename="preserved-logo.png",
+            stored_filename="preserved-logo.png",
+            asset_url="/media/preserved-logo.webp",
+            optimized_url="/media/preserved-logo.webp",
+            mime_type="image/png",
+            file_size=100,
+            width=400,
+            height=120,
+            checksum_sha256="e" * 64,
+            provenance_type="company_original",
+            rights_status="owned",
+            status="approved",
+            created_by="Identity Operator",
+            approved_by="Identity Operator",
+        )
+        session.add(website)
+        session.add(asset)
+        session.flush()
+        identity_assignment = WebsiteIdentityAssetAssignment(
+            website_identity_id=identity.id,
+            website_id=website.id,
+            brand_id=website.brand_id,
+            brand_asset_id=asset.id,
+            slot="header_logo",
+            version=1,
+            status="active",
+            assigned_by="Identity Operator",
+        )
+        session.add(identity_assignment)
+        session.commit()
+
+        refresh_site_plan_compositions(session, plan.id)
+        composition = read_composition_for_generated_page(
+            session,
+            pages[0][1].id,
+        )
+        header = next(
+            item
+            for item in composition.effective_components
+            if item.component_key == "website_header"
+        )
+        assert header.resolved_data["identity_assets"]["header_logo"][
+            "asset_id"
+        ] == asset.id
+        assert len(session.exec(select(BrandAsset)).all()) == 1
+        assert len(session.exec(select(WebsiteIdentityAssetAssignment)).all()) == 1
 
 
 def test_approved_website_identity_asset_is_consumed_and_invalidates_stale_composition():

@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import inspect
+from types import SimpleNamespace
 
 import pytest
 import httpx
@@ -9,12 +10,18 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.main import app
-from app.models import ImageMetadata
+from app.models import GeneratedPage, ImageMetadata, PageImageAssignment, Website
 from app.schemas.wordpress import (
     WordPressMediaAttachmentMatch, WordPressMediaFeaturedReference,
     WordPressMediaReconciliationCandidate,
 )
 from app.services import wordpress_media_sync as media_sync
+from app.services.website_media_safety import (
+    filter_wordpress_media_ids,
+    is_wordpress_media_excluded,
+    wordpress_source_matches_policy,
+    website_external_media_policy_snapshot,
+)
 
 
 def _image_record(**overrides: object) -> ImageMetadata:
@@ -197,6 +204,404 @@ def _candidate(media_id: int, date: str, valid: bool = True) -> WordPressMediaRe
     return WordPressMediaReconciliationCandidate(
         wordpress_media_id=media_id, date_gmt=date, source_url=f"https://example.test/{media_id}.png",
         remote_checksum="abc", valid=valid, gate_results=[],
+    )
+
+
+def _flo_zone_website() -> Website:
+    return Website(
+        id=1,
+        business_id=1,
+        brand_id=1,
+        website_name="Flo-Zone Tenting",
+        domain="www.flo-zonetenting.com",
+        public_url="https://www.Flo-ZoneTenting.com",
+        configuration={
+            "short_brand_name": "Flo-Zone",
+            "why_knowledge_slug": (
+                "why-fumigation-is-most-complete-drywood-termite-treatment"
+            ),
+        },
+    )
+
+
+def _other_website() -> Website:
+    return Website(
+        id=2,
+        business_id=2,
+        brand_id=2,
+        website_name="Other Website",
+        domain="other.example.test",
+        public_url="https://other.example.test",
+    )
+
+
+def test_flo_zone_media_32_is_removed_from_candidate_discovery() -> None:
+    assert filter_wordpress_media_ids(
+        _flo_zone_website(),
+        media_sync.CANDIDATE_MEDIA_IDS,
+    ) == (31,)
+
+
+def test_flo_zone_recent_media_inspector_never_returns_media_32(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    website = _flo_zone_website()
+    website.id = 1
+    page = GeneratedPage(
+        id=41,
+        business_id=1,
+        website_id=1,
+        page_type="city_service",
+        page_title="Orlando",
+        page_slug=media_sync.EXPECTED_SLUG,
+        h1="Orlando",
+    )
+    image = _image_record(id=1, image_title="Orlando hero")
+    assignment = PageImageAssignment(
+        id=1,
+        generated_page_id=41,
+        image_metadata_id=1,
+        image_role="hero",
+        override_alt_text="Orlando hero alt",
+    )
+
+    class FakeSession:
+        def get(self, model, record_id):
+            return {
+                (GeneratedPage, 41): page,
+                (ImageMetadata, 1): image,
+                (PageImageAssignment, 1): assignment,
+                (Website, 1): website,
+            }.get((model, record_id))
+
+    records = [
+        {
+            "id": media_id,
+            "date_gmt": "2026-07-12T08:36:08",
+            "source_url": f"https://www.drywoodtenting.com/orlando-hero-{media_id}.png",
+            "mime_type": "image/png",
+            "slug": f"orlando-hero-{media_id}",
+            "title": {"rendered": "Orlando hero"},
+            "alt_text": "Orlando hero alt",
+            "media_details": {"file": f"orlando-hero-{media_id}.png"},
+            "meta": {},
+        }
+        for media_id in (32, 31)
+    ]
+
+    class InspectorClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, url: str, **kwargs):
+            return httpx.Response(
+                200,
+                request=httpx.Request("GET", url),
+                json=records,
+            )
+
+    monkeypatch.setattr(
+        media_sync,
+        "read_wordpress_settings",
+        lambda session: SimpleNamespace(
+            site_url="https://www.drywoodtenting.com",
+            username="operator",
+        ),
+    )
+    monkeypatch.setattr(
+        media_sync,
+        "get_wordpress_application_password",
+        lambda: "unused",
+    )
+    monkeypatch.setattr(
+        media_sync,
+        "_resolve_media_path",
+        lambda image: (Path("orlando-hero.png"), None),
+    )
+    monkeypatch.setattr(
+        media_sync,
+        "_inspect_file",
+        lambda path: ("image/png", 10, 10, 10, "abc", None),
+    )
+    monkeypatch.setattr(
+        media_sync,
+        "wordpress_http_client",
+        lambda *args, **kwargs: InspectorClient(),
+    )
+
+    result = media_sync.inspect_wordpress_media(FakeSession(), 41)
+    assert result.candidate_count == 1
+    assert [item.wordpress_media_id for item in result.candidates] == [31]
+
+
+def test_flo_zone_media_32_cannot_be_selected_for_reconciliation() -> None:
+    selected, duplicates = media_sync._select_reconciliation_candidate(
+        [_candidate(32, "2026-07-12T08:36:08")],
+        website=_flo_zone_website(),
+    )
+    assert selected is None
+    assert duplicates == []
+
+
+def test_flo_zone_media_32_cannot_displace_newer_media_31() -> None:
+    selected, duplicates = media_sync._select_reconciliation_candidate(
+        [
+            _candidate(32, "2026-07-12T08:00:00"),
+            _candidate(31, "2026-07-12T09:00:00"),
+        ],
+        website=_flo_zone_website(),
+    )
+    assert selected and selected.wordpress_media_id == 31
+    assert duplicates == []
+
+
+def test_flo_zone_media_32_remains_excluded_when_otherwise_valid() -> None:
+    valid_32 = _candidate(32, "2026-07-12T08:00:00", valid=True)
+    assert valid_32.valid is True
+    selected, _ = media_sync._select_reconciliation_candidate(
+        [valid_32],
+        website=_flo_zone_website(),
+    )
+    assert selected is None
+
+
+def test_flo_zone_media_31_remains_eligible() -> None:
+    selected, duplicates = media_sync._select_reconciliation_candidate(
+        [_candidate(31, "2026-07-12T08:36:08")],
+        website=_flo_zone_website(),
+    )
+    assert selected and selected.wordpress_media_id == 31
+    assert duplicates == []
+
+
+def test_other_website_media_32_remains_eligible() -> None:
+    selected, duplicates = media_sync._select_reconciliation_candidate(
+        [_candidate(32, "2026-07-12T08:36:08")],
+        website=_other_website(),
+    )
+    assert selected and selected.wordpress_media_id == 32
+    assert duplicates == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("website_name", "Flo-Zone Tenting"),
+        ("domain", "www.flo-zonetenting.com"),
+        ("public_url", "https://www.Flo-ZoneTenting.com"),
+    ],
+)
+def test_partial_flo_zone_identity_match_does_not_scope_other_website_media_32(
+    field: str,
+    value: str,
+) -> None:
+    website = _other_website()
+    setattr(website, field, value)
+    assert filter_wordpress_media_ids(website, (31, 32)) == (31, 32)
+
+
+def test_fixed_wordpress_media_lookup_blocks_absent_site_policy_before_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        media_sync,
+        "wordpress_http_client",
+        lambda *args, **kwargs: pytest.fail("A missing site policy must block before HTTP."),
+    )
+    match = media_sync._attachment_match(
+        "https://www.drywoodtenting.com",
+        "operator",
+        "unused",
+        _image_record(wordpress_media_id=None),
+        "abc",
+        website=_other_website(),
+    )
+    assert match.status == "blocked"
+    assert "Website-scoped" in match.message
+
+
+def test_reconciliation_token_binds_site_scoped_policy_fingerprint() -> None:
+    website = _flo_zone_website()
+    fingerprint = str(
+        website_external_media_policy_snapshot(website)["fingerprint"]
+    )
+    token = media_sync._sign_reconciliation(
+        "abc",
+        [_candidate(31, "2026-07-12T08:36:08")],
+        31,
+        [],
+        datetime.now(UTC) + timedelta(minutes=1),
+        candidate_ids=(31,),
+        policy_fingerprint=fingerprint,
+    )
+    body = media_sync._verify_reconciliation(token, 41)
+    assert body["candidate_ids"] == [31]
+    assert body["external_media_policy_fingerprint"] == fingerprint
+
+
+def test_saved_flo_zone_media_32_mapping_blocks_before_candidate_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        media_sync,
+        "wordpress_http_client",
+        lambda *args, **kwargs: pytest.fail("Excluded media must not be queried."),
+    )
+    match = media_sync._attachment_match(
+        "https://www.drywoodtenting.com",
+        "operator",
+        "unused",
+        _image_record(wordpress_media_id=32),
+        "abc",
+        website=_flo_zone_website(),
+    )
+    assert match.status == "blocked"
+    assert "Website-scoped" in match.message
+
+
+def test_generic_attachment_search_skips_32_and_matches_31(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meta = {
+        "_atlas_managed_media": "true",
+        "_atlas_image_metadata_id": "1",
+        "_atlas_generated_page_id": "41",
+        "_atlas_source_checksum": "abc",
+    }
+
+    class SearchClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, url: str, **kwargs):
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                200,
+                request=request,
+                json=[
+                    {"id": 32, "source_url": "https://example.test/32.png", "meta": meta},
+                    {"id": 31, "source_url": "https://example.test/31.png", "meta": meta},
+                ],
+            )
+
+    monkeypatch.setattr(
+        media_sync,
+        "wordpress_http_client",
+        lambda *args, **kwargs: SearchClient(),
+    )
+    match = media_sync._attachment_match(
+        "https://www.drywoodtenting.com",
+        "operator",
+        "unused",
+        _image_record(wordpress_media_id=None),
+        "abc",
+        website=_flo_zone_website(),
+    )
+    assert match.status == "matched"
+    assert match.wordpress_media_id == 31
+
+
+def test_existing_flo_zone_media_31_mapping_stays_verified_and_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = _image_record(wordpress_media_id=31)
+    meta = {
+        "_atlas_managed_media": "true",
+        "_atlas_image_metadata_id": "1",
+        "_atlas_generated_page_id": "41",
+        "_atlas_source_checksum": "abc",
+    }
+
+    class MappedClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, url: str, **kwargs):
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "id": 31,
+                    "source_url": "https://example.test/31.png",
+                    "meta": meta,
+                },
+            )
+
+    monkeypatch.setattr(
+        media_sync,
+        "wordpress_http_client",
+        lambda *args, **kwargs: MappedClient(),
+    )
+    match = media_sync._attachment_match(
+        "https://www.drywoodtenting.com",
+        "operator",
+        "unused",
+        image,
+        "abc",
+        website=_flo_zone_website(),
+    )
+    assert not is_wordpress_media_excluded(_flo_zone_website(), 31)
+    assert match.status == "matched"
+    assert match.wordpress_media_id == 31
+    assert image.wordpress_media_id == 31
+
+
+def test_flo_zone_identity_tuple_keeps_policy_fail_closed_after_mutable_identity_drift() -> None:
+    website = _flo_zone_website()
+    website.id = 1
+    website.business_id = 999
+    website.brand_id = 999
+    website.website_name = "Drifted Website"
+    website.domain = "drifted.example.test"
+    website.public_url = "https://drifted.example.test"
+    assert filter_wordpress_media_ids(website, (31, 32)) == (31,)
+
+
+def test_flo_zone_stable_identity_keeps_policy_after_backup_id_remapping() -> None:
+    website = _flo_zone_website()
+    website.id = 901
+    website.business_id = 902
+    website.brand_id = 903
+    assert filter_wordpress_media_ids(website, (31, 32)) == (31,)
+
+
+def test_unrelated_website_reusing_id_one_does_not_receive_flo_zone_policy() -> None:
+    website = _other_website()
+    website.id = 1
+    website.business_id = 1
+    website.brand_id = 1
+    assert filter_wordpress_media_ids(website, (31, 32)) == (31, 32)
+
+
+def test_flo_zone_policy_rejects_an_unexpected_wordpress_source_origin() -> None:
+    website = _flo_zone_website()
+    assert wordpress_source_matches_policy(
+        website,
+        "https://www.drywoodtenting.com",
+    )
+    assert not wordpress_source_matches_policy(
+        website,
+        "https://other-wordpress.example.test",
+    )
+
+
+def test_wordpress_source_gate_fails_closed_when_flo_zone_identity_drifted() -> None:
+    website = _flo_zone_website()
+    website.business_id = 999
+    assert filter_wordpress_media_ids(website, (31, 32)) == (31,)
+    assert not wordpress_source_matches_policy(
+        website,
+        "https://www.drywoodtenting.com",
     )
 
 

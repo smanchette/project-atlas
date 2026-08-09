@@ -16,7 +16,13 @@ from sqlmodel import Session, select
 
 from app.core.config import get_settings
 from app.db.backup import BackupValidationError, load_backup, resolve_backup_download
-from app.models import GeneratedPage, ImageMetadata, PageImageAssignment, WordPressMediaSyncAudit
+from app.models import (
+    GeneratedPage,
+    ImageMetadata,
+    PageImageAssignment,
+    Website,
+    WordPressMediaSyncAudit,
+)
 from app.schemas.wordpress import (
     WordPressDraftGateResult, WordPressMediaAttachmentMatch, WordPressMediaDryRun,
     WordPressMediaInspectionCandidate, WordPressMediaInspectionResult,
@@ -30,6 +36,12 @@ from app.schemas.wordpress import (
 from app.services.wordpress_draft_review import check_live_wordpress_draft_status
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
+from app.services.website_media_safety import (
+    filter_wordpress_media_ids,
+    is_wordpress_media_excluded,
+    wordpress_source_matches_policy,
+    website_external_media_policy_snapshot,
+)
 
 TARGET_PAGE_ID = 41
 TARGET_POST_ID = 8
@@ -55,6 +67,9 @@ def dry_run_wordpress_media(session: Session, page_id: int) -> WordPressMediaDry
     image = session.get(ImageMetadata, TARGET_IMAGE_ID)
     if not page or not assignment or not image:
         raise HTTPException(status_code=404, detail="The Orlando hero media mapping is incomplete.")
+    website = session.get(Website, page.website_id)
+    if not website:
+        raise HTTPException(status_code=409, detail="The Orlando page has no valid Website scope.")
 
     settings = read_wordpress_settings(session)
     password = get_wordpress_application_password()
@@ -66,6 +81,12 @@ def dry_run_wordpress_media(session: Session, page_id: int) -> WordPressMediaDry
         _gate("assignment", "Hero assignment is exact", assignment.id == 1 and assignment.generated_page_id == 41 and assignment.image_metadata_id == 1 and assignment.image_role == "hero" and assignment.status == "active", "Assignment 1 must be the active hero for page 41 and image 1."),
         _gate("image_reviewed", "Image metadata is reviewed", image.review_status == "reviewed", "Image 1 must be reviewed."),
         _gate("credentials", "WordPress credentials are available", bool(settings.site_url and settings.username and password and settings.publishing_mode == "sandbox"), "Sandbox mode and process-memory credentials are required."),
+        _gate(
+            "external_media_source_scope",
+            "WordPress media source matches the Website-scoped safety policy",
+            wordpress_source_matches_policy(website, settings.site_url),
+            "WordPress media source does not match the Website-scoped safety policy.",
+        ),
     ]
     alt_text = (assignment.override_alt_text or image.reviewed_alt_text or "").strip()
     gates.append(_gate("reviewed_alt", "Reviewed alt text exists", bool(alt_text), "Reviewed alt text is required."))
@@ -87,7 +108,14 @@ def dry_run_wordpress_media(session: Session, page_id: int) -> WordPressMediaDry
         _gate("no_content_change", "No post or featured-image change requested", True, "Content and featured-image changes are unavailable."),
         _gate("one_image", "Exactly one image", True, "Bulk media is unavailable."),
     ]
-    match = _attachment_match(settings.site_url, settings.username, password, image, checksum) if password and checksum else WordPressMediaAttachmentMatch(status="unavailable", message="Attachment lookup unavailable until credentials and a valid checksum are present.")
+    match = _attachment_match(
+        settings.site_url,
+        settings.username,
+        password,
+        image,
+        checksum,
+        website=website,
+    ) if password and checksum else WordPressMediaAttachmentMatch(status="unavailable", message="Attachment lookup unavailable until credentials and a valid checksum are present.")
     gates.append(_gate("attachment_search", "Existing attachment state is safe", match.status in {"missing", "matched"}, match.message))
     gates.append(_not_already_mapped_gate(image, match))
 
@@ -126,6 +154,7 @@ def upload_wordpress_media(session: Session, page_id: int, request: WordPressMed
 
     page = session.get(GeneratedPage, 41)
     image = session.get(ImageMetadata, 1)
+    website = session.get(Website, page.website_id) if page else None
     path = Path(dry.resolved_local_path)
     current = hashlib.sha256(path.read_bytes()).hexdigest()
     if current != dry.checksum:
@@ -150,6 +179,10 @@ def upload_wordpress_media(session: Session, page_id: int, request: WordPressMed
             data = response.json()
             media_id = data.get("id")
             if not isinstance(media_id, int): raise RuntimeError("WordPress did not return a media ID.")
+            if is_wordpress_media_excluded(website, media_id):
+                raise RuntimeError(
+                    "WordPress returned media excluded by the Website-scoped safety policy."
+                )
             audit.wordpress_media_id = media_id
             audit.returned_media_url = data.get("source_url") if isinstance(data.get("source_url"), str) else None
             session.add(audit); session.commit(); session.refresh(audit)
@@ -192,14 +225,23 @@ def upload_wordpress_media(session: Session, page_id: int, request: WordPressMed
 def inspect_wordpress_media(session: Session, page_id: int) -> WordPressMediaInspectionResult:
     if page_id != TARGET_PAGE_ID:
         raise HTTPException(status_code=404, detail="The media inspector is limited to Orlando page 41.")
+    page = session.get(GeneratedPage, TARGET_PAGE_ID)
     image = session.get(ImageMetadata, TARGET_IMAGE_ID)
     assignment = session.get(PageImageAssignment, TARGET_ASSIGNMENT_ID)
-    if not image or not assignment:
+    if not page or not image or not assignment:
         raise HTTPException(status_code=404, detail="The Orlando hero media mapping is incomplete.")
+    website = session.get(Website, page.website_id)
+    if not website:
+        raise HTTPException(status_code=409, detail="The Orlando page has no valid Website scope.")
     settings = read_wordpress_settings(session)
     password = get_wordpress_application_password()
     if not settings.site_url or not settings.username or not password:
         raise HTTPException(status_code=409, detail="WordPress credentials are not available in backend process memory.")
+    if not wordpress_source_matches_policy(website, settings.site_url):
+        raise HTTPException(
+            status_code=409,
+            detail="WordPress media source does not match the Website-scoped safety policy.",
+        )
     path, path_error = _resolve_media_path(image)
     if not path:
         raise HTTPException(status_code=409, detail=path_error or "The Orlando hero file is unavailable.")
@@ -226,6 +268,8 @@ def inspect_wordpress_media(session: Session, page_id: int) -> WordPressMediaIns
     target_stem = path.stem.lower()
     for record in records:
         if not isinstance(record, dict) or not isinstance(record.get("id"), int):
+            continue
+        if is_wordpress_media_excluded(website, record["id"]):
             continue
         source_url = record.get("source_url") if isinstance(record.get("source_url"), str) else None
         media_file = (record.get("media_details") or {}).get("file")
@@ -312,6 +356,11 @@ def dry_run_wordpress_media_reconciliation(
     assignment = session.get(PageImageAssignment, TARGET_ASSIGNMENT_ID)
     if not page or not image or not assignment:
         raise HTTPException(status_code=404, detail="The Orlando reconciliation target is incomplete.")
+    website = session.get(Website, page.website_id)
+    if not website:
+        raise HTTPException(status_code=409, detail="The Orlando page has no valid Website scope.")
+    candidate_ids = filter_wordpress_media_ids(website, CANDIDATE_MEDIA_IDS)
+    policy_snapshot = website_external_media_policy_snapshot(website)
     settings = read_wordpress_settings(session)
     password = get_wordpress_application_password()
     path, path_error = _resolve_media_path(image)
@@ -324,6 +373,12 @@ def dry_run_wordpress_media_reconciliation(
         _gate("local_file", "Local source file is valid", file_error is None and local_checksum != "", file_error or "Local source validation failed."),
         _gate("local_expected", "Local source matches expected Orlando asset", local_mime == "image/png" and local_size == 2_823_150 and local_width == 1672 and local_height == 941, "Local MIME, size, or dimensions changed."),
         _gate("credentials", "WordPress credentials are available", bool(settings.site_url and settings.username and password), "WordPress credentials are not available in backend memory."),
+        _gate(
+            "external_media_source_scope",
+            "WordPress media source matches the Website-scoped safety policy",
+            wordpress_source_matches_policy(website, settings.site_url),
+            "WordPress media source does not match the Website-scoped safety policy.",
+        ),
     ]
     candidates: list[WordPressMediaReconciliationCandidate] = []
     post_data: dict = {}
@@ -336,7 +391,7 @@ def dry_run_wordpress_media_reconciliation(
                 if post_response.status_code >= 400:
                     raise RuntimeError(f"WordPress post inspection returned HTTP {post_response.status_code}.")
                 post_data = post_response.json()
-                for media_id in CANDIDATE_MEDIA_IDS:
+                for media_id in candidate_ids:
                     candidates.append(_inspect_reconciliation_candidate(
                         client, api, auth, settings.site_url, media_id,
                         title=image.image_title or image.file_name,
@@ -352,7 +407,10 @@ def dry_run_wordpress_media_reconciliation(
         _gate("post_publish", "WordPress post 8 remains published", post_status == "publish", "WordPress post 8 is not publish."),
         _gate("post_featured_media", "WordPress post 8 has no featured image", post_featured == 0, "WordPress post 8 has an unexpected or unverifiable featured image."),
     ]
-    selected, duplicates = _select_reconciliation_candidate(candidates)
+    selected, duplicates = _select_reconciliation_candidate(
+        candidates,
+        website=website,
+    )
     gates.append(_gate(
         "candidate_selection", "At least one verified candidate is selectable",
         selected is not None, _candidate_selection_failure(candidates),
@@ -361,12 +419,20 @@ def dry_run_wordpress_media_reconciliation(
     token = phrase = expires_at = None
     if ready and selected:
         expires = datetime.now(UTC) + timedelta(minutes=TOKEN_TTL_MINUTES)
-        token = _sign_reconciliation(local_checksum, candidates, selected.wordpress_media_id, duplicates, expires)
+        token = _sign_reconciliation(
+            local_checksum,
+            candidates,
+            selected.wordpress_media_id,
+            duplicates,
+            expires,
+            candidate_ids=candidate_ids,
+            policy_fingerprint=str(policy_snapshot["fingerprint"]),
+        )
         phrase = RECONCILIATION_PHRASE
         expires_at = expires.isoformat()
     return WordPressMediaReconciliationDryRun(
         page_id=41, wordpress_post_id=8, image_id=1, assignment_id=1,
-        candidate_ids=list(CANDIDATE_MEDIA_IDS), local_checksum=local_checksum,
+        candidate_ids=list(candidate_ids), local_checksum=local_checksum,
         local_file_size=local_size, candidates=candidates,
         selected_media_id=selected.wordpress_media_id if selected else None,
         selected_media_url=selected.source_url if selected else None,
@@ -384,6 +450,9 @@ def reconcile_wordpress_media(
     if not hmac.compare_digest(request.confirmation_phrase, RECONCILIATION_PHRASE):
         raise HTTPException(status_code=422, detail="The reconciliation confirmation phrase is incorrect.")
     dry = dry_run_wordpress_media_reconciliation(session, page_id)
+    page = session.get(GeneratedPage, page_id)
+    website = session.get(Website, page.website_id) if page else None
+    policy_snapshot = website_external_media_policy_snapshot(website)
     backup_gate = _backup_gate(request.confirmed_backup_file)
     gates = [*dry.gate_results, backup_gate]
     current_hashes = {str(c.wordpress_media_id): c.remote_checksum for c in dry.candidates}
@@ -394,11 +463,18 @@ def reconcile_wordpress_media(
         or token.get("selected_media_id") != dry.selected_media_id
         or token.get("duplicate_candidate_ids") != dry.duplicate_candidate_ids
         or token.get("remote_hashes") != current_hashes
+        or token.get("external_media_policy_fingerprint")
+        != policy_snapshot["fingerprint"]
     ):
         raise HTTPException(status_code=409, detail="Reconciliation state changed or a required gate is blocked. Run a new dry run.")
     selected = next((c for c in dry.candidates if c.wordpress_media_id == dry.selected_media_id), None)
     if not selected or not selected.source_url or not selected.date_gmt:
         raise HTTPException(status_code=409, detail="The selected attachment is incomplete.")
+    if is_wordpress_media_excluded(website, selected.wordpress_media_id):
+        raise HTTPException(
+            status_code=409,
+            detail="The selected attachment is excluded by the Website-scoped safety policy.",
+        )
     settings = read_wordpress_settings(session)
     evidence = {
         "code": "reconciliation_evidence", "passed": True,
@@ -407,6 +483,7 @@ def reconcile_wordpress_media(
         "duplicate_candidate_ids": dry.duplicate_candidate_ids,
         "remote_hashes": current_hashes,
         "post_observation": {"id": 8, "status": dry.post_status, "featured_media": dry.post_featured_media},
+        "external_media_policy": policy_snapshot,
     }
     audit = WordPressMediaSyncAudit(
         generated_page_id=41, image_metadata_id=1, page_image_assignment_id=1,
@@ -427,6 +504,8 @@ def reconcile_wordpress_media(
     try:
         if not image or image.wordpress_media_id is not None:
             raise RuntimeError("ImageMetadata mapping changed before reconciliation commit.")
+        if is_wordpress_media_excluded(website, selected.wordpress_media_id):
+            raise RuntimeError("Selected WordPress media became excluded before reconciliation commit.")
         uploaded_at = datetime.fromisoformat(selected.date_gmt.replace("Z", "+00:00"))
         image.wordpress_media_id = selected.wordpress_media_id
         image.wordpress_media_url = selected.source_url
@@ -463,6 +542,13 @@ def dry_run_wordpress_featured_image(
     assignment = session.get(PageImageAssignment, 1)
     if not page or not image or not assignment:
         raise HTTPException(status_code=404, detail="The Orlando featured-image target is incomplete.")
+    website = session.get(Website, page.website_id)
+    if not website:
+        raise HTTPException(status_code=409, detail="The Orlando page has no valid Website scope.")
+    excluded_media_ids = sorted(
+        set(CANDIDATE_MEDIA_IDS)
+        - set(filter_wordpress_media_ids(website, CANDIDATE_MEDIA_IDS))
+    )
     settings = read_wordpress_settings(session)
     password = get_wordpress_application_password()
     path, path_error = _resolve_media_path(image)
@@ -486,7 +572,18 @@ def dry_run_wordpress_featured_image(
         _gate("local_source", "Local Orlando source remains exact", file_error is None and local_mime == "image/png" and local_size == 2_823_150 and local_width == 1672 and local_height == 941, file_error or "The local source MIME, size, or dimensions changed."),
         _gate("reconciliation_audit", "Successful reconciliation audit exists", latest_reconciliation is not None, "No successful reconciliation audit for media 31 exists."),
         _gate("credentials", "WordPress credentials are available", bool(settings.site_url and settings.username and password), "WordPress credentials are not available in backend memory."),
-        _gate("duplicate_excluded", "Duplicate media 32 is excluded", True, "Duplicate media 32 must remain excluded."),
+        _gate(
+            "external_media_source_scope",
+            "WordPress media source matches the Website-scoped safety policy",
+            wordpress_source_matches_policy(website, settings.site_url),
+            "WordPress media source does not match the Website-scoped safety policy.",
+        ),
+        _gate(
+            "duplicate_excluded",
+            "Duplicate media 32 is excluded",
+            is_wordpress_media_excluded(website, 32),
+            "Duplicate media 32 must remain excluded by the Website-scoped policy.",
+        ),
         _gate("planned_payload", "Planned payload contains featured_media only", True, "Featured-image payload shape is unsafe."),
     ]
     post_data: dict = {}
@@ -530,7 +627,7 @@ def dry_run_wordpress_featured_image(
         post_slug=post_data.get("slug"), post_url=post_url,
         current_featured_media=post_data.get("featured_media"), media=media,
         local_checksum=local_checksum, planned_payload={"featured_media": 31},
-        excluded_media_ids=[32], gate_results=gates,
+        excluded_media_ids=excluded_media_ids, gate_results=gates,
         status="featured_image_ready" if ready else "blocked", ready=ready,
         confirmation_token=token, confirmation_phrase=phrase, expires_at=expires_at,
     )
@@ -929,8 +1026,18 @@ def _download_checksum(client: httpx.Client, source_url: str, site_url: str) -> 
 
 def _select_reconciliation_candidate(
     candidates: list[WordPressMediaReconciliationCandidate],
+    *,
+    website: Website | None = None,
 ) -> tuple[WordPressMediaReconciliationCandidate | None, list[int]]:
-    valid = [candidate for candidate in candidates if candidate.valid]
+    valid = [
+        candidate
+        for candidate in candidates
+        if candidate.valid
+        and not is_wordpress_media_excluded(
+            website,
+            candidate.wordpress_media_id,
+        )
+    ]
     if not valid:
         return None, []
     valid.sort(key=lambda candidate: (candidate.date_gmt or "9999", candidate.wordpress_media_id))
@@ -940,13 +1047,17 @@ def _select_reconciliation_candidate(
 def _sign_reconciliation(
     checksum: str, candidates: list[WordPressMediaReconciliationCandidate],
     selected_media_id: int, duplicate_ids: list[int], expires: datetime,
+    *,
+    candidate_ids: tuple[int, ...] | list[int] = CANDIDATE_MEDIA_IDS,
+    policy_fingerprint: str | None = None,
 ) -> str:
     body = {
         "action": "reconcile_existing_media", "page_id": 41, "wordpress_post_id": 8,
         "image_id": 1, "assignment_id": 1, "checksum": checksum,
-        "candidate_ids": list(CANDIDATE_MEDIA_IDS), "selected_media_id": selected_media_id,
+        "candidate_ids": list(candidate_ids), "selected_media_id": selected_media_id,
         "duplicate_candidate_ids": duplicate_ids,
         "remote_hashes": {str(c.wordpress_media_id): c.remote_checksum for c in candidates},
+        "external_media_policy_fingerprint": policy_fingerprint,
         "expires_at": int(expires.timestamp()), "nonce": secrets.token_hex(8),
     }
     encoded = _encode(json.dumps(body, sort_keys=True, separators=(",", ":")).encode())
@@ -1027,9 +1138,32 @@ def _inspect_file(path: Path) -> tuple[str, int, int, int, str, str | None]:
     except (OSError, UnidentifiedImageError): return "application/octet-stream", 0, 0, 0, "", "Image file is corrupt or unreadable."
 
 
-def _attachment_match(site: str, username: str, password: str, image: ImageMetadata, checksum: str) -> WordPressMediaAttachmentMatch:
+def _attachment_match(
+    site: str,
+    username: str,
+    password: str,
+    image: ImageMetadata,
+    checksum: str,
+    *,
+    website: Website | None = None,
+) -> WordPressMediaAttachmentMatch:
     endpoint = f"{site.rstrip('/')}/wp-json/wp/v2/media"
     auth = wordpress_basic_auth(username, password)
+    if is_wordpress_media_excluded(website, image.wordpress_media_id):
+        return WordPressMediaAttachmentMatch(
+            status="blocked",
+            message=(
+                "Saved WordPress media mapping is excluded by the Website-scoped "
+                "safety policy."
+            ),
+        )
+    if not wordpress_source_matches_policy(website, site):
+        return WordPressMediaAttachmentMatch(
+            status="blocked",
+            message=(
+                "WordPress media source does not match the Website-scoped safety policy."
+            ),
+        )
     try:
         with wordpress_http_client(site, timeout=12.0, follow_redirects=True, client_factory=httpx.Client) as client:
             if image.wordpress_media_id:
@@ -1042,6 +1176,12 @@ def _attachment_match(site: str, username: str, password: str, image: ImageMetad
                 items = r.json()
         matches = []
         for item in items if isinstance(items, list) else []:
+            media_id = item.get("id")
+            if isinstance(media_id, int) and is_wordpress_media_excluded(
+                website,
+                media_id,
+            ):
+                continue
             meta = item.get("meta") or {}
             if str(meta.get("_atlas_managed_media", "")).lower() == "true" and str(meta.get("_atlas_image_metadata_id")) == "1" and str(meta.get("_atlas_generated_page_id")) == "41":
                 if meta.get("_atlas_source_checksum") != checksum: return WordPressMediaAttachmentMatch(status="blocked", message="An Atlas-managed attachment exists with a different checksum.")

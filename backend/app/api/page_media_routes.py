@@ -9,6 +9,7 @@ from app.models import (
     ImageMetadata,
     PageImageAssignment,
     PlannedPage,
+    Website,
     WebsiteMediaPlanningRecord,
 )
 from app.schemas.entities import ImageMetadataRead
@@ -19,6 +20,7 @@ from app.schemas.media import (
     MediaAssignmentRequest,
     MediaAssignmentUpdateRequest,
 )
+from app.services.website_media_safety import is_image_metadata_excluded
 
 router = APIRouter(prefix="/generated-pages", tags=["page media"])
 
@@ -55,7 +57,40 @@ def list_page_media(
             PageImageAssignment.id,
         )
     ).all()
+    if any(
+        _assignment_uses_excluded_image(session, assignment)
+        for assignment in assignments
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Active assignment references media excluded by the Website-scoped "
+                "external-media safety policy"
+            ),
+        )
     return [_serialize_assignment(session, assignment) for assignment in assignments]
+
+
+@router.get("/{page_id}/media/candidates", response_model=list[ImageMetadataRead])
+def list_page_media_candidates(
+    page_id: int,
+    session: Session = Depends(get_session),
+) -> list[ImageMetadataRead]:
+    page = _get_page(session, page_id)
+    website = _website_for_page(session, page)
+    candidates = session.exec(
+        select(ImageMetadata)
+        .where(ImageMetadata.business_id == page.business_id)
+        .order_by(ImageMetadata.id)
+    ).all()
+    compatible: list[ImageMetadataRead] = []
+    for image in candidates:
+        try:
+            _validate_image_for_page(page, image, website)
+        except HTTPException:
+            continue
+        compatible.append(ImageMetadataRead.model_validate(image))
+    return compatible
 
 
 @router.post("/{page_id}/media", response_model=AssignedMediaRead, status_code=201)
@@ -109,6 +144,7 @@ def update_page_media(
     _require_legacy_page_media_workflow(session, page)
     assignment = _get_assignment(session, page_id, assignment_id)
     _require_legacy_assignment_mutation(assignment)
+    _require_assignment_not_excluded(session, assignment)
     updates = payload.model_dump(exclude_unset=True)
     if "display_preset" in updates:
         assignment.display_preset = _normalize_preset(
@@ -166,6 +202,7 @@ def reorder_page_media(
     ).all()
     for assignment in assignments:
         _require_legacy_assignment_mutation(assignment)
+        _require_assignment_not_excluded(session, assignment)
     assignment_by_id = {
         assignment.id: assignment
         for assignment in assignments
@@ -346,7 +383,8 @@ def _get_compatible_image(
     image = session.get(ImageMetadata, image_id)
     if not image:
         raise HTTPException(status_code=404, detail="Image metadata not found")
-    _validate_image_for_page(page, image)
+    website = _website_for_page(session, page)
+    _validate_image_for_page(page, image, website)
     return image
 
 
@@ -419,7 +457,15 @@ def _next_sort_order(session: Session, page_id: int, role: str) -> int:
 def _validate_image_for_page(
     page: GeneratedPage,
     image: ImageMetadata,
+    website: Website,
 ) -> None:
+    if is_image_metadata_excluded(website, image):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Image is excluded by the Website-scoped external-media safety policy"
+            ),
+        )
     governed_identity = any(
         value is not None
         for value in (
@@ -467,6 +513,16 @@ def _serialize_assignment(
     image = session.get(ImageMetadata, assignment.image_metadata_id)
     if not image:
         raise HTTPException(status_code=500, detail="Assigned image metadata is missing")
+    page = _get_page(session, assignment.generated_page_id)
+    website = _website_for_page(session, page)
+    if is_image_metadata_excluded(website, image):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Assigned image is excluded by the Website-scoped external-media "
+                "safety policy"
+            ),
+        )
     return AssignedMediaRead(
         assignment_id=assignment.id or 0,
         generated_page_id=assignment.generated_page_id,
@@ -499,6 +555,40 @@ def _serialize_assignment(
 def _clean_optional(value: str | None) -> str | None:
     cleaned = value.strip() if value else ""
     return cleaned or None
+
+
+def _website_for_page(session: Session, page: GeneratedPage) -> Website:
+    website = session.get(Website, page.website_id)
+    if not website:
+        raise HTTPException(
+            status_code=409,
+            detail="Generated Page does not resolve to an existing Website",
+        )
+    return website
+
+
+def _assignment_uses_excluded_image(
+    session: Session,
+    assignment: PageImageAssignment,
+) -> bool:
+    page = session.get(GeneratedPage, assignment.generated_page_id)
+    image = session.get(ImageMetadata, assignment.image_metadata_id)
+    website = session.get(Website, page.website_id) if page else None
+    return is_image_metadata_excluded(website, image)
+
+
+def _require_assignment_not_excluded(
+    session: Session,
+    assignment: PageImageAssignment,
+) -> None:
+    if _assignment_uses_excluded_image(session, assignment):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Assignment references media excluded by the Website-scoped "
+                "external-media safety policy"
+            ),
+        )
 
 
 def _require_legacy_assignment_mutation(assignment: PageImageAssignment) -> None:

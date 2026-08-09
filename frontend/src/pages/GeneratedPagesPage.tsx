@@ -85,18 +85,16 @@ function GeneratedPagesPage() {
     setLoading(true);
     setError(null);
     try {
-      const [pageData, cityData, countyData, imageData, approvalSummary, websiteData] = await Promise.all([
+      const [pageData, cityData, countyData, approvalSummary, websiteData] = await Promise.all([
         listItems<GeneratedPage>("/api/generated-pages"),
         listItems<City>("/api/cities"),
         listItems<County>("/api/counties"),
-        listItems<ImageMetadata>("/api/image-metadata"),
         listItems<ApprovalHistorySummary>("/api/generated-pages/approval-history-summary"),
         listItems<Website>("/api/websites")
       ]);
       setPages(pageData);
       setCities(cityData);
       setCounties(countyData);
-      setImages(imageData);
       setWebsites(websiteData);
       setWebsiteFilter((current) => current || String(websiteData[0]?.id ?? ""));
       setApprovalCounts(new Map(approvalSummary.map((item) => [item.generated_page_id, item.approval_count])));
@@ -132,6 +130,7 @@ function GeneratedPagesPage() {
   useEffect(() => {
     if (!selectedPageId) {
       setMediaAssignments([]);
+      setImages([]);
       setQaResult(null);
       setApprovalHistory([]);
       setPageRevisions([]);
@@ -220,7 +219,12 @@ function GeneratedPagesPage() {
 
   async function loadPageMedia(pageId: number) {
     try {
-      setMediaAssignments(await apiRequest<AssignedMedia[]>(`/api/generated-pages/${pageId}/media`));
+      const [assignments, candidates] = await Promise.all([
+        apiRequest<AssignedMedia[]>(`/api/generated-pages/${pageId}/media`),
+        apiRequest<ImageMetadata[]>(`/api/generated-pages/${pageId}/media/candidates`)
+      ]);
+      setMediaAssignments(assignments);
+      setImages(candidates);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load page media.");
     }

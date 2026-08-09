@@ -42,6 +42,8 @@ from app.schemas.media import (
 )
 from app.api.page_media_routes import (
     assign_page_media,
+    list_page_media,
+    list_page_media_candidates,
     remove_page_media,
     remove_page_media_assignment,
     reorder_page_media,
@@ -62,6 +64,9 @@ from app.services.page_media_planning import (
     validate_required_media_for_page,
 )
 from app.services.website_readiness import evaluate_website_readiness
+from app.services.approval_queue import build_approval_queue
+from app.services.page_export import build_page_export_package
+from app.services.page_qa import evaluate_page_qa, get_page_qa
 
 
 COMPOSITION_COMPONENT_KEYS_BY_CONTRACT: dict[str, tuple[str, ...]] = {
@@ -304,6 +309,14 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
+def _bind_flo_zone_identity(session: Session, website: Website) -> None:
+    website.website_name = "Flo-Zone Tenting"
+    website.domain = "www.flo-zonetenting.com"
+    website.public_url = "https://www.Flo-ZoneTenting.com"
+    session.add(website)
+    session.commit()
+
+
 def _create_asset(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -396,6 +409,429 @@ def test_page_type_contracts_are_bounded_and_define_complete_customer_purpose():
     assert home_service_overview["component_or_section"] == "related_page_links"
     assert "related_page_links" in COMPOSITION_COMPONENT_KEYS_BY_CONTRACT["home"]
     assert "service_summary" not in COMPOSITION_COMPONENT_KEYS_BY_CONTRACT["home"]
+
+
+def test_flo_zone_media_32_is_excluded_from_compatible_candidate_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, plan, _ = _scope(session, "excluded-candidate")
+        _bind_flo_zone_identity(session, website)
+        workspace = _decide_all(
+            session,
+            plan.id,
+            refresh_site_plan_media_suggestions(session, plan.id),
+        )
+        asset = _create_asset(
+            session,
+            monkeypatch,
+            tmp_path,
+            business_id=business.id,
+            website_id=website.id,
+            media_key="excluded-media-32",
+            placement_key="home-hero",
+        )
+        asset = approve_page_media_asset(
+            session,
+            asset.id,
+            expected_website_id=website.id,
+            expected_business_id=business.id,
+            approved_by="Approval Operator",
+            expected_media_version=1,
+        )
+        asset.wordpress_media_id = 32
+        session.add(asset)
+        session.commit()
+
+        observed = read_page_media_workspace(session, plan.id)
+        hero = next(
+            item
+            for item in observed.placements
+            if item.effective_requirement
+            and item.effective_requirement.placement_key == "home-hero"
+        )
+        assert asset.id not in {item.id for item in observed.assets}
+        assert asset.id not in hero.compatible_asset_ids
+        assert workspace.website_id == observed.website_id
+
+
+def test_flo_zone_media_32_is_excluded_from_governed_assignment_eligibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, plan, pages = _scope(session, "excluded-governed")
+        _bind_flo_zone_identity(session, website)
+        workspace = _decide_all(
+            session,
+            plan.id,
+            refresh_site_plan_media_suggestions(session, plan.id),
+        )
+        requirement = next(
+            item
+            for item in effective_media_requirements(session, pages[0][0].id)
+            if item.placement_key == "home-hero"
+        )
+        asset = _create_asset(
+            session,
+            monkeypatch,
+            tmp_path,
+            business_id=business.id,
+            website_id=website.id,
+            media_key="excluded-governed-32",
+            placement_key="home-hero",
+        )
+        asset = approve_page_media_asset(
+            session,
+            asset.id,
+            expected_website_id=website.id,
+            expected_business_id=business.id,
+            approved_by="Approval Operator",
+            expected_media_version=1,
+        )
+        asset.wordpress_media_id = 32
+        session.add(asset)
+        session.commit()
+
+        with pytest.raises(PageMediaPlanningError, match="Website-scoped"):
+            assign_media_to_requirement(
+                session,
+                plan.id,
+                requirement.id,
+                PageMediaAssignmentRequest(
+                    image_metadata_id=asset.id,
+                    assigned_by="Assignment Operator",
+                    rationale="Attempt the exact approved placement.",
+                    expected_requirement_version=requirement.version,
+                ),
+            )
+        assert workspace.summary.approved_assignments == 0
+
+
+def test_flo_zone_media_32_is_rejected_at_governed_approval_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, _, _ = _scope(session, "excluded-approval")
+        _bind_flo_zone_identity(session, website)
+        asset = _create_asset(
+            session,
+            monkeypatch,
+            tmp_path,
+            business_id=business.id,
+            website_id=website.id,
+            media_key="excluded-approval-32",
+            placement_key="home-hero",
+        )
+        asset.wordpress_media_id = 32
+        session.add(asset)
+        session.commit()
+
+        with pytest.raises(PageMediaPlanningError, match="Website-scoped"):
+            approve_page_media_asset(
+                session,
+                asset.id,
+                expected_website_id=website.id,
+                expected_business_id=business.id,
+                approved_by="Approval Operator",
+                expected_media_version=1,
+            )
+        assert session.get(ImageMetadata, asset.id).governance_status == "pending_review"
+
+
+def test_flo_zone_media_32_is_excluded_from_direct_legacy_assignment() -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, _, pages = _scope(session, "excluded-legacy")
+        _bind_flo_zone_identity(session, website)
+        image = ImageMetadata(
+            business_id=business.id,
+            file_name="excluded-32.png",
+            asset_url="/media/excluded-32.png",
+            reviewed_alt_text="Excluded external image",
+            review_status="reviewed",
+            wordpress_media_id=32,
+        )
+        session.add(image)
+        session.commit()
+
+        with pytest.raises(HTTPException, match="Website-scoped"):
+            assign_page_media(
+                pages[0][1].id,
+                "hero",
+                MediaAssignmentRequest(image_metadata_id=image.id),
+                session,
+            )
+        assert session.exec(select(PageImageAssignment)).all() == []
+
+
+def test_flo_zone_media_32_is_not_returned_by_legacy_page_candidate_output() -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, _, pages = _scope(session, "excluded-legacy-candidates")
+        _bind_flo_zone_identity(session, website)
+        eligible = ImageMetadata(
+            business_id=business.id,
+            file_name="eligible-31.png",
+            asset_url="/media/eligible-31.png",
+            reviewed_alt_text="Eligible external image",
+            review_status="reviewed",
+            wordpress_media_id=31,
+        )
+        excluded = ImageMetadata(
+            business_id=business.id,
+            file_name="excluded-32.png",
+            asset_url="/media/excluded-32.png",
+            reviewed_alt_text="Excluded external image",
+            review_status="reviewed",
+            wordpress_media_id=32,
+        )
+        session.add(eligible)
+        session.add(excluded)
+        session.commit()
+
+        candidates = list_page_media_candidates(pages[0][1].id, session)
+        assert [item.wordpress_media_id for item in candidates] == [31]
+
+
+def test_existing_flo_zone_media_32_assignment_blocks_all_read_fallbacks() -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, plan, pages = _scope(session, "excluded-read-paths")
+        _bind_flo_zone_identity(session, website)
+        page = pages[0][1]
+        image = ImageMetadata(
+            business_id=business.id,
+            file_name="excluded-read-path-32.png",
+            asset_url="/media/excluded-read-path-32.png",
+            reviewed_alt_text="Excluded external image",
+            review_status="reviewed",
+            wordpress_media_id=32,
+        )
+        session.add(image)
+        session.flush()
+        session.add(
+            PageImageAssignment(
+                generated_page_id=page.id,
+                image_metadata_id=image.id,
+                image_role="hero",
+                status="active",
+            )
+        )
+        session.commit()
+
+        workspace = read_page_media_workspace(session, plan.id)
+        assert any(
+            "excluded by the Website-scoped" in reason
+            for placement in workspace.placements
+            for reason in placement.blocking_reasons
+        )
+        with pytest.raises(HTTPException, match="Website-scoped"):
+            list_page_media(page.id, session)
+        qa = evaluate_page_qa(session, page.id)
+        excluded_check = next(
+            item for item in qa.checks if item.key == "excluded_external_media"
+        )
+        assert excluded_check.status == "fail"
+        export = build_page_export_package(session, page.id)
+        assert export.assigned_media == []
+        assert any(
+            warning.code == "excluded_external_media"
+            and warning.severity == "blocker"
+            for warning in export.warnings
+        )
+        queue_item = build_approval_queue(
+            session,
+            website_id=website.id,
+        ).items[0]
+        assert queue_item.hero_image_status == "excluded"
+        assert queue_item.is_ready_for_approval is False
+        assert queue_item.has_blockers is True
+        assert queue_item.missing_media is True
+        report = evaluate_website_readiness(session, plan.id)
+        website_category = next(
+            item for item in report.categories if item.key == "website_readiness"
+        )
+        compatibility = next(
+            item
+            for item in website_category.items
+            if item.key == "page_media_assignment_compatibility"
+        )
+        assert compatibility.status == "needs_attention"
+        assert compatibility.affected_planned_page_ids == [pages[0][0].id]
+
+
+def test_persisted_page_qa_is_not_reused_when_excluded_media_is_active() -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, _, pages = _scope(session, "excluded-persisted-qa")
+        _bind_flo_zone_identity(session, website)
+        page = pages[0][1]
+        baseline = evaluate_page_qa(session, page.id)
+        page.qa_result = baseline.model_dump(mode="json", exclude={"persisted"})
+        page.qa_status = baseline.readiness_status
+        page.qa_checked_at = baseline.checked_at
+        image = ImageMetadata(
+            business_id=business.id,
+            file_name="excluded-persisted-qa-32.png",
+            asset_url="/media/excluded-persisted-qa-32.png",
+            reviewed_alt_text="Excluded persisted QA image",
+            review_status="reviewed",
+            wordpress_media_id=32,
+        )
+        session.add(page)
+        session.add(image)
+        session.flush()
+        session.add(
+            PageImageAssignment(
+                generated_page_id=page.id,
+                image_metadata_id=image.id,
+                image_role="hero",
+                status="active",
+            )
+        )
+        session.commit()
+
+        observed = get_page_qa(session, page.id)
+        assert observed.persisted is False
+        assert any(
+            item.key == "excluded_external_media" and item.status == "fail"
+            for item in observed.checks
+        )
+
+
+def test_excluded_legacy_assignment_update_fails_before_mutation() -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, _, pages = _scope(session, "excluded-update")
+        _bind_flo_zone_identity(session, website)
+        page = pages[0][1]
+        page.qa_status = "ready"
+        image = ImageMetadata(
+            business_id=business.id,
+            file_name="excluded-update-32.png",
+            asset_url="/media/excluded-update-32.png",
+            reviewed_alt_text="Excluded external image",
+            review_status="reviewed",
+            wordpress_media_id=32,
+        )
+        session.add(page)
+        session.add(image)
+        session.flush()
+        assignment = PageImageAssignment(
+            generated_page_id=page.id,
+            image_metadata_id=image.id,
+            image_role="support",
+            sort_order=10,
+            status="active",
+        )
+        session.add(assignment)
+        session.commit()
+
+        with pytest.raises(HTTPException, match="Website-scoped"):
+            update_page_media(
+                page.id,
+                assignment.id,
+                MediaAssignmentUpdateRequest(sort_order=99),
+                session,
+            )
+        session.refresh(assignment)
+        session.refresh(page)
+        assert assignment.sort_order == 10
+        assert page.qa_status == "ready"
+
+
+def test_other_website_media_32_remains_assignable_under_existing_rules() -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, _, pages = _scope(session, "other-site-media-32")
+        assert website.id == 1
+        image = ImageMetadata(
+            business_id=business.id,
+            file_name="other-site-32.png",
+            asset_url="/media/other-site-32.png",
+            reviewed_alt_text="Other Website approved image",
+            review_status="reviewed",
+            wordpress_media_id=32,
+        )
+        session.add(image)
+        session.commit()
+
+        assignment = assign_page_media(
+            pages[0][1].id,
+            "hero",
+            MediaAssignmentRequest(image_metadata_id=image.id),
+            session,
+        )
+        assert assignment.image.wordpress_media_id == 32
+
+
+def test_decided_required_without_assignment_uses_assignment_readiness() -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _, _, plan, _ = _scope(session, "missing-assignment-status")
+        workspace = _decide_all(
+            session,
+            plan.id,
+            refresh_site_plan_media_suggestions(session, plan.id),
+        )
+        hero = next(
+            item
+            for item in workspace.placements
+            if item.effective_requirement
+            and item.effective_requirement.placement_key == "home-hero"
+        )
+        advisory = next(
+            item
+            for item in workspace.placements
+            if item.effective_requirement
+            and item.effective_requirement.requirement_state == "advisory"
+        )
+        assert hero.readiness == "awaiting_assignment"
+        assert hero.blocking_reasons == [
+            "Required media placement has no approved assignment."
+        ]
+        assert workspace.summary.missing_required_media == 1
+        assert advisory.readiness == "advisory_unfilled"
+        assert advisory.blocking_reasons == []
+
+
+def test_unfilled_advisory_stays_advisory_and_nonrequired() -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _, _, plan, pages = _scope(session, "advisory-unfilled-status")
+        workspace = _decide_all(
+            session,
+            plan.id,
+            refresh_site_plan_media_suggestions(session, plan.id),
+            states={"home-hero": "excluded"},
+        )
+        advisory = next(
+            item
+            for item in workspace.placements
+            if item.effective_requirement
+            and item.effective_requirement.requirement_state == "advisory"
+        )
+        assert advisory.readiness == "advisory_unfilled"
+        assert advisory.blocking_reasons == []
+        assert workspace.summary.missing_required_media == 0
+        assert validate_required_media_for_page(session, pages[0][0]) == []
 
 
 def test_refresh_creates_versioned_suggestions_without_operator_decisions_for_all_page_types():

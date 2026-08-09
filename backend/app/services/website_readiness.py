@@ -850,8 +850,15 @@ def _website_category(
             {
                 placement.planned_page.id
                 for placement in media.placements
-                if placement.active_assignment is not None
-                and placement.blocking_reasons
+                if placement.blocking_reasons
+                and (
+                    placement.active_assignment is not None
+                    or any(
+                        "excluded by the Website-scoped external-media safety policy"
+                        in reason
+                        for reason in placement.blocking_reasons
+                    )
+                )
             }
         )
         stale_ids = sorted(

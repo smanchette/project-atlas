@@ -31,6 +31,18 @@ import type {
   WebsiteContext,
 } from "../src/types";
 
+test("legacy page-media candidates come from the Website-scoped safe endpoint", () => {
+  const source = readFileSync(
+    resolve(process.cwd(), "src/pages/GeneratedPagesPage.tsx"),
+    "utf8",
+  );
+  assert.match(source, /generated-pages\/\$\{pageId\}\/media\/candidates/);
+  assert.doesNotMatch(
+    source,
+    /listItems<ImageMetadata>\("\/api\/image-metadata"\)/,
+  );
+});
+
 test("unassigned governed media renders an honest local placeholder", () => {
   const component: PageComponentInstance = {
     instance_key: "media_placement:requirement-81",

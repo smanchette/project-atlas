@@ -14,10 +14,12 @@ from app.models import (
     ImageMetadata,
     PageImageAssignment,
     Service,
+    Website,
 )
 from app.schemas.approval_queue import ApprovalQueueItem, ApprovalQueueResponse
 from app.services.page_type_review import review_contract_for
 from app.services.website_scope import require_single_website_selection
+from app.services.website_media_safety import is_image_metadata_excluded
 
 
 def build_approval_queue(
@@ -85,7 +87,12 @@ def _queue_item(
         media_required = review_contract_for(page).media_policy == "required"
     except ValueError:
         media_required = True
-    missing_media = media_required and hero_image_status != "reviewed"
+    excluded_media = hero_image_status == "excluded"
+    if excluded_media:
+        has_blockers = True
+    missing_media = excluded_media or (
+        media_required and hero_image_status != "reviewed"
+    )
     approved_but_unpublished = page.status == "approved" and not page.wordpress_url
     is_ready_for_approval = bool(
         page.status == "draft"
@@ -170,14 +177,19 @@ def _count_by_page(session: Session, model: Any) -> dict[int, int]:
 def _hero_statuses(session: Session) -> dict[int, str]:
     assignments = session.exec(
         select(PageImageAssignment).where(
-            PageImageAssignment.image_role == "hero",
             PageImageAssignment.status == "active",
         )
     ).all()
     statuses: dict[int, list[str]] = defaultdict(list)
     for assignment in assignments:
+        page = session.get(GeneratedPage, assignment.generated_page_id)
+        website = session.get(Website, page.website_id) if page else None
         image = session.get(ImageMetadata, assignment.image_metadata_id)
-        if not image or image.review_status != "reviewed":
+        if is_image_metadata_excluded(website, image):
+            status = "excluded"
+        elif assignment.image_role != "hero":
+            continue
+        elif not image or image.review_status != "reviewed":
             status = "unreviewed"
         elif not (
             (assignment.override_alt_text or "").strip()
@@ -189,9 +201,13 @@ def _hero_statuses(session: Session) -> dict[int, str]:
             status = "reviewed"
         statuses[assignment.generated_page_id].append(status)
 
-    rank = {"unreviewed": 0, "missing_alt_text": 1, "reviewed": 2}
+    rank = {"excluded": -1, "unreviewed": 0, "missing_alt_text": 1, "reviewed": 2}
     return {
-        page_id: max(page_statuses, key=lambda status: rank[status])
+        page_id: (
+            "excluded"
+            if "excluded" in page_statuses
+            else max(page_statuses, key=lambda status: rank[status])
+        )
         for page_id, page_statuses in statuses.items()
     }
 

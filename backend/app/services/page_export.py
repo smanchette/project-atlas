@@ -18,6 +18,7 @@ from app.models import (
     ImageMetadata,
     PageImageAssignment,
     Service,
+    Website,
 )
 from app.schemas.page_export import (
     BulkExportCandidate,
@@ -35,6 +36,7 @@ from app.services.page_type_review import (
 )
 from app.services.website_context import build_website_context
 from app.services.website_scope import require_page_website, require_single_website_selection
+from app.services.website_media_safety import is_image_metadata_excluded
 
 
 EXPORT_UNSAFE_PHRASES = tuple(dict.fromkeys((*FORBIDDEN_PHRASES, "guaranteed")))
@@ -236,6 +238,8 @@ def _slug_conflicts(
 
 
 def _media_references(session: Session, page_id: int) -> list[ExportMediaReference]:
+    page = session.get(GeneratedPage, page_id)
+    website = session.get(Website, page.website_id) if page else None
     assignments = session.exec(
         select(PageImageAssignment)
         .where(
@@ -247,7 +251,7 @@ def _media_references(session: Session, page_id: int) -> list[ExportMediaReferen
     references: list[ExportMediaReference] = []
     for assignment in assignments:
         image = session.get(ImageMetadata, assignment.image_metadata_id)
-        if not image:
+        if not image or is_image_metadata_excluded(website, image):
             continue
         references.append(
             ExportMediaReference(
@@ -279,6 +283,27 @@ def _readiness_warnings(
     contract,
 ) -> list[ExportWarning]:
     warnings: list[ExportWarning] = []
+    website = session.get(Website, page.website_id)
+    excluded_assignment_count = 0
+    for assignment in session.exec(
+        select(PageImageAssignment).where(
+            PageImageAssignment.generated_page_id == page.id,
+            PageImageAssignment.status == "active",
+        )
+    ).all():
+        image = session.get(ImageMetadata, assignment.image_metadata_id)
+        if is_image_metadata_excluded(website, image):
+            excluded_assignment_count += 1
+    if excluded_assignment_count:
+        _warn(
+            warnings,
+            "excluded_external_media",
+            "blocker",
+            (
+                f"{excluded_assignment_count} active assignment(s) reference "
+                "Website-scoped excluded external media."
+            ),
+        )
     if page.status != "approved":
         _warn(warnings, "page_not_approved", "blocker", "Page is not approved.")
     if page.qa_status == "blocked":
