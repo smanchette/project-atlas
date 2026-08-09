@@ -15,6 +15,7 @@ from app.schemas.wordpress import (
     WordPressLiveDraftStatus,
 )
 from app.services.wordpress_drafts import _payload_hash
+from app.services.page_qa import effective_page_qa_state
 from app.services.wordpress_sandbox import (
     build_wordpress_payload_preview,
     get_wordpress_application_password,
@@ -136,6 +137,7 @@ def _review_item(session: Session, page: GeneratedPage) -> WordPressDraftReviewI
     service = session.get(Service, page.service_id)
     successful_audits = _successful_audits(session, page.id or 0)
     latest = successful_audits[0] if successful_audits else None
+    qa_state = effective_page_qa_state(session, page)
     return WordPressDraftReviewItem(
         page_id=page.id or 0,
         page_title=page.page_title,
@@ -143,7 +145,11 @@ def _review_item(session: Session, page: GeneratedPage) -> WordPressDraftReviewI
         county=county.county_name if county else None,
         service=service.service_name if service else None,
         atlas_status=page.status,
-        qa_status=page.qa_status,
+        qa_status=(
+            qa_state.result.readiness_status
+            if qa_state.current and qa_state.result is not None
+            else "not_run"
+        ),
         wordpress_post_id=page.wordpress_post_id or 0,
         wordpress_status=page.wordpress_status,
         wordpress_url=page.wordpress_url,

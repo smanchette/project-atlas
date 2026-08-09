@@ -1246,6 +1246,162 @@ class GeneratedPageRevision(SQLModel, table=True):
     changed_fields: list[str] = Field(sa_column=Column(JSON, nullable=False))
 
 
+class GeneratedPageQAResult(TimestampMixin, table=True):
+    """Immutable, identity-bound QA evidence for one Generated Page state."""
+
+    __table_args__ = (
+        CheckConstraint(
+            "lifecycle_status IN ('current','superseded','historical_unbound')",
+            name="ck_generatedpageqaresult_lifecycle",
+        ),
+        CheckConstraint(
+            "readiness_status IS NULL "
+            "OR readiness_status IN ('ready','needs_review','blocked')",
+            name="ck_generatedpageqaresult_readiness",
+        ),
+        CheckConstraint(
+            "passed_count IS NULL OR passed_count >= 0",
+            name="ck_generatedpageqaresult_passed_count",
+        ),
+        CheckConstraint(
+            "warning_count IS NULL OR warning_count >= 0",
+            name="ck_generatedpageqaresult_warning_count",
+        ),
+        CheckConstraint(
+            "failed_count IS NULL OR failed_count >= 0",
+            name="ck_generatedpageqaresult_failed_count",
+        ),
+        CheckConstraint(
+            "composition_version IS NULL OR composition_version >= 1",
+            name="ck_generatedpageqaresult_composition_version",
+        ),
+        CheckConstraint(
+            "length(result_hash) = 64 "
+            "AND (content_hash IS NULL OR length(content_hash) = 64) "
+            "AND (source_hash IS NULL OR length(source_hash) = 64) "
+            "AND (composition_source_hash IS NULL "
+            "OR length(composition_source_hash) = 64) "
+            "AND (qa_ruleset_hash IS NULL OR length(qa_ruleset_hash) = 64)",
+            name="ck_generatedpageqaresult_hash_lengths",
+        ),
+        CheckConstraint(
+            "lifecycle_status != 'historical_unbound' "
+            "OR historical_payload IS NOT NULL",
+            name="ck_generatedpageqaresult_historical_payload",
+        ),
+        CheckConstraint(
+            "(page_composition_id IS NULL "
+            "AND composition_version IS NULL "
+            "AND composition_source_hash IS NULL) OR ("
+            "page_composition_id IS NOT NULL "
+            "AND composition_version IS NOT NULL "
+            "AND composition_source_hash IS NOT NULL)",
+            name="ck_generatedpageqaresult_composition_binding",
+        ),
+        CheckConstraint(
+            "lifecycle_status = 'historical_unbound' OR ("
+            "website_id IS NOT NULL "
+            "AND site_plan_id IS NOT NULL "
+            "AND planned_page_id IS NOT NULL "
+            "AND content_hash IS NOT NULL "
+            "AND source_hash IS NOT NULL "
+            "AND qa_algorithm_key IS NOT NULL "
+            "AND length(trim(qa_algorithm_key)) > 0 "
+            "AND qa_algorithm_version IS NOT NULL "
+            "AND length(trim(qa_algorithm_version)) > 0 "
+            "AND qa_ruleset_key IS NOT NULL "
+            "AND length(trim(qa_ruleset_key)) > 0 "
+            "AND qa_ruleset_version IS NOT NULL "
+            "AND length(trim(qa_ruleset_version)) > 0 "
+            "AND qa_ruleset_hash IS NOT NULL "
+            "AND readiness_status IS NOT NULL "
+            "AND passed_count IS NOT NULL "
+            "AND warning_count IS NOT NULL "
+            "AND failed_count IS NOT NULL "
+            "AND check_payload IS NOT NULL "
+            "AND evaluated_at IS NOT NULL "
+            "AND historical_payload IS NULL)",
+            name="ck_generatedpageqaresult_bound_evidence",
+        ),
+        CheckConstraint(
+            "supersedes_qa_result_id IS NULL OR supersedes_qa_result_id != id",
+            name="ck_generatedpageqaresult_not_self_superseding",
+        ),
+        UniqueConstraint(
+            "generated_page_id",
+            "result_hash",
+            name="uq_generatedpageqaresult_page_result_hash",
+        ),
+        Index(
+            "ix_generatedpageqaresult_scope",
+            "website_id",
+            "site_plan_id",
+            "planned_page_id",
+        ),
+        Index(
+            "ix_generatedpageqaresult_page_evaluated",
+            "generated_page_id",
+            "evaluated_at",
+        ),
+        Index(
+            "uq_generatedpageqaresult_current_page",
+            "generated_page_id",
+            unique=True,
+            postgresql_where=text("lifecycle_status = 'current'"),
+            sqlite_where=text("lifecycle_status = 'current'"),
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int | None = Field(default=None, foreign_key="website.id", index=True)
+    site_plan_id: int | None = Field(default=None, foreign_key="siteplan.id", index=True)
+    planned_page_id: int | None = Field(
+        default=None,
+        foreign_key="plannedpage.id",
+        index=True,
+    )
+    generated_page_id: int = Field(foreign_key="generatedpage.id", index=True)
+    latest_generated_page_revision_id: int | None = Field(
+        default=None,
+        foreign_key="generatedpagerevision.id",
+        index=True,
+    )
+    content_hash: str | None = Field(default=None, max_length=64)
+    source_hash: str | None = Field(default=None, max_length=64)
+    page_composition_id: int | None = Field(
+        default=None,
+        foreign_key="pagecomposition.id",
+        index=True,
+    )
+    composition_version: int | None = Field(default=None, ge=1)
+    composition_source_hash: str | None = Field(default=None, max_length=64)
+    qa_algorithm_key: str | None = Field(default=None, max_length=120)
+    qa_algorithm_version: str | None = Field(default=None, max_length=80)
+    qa_ruleset_key: str | None = Field(default=None, max_length=120)
+    qa_ruleset_version: str | None = Field(default=None, max_length=80)
+    qa_ruleset_hash: str | None = Field(default=None, max_length=64)
+    readiness_status: str | None = Field(default=None, max_length=32, index=True)
+    passed_count: int | None = Field(default=None, ge=0)
+    warning_count: int | None = Field(default=None, ge=0)
+    failed_count: int | None = Field(default=None, ge=0)
+    check_payload: list[dict[str, Any]] | None = Field(
+        default=None,
+        sa_column=Column(JSON, nullable=True),
+    )
+    evaluated_at: datetime | None = Field(default=None, index=True)
+    lifecycle_status: str = Field(max_length=32, index=True)
+    supersedes_qa_result_id: int | None = Field(
+        default=None,
+        foreign_key="generatedpageqaresult.id",
+        index=True,
+    )
+    result_hash: str = Field(max_length=64)
+    historical_payload: Any | None = Field(
+        default=None,
+        sa_column=Column(JSON(none_as_null=True), nullable=True),
+    )
+
+
 class WordPressDraftAudit(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint(

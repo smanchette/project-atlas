@@ -758,13 +758,32 @@ export type QACheckItem = {
 };
 
 export type PageQAResult = {
+  qa_result_id?: number | null;
   page_id: number;
+  website_id?: number | null;
+  site_plan_id?: number | null;
+  planned_page_id?: number | null;
+  latest_generated_page_revision_id?: number | null;
+  content_hash: string;
+  source_hash: string;
+  page_composition_id?: number | null;
+  composition_version?: number | null;
+  composition_source_hash?: string | null;
+  qa_algorithm_key: string;
+  qa_algorithm_version: string;
+  qa_ruleset_key: string;
+  qa_ruleset_version: string;
+  qa_ruleset_hash: string;
   readiness_status: "ready" | "needs_review" | "blocked";
   checked_at: string;
   passed_count: number;
   warning_count: number;
   failed_count: number;
   checks: QACheckItem[];
+  result_hash: string;
+  lifecycle_status: "candidate" | "current" | "superseded" | "historical_unbound";
+  currentness_status: string;
+  currentness_reasons: string[];
   persisted: boolean;
 };
 

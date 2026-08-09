@@ -482,7 +482,7 @@ def test_backup_round_trip_preserves_resumable_run_and_item_bindings(tmp_path):
         )
         exported = export_backup(session, backup_dir=tmp_path)
     payload = load_backup(tmp_path / exported["file_name"])
-    assert payload["metadata"]["version"] == "0.54"
+    assert payload["metadata"]["version"] == "0.55"
     assert len(payload["data"]["website_draft_generation_runs"]) == 1
     assert len(payload["data"]["website_draft_generation_items"]) == (
         run.counts.expected

@@ -51,9 +51,12 @@ def isolate_wordpress_audit_state() -> None:
         WordPressBootstrapEstablishmentAudit,
         WordPressMetadataLifecycleAudit,
         WordPressCacheAwareRenderingAudit,
+        GeneratedPageQAResult,
+        GeneratedPage,
     )
 
     models = (
+        GeneratedPageQAResult,
         WordPressCacheAwareRenderingAudit, WordPressMetadataLifecycleAudit, WordPressBootstrapCleanupAudit, WordPressBootstrapEstablishmentAudit, WordPressPluginUpgradeAudit, WordPressDeploymentTransition, WordPressDeploymentNonce, WordPressDeploymentAudit,
         WordPressPublishAudit, WordPressMetadataSyncAudit, WordPressMetadataState,
         WordPressMediaSyncAudit, WordPressDraftAudit, WordPressHeadingCorrectionAudit,
@@ -67,6 +70,27 @@ def isolate_wordpress_audit_state() -> None:
     yield
     available = set(inspect(engine).get_table_names())
     with Session(engine) as session:
+        qa_result_ids = (
+            {
+                record.id
+                for record in session.exec(select(GeneratedPageQAResult)).all()
+                if record.id is not None
+            }
+            if GeneratedPageQAResult.__tablename__ in available
+            else set()
+        )
+        if qa_result_ids and GeneratedPage.__tablename__ in available:
+            for page in session.exec(select(GeneratedPage)).all():
+                payload = page.qa_result
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("qa_result_id") in qa_result_ids
+                ):
+                    page.qa_status = "not_run"
+                    page.qa_result = None
+                    page.qa_checked_at = None
+                    session.add(page)
+            session.flush()
         for model in models:
             if model.__tablename__ in available:
                 session.exec(delete(model))

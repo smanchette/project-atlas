@@ -36,7 +36,7 @@ def test_clean_database_migrates_to_current_head(monkeypatch, tmp_path):
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260809_0042"
+        ).scalar_one() == "20260809_0043"
 
 
 def test_populated_0032_upgrade_preserves_existing_page(monkeypatch, tmp_path):

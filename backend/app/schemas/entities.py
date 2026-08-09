@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 from sqlmodel import SQLModel
 
 
@@ -252,6 +252,8 @@ class GeneratedPageCreate(GeneratedPageBase):
 
 
 class GeneratedPageUpdate(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
     business_id: int | None = None
     website_id: int | None = None
     service_id: int | None = None
@@ -267,9 +269,6 @@ class GeneratedPageUpdate(SQLModel):
     draft_content: dict[str, Any] | None = None
     generation_status: str | None = None
     generated_at: datetime | None = None
-    qa_status: str | None = None
-    qa_result: dict[str, Any] | None = None
-    qa_checked_at: datetime | None = None
     internal_notes: str | None = None
     last_reviewed_at: datetime | None = None
     last_reviewed_by: str | None = None

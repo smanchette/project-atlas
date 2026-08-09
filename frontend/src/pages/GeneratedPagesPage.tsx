@@ -1,4 +1,4 @@
-import { CSSProperties, useEffect, useMemo, useState } from "react";
+import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowDown, ArrowUp, CheckCircle2, CircleCheck, ClipboardList, Eye, FileClock, FileJson, Image as ImageIcon, ListChecks, Monitor, Pencil, Plus, RotateCcw, Save, ShieldCheck, Sparkles, Trash2, X, XCircle } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -73,6 +73,8 @@ function GeneratedPagesPage() {
   const [editorSaving, setEditorSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const selectedPageIdRef = useRef<number | null>(null);
+  const qaRequestSequenceRef = useRef(0);
   const selectedPage = pages.find((page) => page.id === selectedPageId) ?? null;
   const editorPage = pages.find((page) => page.id === editorPageId) ?? null;
   const editorDirty = Boolean(
@@ -80,6 +82,13 @@ function GeneratedPagesPage() {
     editorBaseline &&
     JSON.stringify(editorDraft) !== JSON.stringify(editorBaseline)
   );
+
+  function selectPage(pageId: number | null) {
+    selectedPageIdRef.current = pageId;
+    qaRequestSequenceRef.current += 1;
+    setQaResult(null);
+    setSelectedPageId(pageId);
+  }
 
   async function loadData() {
     setLoading(true);
@@ -116,7 +125,7 @@ function GeneratedPagesPage() {
     if (!pageId || !action) return;
     const page = pages.find((item) => item.id === pageId);
     if (!page) return;
-    setSelectedPageId(page.id);
+    selectPage(page.id);
     if (action === "edit" && page.status === "draft" && page.draft_content) {
       openEditor(page);
     }
@@ -128,6 +137,8 @@ function GeneratedPagesPage() {
   }, [loading, pages, searchParams, setSearchParams]);
 
   useEffect(() => {
+    selectedPageIdRef.current = selectedPageId;
+    invalidateQaDisplay();
     if (!selectedPageId) {
       setMediaAssignments([]);
       setImages([]);
@@ -185,14 +196,16 @@ function GeneratedPagesPage() {
     const countyMatches = countyFilter === "all" || String(page.county_id) === countyFilter;
     const cityMatches = cityFilter === "all" || String(page.city_id) === cityFilter;
     const statusMatches = statusFilter === "all" || page.status === statusFilter;
-    const warningCount = page.qa_result?.warning_count ?? 0;
-    const blockerCount = page.qa_result?.failed_count ?? 0;
+    const effectiveStatus = effectiveStoredQaStatus(page);
+    const qaIsCurrent = effectiveStatus !== "not_run";
+    const warningCount = qaIsCurrent ? page.qa_result?.warning_count ?? 0 : 0;
+    const blockerCount = qaIsCurrent ? page.qa_result?.failed_count ?? 0 : 0;
     const qaMatches =
       qaFilter === "all" ||
-      page.qa_status === qaFilter ||
+      effectiveStatus === qaFilter ||
       (qaFilter === "has_warnings" && warningCount > 0) ||
       (qaFilter === "has_blockers" && blockerCount > 0) ||
-      (qaFilter === "not_run" && page.qa_status === "not_run");
+      (qaFilter === "not_run" && effectiveStatus === "not_run");
     return websiteMatches && countyMatches && cityMatches && statusMatches && qaMatches;
   });
 
@@ -231,11 +244,38 @@ function GeneratedPagesPage() {
   }
 
   async function loadPageQa(pageId: number) {
+    const requestSequence = nextQaRequestSequenceForSelection(
+      pageId,
+      selectedPageIdRef.current,
+      qaRequestSequenceRef.current,
+    );
+    if (requestSequence === null) return;
+    qaRequestSequenceRef.current = requestSequence;
     try {
-      setQaResult(await apiRequest<PageQAResult>(`/api/generated-pages/${pageId}/qa`));
+      const result = await apiRequest<PageQAResult>(`/api/generated-pages/${pageId}/qa`);
+      if (
+        !qaResultBelongsToSelection(
+          result,
+          pageId,
+          selectedPageIdRef.current,
+          requestSequence,
+          qaRequestSequenceRef.current,
+        )
+      ) {
+        return;
+      }
+      setQaResult(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to load page QA.");
+      if (requestSequence === qaRequestSequenceRef.current) {
+        setError(err instanceof Error ? err.message : "Unable to load page QA.");
+      }
     }
+  }
+
+  function invalidateQaDisplay(): number {
+    const requestSequence = ++qaRequestSequenceRef.current;
+    setQaResult(null);
+    return requestSequence;
   }
 
   async function loadApprovalHistory(pageId: number) {
@@ -264,7 +304,7 @@ function GeneratedPagesPage() {
       if (!discard) return;
     }
     const editable = manualDraftFromPage(page);
-    setSelectedPageId(page.id);
+    selectPage(page.id);
     setEditorPageId(page.id);
     setEditorDraft(editable);
     setEditorBaseline(structuredClone(editable));
@@ -285,6 +325,7 @@ function GeneratedPagesPage() {
 
   async function saveEditor(runQa: boolean) {
     if (!editorPage || !editorDraft) return;
+    const requestSequence = invalidateQaDisplay();
     setEditorSaving(true);
     setMessage(null);
     setError(null);
@@ -309,7 +350,17 @@ function GeneratedPagesPage() {
       setEditorBaseline(structuredClone(savedDraft));
       setEditorReason("");
       if (result.qa_result) {
-        setQaResult(result.qa_result);
+        if (
+          qaResultBelongsToSelection(
+            result.qa_result,
+            editorPage.id,
+            selectedPageIdRef.current,
+            requestSequence,
+            qaRequestSequenceRef.current,
+          )
+        ) {
+          setQaResult(result.qa_result);
+        }
       }
       await loadData();
       await loadPageRevisions(editorPage.id);
@@ -357,6 +408,7 @@ function GeneratedPagesPage() {
     if (!selectedPage || !selectedImageId) {
       return;
     }
+    invalidateQaDisplay();
     setWorking(true);
     setError(null);
     setMessage(null);
@@ -392,6 +444,7 @@ function GeneratedPagesPage() {
     if (!selectedPage) {
       return;
     }
+    invalidateQaDisplay();
     setWorking(true);
     setError(null);
     setMessage(null);
@@ -415,6 +468,7 @@ function GeneratedPagesPage() {
     payload: Partial<AssignedMedia>
   ) {
     if (!selectedPage) return;
+    invalidateQaDisplay();
     setWorking(true);
     setError(null);
     setMessage(null);
@@ -439,6 +493,7 @@ function GeneratedPagesPage() {
 
   async function reorderMedia(imageRole: string, assignmentIds: number[]) {
     if (!selectedPage) return;
+    invalidateQaDisplay();
     setWorking(true);
     setError(null);
     try {
@@ -478,6 +533,7 @@ function GeneratedPagesPage() {
     if (!batchPreview || batchPreview.eligible_count === 0) {
       return;
     }
+    invalidateQaDisplay();
     setWorking(true);
     setMessage(null);
     setError(null);
@@ -497,6 +553,7 @@ function GeneratedPagesPage() {
   }
 
   async function generateSingle(page: GeneratedPage) {
+    invalidateQaDisplay();
     setGeneratingPageId(page.id);
     setMessage(null);
     setError(null);
@@ -505,7 +562,7 @@ function GeneratedPagesPage() {
         method: "POST",
         body: JSON.stringify({ allow_overwrite: false, website_id: page.website_id })
       });
-      setSelectedPageId(page.id);
+      selectPage(page.id);
       setMessage(`${page.page_title} draft generated.`);
       await loadData();
     } catch (err) {
@@ -516,6 +573,7 @@ function GeneratedPagesPage() {
   }
 
   async function approveDraft(page: GeneratedPage) {
+    invalidateQaDisplay();
     setWorking(true);
     setMessage(null);
     setError(null);
@@ -536,6 +594,7 @@ function GeneratedPagesPage() {
   }
 
   async function runPageQa(page: GeneratedPage) {
+    const requestSequence = invalidateQaDisplay();
     setQaRunningPageId(page.id);
     setMessage(null);
     setError(null);
@@ -543,7 +602,15 @@ function GeneratedPagesPage() {
       const result = await apiRequest<PageQAResult>(`/api/generated-pages/${page.id}/qa/run`, {
         method: "POST"
       });
-      if (selectedPageId === page.id) {
+      if (
+        qaResultBelongsToSelection(
+          result,
+          page.id,
+          selectedPageIdRef.current,
+          requestSequence,
+          qaRequestSequenceRef.current,
+        )
+      ) {
         setQaResult(result);
       }
       setMessage(`${page.page_title} QA status: ${humanize(result.readiness_status)}.`);
@@ -585,6 +652,7 @@ function GeneratedPagesPage() {
 
   async function runQaBatch() {
     if (!qaBatchPreview) return;
+    invalidateQaDisplay();
     setWorking(true);
     setMessage(null);
     setError(null);
@@ -647,7 +715,7 @@ function GeneratedPagesPage() {
               value={websiteFilter}
               onChange={(event) => {
                 setWebsiteFilter(event.target.value);
-                setSelectedPageId(null);
+                selectPage(null);
                 clearBatchPreview();
               }}
             >
@@ -821,12 +889,12 @@ function GeneratedPagesPage() {
                       <td>{page.county_id ? countyNameById.get(page.county_id) ?? page.county_id : "-"}</td>
                       <td>{page.status}</td>
                       <td>{humanize(page.generation_status)}</td>
-                      <td><QAStatusBadge status={page.qa_status} /></td>
+                      <td><QAStatusBadge status={effectiveStoredQaStatus(page)} /></td>
                       <td className="actionsCell">
                         <button
                           className="linkButton buttonWithIcon"
                           type="button"
-                          onClick={() => setSelectedPageId(page.id)}
+                          onClick={() => selectPage(page.id)}
                         >
                           <Eye size={15} aria-hidden="true" />
                           Review
@@ -841,12 +909,13 @@ function GeneratedPagesPage() {
                             Edit Draft
                           </button>
                         )}
-                        {((page.qa_result?.warning_count ?? 0) > 0 ||
+                        {effectiveStoredQaStatus(page) !== "not_run" &&
+                          ((page.qa_result?.warning_count ?? 0) > 0 ||
                           (page.qa_result?.failed_count ?? 0) > 0) && (
                           <button
                             className="warningButton buttonWithIcon"
                             type="button"
-                            onClick={() => setSelectedPageId(page.id)}
+                            onClick={() => selectPage(page.id)}
                           >
                             <ClipboardList size={15} aria-hidden="true" />
                             Fix Issues
@@ -1295,6 +1364,9 @@ function QAPanel({
   onRun: (page: GeneratedPage) => Promise<void>;
 }) {
   const issues = result?.checks.filter((check) => check.status !== "pass") ?? [];
+  const resultIsCurrent =
+    result?.persisted === true &&
+    result.currentness_status === "current_exact_identity_match";
   return (
     <section className="panel qaPanel" id="qa-panel">
       <div className="panelHeader">
@@ -1329,12 +1401,22 @@ function QAPanel({
         <p>Loading QA checklist...</p>
       ) : (
         <>
+          {!resultIsCurrent && (
+            <div className="alert warning" role="status">
+              <strong>QA is not current for this exact page identity.</strong>{" "}
+              {result.currentness_reasons.join(" ") || "Run QA to persist a current result."}
+            </div>
+          )}
           <div className="qaResultHeader">
-            <QAStatusBadge status={result.readiness_status} />
+            <QAStatusBadge status={resultIsCurrent ? result.readiness_status : "not_run"} />
             <span>{result.passed_count} passed</span>
             <span>{result.warning_count} warnings</span>
             <span>{result.failed_count} blockers</span>
-            <small>{result.persisted ? "Saved result" : "Current preview; not saved"}</small>
+            <small>
+              {resultIsCurrent
+                ? "Saved current result"
+                : `Fresh evaluation candidate: ${humanize(result.readiness_status)}; not saved`}
+            </small>
           </div>
           <section className="qaRemediation">
             <div className="qaRemediationHeader">
@@ -2014,6 +2096,38 @@ function ApprovalHistoryPanel({
   );
 }
 
+export function effectiveStoredQaStatus(page: GeneratedPage): string {
+  const result = page.qa_result;
+  return result?.persisted === true &&
+    result.qa_result_id != null &&
+    result.page_id === page.id &&
+    result.website_id === page.website_id &&
+    result.lifecycle_status === "current" &&
+    result.currentness_status === "current_exact_identity_match"
+    ? result.readiness_status
+    : "not_run";
+}
+
+export function qaResultBelongsToSelection(
+  result: PageQAResult,
+  requestedPageId: number,
+  selectedPageId: number | null,
+  responseSequence: number,
+  activeSequence: number,
+): boolean {
+  return responseSequence === activeSequence &&
+    result.page_id === requestedPageId &&
+    selectedPageId === requestedPageId;
+}
+
+export function nextQaRequestSequenceForSelection(
+  requestedPageId: number,
+  selectedPageId: number | null,
+  activeSequence: number,
+): number | null {
+  return selectedPageId === requestedPageId ? activeSequence + 1 : null;
+}
+
 function QAStatusBadge({ status }: { status: string }) {
   const normalized = status || "not_run";
   return <span className={`qaStatusBadge ${normalized}`}>{humanize(normalized)}</span>;
@@ -2043,7 +2157,12 @@ function DraftReview({
   const canApprove =
     page.qa_status === "ready" &&
     qaResult?.persisted === true &&
-    qaResult.readiness_status === "ready";
+    qaResult.qa_result_id != null &&
+    qaResult.page_id === page.id &&
+    qaResult.website_id === page.website_id &&
+    qaResult.lifecycle_status === "current" &&
+    qaResult.readiness_status === "ready" &&
+    qaResult.currentness_status === "current_exact_identity_match";
   return (
     <section className="panel draftReview">
       <div className="panelHeader">
@@ -2066,6 +2185,13 @@ function DraftReview({
           </button>
         )}
       </div>
+
+      {qaResult && qaResult.currentness_status !== "current_exact_identity_match" && (
+        <div className="alert warning" role="status">
+          <strong>QA is not current for this exact page identity.</strong>{" "}
+          {qaResult.currentness_reasons.join(" ") || "Run QA again before approval or export."}
+        </div>
+      )}
 
       {!draft ? (
         <p>No structured draft has been generated for this page.</p>

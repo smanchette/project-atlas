@@ -171,11 +171,26 @@ function GeneratedPagePreview() {
         </div>
       </div>
       {showQa && qaResult && (
-        <div className={`previewQaBanner ${qaResult.readiness_status}`}>
+        <div
+          className={`previewQaBanner ${
+            effectiveQaDisplayStatus(qaResult)
+          }`}
+        >
           <div className="previewContainer">
             <AlertTriangle size={17} aria-hidden="true" />
-            <strong>Internal QA: {qaResult.readiness_status.replace(/_/g, " ")}</strong>
+            <strong>
+              Internal QA:{" "}
+              {effectiveQaDisplayStatus(qaResult) !== "not_run"
+                ? qaResult.readiness_status.replace(/_/g, " ")
+                : "not current for this page identity"}
+            </strong>
             <span>{qaResult.failed_count} blockers | {qaResult.warning_count} warnings</span>
+            {effectiveQaDisplayStatus(qaResult) === "not_run" && (
+              <span>
+                {qaResult.currentness_reasons.join(" ") ||
+                  `Fresh candidate: ${qaResult.readiness_status.replace(/_/g, " ")}; not saved.`}
+              </span>
+            )}
             <span>{approvalCount} approval record(s) | {revisionCount} revision(s)</span>
           </div>
         </div>
@@ -317,6 +332,13 @@ export function renderComponent(component: PageComponentInstance) {
     default:
       return <PreviewState key={component.instance_key} message={`Unsupported semantic component: ${component.component_key}`} error />;
   }
+}
+
+export function effectiveQaDisplayStatus(result: PageQAResult): string {
+  return result.persisted === true &&
+    result.currentness_status === "current_exact_identity_match"
+    ? result.readiness_status
+    : "not_run";
 }
 
 function Navigation({ component }: { component: PageComponentInstance }) {

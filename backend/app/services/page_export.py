@@ -1,12 +1,10 @@
 import json
 import re
 import unicodedata
-from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import HTTPException
-from sqlalchemy import func
 from sqlmodel import Session, select
 
 from app.models import (
@@ -14,7 +12,6 @@ from app.models import (
     City,
     County,
     GeneratedPage,
-    GeneratedPageRevision,
     ImageMetadata,
     PageImageAssignment,
     PlannedPage,
@@ -40,6 +37,7 @@ from app.services.page_composition import (
     PageCompositionError,
     read_composition_for_generated_page,
 )
+from app.services.page_qa import EffectivePageQAState, effective_page_qa_state
 from app.services.website_context import build_website_context
 from app.services.website_scope import require_page_website, require_single_website_selection
 from app.services.website_media_safety import is_image_metadata_excluded
@@ -107,6 +105,7 @@ def build_page_export_package(session: Session, page_id: int) -> PageExportPacka
         suggested_url_slug=suggested_slug,
     )
     media = _media_references(session, page.id or page_id)
+    qa_state = effective_page_qa_state(session, page)
     faqs = _faq_items(draft.get("faq_items"))
     canonical_url = _canonical_url(website_context.website.public_url, url_slug)
     warnings = _readiness_warnings(
@@ -117,11 +116,12 @@ def build_page_export_package(session: Session, page_id: int) -> PageExportPacka
         media=media,
         slug_conflicts=conflicts,
         contract=contract,
+        qa_state=qa_state,
     )
     return PageExportPackage(
         page_id=page.id or page_id,
         page_status=page.status,
-        qa_status=page.qa_status,
+        qa_status=_effective_qa_status(qa_state),
         page_title=page_title,
         url_slug=url_slug,
         h1=h1,
@@ -449,6 +449,7 @@ def _readiness_warnings(
     media: list[ExportMediaReference],
     slug_conflicts: list[int],
     contract,
+    qa_state: EffectivePageQAState,
 ) -> list[ExportWarning]:
     warnings: list[ExportWarning] = []
     website = session.get(Website, page.website_id)
@@ -474,20 +475,25 @@ def _readiness_warnings(
         )
     if page.status != "approved":
         _warn(warnings, "page_not_approved", "blocker", "Page is not approved.")
-    if page.qa_status == "blocked":
-        _warn(warnings, "qa_blocked", "blocker", "QA is blocked.")
-    elif page.qa_status != "ready":
-        _warn(warnings, "qa_not_ready", "blocker", "QA is not currently ready.")
-    latest_revision_at = session.exec(
-        select(func.max(GeneratedPageRevision.created_at)).where(
-            GeneratedPageRevision.generated_page_id == page.id
+    if qa_state.classification == "missing_qa":
+        _warn(warnings, "qa_not_ready", "blocker", "QA has not been run.")
+    elif not qa_state.current:
+        reason = qa_state.reasons[0] if qa_state.reasons else "Saved QA is not current."
+        _warn(
+            warnings,
+            "qa_stale",
+            "blocker",
+            f"Saved QA is stale or identity-mismatched: {reason}",
         )
-    ).one()
-    if latest_revision_at and (
-        page.qa_checked_at is None
-        or _timestamp(latest_revision_at) > _timestamp(page.qa_checked_at)
+    elif qa_state.result is None:
+        _warn(warnings, "qa_stale", "blocker", "Current QA evidence is unavailable.")
+    elif (
+        qa_state.result.readiness_status == "blocked"
+        or qa_state.result.failed_count > 0
     ):
-        _warn(warnings, "qa_stale", "blocker", "The draft was edited after the latest QA check.")
+        _warn(warnings, "qa_blocked", "blocker", "QA is blocked.")
+    elif not qa_state.ready:
+        _warn(warnings, "qa_not_ready", "blocker", "QA is not currently ready.")
 
     contract_errors = validate_draft_contract(page, draft)
     for error in contract_errors:
@@ -705,10 +711,10 @@ def _without_empty(value: dict[str, Any]) -> dict[str, Any]:
     return {key: item for key, item in value.items() if item is not None and item != ""}
 
 
-def _timestamp(value: datetime) -> float:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=UTC)
-    return value.timestamp()
+def _effective_qa_status(qa_state: EffectivePageQAState) -> str:
+    if qa_state.current and qa_state.result is not None:
+        return qa_state.result.readiness_status
+    return "not_run"
 
 
 def _text(value: Any) -> str:

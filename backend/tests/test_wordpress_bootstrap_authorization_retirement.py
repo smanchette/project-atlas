@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.main import app
-from app.models import WordPressBootstrapEstablishmentAudit
+from app.models import Business, GeneratedPage, WordPressBootstrapEstablishmentAudit
 from app.db.backup import export_backup
 from app.schemas.wordpress import (
     WordPressBootstrapAuthorizationRetirementApplyRequest,
@@ -25,7 +25,7 @@ from app.services.wordpress_rendered_state import build_manual_browser_evidence
 from test_wordpress_bootstrap_establishment import authorized_audit, base_snapshot, proof, snapshot
 from test_wordpress_bootstrap_backup_renewal import request as renewal_request
 from test_wordpress_bootstrap_transport_identity import _historical_403
-from test_wordpress_plugin_upgrade import HTML, KEY
+from test_wordpress_plugin_upgrade import HTML, KEY, seed as seed_upgrade_audits
 
 
 @pytest.fixture(autouse=True)
@@ -77,6 +77,30 @@ def stale_audit(db, monkeypatch):
         session.add(audit); session.commit()
     monkeypatch.setattr(establishment, "_observe", lambda *args, **kwargs: base_snapshot(deepcopy(current_hit()), "inactive").inspected_state)
     return audit_id
+
+
+def _seed_backup_reference_graph(session: Session) -> None:
+    """Complete the lifecycle fixture graph required by strict backup validation."""
+
+    business = Business(
+        id=1,
+        company_name="Bootstrap retirement backup fixture",
+        business_type="Test business",
+        state="FL",
+    )
+    session.add(business)
+    session.flush()
+    session.add(
+        GeneratedPage(
+            id=41,
+            business_id=business.id,
+            page_type="city_service",
+            page_title="Bootstrap retirement backup fixture",
+            page_slug="bootstrap-retirement-backup-fixture",
+        )
+    )
+    session.commit()
+    seed_upgrade_audits(session)
 
 
 def test_genuine_403_to_200_hit_retirement_is_atomic_and_history_preserving(db, monkeypatch):
@@ -324,10 +348,11 @@ def test_data_backup_039_serializes_retirement_and_renewals(db, monkeypatch, tmp
             retirement_handle=preflight.retirement_handle,
             confirmation_phrase=preflight.confirmation_phrase,
         ))
+        _seed_backup_reference_graph(session)
         result = export_backup(session, backup_dir=tmp_path)
         payload = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
         record = next(item for item in payload["data"]["wordpress_bootstrap_establishment_audits"] if item["id"] == audit_id)
-        assert payload["metadata"]["version"] == "0.54"
+        assert payload["metadata"]["version"] == "0.55"
         assert record["authorization_mode"] == "manual_upload"
         assert record["retirement_reason"] == establishment.RETIREMENT_REASON
         assert len(record["backup_renewals"]) == 2
@@ -341,6 +366,7 @@ def test_data_backup_039_serializes_retirement_and_renewals(db, monkeypatch, tmp
 def test_data_backup_038_record_defaults_remain_compatible(db, monkeypatch, tmp_path):
     audit_id, _ = authorized_audit(db, monkeypatch)
     with Session(db) as session:
+        _seed_backup_reference_graph(session)
         result = export_backup(session, backup_dir=tmp_path)
         path = Path(result["path"])
         payload = json.loads(path.read_text(encoding="utf-8"))

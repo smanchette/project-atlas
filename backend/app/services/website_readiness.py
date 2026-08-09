@@ -17,6 +17,7 @@ from app.models import (
     WebsiteIdentityAssetAssignment,
 )
 from app.services.brand_assets import identity_asset_contract_error
+from app.services.page_qa import effective_page_qa_state
 from app.schemas.site_plans import (
     WebsiteReadinessCategory,
     WebsiteReadinessItem,
@@ -69,7 +70,7 @@ def evaluate_website_readiness(
 
     categories = [
         _business_category(context, planned_pages),
-        _content_category(planned_pages, generated_by_id, records_by_page),
+        _content_category(session, planned_pages, generated_by_id, records_by_page),
         _website_category(session, plan, planned_pages, generated_by_id),
         _future_category(),
     ]
@@ -129,6 +130,7 @@ def _business_category(context, pages: list[PlannedPage]) -> WebsiteReadinessCat
 
 
 def _content_category(
+    session: Session,
     pages: list[PlannedPage],
     generated_by_id: dict[int, GeneratedPage],
     records_by_page: dict[int, PlanningRecord],
@@ -176,7 +178,9 @@ def _content_category(
     missing_drafts: list[int] = []
     invalid_drafts: list[int] = []
     stale_drafts: list[int] = []
+    missing_qa: list[int] = []
     stale_qa: list[int] = []
+    failed_qa: list[int] = []
     for planned in pages:
         if planned.page_type in DEFERRED_PAGE_TYPES:
             continue
@@ -199,15 +203,14 @@ def _content_category(
             and _timestamp(draft_planning_time) < _timestamp(record.generated_at)
         ):
             stale_drafts.append(planned.id or 0)
-        if (
-            generated.qa_status != "ready"
-            or generated.qa_checked_at is None
-            or (
-                generated.qa_checked_at is not None
-                and _timestamp(generated.qa_checked_at) < _timestamp(generated.updated_at)
-            )
-        ):
+        qa_state = effective_page_qa_state(session, generated)
+        if qa_state.classification == "missing_qa":
+            missing_qa.append(planned.id or 0)
+        elif not qa_state.current:
             stale_qa.append(planned.id or 0)
+        elif not qa_state.ready:
+            failed_qa.append(planned.id or 0)
+    all_qa_issues = sorted(set(missing_qa + stale_qa + failed_qa))
     items.extend(
         [
             WebsiteReadinessItem(
@@ -244,15 +247,53 @@ def _content_category(
                 affected_planned_page_ids=stale_drafts,
             ),
             WebsiteReadinessItem(
-                key="page_qa",
-                label="Current per-page QA",
+                key="page_qa_missing",
+                label="Per-page QA availability",
+                status="ready" if not missing_qa else "needs_attention",
+                message=(
+                    "Every available supported draft has persisted QA evidence."
+                    if not missing_qa
+                    else "One or more available drafts have no persisted QA result."
+                ),
+                affected_planned_page_ids=missing_qa,
+            ),
+            WebsiteReadinessItem(
+                key="page_qa_stale",
+                label="Per-page QA identity and currentness",
                 status="ready" if not stale_qa else "needs_attention",
                 message=(
-                    "Every available supported draft has current ready QA."
+                    "Every persisted QA result matches the current page identity."
                     if not stale_qa
-                    else "One or more available drafts need current page-type-aware QA."
+                    else "One or more saved QA results are stale or identity-mismatched."
                 ),
                 affected_planned_page_ids=stale_qa,
+            ),
+            WebsiteReadinessItem(
+                key="page_qa_failed",
+                label="Per-page QA outcomes",
+                status="ready" if not failed_qa else "needs_attention",
+                message=(
+                    "Every current QA result is ready without blockers or warnings."
+                    if not failed_qa
+                    else "One or more current QA results are blocked or need review."
+                ),
+                affected_planned_page_ids=failed_qa,
+            ),
+            WebsiteReadinessItem(
+                key="page_qa",
+                label="Current per-page QA",
+                status="ready" if not all_qa_issues else "needs_attention",
+                message=(
+                    "Every available supported draft has current ready QA."
+                    if not all_qa_issues
+                    else (
+                        "Per-page QA needs attention: "
+                        f"{len(missing_qa)} missing, {len(stale_qa)} stale or "
+                        f"identity-mismatched, and {len(failed_qa)} failed or "
+                        "needing review."
+                    )
+                ),
+                affected_planned_page_ids=all_qa_issues,
             ),
         ]
     )

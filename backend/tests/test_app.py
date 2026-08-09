@@ -25,6 +25,7 @@ from app.models import (
     City,
     County,
     GeneratedPage,
+    GeneratedPageQAResult,
     GeneratedPageRevision,
     ImageMetadata,
     KnowledgeBlock,
@@ -239,7 +240,7 @@ def test_backup_export_contains_metadata_counts_and_all_data_groups(tmp_path: Pa
 
     assert backup_path.is_file()
     assert payload["metadata"]["app"] == "Project Atlas"
-    assert payload["metadata"]["version"] == "0.54"
+    assert payload["metadata"]["version"] == "0.55"
     assert isinstance(payload["metadata"]["created_at"], str)
     assert payload["metadata"]["table_counts"] == before_counts
     assert set(payload["data"]) == set(BACKUP_MODELS)
@@ -949,14 +950,31 @@ def test_uploaded_media_requires_review_before_assignment_and_preserves_draft() 
 
 
 def test_backup_export_preserves_uploaded_media_metadata_and_assignments(tmp_path: Path) -> None:
-    with TestClient(app):
+    with TestClient(app) as client:
+        context = _orlando_context(client)
+        upload_response = client.post(
+            "/api/media/upload",
+            files={"file": ("backup-export.png", _png_bytes(color=(41, 112, 86)), "image/png")},
+            data={
+                "business_id": context["page"]["business_id"],
+                "service_id": context["page"]["service_id"],
+                "county_id": context["page"]["county_id"],
+                "city_id": context["page"]["city_id"],
+                "image_title": "Backup Export Media",
+                "image_role": "support",
+            },
+        )
+        assert upload_response.status_code == 201
+        uploaded = upload_response.json()
         with Session(engine) as session:
             result = export_backup(session, backup_dir=tmp_path)
 
     payload = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
     images = payload["data"]["image_metadata"]
     assignments = payload["data"]["page_image_assignments"]
-    assert any(image.get("thumbnail_url") and image.get("optimized_url") for image in images)
+    exported_upload = next(image for image in images if image["id"] == uploaded["id"])
+    assert exported_upload["thumbnail_url"] == uploaded["thumbnail_url"]
+    assert exported_upload["optimized_url"] == uploaded["optimized_url"]
     assert all(0 <= image["focal_x"] <= 1 and 0 <= image["focal_y"] <= 1 for image in images)
     assert all("sort_order" in assignment for assignment in assignments)
     assert all("override_focal_x" in assignment for assignment in assignments)
@@ -1765,7 +1783,7 @@ def test_backup_restore_preserves_review_notes_and_approval_audits_idempotently(
                 session.delete(record)
             session.commit()
 
-        assert payload["metadata"]["version"] == "0.54"
+        assert payload["metadata"]["version"] == "0.55"
     assert payload["data"]["approval_audits"]
     exported_page = next(
         record
@@ -2149,7 +2167,7 @@ def test_backup_restore_preserves_page_revisions_idempotently(tmp_path: Path) ->
                 revisions=restored_revisions,
             )
 
-    assert payload_json["metadata"]["version"] == "0.54"
+    assert payload_json["metadata"]["version"] == "0.55"
     assert payload_json["data"]["page_revisions"]
     assert len(restored_revisions) == 1
     assert restored_after["hero_subheadline"].endswith("Reviewed for backup.")
@@ -2207,14 +2225,11 @@ def test_approval_queue_detects_ready_page() -> None:
         with Session(engine) as session:
             page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
             page = _ensure_complete_page(session, page)
-            qa = evaluate_page_qa(session, page.id)
-            assert qa.readiness_status == "ready"
-            page.qa_status = qa.readiness_status
-            page.qa_result = qa.model_dump(mode="json", exclude={"persisted"})
-            page.qa_checked_at = qa.checked_at
             page.status = "draft"
             session.add(page)
             session.flush()
+            qa = save_page_qa(session, page.id, commit=False)
+            assert qa.readiness_status == "ready"
 
             item = _approval_queue_item(session, page.id)
             session.rollback()
@@ -2229,12 +2244,8 @@ def test_approval_queue_detects_blocked_page() -> None:
     with TestClient(app):
         with Session(engine) as session:
             page = _page_by_slug(session, "drywood-termite-tenting-deltona-fl")
-            qa = evaluate_page_qa(session, page.id)
-            page.qa_status = qa.readiness_status
-            page.qa_result = qa.model_dump(mode="json", exclude={"persisted"})
-            page.qa_checked_at = qa.checked_at
-            session.add(page)
-            session.flush()
+            qa = save_page_qa(session, page.id, commit=False)
+            assert qa.readiness_status == "blocked"
 
             item = _approval_queue_item(session, page.id)
             session.rollback()
@@ -2248,16 +2259,17 @@ def test_approval_queue_detects_warnings() -> None:
     with TestClient(app):
         with Session(engine) as session:
             page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
-            page.qa_status = "needs_review"
-            page.qa_result = {
-                "warning_count": 1,
-                "failed_count": 0,
-                "checks": [{"status": "warning"}],
-            }
-            page.qa_checked_at = datetime.now(UTC)
+            page = _ensure_complete_page(session, page)
+            business = session.get(Business, page.business_id)
+            assert business is not None
+            business.license_number = "TEST-LICENSE-NOT-IN-DRAFT"
+            business.certified_operator = "TEST-OPERATOR-NOT-IN-DRAFT"
             page.status = "draft"
+            session.add(business)
             session.add(page)
             session.flush()
+            qa = save_page_qa(session, page.id, commit=False)
+            assert qa.readiness_status == "needs_review"
 
             item = _approval_queue_item(session, page.id)
             session.rollback()
@@ -2271,15 +2283,19 @@ def test_approval_queue_detects_edit_after_last_qa() -> None:
     with TestClient(app):
         with Session(engine) as session:
             page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
-            page.qa_status = "ready"
-            page.qa_result = {"warning_count": 0, "failed_count": 0, "checks": []}
-            page.qa_checked_at = datetime(2026, 1, 1, tzinfo=UTC)
+            page = _ensure_complete_page(session, page)
+            page.status = "draft"
+            session.add(page)
+            session.flush()
+            qa = save_page_qa(session, page.id, commit=False)
+            assert qa.readiness_status == "ready"
+            current_hash = draft_content_hash(page.draft_content)
             revision = GeneratedPageRevision(
                 generated_page_id=page.id,
-                created_at=datetime(2026, 1, 2, tzinfo=UTC),
+                created_at=qa.checked_at + timedelta(seconds=1),
                 created_by="Queue test",
-                draft_hash_before="before",
-                draft_hash_after="after",
+                draft_hash_before=current_hash,
+                draft_hash_after=current_hash,
                 draft_content_before=deepcopy(page.draft_content or {}),
                 draft_content_after=deepcopy(page.draft_content or {}),
                 changed_fields=["intro"],
@@ -3298,16 +3314,20 @@ def test_wordpress_draft_queue_blocks_stale_qa_after_edits() -> None:
     assert response.status_code == 200
     item = next(item for item in response.json()["items"] if item["page_id"] == page_id)
     assert item["queue_group"] == "blocked_stale_qa"
-    assert datetime.fromisoformat(item["latest_revision_at"]).replace(tzinfo=UTC) > datetime.fromisoformat(item["qa_checked_at"]).replace(tzinfo=UTC)
+    assert item["latest_revision_at"] is not None
+    assert item["qa_status"] == "not_run"
+    assert item["qa_checked_at"] is None
     assert item["eligible"] is False
 
 
 @pytest.mark.parametrize(
-    ("revision_offset", "expected_group"),
-    [(-1, "eligible"), (0, "eligible"), (1, "blocked_stale_qa")],
+    "revision_offset",
+    [-1, 0, 1],
     ids=["revision-before-qa", "revision-equal-qa", "revision-after-qa"],
 )
-def test_wordpress_draft_queue_qa_revision_timestamp_boundaries(revision_offset: int, expected_group: str) -> None:
+def test_wordpress_draft_queue_uses_revision_identity_not_timestamp(
+    revision_offset: int,
+) -> None:
     qa_time = datetime(2026, 7, 12, 13, 0, 0, 123456, tzinfo=UTC)
     revision_time = qa_time + timedelta(seconds=revision_offset)
     with TestClient(app) as client:
@@ -3316,8 +3336,9 @@ def test_wordpress_draft_queue_qa_revision_timestamp_boundaries(revision_offset:
             page, original = _prepare_wordpress_draft_page(session)
             page.qa_checked_at = qa_time
             session.add(page)
+            assert page.qa_result is not None
             revision = GeneratedPageRevision(generated_page_id=page.id, created_at=revision_time,
-                draft_hash_before="before", draft_hash_after=f"after-{revision_offset}",
+                draft_hash_before="before", draft_hash_after=page.qa_result["content_hash"],
                 draft_content_before=page.draft_content, draft_content_after=page.draft_content, changed_fields=["intro"])
             session.add(revision); session.commit(); page_id, revision_id = page.id, revision.id
         response = client.get("/api/wordpress/draft-queue")
@@ -3327,8 +3348,12 @@ def test_wordpress_draft_queue_qa_revision_timestamp_boundaries(revision_offset:
             session.delete(persisted_revision); _restore_wordpress_page(session, persisted_page, original); _clear_wordpress_settings(session)
     wordpress_sandbox.clear_wordpress_application_password()
     item = next(item for item in response.json()["items"] if item["page_id"] == page_id)
-    assert item["queue_group"] == expected_group
-    assert item["eligible"] is (expected_group == "eligible")
+    current_gate = next(
+        gate for gate in item["gate_results"] if gate["code"] == "qa_current"
+    )
+    assert item["queue_group"] == "blocked_stale_qa"
+    assert item["eligible"] is False
+    assert "stale_generated_revision" in current_gate["message"]
 
 
 def test_wordpress_draft_queue_blocks_missing_credentials() -> None:
@@ -3649,6 +3674,32 @@ def test_wordpress_dry_run_is_read_only() -> None:
     assert response.json()["confirmation_token"]
     assert response.json()["confirmation_phrase"]
     assert after == before
+
+
+def test_wordpress_dry_run_blocks_wrong_page_qa_identity() -> None:
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            page_id = page.id
+            _replace_current_qa_with_wrong_page_projection(session, page)
+
+        response = client.post(f"/api/wordpress/draft/dry-run/{page_id}")
+
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+            )
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "blocked"
+    assert _gate_response(response.json(), "qa_ready")["passed"] is False
+    assert _gate_response(response.json(), "qa_current")["passed"] is False
+    assert response.json()["confirmation_token"] is None
 
 
 def test_wordpress_dry_run_uses_saved_process_memory_password() -> None:
@@ -4388,6 +4439,45 @@ def test_wordpress_publish_dry_run_is_read_only_and_returns_confirmation(
     assert after == before
 
 
+def test_wordpress_publish_dry_run_blocks_wrong_page_qa_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        wordpress_draft_review.httpx,
+        "Client",
+        _fake_wordpress_get_client(status="draft"),
+    )
+    with TestClient(app) as client:
+        _configure_wordpress_sandbox(client)
+        with Session(engine) as session:
+            page, original = _prepare_wordpress_draft_page(session)
+            create_audit = _add_wordpress_draft_audit(session, page, status="created")
+            update_audit = _add_wordpress_update_audit(session, page)
+            review = _set_manual_publish_ready(session, page.id)
+            page_id, review_id = page.id, review.id
+            _replace_current_qa_with_wrong_page_projection(session, page)
+
+        response = client.post(f"/api/wordpress/publish/dry-run/{page_id}")
+
+        with Session(engine) as session:
+            _restore_wordpress_page(
+                session,
+                session.get(GeneratedPage, page_id),
+                original,
+                audits=[create_audit, update_audit],
+            )
+            session.delete(session.get(WordPressQualityReview, review_id))
+            session.commit()
+            _clear_wordpress_settings(session)
+    wordpress_sandbox.clear_wordpress_application_password()
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "blocked"
+    assert _gate_response(response.json(), "qa_ready")["passed"] is False
+    assert _gate_response(response.json(), "qa_current")["passed"] is False
+    assert response.json()["confirmation_token"] is None
+
+
 def test_wordpress_publish_exposes_no_bulk_or_unrelated_routes() -> None:
     with TestClient(app) as client:
         responses = [
@@ -4806,7 +4896,7 @@ def test_backup_restore_preserves_wordpress_audits_and_safe_references_idempoten
                 audits=restored_audits,
             )
 
-    assert payload["metadata"]["version"] == "0.54"
+    assert payload["metadata"]["version"] == "0.55"
     assert payload["data"]["wordpress_draft_audits"]
     assert payload["data"]["generated_pages"][0].get("wordpress_post_id") is not None or any(
         item.get("wordpress_post_id") == 911
@@ -5054,12 +5144,9 @@ def _prepare_wordpress_draft_page(
     page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
     page = _ensure_complete_page(session, page)
     original = _wordpress_page_state(page)
-    qa = evaluate_page_qa(session, page.id)
+    qa = save_page_qa(session, page.id, commit=False)
     assert qa.readiness_status == "ready"
     page.status = "approved"
-    page.qa_status = "ready"
-    page.qa_result = qa.model_dump(mode="json", exclude={"persisted"})
-    page.qa_checked_at = datetime.now(UTC)
     page.wordpress_post_id = None
     page.wordpress_url = None
     page.wordpress_status = None
@@ -5069,6 +5156,30 @@ def _prepare_wordpress_draft_page(
     session.commit()
     session.refresh(page)
     return page, original
+
+
+def _replace_current_qa_with_wrong_page_projection(
+    session: Session,
+    page: GeneratedPage,
+) -> None:
+    records = list(
+        session.exec(
+            select(GeneratedPageQAResult).where(
+                GeneratedPageQAResult.generated_page_id == page.id,
+                GeneratedPageQAResult.lifecycle_status == "current",
+            )
+        ).all()
+    )
+    assert len(records) == 1
+    for record in records:
+        session.delete(record)
+    page.qa_result = {
+        **(page.qa_result or {}),
+        "page_id": (page.id or 0) + 1000,
+    }
+    page.qa_status = "ready"
+    session.add(page)
+    session.commit()
 
 
 def _add_wordpress_draft_audit(

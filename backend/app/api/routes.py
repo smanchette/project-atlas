@@ -50,6 +50,7 @@ from app.schemas.entities import (
     WebsiteRead,
     WebsiteUpdate,
 )
+from app.services.page_qa import generated_page_with_effective_qa
 
 api_router = APIRouter()
 api_router.include_router(backup_router)
@@ -144,6 +145,7 @@ api_router.include_router(
         update_schema=GeneratedPageUpdate,
         prefix="/generated-pages",
         tags=["generated pages"],
+        read_transform=generated_page_with_effective_qa,
     )
 )
 api_router.include_router(

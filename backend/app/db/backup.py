@@ -3,8 +3,10 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import tempfile
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -12,6 +14,7 @@ from sqlmodel import Session, SQLModel, select
 
 from app.core.config import get_settings
 from app.db.session import create_db_and_tables, engine
+from app.services.page_qa import historical_qa_payload_hash, qa_result_record_hash
 from app.models import (
     ApprovalAudit,
     Brand,
@@ -24,6 +27,7 @@ from app.models import (
     WebsiteDraftGenerationItem,
     WebsiteDraftGenerationRun,
     GeneratedPage,
+    GeneratedPageQAResult,
     GeneratedPageRevision,
     ImageMetadata,
     InternalLinkIntent,
@@ -73,7 +77,7 @@ from app.models import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.54"
+BACKUP_VERSION = "0.55"
 BRAND_ASSET_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
 BRAND_ASSET_MIME_EXTENSIONS = {
     "image/jpeg": {".jpg", ".jpeg"},
@@ -119,6 +123,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.52",
     "0.53",
     "0.54",
+    "0.55",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -144,6 +149,7 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "counties": County,
     "cities": City,
     "generated_pages": GeneratedPage,
+    "generated_page_qa_results": GeneratedPageQAResult,
     "site_plans": SitePlan,
     "planned_pages": PlannedPage,
     "planning_records": PlanningRecord,
@@ -196,6 +202,45 @@ class BackupValidationError(ValueError):
     pass
 
 
+LEGACY_QA_PROJECTION_FIELDS = {
+    "page_id",
+    "readiness_status",
+    "checked_at",
+    "passed_count",
+    "warning_count",
+    "failed_count",
+    "checks",
+}
+CANDIDATE_QA_PROJECTION_FIELDS = {
+    "qa_result_id",
+    "page_id",
+    "website_id",
+    "site_plan_id",
+    "planned_page_id",
+    "latest_generated_page_revision_id",
+    "content_hash",
+    "source_hash",
+    "page_composition_id",
+    "composition_version",
+    "composition_source_hash",
+    "qa_algorithm_key",
+    "qa_algorithm_version",
+    "qa_ruleset_key",
+    "qa_ruleset_version",
+    "qa_ruleset_hash",
+    "readiness_status",
+    "checked_at",
+    "passed_count",
+    "warning_count",
+    "failed_count",
+    "checks",
+    "result_hash",
+    "lifecycle_status",
+    "currentness_status",
+    "currentness_reasons",
+}
+
+
 def export_backup(
     session: Session,
     *,
@@ -205,7 +250,6 @@ def export_backup(
     destination = backup_dir or BACKUP_DIR
     destination.mkdir(parents=True, exist_ok=True)
     timestamp = (created_at or datetime.now(UTC)).astimezone(UTC)
-    backup_path = _available_backup_path(destination, timestamp)
 
     data = {}
     for group, model in BACKUP_MODELS.items():
@@ -227,7 +271,32 @@ def export_backup(
         },
         "data": data,
     }
-    backup_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    serialized = json.dumps(payload, indent=2, ensure_ascii=True) + "\n"
+    descriptor, validation_name = tempfile.mkstemp(
+        dir=destination,
+        prefix=".atlas-backup-",
+        suffix=".validating",
+        text=True,
+    )
+    validation_path = Path(validation_name)
+    backup_path: Path | None = None
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(serialized)
+            stream.flush()
+            os.fsync(stream.fileno())
+        load_backup(validation_path)
+        backup_path = _reserve_backup_path(destination, timestamp)
+        validation_path.replace(backup_path)
+    except Exception:
+        if backup_path is not None:
+            backup_path.unlink(missing_ok=True)
+        raise
+    finally:
+        validation_path.unlink(missing_ok=True)
+
+    if backup_path is None:  # pragma: no cover - defensive type narrowing
+        raise BackupValidationError("Backup publication did not reserve a destination.")
 
     return {
         "file_name": backup_path.name,
@@ -494,10 +563,17 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             city_ids[old_id] = _required_id(restored)
 
         generated_page_ids: dict[int, int] = {}
+        pending_generated_page_qa_projections: list[
+            tuple[dict[str, Any] | None, GeneratedPage]
+        ] = []
         for record in data["generated_pages"]:
             old_id = _record_id(record, "generated_pages")
             restored_record = {
                 **record,
+                # Nested QA projections contain backup-local page identities.
+                # Restore the enclosing page first, then bind the projection to
+                # the remapped page id below.
+                "qa_result": None,
                 "business_id": _mapped_id(business_ids, record["business_id"], "generated_pages.business_id"),
                 "service_id": _mapped_optional_id(
                     service_ids,
@@ -521,7 +597,11 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 ),
                 restored_record,
             )
-            generated_page_ids[old_id] = _required_id(restored)
+            restored_page_id = _required_id(restored)
+            generated_page_ids[old_id] = restored_page_id
+            pending_generated_page_qa_projections.append(
+                (record.get("qa_result"), restored)
+            )
 
         site_plan_ids: dict[int, int] = {}
         for record in data.get("site_plans", []):
@@ -1239,7 +1319,9 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 record,
             )
 
+        page_composition_ids: dict[int, int] = {}
         for record in data.get("page_compositions", []):
+            old_composition_id = _record_id(record, "page_compositions")
             planned_page_id = _mapped_id(
                 planned_page_ids,
                 record["planned_page_id"],
@@ -1251,7 +1333,7 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 theme_ids=theme_ids,
                 selection_ids=website_theme_selection_ids,
             )
-            _upsert(
+            restored_composition = _upsert(
                 session,
                 PageComposition,
                 select(PageComposition).where(
@@ -1274,6 +1356,9 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                         "page_compositions.generated_page_id",
                     ),
                 },
+            )
+            page_composition_ids[old_composition_id] = _required_id(
+                restored_composition
             )
         if payload["metadata"]["version"] not in {
             "0.44",
@@ -1313,6 +1398,9 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                         commit=False,
                     )
 
+        pending_approval_qa_snapshots: list[
+            tuple[dict[str, Any], ApprovalAudit]
+        ] = []
         for record in data["approval_audits"]:
             page_id = _mapped_id(
                 generated_page_ids,
@@ -1323,13 +1411,18 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             restored_record = {
                 **record,
                 "generated_page_id": page_id,
+                "qa_result_snapshot": _restore_qa_page_identity(
+                    record.get("qa_result_snapshot"),
+                    generated_page_ids=generated_page_ids,
+                    field="approval_audits.qa_result_snapshot.page_id",
+                ),
                 "approved_at": approved_at,
                 "qa_checked_at": _datetime_value(
                     record["qa_checked_at"],
                     "approval_audits.qa_checked_at",
                 ),
             }
-            _upsert(
+            restored_audit = _upsert(
                 session,
                 ApprovalAudit,
                 select(ApprovalAudit).where(
@@ -1339,8 +1432,13 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 ),
                 restored_record,
             )
+            pending_approval_qa_snapshots.append(
+                (record["qa_result_snapshot"], restored_audit)
+            )
 
+        generated_page_revision_ids: dict[int, int] = {}
         for record in data["page_revisions"]:
+            old_revision_id = _record_id(record, "page_revisions")
             page_id = _mapped_id(
                 generated_page_ids,
                 record["generated_page_id"],
@@ -1352,7 +1450,7 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 "generated_page_id": page_id,
                 "created_at": created_at,
             }
-            _upsert(
+            restored_revision = _upsert(
                 session,
                 GeneratedPageRevision,
                 select(GeneratedPageRevision).where(
@@ -1361,6 +1459,9 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     GeneratedPageRevision.draft_hash_after == record["draft_hash_after"],
                 ),
                 restored_record,
+            )
+            generated_page_revision_ids[old_revision_id] = _required_id(
+                restored_revision
             )
 
         wordpress_draft_audit_ids: dict[int, int] = {}
@@ -1616,6 +1717,302 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 composition.source_snapshot
             )
             session.add(composition)
+
+        # Rebuild every composition that the backup claimed was current before
+        # restoring durable QA.  A restore can remap navigation, media,
+        # identity-asset, and page IDs, so the authoritative restored
+        # composition version/hash may differ from the exported identity even
+        # though its meaning is unchanged.  QA must bind to that final restored
+        # identity, not the intermediate remapped snapshot.
+        _refresh_restored_current_compositions(
+            session,
+            payload=payload,
+            site_plan_ids=site_plan_ids,
+        )
+        session.flush()
+
+        source_compositions = {
+            record["id"]: record for record in data.get("page_compositions", [])
+        }
+        generated_page_qa_result_ids: dict[int, int] = {}
+        generated_page_qa_result_hashes: dict[str, str] = {}
+        pending_qa_supersession: list[
+            tuple[dict[str, Any], GeneratedPageQAResult]
+        ] = []
+        prepared_qa_records: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+        for record in sorted(
+            data.get("generated_page_qa_results", []),
+            key=lambda value: (str(value.get("created_at") or ""), value["id"]),
+        ):
+            old_result_id = _record_id(record, "generated_page_qa_results")
+            restored_record = _restore_generated_page_qa_result_payload(
+                session,
+                record,
+                website_ids=website_ids,
+                site_plan_ids=site_plan_ids,
+                planned_page_ids=planned_page_ids,
+                generated_page_ids=generated_page_ids,
+                generated_page_revision_ids=generated_page_revision_ids,
+                page_composition_ids=page_composition_ids,
+                source_compositions=source_compositions,
+            )
+            prepared_qa_records.append((old_result_id, record, restored_record))
+
+        # A restore may target a database that already has newer, divergent QA
+        # evidence. Preserve that evidence, but relinquish its `current` claim
+        # before upserting the backup's authoritative current row so the
+        # one-current-per-page invariant remains atomic and fail closed.
+        backup_current_by_page = {
+            restored["generated_page_id"]: restored["result_hash"]
+            for _, source, restored in prepared_qa_records
+            if source.get("lifecycle_status") == "current"
+        }
+        source_qa_by_id = {
+            record["id"]: record
+            for record in data.get("generated_page_qa_results", [])
+        }
+        restored_qa_by_source_id = {
+            old_result_id: restored
+            for old_result_id, _, restored in prepared_qa_records
+        }
+        backup_lineage_hashes_by_page: dict[int, list[str]] = {}
+        for old_result_id, source, restored in prepared_qa_records:
+            if source.get("lifecycle_status") != "current":
+                continue
+            page_id = restored["generated_page_id"]
+            lineage: list[str] = []
+            source_result_id: int | None = old_result_id
+            source_visited: set[int] = set()
+            while source_result_id is not None:
+                if source_result_id in source_visited:
+                    raise BackupValidationError("Backup QA lineage is cyclic.")
+                source_record = source_qa_by_id.get(source_result_id)
+                restored_source = restored_qa_by_source_id.get(source_result_id)
+                if (
+                    source_record is None
+                    or restored_source is None
+                    or restored_source["generated_page_id"] != page_id
+                    or source_record.get("lifecycle_status")
+                    == "historical_unbound"
+                ):
+                    raise BackupValidationError(
+                        "Backup QA lineage references a missing, cross-page, or unbound result."
+                    )
+                source_visited.add(source_result_id)
+                lineage.append(restored_source["result_hash"])
+                source_result_id = source_record.get("supersedes_qa_result_id")
+            backup_lineage_hashes_by_page[page_id] = lineage
+
+        qa_lineage_rebases: list[
+            tuple[list[GeneratedPageQAResult], int, str]
+        ] = []
+        for page_id, backup_result_hash in backup_current_by_page.items():
+            target_current = list(
+                session.exec(
+                    select(GeneratedPageQAResult).where(
+                        GeneratedPageQAResult.generated_page_id == page_id,
+                        GeneratedPageQAResult.lifecycle_status == "current",
+                    )
+                ).all()
+            )
+            if len(target_current) > 1:
+                raise BackupValidationError(
+                    "Restore target has multiple current QA results for one Generated Page."
+                )
+            for existing in target_current:
+                expected_backup_lineage = backup_lineage_hashes_by_page[page_id]
+                backup_hashes = set(expected_backup_lineage)
+                observed_backup_lineage: list[str] = []
+                target_only_lineage: list[GeneratedPageQAResult] = []
+                target_node: GeneratedPageQAResult | None = existing
+                target_visited: set[int] = set()
+                while target_node is not None:
+                    if target_node.id in target_visited:
+                        raise BackupValidationError(
+                            "Restore target QA lineage is cyclic."
+                        )
+                    if (
+                        target_node.generated_page_id != page_id
+                        or target_node.lifecycle_status == "historical_unbound"
+                    ):
+                        raise BackupValidationError(
+                            "Restore target QA lineage is cross-page or unbound."
+                        )
+                    target_visited.add(target_node.id)
+                    if target_node.result_hash in backup_hashes:
+                        observed_backup_lineage.append(target_node.result_hash)
+                    else:
+                        target_only_lineage.append(target_node)
+                    parent_id = target_node.supersedes_qa_result_id
+                    target_node = (
+                        session.get(GeneratedPageQAResult, parent_id)
+                        if parent_id is not None
+                        else None
+                    )
+                    if parent_id is not None and target_node is None:
+                        raise BackupValidationError(
+                            "Restore target QA lineage references a missing result."
+                        )
+
+                expected_positions = {
+                    result_hash: index
+                    for index, result_hash in enumerate(expected_backup_lineage)
+                }
+                observed_positions = [
+                    expected_positions[result_hash]
+                    for result_hash in observed_backup_lineage
+                ]
+                if observed_positions != sorted(set(observed_positions)):
+                    raise BackupValidationError(
+                        "Restore target QA lineage conflicts with backup ancestry."
+                    )
+                if (
+                    existing.result_hash == backup_result_hash
+                    and observed_backup_lineage != expected_backup_lineage
+                ):
+                    raise BackupValidationError(
+                        "Restore target equal-current QA lineage does not contain the backup ancestry exactly."
+                    )
+                if target_only_lineage:
+                    qa_lineage_rebases.append(
+                        (target_only_lineage, page_id, backup_result_hash)
+                    )
+                if existing.result_hash != backup_result_hash:
+                    existing.lifecycle_status = "superseded"
+                    existing.updated_at = datetime.now(UTC)
+                    session.add(existing)
+        session.flush()
+
+        for old_result_id, record, restored_record in prepared_qa_records:
+            restored_qa_result = _upsert(
+                session,
+                GeneratedPageQAResult,
+                select(GeneratedPageQAResult).where(
+                    GeneratedPageQAResult.generated_page_id
+                    == restored_record["generated_page_id"],
+                    GeneratedPageQAResult.result_hash
+                    == restored_record["result_hash"],
+                ),
+                restored_record,
+            )
+            generated_page_qa_result_ids[old_result_id] = _required_id(
+                restored_qa_result
+            )
+            generated_page_qa_result_hashes[record["result_hash"]] = (
+                restored_record["result_hash"]
+            )
+            pending_qa_supersession.append((record, restored_qa_result))
+
+        for record, restored_qa_result in pending_qa_supersession:
+            page_id = restored_qa_result.generated_page_id
+            restored_qa_result.supersedes_qa_result_id = _mapped_optional_id(
+                generated_page_qa_result_ids,
+                record.get("supersedes_qa_result_id"),
+                "generated_page_qa_results.supersedes_qa_result_id",
+            )
+            session.add(restored_qa_result)
+
+        session.flush()
+        for target_only_lineage, page_id, backup_result_hash in qa_lineage_rebases:
+            restored_backup_current = session.exec(
+                select(GeneratedPageQAResult).where(
+                    GeneratedPageQAResult.generated_page_id == page_id,
+                    GeneratedPageQAResult.result_hash == backup_result_hash,
+                )
+            ).one()
+            backup_parent_id = restored_backup_current.supersedes_qa_result_id
+            for index, target_result in enumerate(target_only_lineage):
+                target_result.lifecycle_status = "superseded"
+                target_result.supersedes_qa_result_id = (
+                    target_only_lineage[index + 1].id
+                    if index + 1 < len(target_only_lineage)
+                    else backup_parent_id
+                )
+                session.add(target_result)
+            restored_backup_current.supersedes_qa_result_id = (
+                target_only_lineage[0].id
+            )
+            session.add(restored_backup_current)
+
+        for qa_projection, restored_page in pending_generated_page_qa_projections:
+            if qa_projection is None:
+                restored_page.qa_result = None
+                session.add(restored_page)
+                continue
+            old_qa_result_id = qa_projection.get("qa_result_id")
+            if isinstance(old_qa_result_id, int):
+                durable = session.get(
+                    GeneratedPageQAResult,
+                    _mapped_id(
+                        generated_page_qa_result_ids,
+                        old_qa_result_id,
+                        "generated_pages.qa_result.qa_result_id",
+                    ),
+                )
+                if durable is None or durable.lifecycle_status != "current":
+                    raise BackupValidationError(
+                        "Restored Generated Page QA projection lacks current durable evidence."
+                    )
+                restored_page.qa_result = _qa_projection_from_durable_result(durable)
+                restored_page.qa_status = durable.readiness_status or "not_run"
+                restored_page.qa_checked_at = durable.evaluated_at
+            else:
+                restored_page.qa_result = _restore_qa_page_identity(
+                    qa_projection,
+                    generated_page_ids=generated_page_ids,
+                    website_ids=website_ids,
+                    site_plan_ids=site_plan_ids,
+                    planned_page_ids=planned_page_ids,
+                    generated_page_revision_ids=generated_page_revision_ids,
+                    page_composition_ids=page_composition_ids,
+                    qa_result_ids=generated_page_qa_result_ids,
+                    qa_result_hashes=generated_page_qa_result_hashes,
+                    field="generated_pages.qa_result.page_id",
+                )
+            session.add(restored_page)
+
+        for qa_snapshot, restored_audit in pending_approval_qa_snapshots:
+            old_qa_result_id = qa_snapshot.get("qa_result_id")
+            if isinstance(old_qa_result_id, int):
+                durable = session.get(
+                    GeneratedPageQAResult,
+                    _mapped_id(
+                        generated_page_qa_result_ids,
+                        old_qa_result_id,
+                        "approval_audits.qa_result_snapshot.qa_result_id",
+                    ),
+                )
+                if durable is None or durable.lifecycle_status == "historical_unbound":
+                    raise BackupValidationError(
+                        "Restored Approval Audit snapshot lacks bound durable QA evidence."
+                    )
+                restored_audit.qa_result_snapshot = (
+                    _qa_projection_from_durable_result(durable)
+                )
+                restored_audit.qa_status_at_approval = durable.readiness_status or "not_run"
+                restored_audit.qa_checked_at = durable.evaluated_at
+            else:
+                restored_snapshot = _restore_qa_page_identity(
+                    qa_snapshot,
+                    generated_page_ids=generated_page_ids,
+                    website_ids=website_ids,
+                    site_plan_ids=site_plan_ids,
+                    planned_page_ids=planned_page_ids,
+                    generated_page_revision_ids=generated_page_revision_ids,
+                    page_composition_ids=page_composition_ids,
+                    qa_result_ids=generated_page_qa_result_ids,
+                    qa_result_hashes=generated_page_qa_result_hashes,
+                    field="approval_audits.qa_result_snapshot.page_id",
+                ) or {}
+                if qa_snapshot.get("lifecycle_status") == "candidate":
+                    restored_snapshot = _rehash_restored_candidate_qa_projection(
+                        session,
+                        qa_snapshot,
+                        restored_snapshot,
+                        source_compositions=source_compositions,
+                    )
+                restored_audit.qa_result_snapshot = restored_snapshot
+            session.add(restored_audit)
 
         for record in data["wordpress_media_sync_audits"]:
             attempted_at = _datetime_value(record["attempted_at"], "wordpress_media_sync_audits.attempted_at")
@@ -1915,71 +2312,14 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 restored_record,
             )
 
-        if data.get("page_compositions"):
-            from app.services.page_composition import refresh_site_plan_compositions
-            from app.services.site_connections import read_site_connection_plan
-
-            composition_plan_ids = {
-                _mapped_id(
-                    site_plan_ids,
-                    record["site_plan_id"],
-                    "page_compositions.site_plan_id",
-                )
-                for record in data["page_compositions"]
-            }
-            for restored_plan_id in sorted(composition_plan_ids):
-                old_plan_ids = {
-                    old_id
-                    for old_id, new_id in site_plan_ids.items()
-                    if new_id == restored_plan_id
-                }
-                backed_compositions = [
-                    record
-                    for record in data["page_compositions"]
-                    if record.get("site_plan_id") in old_plan_ids
-                ]
-                graph_ready = (
-                    payload["metadata"]["version"] in {"0.52", "0.53", "0.54"}
-                    and read_site_connection_plan(session, restored_plan_id).ready
-                )
-                claims_current = bool(backed_compositions) and all(
-                    record.get("status") == "current"
-                    for record in backed_compositions
-                )
-                if graph_ready and claims_current:
-                    result = refresh_site_plan_compositions(
-                        session,
-                        restored_plan_id,
-                        commit=False,
-                    )
-                    expected_count = len(
-                        session.exec(
-                            select(PlannedPage).where(
-                                PlannedPage.site_plan_id == restored_plan_id,
-                                PlannedPage.generated_page_id.is_not(None),
-                            )
-                        ).all()
-                    )
-                    observed_count = (
-                        result.created + result.refreshed + result.unchanged
-                    )
-                    if (
-                        result.blocked
-                        or observed_count != expected_count
-                        or len(result.compositions) != expected_count
-                    ):
-                        raise BackupValidationError(
-                            "Authoritative Site Connection restore could not refresh every expected composition."
-                        )
-                else:
-                    for composition in session.exec(
-                        select(PageComposition).where(
-                            PageComposition.site_plan_id == restored_plan_id
-                        )
-                    ).all():
-                        composition.status = "stale"
-                        composition.updated_at = datetime.now(UTC)
-                        session.add(composition)
+        # Re-check at the transaction boundary after every remaining record has
+        # been restored.  This is normally an unchanged no-op; retaining the
+        # check makes future composition dependencies fail closed.
+        _refresh_restored_current_compositions(
+            session,
+            payload=payload,
+            site_plan_ids=site_plan_ids,
+        )
 
         session.commit()
     except Exception as exc:
@@ -1994,6 +2334,83 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
         "records_processed": sum(payload["metadata"]["table_counts"].values()),
         "table_counts": payload["metadata"]["table_counts"],
     }
+
+
+def _refresh_restored_current_compositions(
+    session: Session,
+    *,
+    payload: dict[str, Any],
+    site_plan_ids: dict[int, int],
+) -> None:
+    """Materialize the authoritative remapped composition graph during restore."""
+
+    data = payload["data"]
+    if not data.get("page_compositions"):
+        return
+
+    from app.services.page_composition import refresh_site_plan_compositions
+    from app.services.site_connections import read_site_connection_plan
+
+    composition_plan_ids = {
+        _mapped_id(
+            site_plan_ids,
+            record["site_plan_id"],
+            "page_compositions.site_plan_id",
+        )
+        for record in data["page_compositions"]
+    }
+    for restored_plan_id in sorted(composition_plan_ids):
+        old_plan_ids = {
+            old_id
+            for old_id, new_id in site_plan_ids.items()
+            if new_id == restored_plan_id
+        }
+        backed_compositions = [
+            record
+            for record in data["page_compositions"]
+            if record.get("site_plan_id") in old_plan_ids
+        ]
+        graph_ready = (
+            payload["metadata"]["version"]
+            in {"0.52", "0.53", "0.54", "0.55"}
+            and read_site_connection_plan(session, restored_plan_id).ready
+        )
+        claims_current = bool(backed_compositions) and all(
+            record.get("status") == "current"
+            for record in backed_compositions
+        )
+        if graph_ready and claims_current:
+            result = refresh_site_plan_compositions(
+                session,
+                restored_plan_id,
+                commit=False,
+            )
+            expected_count = len(
+                session.exec(
+                    select(PlannedPage).where(
+                        PlannedPage.site_plan_id == restored_plan_id,
+                        PlannedPage.generated_page_id.is_not(None),
+                    )
+                ).all()
+            )
+            observed_count = result.created + result.refreshed + result.unchanged
+            if (
+                result.blocked
+                or observed_count != expected_count
+                or len(result.compositions) != expected_count
+            ):
+                raise BackupValidationError(
+                    "Authoritative Site Connection restore could not refresh every expected composition."
+                )
+        else:
+            for composition in session.exec(
+                select(PageComposition).where(
+                    PageComposition.site_plan_id == restored_plan_id
+                )
+            ).all():
+                composition.status = "stale"
+                composition.updated_at = datetime.now(UTC)
+                session.add(composition)
 
 
 def is_sensitive_setting_key(setting_key: str) -> bool:
@@ -2090,12 +2507,12 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54"}:
+    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
         for group in ("site_plans", "planned_pages", "planning_records"):
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54"}:
+    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
         for group in (
             "site_connection_planning_records",
             "navigation_sets",
@@ -2105,7 +2522,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54"}:
+    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
         for group in (
             "website_coverage_planning_records",
             "website_service_coverage_decisions",
@@ -2116,7 +2533,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54"}:
+    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
         for group in (
             "drafting_eligibility_assessments",
             "drafting_eligibility_dispositions",
@@ -2124,7 +2541,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54"}:
+    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
         for group in (
             "supporting_page_authorizations",
             "pre_draft_distinctness_briefs",
@@ -2132,7 +2549,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54"}:
+    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
         for group in (
             "website_draft_generation_runs",
             "website_draft_generation_items",
@@ -2143,25 +2560,28 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "website_service_county_coverage_decisions" not in data:
         data.setdefault("website_service_county_coverage_decisions", [])
         counts.setdefault("website_service_county_coverage_decisions", 0)
-    if backup_version not in {"0.49", "0.50", "0.51", "0.52", "0.53", "0.54"}:
+    if backup_version not in {"0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
         for group in ("semantic_component_definitions", "page_compositions"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.50", "0.51", "0.52", "0.53", "0.54"}:
+    if backup_version not in {"0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
         for group in ("brand_assets", "website_identity_asset_assignments"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.51", "0.52", "0.53", "0.54"}:
+    if backup_version not in {"0.51", "0.52", "0.53", "0.54", "0.55"}:
         for group in ("themes", "website_theme_selections"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.53", "0.54"}:
+    if backup_version not in {"0.53", "0.54", "0.55"}:
         for group in (
             "website_media_planning_records",
             "planned_page_media_requirements",
         ):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
+    if backup_version != "0.55":
+        data.setdefault("generated_page_qa_results", [])
+        counts.setdefault("generated_page_qa_results", 0)
 
     for group in BACKUP_MODELS:
         records = data.get(group)
@@ -2449,11 +2869,13 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             )
 
     _validate_site_connection_decision_provenance(data, backup_version)
+    _validate_nested_qa_page_identities(data, backup_version)
     _validate_unique_records(data)
     _validate_backup_references(data)
     _validate_brand_asset_ownership(data)
     _validate_theme_ownership(data)
     _validate_page_media_ownership(data, backup_version)
+    _validate_generated_page_qa_results(data, backup_version)
     return payload
 
 
@@ -2483,12 +2905,23 @@ def resolve_backup_download(file_name: str) -> Path:
     return backup_path
 
 
-def _available_backup_path(destination: Path, timestamp: datetime) -> Path:
+def _reserve_backup_path(destination: Path, timestamp: datetime) -> Path:
+    """Atomically reserve one final backup filename for this export.
+
+    The empty placeholder exists only between successful validation and the
+    same-filesystem atomic replacement. Exclusive creation prevents concurrent
+    exports from selecting or overwriting the same final filename.
+    """
+
     candidate_time = timestamp
     while True:
         candidate = destination / f"atlas-backup-{candidate_time.strftime('%Y-%m-%d-%H%M%S')}.json"
-        if not candidate.exists():
+        try:
+            with candidate.open("x", encoding="utf-8"):
+                pass
             return candidate
+        except FileExistsError:
+            pass
         candidate_time += timedelta(seconds=1)
 
 
@@ -2927,6 +3360,273 @@ def _mapped_optional_id(mapping: dict[int, int], old_id: Any, field: str) -> int
     return _mapped_id(mapping, old_id, field)
 
 
+def _qa_projection_from_durable_result(
+    record: GeneratedPageQAResult,
+) -> dict[str, Any]:
+    """Rebuild redundant projections from restored immutable QA evidence."""
+
+    if record.id is None or record.evaluated_at is None:
+        raise BackupValidationError(
+            "Restored durable QA evidence lacks an identity or evaluation timestamp."
+        )
+    return {
+        "qa_result_id": record.id,
+        "page_id": record.generated_page_id,
+        "website_id": record.website_id,
+        "site_plan_id": record.site_plan_id,
+        "planned_page_id": record.planned_page_id,
+        "latest_generated_page_revision_id": record.latest_generated_page_revision_id,
+        "content_hash": record.content_hash,
+        "source_hash": record.source_hash,
+        "page_composition_id": record.page_composition_id,
+        "composition_version": record.composition_version,
+        "composition_source_hash": record.composition_source_hash,
+        "qa_algorithm_key": record.qa_algorithm_key,
+        "qa_algorithm_version": record.qa_algorithm_version,
+        "qa_ruleset_key": record.qa_ruleset_key,
+        "qa_ruleset_version": record.qa_ruleset_version,
+        "qa_ruleset_hash": record.qa_ruleset_hash,
+        "readiness_status": record.readiness_status,
+        "checked_at": _canonical_qa_timestamp(record.evaluated_at),
+        "passed_count": record.passed_count,
+        "warning_count": record.warning_count,
+        "failed_count": record.failed_count,
+        "checks": deepcopy(record.check_payload or []),
+        "result_hash": record.result_hash,
+        "lifecycle_status": "current",
+        "currentness_status": "current_exact_identity_match",
+        "currentness_reasons": [],
+    }
+
+
+def _restore_qa_page_identity(
+    value: Any,
+    *,
+    generated_page_ids: dict[int, int],
+    field: str,
+    website_ids: dict[int, int] | None = None,
+    site_plan_ids: dict[int, int] | None = None,
+    planned_page_ids: dict[int, int] | None = None,
+    generated_page_revision_ids: dict[int, int] | None = None,
+    page_composition_ids: dict[int, int] | None = None,
+    qa_result_ids: dict[int, int] | None = None,
+    qa_result_hashes: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Remap every explicit identity in a persisted QA projection."""
+
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise BackupValidationError(f"Backup contains an invalid object in {field}.")
+    old_page_id = value.get("page_id")
+    restored = deepcopy(value)
+    restored["page_id"] = _mapped_id(generated_page_ids, old_page_id, field)
+    for key, mapping in (
+        ("website_id", website_ids),
+        ("site_plan_id", site_plan_ids),
+        ("planned_page_id", planned_page_ids),
+        ("latest_generated_page_revision_id", generated_page_revision_ids),
+        ("page_composition_id", page_composition_ids),
+    ):
+        if key in restored and mapping is not None:
+            restored[key] = _mapped_optional_id(
+                mapping,
+                restored.get(key),
+                f"{field.rsplit('.', 1)[0]}.{key}",
+            )
+    old_result_id = restored.get("qa_result_id")
+    if old_result_id is not None and qa_result_ids is not None:
+        restored["qa_result_id"] = _mapped_id(
+            qa_result_ids,
+            old_result_id,
+            f"{field.rsplit('.', 1)[0]}.qa_result_id",
+        )
+    old_result_hash = restored.get("result_hash")
+    if (
+        isinstance(old_result_hash, str)
+        and qa_result_hashes is not None
+        and old_result_hash in qa_result_hashes
+    ):
+        restored["result_hash"] = qa_result_hashes[old_result_hash]
+    return restored
+
+
+def _restore_generated_page_qa_result_payload(
+    session: Session,
+    record: dict[str, Any],
+    *,
+    website_ids: dict[int, int],
+    site_plan_ids: dict[int, int],
+    planned_page_ids: dict[int, int],
+    generated_page_ids: dict[int, int],
+    generated_page_revision_ids: dict[int, int],
+    page_composition_ids: dict[int, int],
+    source_compositions: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    """Remap one immutable QA record and re-hash its restored identity."""
+
+    restored = {
+        **record,
+        "website_id": _mapped_optional_id(
+            website_ids,
+            record.get("website_id"),
+            "generated_page_qa_results.website_id",
+        ),
+        "site_plan_id": _mapped_optional_id(
+            site_plan_ids,
+            record.get("site_plan_id"),
+            "generated_page_qa_results.site_plan_id",
+        ),
+        "planned_page_id": _mapped_optional_id(
+            planned_page_ids,
+            record.get("planned_page_id"),
+            "generated_page_qa_results.planned_page_id",
+        ),
+        "generated_page_id": _mapped_id(
+            generated_page_ids,
+            record.get("generated_page_id"),
+            "generated_page_qa_results.generated_page_id",
+        ),
+        "latest_generated_page_revision_id": _mapped_optional_id(
+            generated_page_revision_ids,
+            record.get("latest_generated_page_revision_id"),
+            "generated_page_qa_results.latest_generated_page_revision_id",
+        ),
+        "page_composition_id": _mapped_optional_id(
+            page_composition_ids,
+            record.get("page_composition_id"),
+            "generated_page_qa_results.page_composition_id",
+        ),
+        "supersedes_qa_result_id": None,
+        "evaluated_at": (
+            _datetime_value(
+                record["evaluated_at"],
+                "generated_page_qa_results.evaluated_at",
+            )
+            if record.get("evaluated_at") is not None
+            else None
+        ),
+        "created_at": _datetime_value(
+            record["created_at"],
+            "generated_page_qa_results.created_at",
+        ),
+        "updated_at": _datetime_value(
+            record["updated_at"],
+            "generated_page_qa_results.updated_at",
+        ),
+    }
+
+    old_composition_id = record.get("page_composition_id")
+    if isinstance(old_composition_id, int):
+        source_composition = source_compositions[old_composition_id]
+        restored_composition = session.get(
+            PageComposition,
+            restored["page_composition_id"],
+        )
+        if restored_composition is None:
+            raise BackupValidationError(
+                "Backup QA result composition could not be restored."
+            )
+        # A QA result bound to the exported current composition can follow the
+        # composition's deterministic ID-remap hash. An already-stale historical
+        # binding remains unchanged and therefore remains stale after restore.
+        if (
+            record.get("composition_version")
+            == source_composition.get("composition_version")
+            and record.get("composition_source_hash")
+            == source_composition.get("source_hash")
+        ):
+            restored["composition_version"] = (
+                restored_composition.composition_version
+            )
+            restored["composition_source_hash"] = restored_composition.source_hash
+
+    if restored.get("lifecycle_status") == "historical_unbound":
+        restored["result_hash"] = historical_qa_payload_hash(
+            restored["historical_payload"]
+        )
+    else:
+        restored["result_hash"] = qa_result_record_hash(restored)
+    return restored
+
+
+def _canonical_qa_timestamp(value: datetime) -> str:
+    normalized = (
+        value.replace(tzinfo=UTC)
+        if value.tzinfo is None
+        else value.astimezone(UTC)
+    )
+    return normalized.isoformat().replace("+00:00", "Z")
+
+
+def _qa_hash_values_from_projection(
+    projection: dict[str, Any],
+    *,
+    evaluated_at: datetime,
+) -> dict[str, Any]:
+    return {
+        "website_id": projection.get("website_id"),
+        "site_plan_id": projection.get("site_plan_id"),
+        "planned_page_id": projection.get("planned_page_id"),
+        "generated_page_id": projection.get("page_id"),
+        "latest_generated_page_revision_id": projection.get(
+            "latest_generated_page_revision_id"
+        ),
+        "content_hash": projection.get("content_hash"),
+        "source_hash": projection.get("source_hash"),
+        "page_composition_id": projection.get("page_composition_id"),
+        "composition_version": projection.get("composition_version"),
+        "composition_source_hash": projection.get("composition_source_hash"),
+        "qa_algorithm_key": projection.get("qa_algorithm_key"),
+        "qa_algorithm_version": projection.get("qa_algorithm_version"),
+        "qa_ruleset_key": projection.get("qa_ruleset_key"),
+        "qa_ruleset_version": projection.get("qa_ruleset_version"),
+        "qa_ruleset_hash": projection.get("qa_ruleset_hash"),
+        "readiness_status": projection.get("readiness_status"),
+        "passed_count": projection.get("passed_count"),
+        "warning_count": projection.get("warning_count"),
+        "failed_count": projection.get("failed_count"),
+        "check_payload": projection.get("checks"),
+        "evaluated_at": evaluated_at,
+    }
+
+
+def _rehash_restored_candidate_qa_projection(
+    session: Session,
+    source: dict[str, Any],
+    restored: dict[str, Any],
+    *,
+    source_compositions: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    old_composition_id = source.get("page_composition_id")
+    if isinstance(old_composition_id, int):
+        source_composition = source_compositions[old_composition_id]
+        restored_composition = session.get(
+            PageComposition,
+            restored.get("page_composition_id"),
+        )
+        if restored_composition is None:
+            raise BackupValidationError(
+                "Backup candidate QA composition could not be restored."
+            )
+        if (
+            source.get("composition_version")
+            == source_composition.get("composition_version")
+            and source.get("composition_source_hash")
+            == source_composition.get("source_hash")
+        ):
+            restored["composition_source_hash"] = restored_composition.source_hash
+    evaluated_at = _datetime_value(
+        restored.get("checked_at"),
+        "approval_audits.qa_result_snapshot.checked_at",
+    )
+    restored["checked_at"] = _canonical_qa_timestamp(evaluated_at)
+    restored["result_hash"] = qa_result_record_hash(
+        _qa_hash_values_from_projection(restored, evaluated_at=evaluated_at)
+    )
+    return restored
+
+
 def _datetime_value(value: Any, field: str) -> datetime:
     if isinstance(value, datetime):
         return value
@@ -2948,7 +3648,7 @@ def _validate_site_connection_decision_provenance(
     data: dict[str, list[dict[str, Any]]],
     backup_version: str,
 ) -> None:
-    if backup_version in {"0.52", "0.53", "0.54"}:
+    if backup_version in {"0.52", "0.53", "0.54", "0.55"}:
         _validate_052_site_connection_provenance_fields(data)
 
     planning_by_plan = {
@@ -3019,7 +3719,7 @@ def _validate_site_connection_decision_provenance(
                 "Backup Internal Link Intent crosses a Website, Site Plan, or page boundary."
             )
 
-    if backup_version not in {"0.52", "0.53", "0.54"}:
+    if backup_version not in {"0.52", "0.53", "0.54", "0.55"}:
         return
 
     _validate_052_composition_connection_bindings(
@@ -3403,6 +4103,62 @@ def _validate_052_site_connection_suggestion_bindings(
             )
 
 
+def _validate_nested_qa_page_identities(
+    data: dict[str, list[dict[str, Any]]],
+    backup_version: str,
+) -> None:
+    """Reject QA projections that claim a page other than their owner."""
+
+    require_identity = backup_version == "0.55"
+    for record in data["generated_pages"]:
+        qa_result = record.get("qa_result")
+        if qa_result is None:
+            continue
+        if not isinstance(qa_result, dict):
+            raise BackupValidationError(
+                "Backup Generated Page QA result must be an object."
+            )
+        if not require_identity:
+            _validate_legacy_qa_projection(
+                qa_result,
+                field="generated_pages.qa_result",
+            )
+            continue
+        page_id = qa_result.get("page_id")
+        if require_identity and page_id != record.get("id"):
+            raise BackupValidationError(
+                "Backup Generated Page QA result does not match its enclosing page identity."
+            )
+
+    for record in data["approval_audits"]:
+        snapshot = record.get("qa_result_snapshot")
+        if not isinstance(snapshot, dict):
+            raise BackupValidationError(
+                "Backup Approval Audit QA result snapshot must be an object."
+            )
+        if not require_identity:
+            _validate_legacy_qa_projection(
+                snapshot,
+                field="approval_audits.qa_result_snapshot",
+            )
+            continue
+        page_id = snapshot.get("page_id")
+        # Approval snapshots are immutable historical evidence. Exact legacy
+        # snapshots may truthfully preserve a pre-binding restore defect; full
+        # candidate and durable snapshots still carry authoritative page identity.
+        if (
+            require_identity
+            and (
+                snapshot.get("qa_result_id") is not None
+                or snapshot.get("lifecycle_status") == "candidate"
+            )
+            and page_id != record.get("generated_page_id")
+        ):
+            raise BackupValidationError(
+                "Backup Approval Audit QA result snapshot does not match its page identity."
+            )
+
+
 def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
     key_fields: dict[str, tuple[str, ...]] = {
         "businesses": ("company_name",),
@@ -3459,6 +4215,7 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         "website_theme_selections": ("website_id", "version"),
         "approval_audits": ("generated_page_id", "approved_at", "draft_hash_at_approval"),
         "page_revisions": ("generated_page_id", "created_at", "draft_hash_after"),
+        "generated_page_qa_results": ("generated_page_id", "result_hash"),
         "wordpress_draft_audits": ("generated_page_id", "attempted_at", "payload_hash"),
         "wordpress_heading_correction_audits": ("token_fingerprint",),
         "wordpress_deployment_audits": ("generated_page_id", "attempted_at", "action_type"),
@@ -3715,6 +4472,23 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
         ),
         "page_revisions": (
             ("generated_page_id", "generated_pages", False),
+        ),
+        "generated_page_qa_results": (
+            ("website_id", "websites", True),
+            ("site_plan_id", "site_plans", True),
+            ("planned_page_id", "planned_pages", True),
+            ("generated_page_id", "generated_pages", False),
+            (
+                "latest_generated_page_revision_id",
+                "page_revisions",
+                True,
+            ),
+            ("page_composition_id", "page_compositions", True),
+            (
+                "supersedes_qa_result_id",
+                "generated_page_qa_results",
+                True,
+            ),
         ),
         "wordpress_draft_audits": (
             ("generated_page_id", "generated_pages", False),
@@ -4726,10 +5500,635 @@ def _validate_page_media_ownership(
                     "Backup Page Composition generated media component crosses its governed placement binding."
                 )
 
-    if backup_version not in {"0.53", "0.54"} and (planning_records or requirements):
+    if backup_version not in {"0.53", "0.54", "0.55"} and (planning_records or requirements):
         raise BackupValidationError(
             "Legacy backup versions cannot claim Page Media planning governance."
         )
+
+
+def _validate_bound_qa_projection(
+    projection: dict[str, Any],
+    durable: dict[str, Any],
+    *,
+    field: str,
+) -> None:
+    """Require every redundant QA projection field to match immutable evidence."""
+
+    expected = {
+        "qa_result_id": durable.get("id"),
+        "page_id": durable.get("generated_page_id"),
+        "website_id": durable.get("website_id"),
+        "site_plan_id": durable.get("site_plan_id"),
+        "planned_page_id": durable.get("planned_page_id"),
+        "latest_generated_page_revision_id": durable.get(
+            "latest_generated_page_revision_id"
+        ),
+        "content_hash": durable.get("content_hash"),
+        "source_hash": durable.get("source_hash"),
+        "page_composition_id": durable.get("page_composition_id"),
+        "composition_version": durable.get("composition_version"),
+        "composition_source_hash": durable.get("composition_source_hash"),
+        "qa_algorithm_key": durable.get("qa_algorithm_key"),
+        "qa_algorithm_version": durable.get("qa_algorithm_version"),
+        "qa_ruleset_key": durable.get("qa_ruleset_key"),
+        "qa_ruleset_version": durable.get("qa_ruleset_version"),
+        "qa_ruleset_hash": durable.get("qa_ruleset_hash"),
+        "readiness_status": durable.get("readiness_status"),
+        "passed_count": durable.get("passed_count"),
+        "warning_count": durable.get("warning_count"),
+        "failed_count": durable.get("failed_count"),
+        "checks": durable.get("check_payload"),
+        "result_hash": durable.get("result_hash"),
+        # A bound projection records the state when this evidence was current;
+        # immutable Approval Audit snapshots remain valid after later QA runs.
+        "lifecycle_status": "current",
+        "currentness_status": "current_exact_identity_match",
+        "currentness_reasons": [],
+    }
+    if set(projection) != set(expected) | {"checked_at"}:
+        raise BackupValidationError(
+            f"Backup {field} does not use the exact durable QA projection contract."
+        )
+    for key, value in expected.items():
+        if projection.get(key) != value:
+            raise BackupValidationError(
+                f"Backup {field}.{key} does not match its durable QA result."
+            )
+    if _comparable_datetime(
+        _datetime_value(projection.get("checked_at"), f"{field}.checked_at")
+    ) != _comparable_datetime(
+        _datetime_value(durable.get("evaluated_at"), f"{field}.evaluated_at")
+    ):
+        raise BackupValidationError(
+            f"Backup {field}.checked_at does not match its durable QA result."
+        )
+
+
+def _validate_legacy_qa_projection(value: dict[str, Any], *, field: str) -> None:
+    checks = value.get("checks")
+    if (
+        set(value) != LEGACY_QA_PROJECTION_FIELDS
+        or type(value.get("page_id")) is not int
+        or value.get("readiness_status") not in {"ready", "needs_review", "blocked"}
+        or not isinstance(checks, list)
+        or not all(isinstance(check, dict) for check in checks)
+        or any(
+            type(value.get(key)) is not int or value[key] < 0
+            for key in ("passed_count", "warning_count", "failed_count")
+        )
+    ):
+        raise BackupValidationError(
+            f"Backup {field} is neither exact legacy nor bound QA evidence."
+        )
+    _datetime_value(value.get("checked_at"), f"{field}.checked_at")
+    observed = {
+        status: sum(check.get("status") == status for check in checks)
+        for status in ("pass", "warning", "fail")
+    }
+    if (
+        value["passed_count"] != observed["pass"]
+        or value["warning_count"] != observed["warning"]
+        or value["failed_count"] != observed["fail"]
+    ):
+        raise BackupValidationError(f"Backup {field} legacy QA counts are inconsistent.")
+
+
+def _validate_candidate_qa_projection(
+    value: dict[str, Any],
+    *,
+    data: dict[str, list[dict[str, Any]]],
+    owner_page_id: Any,
+    field: str,
+) -> None:
+    """Validate an exact, non-persisted QA result captured by an Approval Audit."""
+
+    if (
+        set(value) != CANDIDATE_QA_PROJECTION_FIELDS
+        or value.get("qa_result_id") is not None
+        or value.get("lifecycle_status") != "candidate"
+        or value.get("currentness_status") != "candidate_not_persisted"
+        or value.get("currentness_reasons") != []
+        or not _is_positive_int(owner_page_id)
+        or value.get("page_id") != owner_page_id
+    ):
+        raise BackupValidationError(
+            f"Backup {field} does not use the exact candidate QA projection contract."
+        )
+
+    websites = {record["id"]: record for record in data["websites"]}
+    site_plans = {record["id"]: record for record in data["site_plans"]}
+    planned_pages = {record["id"]: record for record in data["planned_pages"]}
+    generated_pages = {record["id"]: record for record in data["generated_pages"]}
+    revisions = {record["id"]: record for record in data["page_revisions"]}
+    compositions = {record["id"]: record for record in data["page_compositions"]}
+
+    website_id = value.get("website_id")
+    site_plan_id = value.get("site_plan_id")
+    planned_page_id = value.get("planned_page_id")
+    if not all(
+        _is_positive_int(identity)
+        for identity in (website_id, site_plan_id, planned_page_id)
+    ):
+        raise BackupValidationError(
+            f"Backup {field} has an incomplete Website-scoped candidate identity."
+        )
+    website = websites.get(website_id)
+    plan = site_plans.get(site_plan_id)
+    planned_page = planned_pages.get(planned_page_id)
+    generated_page = generated_pages.get(owner_page_id)
+    if (
+        website is None
+        or plan is None
+        or planned_page is None
+        or generated_page is None
+        or generated_page.get("website_id") != website_id
+        or plan.get("website_id") != website_id
+        or planned_page.get("website_id") != website_id
+        or planned_page.get("site_plan_id") != site_plan_id
+        or planned_page.get("generated_page_id") != owner_page_id
+    ):
+        raise BackupValidationError(
+            f"Backup {field} crosses a Website, Site Plan, Planned Page, or draft boundary."
+        )
+
+    revision_id = value.get("latest_generated_page_revision_id")
+    if revision_id is not None:
+        revision = revisions.get(revision_id)
+        if (
+            not _is_positive_int(revision_id)
+            or revision is None
+            or revision.get("generated_page_id") != owner_page_id
+            or revision.get("draft_hash_after") != value.get("content_hash")
+        ):
+            raise BackupValidationError(
+                f"Backup {field} loses its exact revision identity."
+            )
+
+    composition_id = value.get("page_composition_id")
+    composition_binding = (
+        composition_id,
+        value.get("composition_version"),
+        value.get("composition_source_hash"),
+    )
+    if composition_id is None:
+        if composition_binding != (None, None, None):
+            raise BackupValidationError(
+                f"Backup {field} has a partial composition identity."
+            )
+    else:
+        composition = compositions.get(composition_id)
+        if (
+            not _is_positive_int(composition_id)
+            or composition is None
+            or composition.get("website_id") != website_id
+            or composition.get("site_plan_id") != site_plan_id
+            or composition.get("planned_page_id") != planned_page_id
+            or composition.get("generated_page_id") != owner_page_id
+            or not _is_positive_int(value.get("composition_version"))
+            or not _is_lower_sha256(value.get("composition_source_hash"))
+        ):
+            raise BackupValidationError(
+                f"Backup {field} composition binding crosses scope or is malformed."
+            )
+
+    checks = value.get("checks")
+    if (
+        not _is_lower_sha256(value.get("content_hash"))
+        or not _is_lower_sha256(value.get("source_hash"))
+        or not _is_lower_sha256(value.get("qa_ruleset_hash"))
+        or not _is_lower_sha256(value.get("result_hash"))
+        or value.get("readiness_status") not in {"ready", "needs_review", "blocked"}
+        or not isinstance(checks, list)
+        or not all(
+            isinstance(check, dict)
+            and check.get("status") in {"pass", "warning", "fail"}
+            for check in checks
+        )
+        or any(
+            type(value.get(count_field)) is not int or value[count_field] < 0
+            for count_field in ("passed_count", "warning_count", "failed_count")
+        )
+        or any(
+            not isinstance(value.get(identity_field), str)
+            or not value[identity_field].strip()
+            for identity_field in (
+                "qa_algorithm_key",
+                "qa_algorithm_version",
+                "qa_ruleset_key",
+                "qa_ruleset_version",
+            )
+        )
+    ):
+        raise BackupValidationError(f"Backup {field} has malformed candidate evidence.")
+
+    observed_counts = {
+        status: sum(check.get("status") == status for check in checks)
+        for status in ("pass", "warning", "fail")
+    }
+    expected_readiness = (
+        "blocked"
+        if observed_counts["fail"]
+        else "needs_review"
+        if observed_counts["warning"]
+        else "ready"
+    )
+    if (
+        value["passed_count"] != observed_counts["pass"]
+        or value["warning_count"] != observed_counts["warning"]
+        or value["failed_count"] != observed_counts["fail"]
+        or value["readiness_status"] != expected_readiness
+    ):
+        raise BackupValidationError(
+            f"Backup {field} candidate QA outcome is internally inconsistent."
+        )
+
+    evaluated_at = _datetime_value(value.get("checked_at"), f"{field}.checked_at")
+    expected_hash = qa_result_record_hash(
+        _qa_hash_values_from_projection(value, evaluated_at=evaluated_at)
+    )
+    if value.get("result_hash") != expected_hash:
+        raise BackupValidationError(
+            f"Backup {field} candidate QA identity or outcome hash does not match."
+        )
+
+
+def _validate_generated_page_qa_results(
+    data: dict[str, list[dict[str, Any]]],
+    backup_version: str,
+) -> None:
+    """Validate immutable QA identity, outcome integrity, and lineage."""
+
+    records = data["generated_page_qa_results"]
+    if backup_version != "0.55":
+        if records:
+            raise BackupValidationError(
+                "Legacy backup versions cannot claim durable Generated Page QA results."
+            )
+        return
+
+    websites = {record["id"]: record for record in data["websites"]}
+    site_plans = {record["id"]: record for record in data["site_plans"]}
+    planned_pages = {record["id"]: record for record in data["planned_pages"]}
+    generated_pages = {record["id"]: record for record in data["generated_pages"]}
+    revisions = {record["id"]: record for record in data["page_revisions"]}
+    compositions = {record["id"]: record for record in data["page_compositions"]}
+    records_by_id = {record["id"]: record for record in records}
+    valid_lifecycle = {"current", "superseded", "historical_unbound"}
+    valid_readiness = {"ready", "needs_review", "blocked"}
+    current_pages: set[int] = set()
+    superseded_targets: set[int] = set()
+
+    for generated_page in generated_pages.values():
+        projection = generated_page.get("qa_result")
+        if not isinstance(projection, dict):
+            continue
+        qa_result_id = projection.get("qa_result_id")
+        if qa_result_id is None:
+            _validate_legacy_qa_projection(
+                projection,
+                field="generated_pages.qa_result",
+            )
+            continue
+        durable = records_by_id.get(qa_result_id)
+        if (
+            durable is None
+            or durable.get("generated_page_id") != generated_page.get("id")
+            or durable.get("lifecycle_status") != "current"
+        ):
+            raise BackupValidationError(
+                "Backup Generated Page QA projection references missing, stale, or cross-page durable evidence."
+            )
+        _validate_bound_qa_projection(
+            projection,
+            durable,
+            field="generated_pages.qa_result",
+        )
+        if (
+            generated_page.get("qa_status") != durable.get("readiness_status")
+            or _comparable_datetime(
+                _datetime_value(
+                    generated_page.get("qa_checked_at"),
+                    "generated_pages.qa_checked_at",
+                )
+            )
+            != _comparable_datetime(
+                _datetime_value(
+                    durable.get("evaluated_at"),
+                    "generated_page_qa_results.evaluated_at",
+                )
+            )
+        ):
+            raise BackupValidationError(
+                "Backup Generated Page QA status or timestamp diverges from durable evidence."
+            )
+
+    for audit in data["approval_audits"]:
+        snapshot = audit.get("qa_result_snapshot")
+        if not isinstance(snapshot, dict):
+            continue
+        qa_result_id = snapshot.get("qa_result_id")
+        if qa_result_id is None:
+            if set(snapshot) == LEGACY_QA_PROJECTION_FIELDS:
+                _validate_legacy_qa_projection(
+                    snapshot,
+                    field="approval_audits.qa_result_snapshot",
+                )
+            else:
+                _validate_candidate_qa_projection(
+                    snapshot,
+                    data=data,
+                    owner_page_id=audit.get("generated_page_id"),
+                    field="approval_audits.qa_result_snapshot",
+                )
+                if (
+                    audit.get("qa_status_at_approval")
+                    != snapshot.get("readiness_status")
+                    or audit.get("draft_hash_at_approval")
+                    != snapshot.get("content_hash")
+                    or _comparable_datetime(
+                        _datetime_value(
+                            audit.get("qa_checked_at"),
+                            "approval_audits.qa_checked_at",
+                        )
+                    )
+                    != _comparable_datetime(
+                        _datetime_value(
+                            snapshot.get("checked_at"),
+                            "approval_audits.qa_result_snapshot.checked_at",
+                        )
+                    )
+                ):
+                    raise BackupValidationError(
+                        "Backup Approval Audit QA status, content, or timestamp diverges from candidate evidence."
+                    )
+            continue
+        durable = records_by_id.get(qa_result_id)
+        if (
+            durable is None
+            or durable.get("generated_page_id") != audit.get("generated_page_id")
+        ):
+            raise BackupValidationError(
+                "Backup Approval Audit QA snapshot references missing or cross-page durable evidence."
+            )
+        _validate_bound_qa_projection(
+            snapshot,
+            durable,
+            field="approval_audits.qa_result_snapshot",
+        )
+        if (
+            audit.get("qa_status_at_approval") != durable.get("readiness_status")
+            or _comparable_datetime(
+                _datetime_value(
+                    audit.get("qa_checked_at"),
+                    "approval_audits.qa_checked_at",
+                )
+            )
+            != _comparable_datetime(
+                _datetime_value(
+                    durable.get("evaluated_at"),
+                    "generated_page_qa_results.evaluated_at",
+                )
+            )
+        ):
+            raise BackupValidationError(
+                "Backup Approval Audit QA status or timestamp diverges from durable evidence."
+            )
+
+    for record in records:
+        lifecycle = record.get("lifecycle_status")
+        generated_page = generated_pages.get(record.get("generated_page_id"))
+        if lifecycle not in valid_lifecycle or generated_page is None:
+            raise BackupValidationError(
+                "Backup Generated Page QA result has invalid lifecycle or page identity."
+            )
+        if not _is_lower_sha256(record.get("result_hash")):
+            raise BackupValidationError(
+                "Backup Generated Page QA result has an invalid result hash."
+            )
+        _datetime_value(
+            record.get("created_at"),
+            "generated_page_qa_results.created_at",
+        )
+        _datetime_value(
+            record.get("updated_at"),
+            "generated_page_qa_results.updated_at",
+        )
+
+        supersedes_id = record.get("supersedes_qa_result_id")
+        if supersedes_id is not None:
+            superseded = records_by_id.get(supersedes_id)
+            if (
+                superseded is None
+                or supersedes_id == record.get("id")
+                or superseded.get("generated_page_id")
+                != record.get("generated_page_id")
+                or superseded.get("lifecycle_status") != "superseded"
+                or supersedes_id in superseded_targets
+            ):
+                raise BackupValidationError(
+                    "Backup Generated Page QA supersession lineage is invalid or branched."
+                )
+            superseded_targets.add(supersedes_id)
+
+        if lifecycle == "historical_unbound":
+            historical_payload = record.get("historical_payload")
+            if not isinstance(historical_payload, dict):
+                raise BackupValidationError(
+                    "Backup historical QA evidence payload must be an object."
+                )
+            if supersedes_id is not None or record["result_hash"] != historical_qa_payload_hash(
+                historical_payload
+            ):
+                raise BackupValidationError(
+                    "Backup historical QA evidence payload or hash was altered."
+                )
+            continue
+
+        website = websites.get(record.get("website_id"))
+        plan = site_plans.get(record.get("site_plan_id"))
+        planned_page = planned_pages.get(record.get("planned_page_id"))
+        if (
+            website is None
+            or plan is None
+            or planned_page is None
+            or generated_page.get("website_id") != record.get("website_id")
+            or plan.get("website_id") != record.get("website_id")
+            or planned_page.get("website_id") != record.get("website_id")
+            or planned_page.get("site_plan_id") != record.get("site_plan_id")
+            or planned_page.get("generated_page_id")
+            != record.get("generated_page_id")
+        ):
+            raise BackupValidationError(
+                "Backup Generated Page QA result crosses a Website, Site Plan, Planned Page, or draft boundary."
+            )
+
+        revision_id = record.get("latest_generated_page_revision_id")
+        if revision_id is not None:
+            revision = revisions.get(revision_id)
+            if (
+                revision is None
+                or revision.get("generated_page_id")
+                != record.get("generated_page_id")
+                or revision.get("draft_hash_after") != record.get("content_hash")
+            ):
+                raise BackupValidationError(
+                    "Backup Generated Page QA result loses its exact revision identity."
+                )
+
+        composition_id = record.get("page_composition_id")
+        composition_binding = (
+            composition_id,
+            record.get("composition_version"),
+            record.get("composition_source_hash"),
+        )
+        if composition_id is None:
+            if composition_binding != (None, None, None):
+                raise BackupValidationError(
+                    "Backup Generated Page QA result has a partial composition identity."
+                )
+        else:
+            composition = compositions.get(composition_id)
+            if (
+                composition is None
+                or composition.get("website_id") != record.get("website_id")
+                or composition.get("site_plan_id") != record.get("site_plan_id")
+                or composition.get("planned_page_id")
+                != record.get("planned_page_id")
+                or composition.get("generated_page_id")
+                != record.get("generated_page_id")
+                or not _is_positive_int(record.get("composition_version"))
+                or not _is_lower_sha256(record.get("composition_source_hash"))
+            ):
+                raise BackupValidationError(
+                    "Backup Generated Page QA composition binding crosses scope or is malformed."
+                )
+
+        checks = record.get("check_payload")
+        if (
+            not _is_lower_sha256(record.get("content_hash"))
+            or not _is_lower_sha256(record.get("source_hash"))
+            or not _is_lower_sha256(record.get("qa_ruleset_hash"))
+            or record.get("readiness_status") not in valid_readiness
+            or not isinstance(checks, list)
+            or not all(isinstance(check, dict) for check in checks)
+            or any(
+                not isinstance(record.get(field), int) or record[field] < 0
+                for field in ("passed_count", "warning_count", "failed_count")
+            )
+            or any(
+                not isinstance(record.get(field), str) or not record[field].strip()
+                for field in (
+                    "qa_algorithm_key",
+                    "qa_algorithm_version",
+                    "qa_ruleset_key",
+                    "qa_ruleset_version",
+                )
+            )
+            or record.get("historical_payload") is not None
+        ):
+            raise BackupValidationError(
+                "Backup Generated Page QA result has malformed bound evidence."
+            )
+        evaluated_at = _datetime_value(
+            record.get("evaluated_at"),
+            "generated_page_qa_results.evaluated_at",
+        )
+        observed_counts = {
+            status: sum(check.get("status") == status for check in checks)
+            for status in ("pass", "warning", "fail")
+        }
+        if (
+            record["passed_count"] != observed_counts["pass"]
+            or record["warning_count"] != observed_counts["warning"]
+            or record["failed_count"] != observed_counts["fail"]
+        ):
+            raise BackupValidationError(
+                "Backup Generated Page QA counts do not match the exact check payload."
+            )
+        hash_values = {**record, "evaluated_at": evaluated_at}
+        if record["result_hash"] != qa_result_record_hash(hash_values):
+            raise BackupValidationError(
+                "Backup Generated Page QA identity or outcome hash does not match."
+            )
+        if lifecycle == "current":
+            if record["generated_page_id"] in current_pages:
+                raise BackupValidationError(
+                    "Backup contains multiple current QA results for one Generated Page."
+                )
+            current_pages.add(record["generated_page_id"])
+
+    for record in records:
+        visited: set[int] = set()
+        cursor = record
+        while cursor.get("supersedes_qa_result_id") is not None:
+            cursor_id = cursor["supersedes_qa_result_id"]
+            if cursor_id in visited:
+                raise BackupValidationError(
+                    "Backup Generated Page QA supersession lineage contains a cycle."
+                )
+            visited.add(cursor_id)
+            cursor = records_by_id[cursor_id]
+
+    bound_by_page: dict[int, list[dict[str, Any]]] = {}
+    for record in records:
+        if record.get("lifecycle_status") in {"current", "superseded"}:
+            bound_by_page.setdefault(record["generated_page_id"], []).append(record)
+    for page_id, bound_records in bound_by_page.items():
+        currents = [
+            record
+            for record in bound_records
+            if record.get("lifecycle_status") == "current"
+        ]
+        if len(currents) != 1:
+            raise BackupValidationError(
+                "Backup bound QA lineage must have exactly one current result per Generated Page."
+            )
+        bound_ids = {record["id"] for record in bound_records}
+        visited: set[int] = set()
+        cursor = currents[0]
+        while True:
+            cursor_id = cursor["id"]
+            if cursor_id in visited:
+                raise BackupValidationError(
+                    "Backup Generated Page QA supersession lineage contains a cycle."
+                )
+            visited.add(cursor_id)
+            parent_id = cursor.get("supersedes_qa_result_id")
+            if parent_id is None:
+                break
+            cursor = records_by_id[parent_id]
+        if visited != bound_ids:
+            raise BackupValidationError(
+                "Backup bound QA lineage is disconnected or has a reversed lifecycle order."
+            )
+
+    for page_id in current_pages:
+        generated_page = generated_pages[page_id]
+        projection = generated_page.get("qa_result")
+        current = next(
+            record
+            for record in records
+            if record.get("generated_page_id") == page_id
+            and record.get("lifecycle_status") == "current"
+        )
+        if projection is None:
+            if (
+                generated_page.get("qa_status") != "not_run"
+                or generated_page.get("qa_checked_at") is not None
+            ):
+                raise BackupValidationError(
+                    "Backup invalidated QA projection retains a status or timestamp."
+                )
+            continue
+        if (
+            not isinstance(projection, dict)
+            or projection.get("qa_result_id") != current.get("id")
+            or projection.get("page_id") != page_id
+            or projection.get("result_hash") != current.get("result_hash")
+        ):
+            raise BackupValidationError(
+                "Backup current QA result lacks its exact Generated Page projection."
+            )
 
 
 def _is_lower_sha256(value: object) -> bool:

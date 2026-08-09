@@ -21,6 +21,7 @@ from app.schemas.wordpress import (
 )
 from app.services.approval_audit import draft_content_hash
 from app.services.page_export import build_page_export_package
+from app.services.page_qa import effective_page_qa_state
 from app.services.wordpress_http import wordpress_basic_auth, wordpress_http_client
 from app.services.wordpress_sandbox import (
     build_wordpress_payload_preview,
@@ -196,18 +197,8 @@ def _build_context(session: Session, page_id: int) -> dict[str, Any]:
         excerpt=preview.payload.excerpt,
     )
     payload_hash = _payload_hash(payload)
-    latest_revision_at = session.exec(
-        select(func.max(GeneratedPageRevision.created_at)).where(
-            GeneratedPageRevision.generated_page_id == page_id
-        )
-    ).one()
-    qa_current = bool(
-        page.qa_checked_at
-        and (
-            latest_revision_at is None
-            or _timestamp(page.qa_checked_at) >= _timestamp(latest_revision_at)
-        )
-    )
+    qa_state = effective_page_qa_state(session, page)
+    qa_reason = qa_state.reasons[0] if qa_state.reasons else "Run current page QA."
     blocker_count = sum(warning.severity == "blocker" for warning in export_package.warnings)
     password = get_wordpress_application_password()
     gates = [
@@ -226,14 +217,14 @@ def _build_context(session: Session, page_id: int) -> dict[str, Any]:
         _gate(
             "qa_ready",
             "QA status is ready",
-            page.qa_status == "ready" and page.qa_checked_at is not None,
-            f"QA status is {page.qa_status}; run QA and resolve all issues.",
+            qa_state.ready,
+            f"Effective QA is {qa_state.classification}: {qa_reason}",
         ),
         _gate(
             "qa_current",
             "QA is current after edits",
-            qa_current,
-            "QA is missing or older than the latest manual revision.",
+            qa_state.current,
+            f"Effective QA is not current: {qa_state.classification}. {qa_reason}",
         ),
         _gate(
             "export_clear",
@@ -286,6 +277,8 @@ def _record_audit(
     error_message: str | None = None,
 ) -> WordPressDraftAudit:
     page = context["page"]
+    qa_state = effective_page_qa_state(session, page)
+    qa_result = qa_state.result if qa_state.current else None
     audit = WordPressDraftAudit(
         generated_page_id=page.id,
         action_type="create_draft",
@@ -295,8 +288,10 @@ def _record_audit(
         wordpress_status=wordpress_status,
         slug=context["payload"].slug,
         payload_hash=context["payload_hash"],
-        qa_status_at_attempt=page.qa_status,
-        qa_checked_at=page.qa_checked_at,
+        qa_status_at_attempt=(
+            qa_result.readiness_status if qa_result is not None else "not_run"
+        ),
+        qa_checked_at=qa_result.checked_at if qa_result is not None else None,
         draft_hash_at_attempt=context["draft_hash"],
         gate_results=[gate.model_dump(mode="json") for gate in context["gates"]],
         error_message=error_message,

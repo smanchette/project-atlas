@@ -11,6 +11,7 @@ from app.schemas.wordpress import (
     WordPressDraftQueueResponse,
 )
 from app.services.page_export import build_page_export_package
+from app.services.page_qa import effective_page_qa_state
 from app.services.wordpress_sandbox import get_wordpress_application_password, read_wordpress_settings
 from app.services.website_scope import require_single_website_selection
 
@@ -82,20 +83,25 @@ def _queue_item(
     package = build_page_export_package(session, page.id or 0)
     blockers = [warning for warning in package.warnings if warning.severity == "blocker"]
     warnings = [warning for warning in package.warnings if warning.severity == "warning"]
-    qa_current = bool(
-        page.qa_checked_at
-        and (
-            latest_revision_at is None
-            or _timestamp(page.qa_checked_at) >= _timestamp(latest_revision_at)
-        )
+    qa_state = effective_page_qa_state(session, page)
+    effective_qa_status = (
+        qa_state.result.readiness_status
+        if qa_state.current and qa_state.result is not None
+        else "not_run"
     )
+    effective_qa_checked_at = (
+        qa_state.result.checked_at
+        if qa_state.current and qa_state.result is not None
+        else None
+    )
+    qa_reason = qa_state.reasons[0] if qa_state.reasons else "Run current page QA."
     has_missing_media = any(warning.code in {"hero_missing", "alt_text_missing"} for warning in blockers)
     gates = [
         _gate("sandbox_mode", "WordPress mode is sandbox", mode_is_sandbox, "Set WordPress mode to Sandbox."),
         _gate("credentials_ready", "Connection credentials are available", credentials_ready, "Re-enter the WordPress application password after backend restart."),
         _gate("page_approved", "Atlas page is approved", page.status == "approved", "Approve the page in Atlas first."),
-        _gate("qa_ready", "QA status is ready", page.qa_status == "ready" and page.qa_checked_at is not None, "Run QA and resolve all blockers."),
-        _gate("qa_current", "QA is current after edits", qa_current, "Run QA again after the latest manual edit."),
+        _gate("qa_ready", "QA status is ready", qa_state.ready, f"Effective QA is {qa_state.classification}: {qa_reason}"),
+        _gate("qa_current", "QA is current after edits", qa_state.current, f"Effective QA is not current: {qa_state.classification}. {qa_reason}"),
         _gate("export_clear", "Export package has no blockers", not blockers, "Resolve export blockers before creating a draft."),
         _gate("slug_unique", "Slug has no conflicts", not package.slug_conflicts, "Resolve the slug conflict before creating a draft."),
         _gate("not_already_created", "No existing WordPress draft reference", page.wordpress_post_id is None, "This page already has a WordPress draft reference."),
@@ -106,7 +112,9 @@ def _queue_item(
         page,
         mode_is_sandbox=mode_is_sandbox,
         credentials_ready=credentials_ready,
-        qa_current=qa_current,
+        qa_current=qa_state.current,
+        qa_ready=qa_state.ready,
+        qa_classification=qa_state.classification,
         has_missing_media=has_missing_media,
         blockers=blockers,
     )
@@ -118,8 +126,12 @@ def _queue_item(
         county=county.county_name if county else None,
         service=service.service_name if service else None,
         atlas_status=page.status,
-        qa_status=page.qa_status,
-        qa_checked_at=page.qa_checked_at.isoformat() if page.qa_checked_at else None,
+        qa_status=effective_qa_status,
+        qa_checked_at=(
+            effective_qa_checked_at.isoformat()
+            if effective_qa_checked_at
+            else None
+        ),
         revision_count=revision_count,
         latest_revision_at=latest_revision_at.isoformat() if latest_revision_at else None,
         approval_audit_count=approval_count,
@@ -144,6 +156,8 @@ def _group(
     mode_is_sandbox: bool,
     credentials_ready: bool,
     qa_current: bool,
+    qa_ready: bool,
+    qa_classification: str,
     has_missing_media: bool,
     blockers: list[Any],
 ) -> str:
@@ -153,10 +167,12 @@ def _group(
         return "blocked_credentials"
     if page.status != "approved":
         return "blocked_approval"
-    if page.qa_status != "ready" or page.qa_checked_at is None:
+    if qa_classification == "missing_qa":
         return "blocked_qa"
     if not qa_current:
         return "blocked_stale_qa"
+    if not qa_ready:
+        return "blocked_qa"
     if has_missing_media:
         return "blocked_missing_media"
     if blockers:

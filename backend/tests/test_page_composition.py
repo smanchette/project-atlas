@@ -6,6 +6,7 @@ import json
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -43,6 +44,7 @@ from app.services.page_composition import (
     refresh_site_plan_compositions,
     update_operator_composition_decisions,
 )
+from app.services.page_qa import effective_page_qa_state, get_page_qa, save_page_qa
 from app.services import page_composition as composition_service
 from app.services.page_media_planning import (
     decide_media_placement,
@@ -235,6 +237,46 @@ def test_registry_contracts_define_purpose_inputs_outcome_and_accessibility():
             and any("mobile" in requirement.lower() for requirement in item.accessibility_requirements)
             for item in registry
         )
+
+
+def test_live_composition_source_drift_invalidates_bound_qa_without_stale_marker():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session)
+        _, plan, pages = _scope(session)
+        refresh = refresh_site_plan_compositions(session, plan.id)
+        assert refresh.blocked == []
+        page = pages[0][1]
+        saved = save_page_qa(session, page.id)
+        assert saved.page_composition_id is not None
+        composition = session.get(PageComposition, saved.page_composition_id)
+        assert composition is not None and composition.status == "current"
+        stored_source_hash = composition.source_hash
+        navigation_item = session.exec(
+            select(NavigationItem)
+            .where(NavigationItem.site_plan_id == plan.id)
+            .order_by(NavigationItem.id)
+        ).first()
+        assert navigation_item is not None
+        navigation_item.label = f"{navigation_item.label} changed"
+        navigation_item.updated_at = datetime.now(UTC)
+        session.add(navigation_item)
+        session.flush()
+
+        state = effective_page_qa_state(session, page.id)
+
+        assert composition.status == "current"
+        assert composition.source_hash == stored_source_hash
+        assert state.classification == "otherwise_invalid"
+        assert "Composition is not authoritative" in state.reasons[0]
+        with pytest.raises(HTTPException) as read_error:
+            get_page_qa(session, page.id)
+        assert read_error.value.status_code == 409
+        assert "non-authoritative page identity" in str(read_error.value.detail)
+        with pytest.raises(HTTPException) as save_error:
+            save_page_qa(session, page.id)
+        assert save_error.value.status_code == 409
 
 
 def test_refresh_builds_fact_free_suggestions_and_resolves_approved_inputs():

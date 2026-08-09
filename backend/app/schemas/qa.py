@@ -22,13 +22,34 @@ class QACheckItem(SQLModel):
 
 
 class PageQAResult(SQLModel):
+    qa_result_id: int | None = None
     page_id: int
+    website_id: int | None = None
+    site_plan_id: int | None = None
+    planned_page_id: int | None = None
+    latest_generated_page_revision_id: int | None = None
+    content_hash: str
+    source_hash: str
+    page_composition_id: int | None = None
+    composition_version: int | None = None
+    composition_source_hash: str | None = None
+    qa_algorithm_key: str
+    qa_algorithm_version: str
+    qa_ruleset_key: str
+    qa_ruleset_version: str
+    qa_ruleset_hash: str
     readiness_status: Literal["ready", "needs_review", "blocked"]
     checked_at: datetime
     passed_count: int
     warning_count: int
     failed_count: int
     checks: list[QACheckItem]
+    result_hash: str
+    lifecycle_status: Literal[
+        "candidate", "current", "superseded", "historical_unbound"
+    ] = "candidate"
+    currentness_status: str = "candidate_not_persisted"
+    currentness_reasons: list[str] = Field(default_factory=list)
     persisted: bool = False
 
 

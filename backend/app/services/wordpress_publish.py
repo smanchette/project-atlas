@@ -22,6 +22,7 @@ from app.schemas.wordpress import (
     WordPressPublishRequestPayload,
 )
 from app.services.page_export import build_page_export_package
+from app.services.page_qa import effective_page_qa_state
 from app.services.wordpress_draft_review import check_live_wordpress_draft_status
 from app.services.wordpress_drafts import _payload_hash
 from app.services.wordpress_quality_review import build_wordpress_draft_quality_review
@@ -67,18 +68,8 @@ def dry_run_wordpress_publish(session: Session, page_id: int) -> WordPressPublis
     current_payload_hash = _payload_hash(draft_payload)
     publish_payload_hash = _model_hash(publish_payload)
     latest_update = _latest_successful_update_audit(session, page_id)
-    latest_revision_at = session.exec(
-        select(func.max(GeneratedPageRevision.created_at)).where(
-            GeneratedPageRevision.generated_page_id == page_id
-        )
-    ).one()
-    qa_current = bool(
-        page.qa_checked_at
-        and (
-            latest_revision_at is None
-            or _timestamp(page.qa_checked_at) >= _timestamp(latest_revision_at)
-        )
-    )
+    qa_state = effective_page_qa_state(session, page)
+    qa_reason = qa_state.reasons[0] if qa_state.reasons else "Run current page QA."
     blocker_count = sum(warning.severity == "blocker" for warning in export_package.warnings)
     live_status = check_live_wordpress_draft_status(session, page_id) if page.wordpress_post_id else None
 
@@ -113,14 +104,14 @@ def dry_run_wordpress_publish(session: Session, page_id: int) -> WordPressPublis
         _gate(
             "qa_ready",
             "QA status is ready",
-            page.qa_status == "ready" and page.qa_checked_at is not None,
-            f"QA status is {page.qa_status}; run QA and resolve all issues.",
+            qa_state.ready,
+            f"Effective QA is {qa_state.classification}: {qa_reason}",
         ),
         _gate(
             "qa_current",
             "QA is current after edits",
-            qa_current,
-            "QA is missing or older than the latest manual revision.",
+            qa_state.current,
+            f"Effective QA is not current: {qa_state.classification}. {qa_reason}",
         ),
         _gate(
             "export_clear",

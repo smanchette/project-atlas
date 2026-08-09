@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func
@@ -17,6 +17,7 @@ from app.models import (
     Website,
 )
 from app.schemas.approval_queue import ApprovalQueueItem, ApprovalQueueResponse
+from app.services.page_qa import EffectivePageQAState, effective_page_qa_state
 from app.services.page_type_review import review_contract_for
 from app.services.website_scope import require_single_website_selection
 from app.services.website_media_safety import is_image_metadata_excluded
@@ -54,6 +55,7 @@ def build_approval_queue(
             latest_revision_at=latest_revisions.get(page.id or 0),
             approval_count=approval_counts.get(page.id or 0, 0),
             hero_image_status=hero_statuses.get(page.id or 0, "missing"),
+            qa_state=effective_page_qa_state(session, page),
         )
         for page in pages
     ]
@@ -70,19 +72,44 @@ def _queue_item(
     latest_revision_at: datetime | None,
     approval_count: int,
     hero_image_status: str,
+    qa_state: EffectivePageQAState,
 ) -> ApprovalQueueItem:
-    has_blockers = page.qa_status == "blocked" or _qa_count(page.qa_result, "failed_count", "fail") > 0
-    has_warnings = (
-        page.qa_status == "needs_review"
-        or _qa_count(page.qa_result, "warning_count", "warning") > 0
+    qa_status = (
+        qa_state.result.readiness_status
+        if qa_state.current and qa_state.result is not None
+        else "not_run"
     )
-    edited_since_last_qa = bool(
-        latest_revision_at
+    qa_checked_at = (
+        qa_state.result.checked_at
+        if qa_state.current and qa_state.result is not None
+        else None
+    )
+    qa_is_not_current = qa_state.classification not in {
+        "current_exact_identity_match",
+        "missing_qa",
+    }
+    has_blockers = bool(
+        qa_state.current
+        and qa_state.result is not None
         and (
-            page.qa_checked_at is None
-            or _utc_timestamp(latest_revision_at) > _utc_timestamp(page.qa_checked_at)
+            qa_state.result.readiness_status == "blocked"
+            or qa_state.result.failed_count > 0
         )
     )
+    has_warnings = (
+        qa_state.current
+        and qa_state.result is not None
+        and (
+            qa_state.result.readiness_status == "needs_review"
+            or qa_state.result.warning_count > 0
+        )
+    )
+    # Preserve the established queue field's edit-specific meaning while
+    # deriving it from durable QA identity rather than timestamps.
+    edited_since_last_qa = qa_state.classification in {
+        "stale_generated_revision",
+        "stale_content_hash",
+    }
     try:
         media_required = review_contract_for(page).media_policy == "required"
     except ValueError:
@@ -96,8 +123,7 @@ def _queue_item(
     approved_but_unpublished = page.status == "approved" and not page.wordpress_url
     is_ready_for_approval = bool(
         page.status == "draft"
-        and page.qa_status == "ready"
-        and page.qa_checked_at
+        and qa_state.ready
         and not has_blockers
         and not has_warnings
         and not edited_since_last_qa
@@ -106,7 +132,9 @@ def _queue_item(
     needs_manual_review = bool(
         page.status == "draft"
         and (
-            page.qa_status == "not_run"
+            qa_state.classification == "missing_qa"
+            or qa_is_not_current
+            or not qa_state.ready
             or has_blockers
             or has_warnings
             or edited_since_last_qa
@@ -125,8 +153,8 @@ def _queue_item(
         service_id=page.service_id,
         service_name=service.service_name if service else "",
         page_status=page.status,
-        qa_status=page.qa_status,
-        qa_checked_at=page.qa_checked_at,
+        qa_status=qa_status,
+        qa_checked_at=qa_checked_at,
         latest_revision_at=latest_revision_at,
         revision_count=revision_count,
         approval_history_count=approval_count,
@@ -142,6 +170,8 @@ def _queue_item(
         needs_manual_review=needs_manual_review,
         next_recommended_action=_next_action(
             page,
+            qa_classification=qa_state.classification,
+            qa_status=qa_status,
             is_ready_for_approval=is_ready_for_approval,
             has_blockers=has_blockers,
             has_warnings=has_warnings,
@@ -212,21 +242,6 @@ def _hero_statuses(session: Session) -> dict[int, str]:
     }
 
 
-def _qa_count(result: dict[str, Any] | None, count_key: str, item_status: str) -> int:
-    if not result:
-        return 0
-    value = result.get(count_key)
-    if isinstance(value, int):
-        return value
-    checks = result.get("checks")
-    if not isinstance(checks, list):
-        return 0
-    return sum(
-        isinstance(item, dict) and item.get("status") == item_status
-        for item in checks
-    )
-
-
 def _notes_snippet(notes: str | None) -> str | None:
     normalized = " ".join((notes or "").split())
     if not normalized:
@@ -234,15 +249,11 @@ def _notes_snippet(notes: str | None) -> str | None:
     return normalized if len(normalized) <= 120 else f"{normalized[:117]}..."
 
 
-def _utc_timestamp(value: datetime) -> float:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=UTC)
-    return value.timestamp()
-
-
 def _next_action(
     page: GeneratedPage,
     *,
+    qa_classification: str,
+    qa_status: str,
     is_ready_for_approval: bool,
     has_blockers: bool,
     has_warnings: bool,
@@ -254,15 +265,19 @@ def _next_action(
         return "Hold for a future explicit publishing workflow."
     if page.status == "published":
         return "No approval queue action is required."
-    if page.qa_status == "not_run":
+    if qa_classification == "missing_qa":
         return "Run QA."
-    if edited_since_last_qa:
+    if qa_classification in {"stale_generated_revision", "stale_content_hash"}:
         return "Run QA again after the latest manual edit."
+    if qa_classification.startswith("wrong_"):
+        return "Run QA again because the saved QA result is identity-mismatched."
+    if qa_classification != "current_exact_identity_match":
+        return "Run QA again because the saved QA result is stale or invalid."
     if missing_media:
         return "Assign and review a complete hero image."
-    if has_blockers:
+    if qa_status == "blocked" or has_blockers:
         return "Open issues and resolve QA blockers."
-    if has_warnings:
+    if qa_status == "needs_review" or has_warnings:
         return "Review QA warnings and confirm the page manually."
     if is_ready_for_approval:
         return "Review the preview, then approve explicitly when satisfied."

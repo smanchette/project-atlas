@@ -83,6 +83,18 @@ COMPOSITION_COMPONENT_KEYS_BY_CONTRACT: dict[str, tuple[str, ...]] = {
     "informational": ("hero", "trust_license", "content_section"),
 }
 
+COMPOSITION_REQUIRED_INPUTS: dict[str, list[str]] = {
+    "hero": ["draft:h1", "draft:intro", "contact_information"],
+    "trust_license": ["trust_information"],
+    "content_section": ["draft:section"],
+    "service_summary": ["service", "draft:section"],
+    "contact_pathways": ["website_identity", "contact_information"],
+    "faq": ["draft:faq_items"],
+    # The isolated Home fixture has no second Planned Page to authorize as a
+    # destination. Related-page behavior is covered by the composition suite.
+    "related_page_links": [],
+}
+
 COMPOSITION_INSTANCES_BY_CONTRACT: dict[str, tuple[tuple[str, str], ...]] = {
     "home": (
         ("hero", "hero"),
@@ -140,6 +152,32 @@ def _engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+
+
+def _composition_input_bindings(
+    component_key: str,
+    instance_key: str,
+    *,
+    generated_page_id: int,
+    website_id: int,
+) -> dict[str, object]:
+    if component_key == "hero":
+        return {"generated_page_id": generated_page_id}
+    if component_key == "trust_license":
+        return {"website_id": website_id}
+    if component_key in {"content_section", "service_summary"}:
+        return {
+            "generated_page_id": generated_page_id,
+            "section_key": instance_key.split(":", 1)[-1],
+        }
+    if component_key in {"related_page_links", "destination_cards"}:
+        return {
+            "internal_link_intent_ids": [],
+            "draft_related_page_ids": [],
+        }
+    if component_key == "contact_pathways":
+        return {"website_id": website_id}
+    return {}
 
 
 def _scope(
@@ -201,12 +239,20 @@ def _scope(
     existing_component_keys = {
         row.component_key for row in session.exec(select(SemanticComponentDefinition)).all()
     }
+    composition_component_keys = {
+        component_key
+        for contract_keys in COMPOSITION_COMPONENT_KEYS_BY_CONTRACT.values()
+        for component_key in contract_keys
+    }
     for component_key in sorted(
-        {
-            contract["component_or_section"]
-            for contracts in PAGE_TYPE_MEDIA_CONTRACTS.values()
-            for contract in contracts
-        }
+        (
+            {
+                contract["component_or_section"]
+                for contracts in PAGE_TYPE_MEDIA_CONTRACTS.values()
+                for contract in contracts
+            }
+            | composition_component_keys
+        )
         - existing_component_keys
     ):
         session.add(
@@ -214,7 +260,7 @@ def _scope(
                 component_key=component_key,
                 contract_version=1,
                 purpose=f"Render the approved {component_key} contract.",
-                required_inputs=["media_placement"],
+                required_inputs=COMPOSITION_REQUIRED_INPUTS[component_key],
                 customer_outcome=f"Understand the approved {component_key} information.",
                 compatible_page_types=["all"],
                 supported_variants=["default", "placeholder", "approved_media"],
@@ -226,6 +272,7 @@ def _scope(
 
     pages: list[tuple[PlannedPage, GeneratedPage]] = []
     for index, requested_type in enumerate(page_types):
+        composition_instances = COMPOSITION_INSTANCES_BY_CONTRACT[requested_type]
         page_type = "county" if requested_type == "service_county" else requested_type
         service_id = (
             service.id
@@ -247,8 +294,21 @@ def _scope(
                 "title": f"{requested_type.title()} {index}",
                 "h1": f"{requested_type.title()} {index}",
                 "intro": "Approved information only.",
-                "sections": [],
-                "faq_items": [],
+                "sections": [
+                    {
+                        "key": instance_key.split(":", 1)[-1],
+                        "heading": f"Approved {instance_key.split(':', 1)[-1].replace('_', ' ')}",
+                        "body": "Approved information only.",
+                    }
+                    for component_key, instance_key in composition_instances
+                    if component_key in {"content_section", "service_summary"}
+                ],
+                "faq_items": [
+                    {
+                        "question": "What approved information is available?",
+                        "answer": "Approved information only.",
+                    }
+                ],
                 "image_placements": [],
                 "related_pages": [],
                 "call_to_action": "Contact the business.",
@@ -279,10 +339,20 @@ def _scope(
                     {
                         "instance_key": instance_key,
                         "component_key": component_key,
+                        "contract_version": 1,
+                        "region": "main",
+                        "variant": "default",
+                        "input_bindings": _composition_input_bindings(
+                            component_key,
+                            instance_key,
+                            generated_page_id=generated.id,
+                            website_id=website.id,
+                        ),
+                        "provenance": "atlas_generated",
                         "position": component_index,
                     }
                     for component_index, (component_key, instance_key) in enumerate(
-                        COMPOSITION_INSTANCES_BY_CONTRACT[requested_type]
+                        composition_instances
                     )
                 ],
                 source_snapshot={"baseline": True},
@@ -735,6 +805,7 @@ def test_existing_flo_zone_media_32_assignment_blocks_all_read_fallbacks() -> No
             )
         )
         session.commit()
+        _refresh_test_compositions(session, plan, pages)
 
         workspace = read_page_media_workspace(session, plan.id)
         assert any(
@@ -781,8 +852,9 @@ def test_persisted_page_qa_is_not_reused_when_excluded_media_is_active() -> None
     engine = _engine()
     SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
-        business, website, _, pages = _scope(session, "excluded-persisted-qa")
+        business, website, plan, pages = _scope(session, "excluded-persisted-qa")
         _bind_flo_zone_identity(session, website)
+        _refresh_test_compositions(session, plan, pages)
         page = pages[0][1]
         baseline = evaluate_page_qa(session, page.id)
         page.qa_result = baseline.model_dump(mode="json", exclude={"persisted"})
@@ -808,6 +880,7 @@ def test_persisted_page_qa_is_not_reused_when_excluded_media_is_active() -> None
             )
         )
         session.commit()
+        _refresh_test_compositions(session, plan, pages)
 
         observed = get_page_qa(session, page.id)
         assert observed.persisted is False
