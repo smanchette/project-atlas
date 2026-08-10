@@ -37,6 +37,14 @@ from app.services.page_composition import (
     PageCompositionError,
     read_composition_for_generated_page,
 )
+from app.services.page_media_roles import (
+    SemanticMediaRoleError,
+    resolve_semantic_media_role,
+)
+from app.services.scoped_media_authorizations import (
+    current_scoped_media_authorization,
+    governed_assignment_authorization_errors,
+)
 from app.services.page_qa import EffectivePageQAState, effective_page_qa_state
 from app.services.website_context import build_website_context
 from app.services.website_scope import require_page_website, require_single_website_selection
@@ -261,6 +269,13 @@ def _media_references(session: Session, page_id: int) -> list[ExportMediaReferen
             page,
             assignment,
         )
+        try:
+            semantic_role = resolve_semantic_media_role(
+                assignment,
+                session=session,
+            )
+        except SemanticMediaRoleError as exc:
+            _governed_export_conflict(str(exc))
         image = session.get(ImageMetadata, assignment.image_metadata_id)
         if not image:
             if assignment.media_requirement_id is not None:
@@ -274,7 +289,7 @@ def _media_references(session: Session, page_id: int) -> list[ExportMediaReferen
         references.append(
             ExportMediaReference(
                 image_id=image.id or 0,
-                image_role=assignment.image_role,
+                image_role=semantic_role,
                 sort_order=assignment.sort_order,
                 **governed_identity,
                 image_title=image.image_title,
@@ -312,7 +327,18 @@ def _governed_media_export_identity(
         "target_component_key": None,
         "target_component_instance_key": None,
         "placement_contract_version": None,
+        "scoped_authorization_id": None,
+        "scoped_authorization_version": None,
+        "scoped_authorization_fingerprint": None,
+        "scoped_authorization_terms": [],
+        "scoped_reuse_policy": None,
     }
+    authorization_errors = governed_assignment_authorization_errors(
+        session,
+        assignment,
+    )
+    if authorization_errors:
+        _governed_export_conflict(" ".join(authorization_errors))
     if assignment.media_requirement_id is None:
         return empty
     if page is None or page.id is None:
@@ -350,6 +376,16 @@ def _governed_media_export_identity(
         _governed_export_conflict("Media requirement is not an active exportable placement.")
     if assignment.placement_contract_version != requirement.contract_version:
         _governed_export_conflict("Placement contract version is stale or inconsistent.")
+    asset = session.get(ImageMetadata, assignment.image_metadata_id)
+    website = session.get(Website, page.website_id)
+    if asset is None or website is None:
+        _governed_export_conflict(
+            "Governed page-media export cannot resolve its asset or Website."
+        )
+    authorization = current_scoped_media_authorization(
+        session,
+        requirement.id or 0,
+    )
 
     target_instance_key = getattr(
         requirement,
@@ -379,6 +415,17 @@ def _governed_media_export_identity(
         "target_component_key": requirement.component_or_section,
         "target_component_instance_key": target_instance_key,
         "placement_contract_version": requirement.contract_version,
+        "scoped_authorization_id": authorization.id if authorization else None,
+        "scoped_authorization_version": (
+            authorization.authorization_version if authorization else None
+        ),
+        "scoped_authorization_fingerprint": (
+            authorization.authorization_fingerprint if authorization else None
+        ),
+        "scoped_authorization_terms": (
+            list(authorization.authorization_terms) if authorization else []
+        ),
+        "scoped_reuse_policy": authorization.reuse_policy if authorization else None,
     }
 
 

@@ -1,8 +1,9 @@
+import json
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlmodel import Session
 
 from app.db.session import get_session
-from app.models import ImageMetadata
 from app.schemas.page_media_planning import (
     PageMediaAssetApprovalRequest,
     PageMediaAssetRead,
@@ -11,6 +12,11 @@ from app.schemas.page_media_planning import (
     PageMediaPlacementDecisionRequest,
     PageMediaWorkspace,
 )
+from app.schemas.scoped_media_authorizations import (
+    ScopedMediaAuthorizationRead,
+    ScopedMediaAuthorizationRequest,
+    normalize_scoped_media_required_terms,
+)
 from app.services.brand_assets import parse_string_list
 from app.services.page_media_planning import (
     PageMediaPlanningError,
@@ -18,9 +24,15 @@ from app.services.page_media_planning import (
     assign_media_to_requirement,
     create_governed_page_media_asset,
     decide_media_placement,
+    page_media_asset_read,
     read_page_media_workspace,
     refresh_site_plan_media_suggestions,
     retire_page_media_asset,
+)
+from app.services.scoped_media_authorizations import (
+    ScopedMediaAuthorizationError,
+    create_scoped_media_authorization,
+    list_scoped_media_authorizations,
 )
 
 
@@ -80,6 +92,43 @@ def assign_page_media(
     )
 
 
+@router.get(
+    "/site-plans/{plan_id}/page-media/authorizations",
+    response_model=list[ScopedMediaAuthorizationRead],
+)
+def page_media_authorization_history(
+    plan_id: int,
+    media_requirement_id: int | None = None,
+    image_metadata_id: int | None = None,
+    session: Session = Depends(get_session),
+) -> list[ScopedMediaAuthorizationRead]:
+    return _authorization_call(
+        list_scoped_media_authorizations,
+        session,
+        plan_id,
+        media_requirement_id=media_requirement_id,
+        image_metadata_id=image_metadata_id,
+    )
+
+
+@router.post(
+    "/site-plans/{plan_id}/page-media/authorizations",
+    response_model=ScopedMediaAuthorizationRead,
+    status_code=201,
+)
+def authorize_scoped_page_media(
+    plan_id: int,
+    payload: ScopedMediaAuthorizationRequest,
+    session: Session = Depends(get_session),
+) -> ScopedMediaAuthorizationRead:
+    return _authorization_call(
+        create_scoped_media_authorization,
+        session,
+        plan_id,
+        payload,
+    )
+
+
 @router.post(
     "/page-media/assets/upload",
     response_model=PageMediaAssetRead,
@@ -104,11 +153,23 @@ async def upload_governed_page_media(
     permitted_placement_keys: str = Form(...),
     accessibility_intent: str = Form(...),
     created_by: str = Form(...),
+    usage_authorization_mode: str = Form(default="contract_default"),
+    required_authorization_terms: str = Form(default="[]"),
     replaces_image_metadata_id: int | None = Form(default=None),
     session: Session = Depends(get_session),
-) -> ImageMetadata:
+) -> PageMediaAssetRead:
     try:
-        return await create_governed_page_media_asset(
+        try:
+            required_terms_value = json.loads(required_authorization_terms)
+            required_terms = normalize_scoped_media_required_terms(
+                required_terms_value
+            )
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=str(exc),
+            ) from exc
+        asset = await create_governed_page_media_asset(
             session,
             file=file,
             website_id=website_id,
@@ -131,8 +192,11 @@ async def upload_governed_page_media(
             ),
             accessibility_intent=accessibility_intent,
             created_by=created_by,
+            usage_authorization_mode=usage_authorization_mode,
+            required_authorization_terms=required_terms,
             replaces_image_metadata_id=replaces_image_metadata_id,
         )
+        return page_media_asset_read(asset)
     except PageMediaPlanningError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -145,8 +209,8 @@ def approve_governed_page_media(
     image_id: int,
     payload: PageMediaAssetApprovalRequest,
     session: Session = Depends(get_session),
-) -> ImageMetadata:
-    return _planning_call(
+) -> PageMediaAssetRead:
+    asset = _planning_call(
         approve_page_media_asset,
         session,
         image_id,
@@ -155,6 +219,7 @@ def approve_governed_page_media(
         approved_by=payload.approved_by,
         expected_media_version=payload.expected_media_version,
     )
+    return page_media_asset_read(asset)
 
 
 @router.post(
@@ -165,8 +230,8 @@ def retire_governed_page_media(
     image_id: int,
     payload: PageMediaAssetRetirementRequest,
     session: Session = Depends(get_session),
-) -> ImageMetadata:
-    return _planning_call(
+) -> PageMediaAssetRead:
+    asset = _planning_call(
         retire_page_media_asset,
         session,
         image_id,
@@ -176,10 +241,18 @@ def retire_governed_page_media(
         rationale=payload.rationale,
         expected_media_version=payload.expected_media_version,
     )
+    return page_media_asset_read(asset)
 
 
 def _planning_call(function, session: Session, *args, **kwargs):
     try:
         return function(session, *args, **kwargs)
     except PageMediaPlanningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _authorization_call(function, session: Session, *args, **kwargs):
+    try:
+        return function(session, *args, **kwargs)
+    except ScopedMediaAuthorizationError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

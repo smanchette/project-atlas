@@ -3,21 +3,32 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from app.models import PlannedPage, PlannedPageMediaRequirement
+from app.models import (
+    ImageMetadata,
+    PlannedPage,
+    PlannedPageMediaRequirement,
+    Website,
+)
 from app.schemas.page_export import ExportMediaReference
 from app.services import page_export
 
 
 class _SessionStub:
-    def __init__(self, requirement, planned_page):
+    def __init__(self, requirement, planned_page, asset, website):
         self.requirement = requirement
         self.planned_page = planned_page
+        self.asset = asset
+        self.website = website
 
     def get(self, model, identity):
         if model is PlannedPageMediaRequirement and identity == self.requirement.id:
             return self.requirement
         if model is PlannedPage and identity == self.planned_page.id:
             return self.planned_page
+        if model is ImageMetadata and identity == self.asset.id:
+            return self.asset
+        if model is Website and identity == self.website.id:
+            return self.website
         return None
 
 
@@ -48,9 +59,26 @@ def _records(*, contract_version: int = 2, target: str | None = "content_section
         website_id=1,
         planned_page_id=79,
         media_requirement_id=201,
+        image_metadata_id=301,
         placement_contract_version=contract_version,
     )
-    return page, planned, requirement, assignment
+    asset = SimpleNamespace(id=301)
+    website = SimpleNamespace(id=1)
+    return page, planned, requirement, assignment, asset, website
+
+
+@pytest.fixture(autouse=True)
+def _contract_default_authorization(monkeypatch):
+    monkeypatch.setattr(
+        page_export,
+        "governed_assignment_authorization_errors",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        page_export,
+        "current_scoped_media_authorization",
+        lambda *_args: None,
+    )
 
 
 def _composition(*, target: str = "content_section:intro", binding_target: str | None = None):
@@ -77,7 +105,7 @@ def _composition(*, target: str = "content_section:intro", binding_target: str |
 
 
 def test_v2_export_projects_persisted_exact_media_target(monkeypatch):
-    page, planned, requirement, assignment = _records()
+    page, planned, requirement, assignment, asset, website = _records()
     monkeypatch.setattr(
         page_export,
         "read_composition_for_generated_page",
@@ -85,7 +113,7 @@ def test_v2_export_projects_persisted_exact_media_target(monkeypatch):
     )
 
     result = page_export._governed_media_export_identity(
-        _SessionStub(requirement, planned),
+        _SessionStub(requirement, planned, asset, website),
         page,
         assignment,
     )
@@ -97,6 +125,11 @@ def test_v2_export_projects_persisted_exact_media_target(monkeypatch):
         "target_component_key": "content_section",
         "target_component_instance_key": "content_section:intro",
         "placement_contract_version": 2,
+        "scoped_authorization_id": None,
+        "scoped_authorization_version": None,
+        "scoped_authorization_fingerprint": None,
+        "scoped_authorization_terms": [],
+        "scoped_reuse_policy": None,
     }
 
 
@@ -122,7 +155,7 @@ def test_v2_export_fails_closed_for_missing_or_invalid_exact_target(
     composition,
     message,
 ):
-    page, planned, requirement, assignment = _records(target=target)
+    page, planned, requirement, assignment, asset, website = _records(target=target)
     monkeypatch.setattr(
         page_export,
         "read_composition_for_generated_page",
@@ -131,7 +164,7 @@ def test_v2_export_fails_closed_for_missing_or_invalid_exact_target(
 
     with pytest.raises(HTTPException, match=message) as exc:
         page_export._governed_media_export_identity(
-            _SessionStub(requirement, planned),
+            _SessionStub(requirement, planned, asset, website),
             page,
             assignment,
         )
@@ -140,7 +173,7 @@ def test_v2_export_fails_closed_for_missing_or_invalid_exact_target(
 
 
 def test_governed_v1_export_preserves_legacy_target_semantics(monkeypatch):
-    page, planned, requirement, assignment = _records(
+    page, planned, requirement, assignment, asset, website = _records(
         contract_version=1,
         target=None,
     )
@@ -151,7 +184,7 @@ def test_governed_v1_export_preserves_legacy_target_semantics(monkeypatch):
     )
 
     result = page_export._governed_media_export_identity(
-        _SessionStub(requirement, planned),
+        _SessionStub(requirement, planned, asset, website),
         page,
         assignment,
     )
@@ -168,7 +201,7 @@ def test_v2_export_rejects_missing_or_mismatched_binding_contract_version(
     monkeypatch,
     binding_version,
 ):
-    page, planned, requirement, assignment = _records()
+    page, planned, requirement, assignment, asset, website = _records()
     composition = _composition()
     placement = composition.effective_components[1]
     if binding_version is None:
@@ -183,7 +216,7 @@ def test_v2_export_rejects_missing_or_mismatched_binding_contract_version(
 
     with pytest.raises(HTTPException, match="placement contract version") as exc:
         page_export._governed_media_export_identity(
-            _SessionStub(requirement, planned),
+            _SessionStub(requirement, planned, asset, website),
             page,
             assignment,
         )
@@ -209,3 +242,25 @@ def test_ungoverned_export_reference_retains_null_governed_identity():
     assert reference.target_component_key is None
     assert reference.target_component_instance_key is None
     assert reference.placement_contract_version is None
+
+
+def test_legacy_shaped_export_still_enforces_scoped_asset_authorization(
+    monkeypatch,
+):
+    assignment = SimpleNamespace(media_requirement_id=None)
+    monkeypatch.setattr(
+        page_export,
+        "governed_assignment_authorization_errors",
+        lambda *_args, **_kwargs: [
+            "Scoped governed media cannot use a legacy assignment path."
+        ],
+    )
+
+    with pytest.raises(HTTPException, match="legacy assignment path") as exc:
+        page_export._governed_media_export_identity(
+            SimpleNamespace(),
+            None,
+            assignment,
+        )
+
+    assert exc.value.status_code == 409

@@ -126,6 +126,9 @@ class PageMediaAssetRead(BaseModel):
     reviewed_alt_text: str | None
     governance_status: str
     approval_version: int | None
+    approval_fingerprint: str | None
+    usage_authorization_mode: Literal["contract_default", "scoped_required"]
+    required_authorization_terms: list[str]
     approved_by: str | None
     approved_at: datetime | None
     retired_by: str | None

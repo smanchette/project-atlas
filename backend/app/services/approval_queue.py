@@ -17,6 +17,13 @@ from app.models import (
     Website,
 )
 from app.schemas.approval_queue import ApprovalQueueItem, ApprovalQueueResponse
+from app.services.page_media_roles import (
+    SemanticMediaRoleError,
+    resolve_semantic_media_role,
+)
+from app.services.scoped_media_authorizations import (
+    governed_assignment_authorization_errors,
+)
 from app.services.page_qa import EffectivePageQAState, effective_page_qa_state
 from app.services.page_type_review import review_contract_for
 from app.services.website_scope import require_single_website_selection
@@ -215,10 +222,26 @@ def _hero_statuses(session: Session) -> dict[int, str]:
         page = session.get(GeneratedPage, assignment.generated_page_id)
         website = session.get(Website, page.website_id) if page else None
         image = session.get(ImageMetadata, assignment.image_metadata_id)
+        status: str | None = None
         if is_image_metadata_excluded(website, image):
             status = "excluded"
-        elif assignment.image_role != "hero":
+        elif governed_assignment_authorization_errors(session, assignment):
+            # Invalid scoped evidence never satisfies the approval hero gate.
             continue
+        else:
+            try:
+                semantic_role = resolve_semantic_media_role(
+                    assignment,
+                    session=session,
+                )
+            except SemanticMediaRoleError:
+                # Malformed governed bindings never acquire hero semantics. The page
+                # remains in the existing missing-hero state and cannot be approved.
+                continue
+            if semantic_role != "hero":
+                continue
+        if status == "excluded":
+            pass
         elif not image or image.review_status != "reviewed":
             status = "unreviewed"
         elif not (
@@ -229,6 +252,7 @@ def _hero_statuses(session: Session) -> dict[int, str]:
             status = "missing_alt_text"
         else:
             status = "reviewed"
+        assert status is not None
         statuses[assignment.generated_page_id].append(status)
 
     rank = {"excluded": -1, "unreviewed": 0, "missing_alt_text": 1, "reviewed": 2}

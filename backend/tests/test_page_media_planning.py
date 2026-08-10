@@ -18,12 +18,15 @@ from app.core.config import Settings
 from app.models import (
     Brand,
     Business,
+    City,
+    County,
     GeneratedPage,
     ImageMetadata,
     PageComposition,
     PageImageAssignment,
     PlannedPage,
     PlannedPageMediaRequirement,
+    ScopedMediaAuthorization,
     SemanticComponentDefinition,
     Service,
     SitePlan,
@@ -34,6 +37,9 @@ from app.models import (
 from app.schemas.page_media_planning import (
     PageMediaAssignmentRequest,
     PageMediaPlacementDecisionRequest,
+)
+from app.schemas.scoped_media_authorizations import (
+    ScopedMediaAuthorizationRequest,
 )
 from app.schemas.entities import ImageMetadataUpdate
 from app.schemas.media import (
@@ -62,14 +68,22 @@ from app.services.page_media_planning import (
     decide_media_placement,
     effective_media_requirements,
     media_source_snapshot,
+    page_media_asset_read,
     read_page_media_workspace,
     refresh_site_plan_media_suggestions,
+    retire_page_media_asset,
     validate_required_media_for_page,
+)
+from app.services.scoped_media_authorizations import (
+    ScopedMediaAuthorizationError,
+    create_scoped_media_authorization,
+    current_scoped_media_authorization,
 )
 from app.services.website_readiness import evaluate_website_readiness
 from app.services.approval_queue import build_approval_queue
 from app.services.page_export import build_page_export_package
 from app.services.page_qa import evaluate_page_qa, get_page_qa
+from app.services.wordpress_sandbox import build_wordpress_payload_preview
 
 
 COMPOSITION_COMPONENT_KEYS_BY_CONTRACT: dict[str, tuple[str, ...]] = {
@@ -90,6 +104,7 @@ COMPOSITION_REQUIRED_INPUTS: dict[str, list[str]] = {
     "service_summary": ["service", "draft:section"],
     "contact_pathways": ["website_identity", "contact_information"],
     "faq": ["draft:faq_items"],
+    "media_placement": [],
     # The isolated Home fixture has no second Planned Page to authorize as a
     # destination. Related-page behavior is covered by the composition suite.
     "related_page_links": [],
@@ -243,7 +258,7 @@ def _scope(
         component_key
         for contract_keys in COMPOSITION_COMPONENT_KEYS_BY_CONTRACT.values()
         for component_key in contract_keys
-    }
+    } | {"media_placement"}
     for component_key in sorted(
         (
             {
@@ -500,6 +515,9 @@ def _create_asset(
     placement_key: str,
     size: tuple[int, int] = (1200, 675),
     gps_present: bool = False,
+    usage_authorization_mode: str = "contract_default",
+    required_authorization_terms: list[str] | None = None,
+    replaces_image_metadata_id: int | None = None,
 ):
     settings = _settings(tmp_path)
     monkeypatch.setattr(media_planning, "get_settings", lambda: settings)
@@ -529,8 +547,43 @@ def _create_asset(
             permitted_placement_keys=[placement_key],
             accessibility_intent="informative",
             created_by="Page Media Operator",
+            usage_authorization_mode=usage_authorization_mode,
+            required_authorization_terms=required_authorization_terms,
+            replaces_image_metadata_id=replaces_image_metadata_id,
         )
     )
+
+
+def _authorize_asset_for_requirement(
+    session: Session,
+    *,
+    plan: SitePlan,
+    requirement: PlannedPageMediaRequirement,
+    asset: ImageMetadata,
+) -> ScopedMediaAuthorization:
+    approval_fingerprint = page_media_asset_read(asset).approval_fingerprint
+    assert approval_fingerprint is not None
+    created = create_scoped_media_authorization(
+        session,
+        plan.id,
+        ScopedMediaAuthorizationRequest(
+            media_requirement_id=requirement.id,
+            expected_requirement_version=requirement.version,
+            expected_placement_contract_version=requirement.contract_version,
+            image_metadata_id=asset.id,
+            expected_media_version=asset.media_version,
+            expected_asset_checksum_sha256=asset.checksum_sha256,
+            expected_approval_version=asset.approval_version,
+            expected_approval_fingerprint=approval_fingerprint,
+            reuse_policy="contract_default",
+            authorization_terms=list(asset.required_authorization_terms),
+            authorized_by="Authorization Operator",
+            authorization_rationale="Authorize one exact lifecycle test scope.",
+        ),
+    )
+    row = session.get(ScopedMediaAuthorization, created.id)
+    assert row is not None
+    return row
 
 
 def test_page_type_contracts_are_bounded_and_define_complete_customer_purpose():
@@ -1744,6 +1797,533 @@ def test_assignment_requires_exact_current_contract_and_preserves_composition_st
             replaced_assignment.replacement_rationale or ""
         )
         assert replaced_assignment.replaced_at is not None
+
+
+def test_asset_retirement_supersedes_unbound_current_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, plan, pages = _scope(session, "auth-retirement")
+        _refresh_test_compositions(session, plan, pages)
+        workspace = _decide_all(
+            session,
+            plan.id,
+            refresh_site_plan_media_suggestions(session, plan.id),
+        )
+        requirement = next(
+            item
+            for item in effective_media_requirements(session, pages[0][0].id)
+            if item.placement_key == "home-hero"
+        )
+        asset = _create_asset(
+            session,
+            monkeypatch,
+            tmp_path,
+            business_id=business.id,
+            website_id=website.id,
+            media_key="authorization-retirement",
+            placement_key="home-hero",
+            usage_authorization_mode="scoped_required",
+            required_authorization_terms=["representative_nonlocalized"],
+        )
+        asset = approve_page_media_asset(
+            session,
+            asset.id,
+            expected_website_id=website.id,
+            expected_business_id=business.id,
+            approved_by="Approval Operator",
+            expected_media_version=1,
+        )
+        authorization = _authorize_asset_for_requirement(
+            session,
+            plan=plan,
+            requirement=requirement,
+            asset=asset,
+        )
+        assert authorization.page_image_assignment_id is None
+
+        retire_page_media_asset(
+            session,
+            asset.id,
+            expected_website_id=website.id,
+            expected_business_id=business.id,
+            retired_by="Retirement Operator",
+            rationale="Retire the exact lifecycle test asset.",
+            expected_media_version=1,
+        )
+
+        session.refresh(authorization)
+        assert authorization.lifecycle_status == "superseded"
+        assert current_scoped_media_authorization(session, requirement.id) is None
+        assert workspace.website_id == website.id
+
+
+def test_replacement_approval_supersedes_predecessor_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, plan, pages = _scope(session, "auth-replacement")
+        _refresh_test_compositions(session, plan, pages)
+        _decide_all(
+            session,
+            plan.id,
+            refresh_site_plan_media_suggestions(session, plan.id),
+        )
+        requirement = next(
+            item
+            for item in effective_media_requirements(session, pages[0][0].id)
+            if item.placement_key == "home-hero"
+        )
+        predecessor = _create_asset(
+            session,
+            monkeypatch,
+            tmp_path,
+            business_id=business.id,
+            website_id=website.id,
+            media_key="authorization-replacement",
+            placement_key="home-hero",
+            usage_authorization_mode="scoped_required",
+            required_authorization_terms=["representative_nonlocalized"],
+        )
+        predecessor = approve_page_media_asset(
+            session,
+            predecessor.id,
+            expected_website_id=website.id,
+            expected_business_id=business.id,
+            approved_by="Approval Operator",
+            expected_media_version=1,
+        )
+        authorization = _authorize_asset_for_requirement(
+            session,
+            plan=plan,
+            requirement=requirement,
+            asset=predecessor,
+        )
+        successor = _create_asset(
+            session,
+            monkeypatch,
+            tmp_path,
+            business_id=business.id,
+            website_id=website.id,
+            media_key="authorization-replacement",
+            placement_key="home-hero",
+            usage_authorization_mode="scoped_required",
+            required_authorization_terms=["representative_nonlocalized"],
+            replaces_image_metadata_id=predecessor.id,
+        )
+
+        approve_page_media_asset(
+            session,
+            successor.id,
+            expected_website_id=website.id,
+            expected_business_id=business.id,
+            approved_by="Approval Operator",
+            expected_media_version=2,
+        )
+
+        session.refresh(authorization)
+        assert authorization.lifecycle_status == "superseded"
+        assert current_scoped_media_authorization(session, requirement.id) is None
+
+
+def test_same_asset_assignment_update_appends_exact_authorization_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, plan, pages = _scope(session, "auth-assignment-update")
+        _refresh_test_compositions(session, plan, pages)
+        _decide_all(
+            session,
+            plan.id,
+            refresh_site_plan_media_suggestions(session, plan.id),
+        )
+        requirement = next(
+            item
+            for item in effective_media_requirements(session, pages[0][0].id)
+            if item.placement_key == "home-hero"
+        )
+        asset = _create_asset(
+            session,
+            monkeypatch,
+            tmp_path,
+            business_id=business.id,
+            website_id=website.id,
+            media_key="authorization-assignment-update",
+            placement_key="home-hero",
+            usage_authorization_mode="scoped_required",
+            required_authorization_terms=["representative_nonlocalized"],
+        )
+        asset = approve_page_media_asset(
+            session,
+            asset.id,
+            expected_website_id=website.id,
+            expected_business_id=business.id,
+            approved_by="Approval Operator",
+            expected_media_version=1,
+        )
+        candidate = _authorize_asset_for_requirement(
+            session,
+            plan=plan,
+            requirement=requirement,
+            asset=asset,
+        )
+        assign_media_to_requirement(
+            session,
+            plan.id,
+            requirement.id,
+            PageMediaAssignmentRequest(
+                image_metadata_id=asset.id,
+                assigned_by="Assignment Operator",
+                rationale="Create the initial exact governed assignment.",
+                expected_requirement_version=requirement.version,
+            ),
+        )
+        first_assignment = session.exec(
+            select(PageImageAssignment).where(
+                PageImageAssignment.media_requirement_id == requirement.id,
+                PageImageAssignment.status == "active",
+            )
+        ).one()
+        first_bound = current_scoped_media_authorization(
+            session,
+            requirement.id,
+        )
+        assert first_bound is not None
+        assert first_bound.page_image_assignment_id == first_assignment.id
+        _refresh_test_compositions(session, plan, pages)
+
+        assign_media_to_requirement(
+            session,
+            plan.id,
+            requirement.id,
+            PageMediaAssignmentRequest(
+                image_metadata_id=asset.id,
+                assigned_by="Assignment Operator",
+                rationale="Update the same exact governed assignment settings.",
+                expected_requirement_version=requirement.version,
+                override_alt_text="Updated reviewed assignment alt text.",
+            ),
+        )
+
+        assignments = list(
+            session.exec(
+                select(PageImageAssignment)
+                .where(
+                    PageImageAssignment.media_requirement_id
+                    == requirement.id
+                )
+                .order_by(PageImageAssignment.assignment_version)
+            ).all()
+        )
+        authorizations = list(
+            session.exec(
+                select(ScopedMediaAuthorization)
+                .where(
+                    ScopedMediaAuthorization.media_requirement_id
+                    == requirement.id
+                )
+                .order_by(ScopedMediaAuthorization.authorization_version)
+            ).all()
+        )
+        assert [row.status for row in assignments] == ["replaced", "active"]
+        assert assignments[1].replaces_page_image_assignment_id == assignments[0].id
+        assert assignments[1].image_metadata_id == assignments[0].image_metadata_id
+        assert [row.lifecycle_status for row in authorizations] == [
+            "superseded",
+            "superseded",
+            "current",
+        ]
+        assert authorizations[0].id == candidate.id
+        assert authorizations[1].page_image_assignment_id == assignments[0].id
+        assert authorizations[2].page_image_assignment_id == assignments[1].id
+        assert authorizations[2].supersedes_authorization_id == authorizations[1].id
+        assert len({row.authorized_at for row in authorizations}) == 1
+
+
+def test_failed_assignment_authorization_handoff_rolls_back_predecessor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, plan, pages = _scope(session, "auth-handoff-rollback")
+        _refresh_test_compositions(session, plan, pages)
+        _decide_all(
+            session,
+            plan.id,
+            refresh_site_plan_media_suggestions(session, plan.id),
+        )
+        requirement = next(
+            item
+            for item in effective_media_requirements(session, pages[0][0].id)
+            if item.placement_key == "home-hero"
+        )
+        asset = _create_asset(
+            session,
+            monkeypatch,
+            tmp_path,
+            business_id=business.id,
+            website_id=website.id,
+            media_key="authorization-handoff-rollback",
+            placement_key="home-hero",
+            usage_authorization_mode="scoped_required",
+            required_authorization_terms=["representative_nonlocalized"],
+        )
+        asset = approve_page_media_asset(
+            session,
+            asset.id,
+            expected_website_id=website.id,
+            expected_business_id=business.id,
+            approved_by="Approval Operator",
+            expected_media_version=1,
+        )
+        _authorize_asset_for_requirement(
+            session,
+            plan=plan,
+            requirement=requirement,
+            asset=asset,
+        )
+        assign_media_to_requirement(
+            session,
+            plan.id,
+            requirement.id,
+            PageMediaAssignmentRequest(
+                image_metadata_id=asset.id,
+                assigned_by="Assignment Operator",
+                rationale="Create the preserved predecessor assignment.",
+                expected_requirement_version=requirement.version,
+            ),
+        )
+        predecessor = session.exec(
+            select(PageImageAssignment).where(
+                PageImageAssignment.media_requirement_id == requirement.id,
+                PageImageAssignment.status == "active",
+            )
+        ).one()
+        authorization = current_scoped_media_authorization(
+            session,
+            requirement.id,
+        )
+        assert authorization is not None
+        _refresh_test_compositions(session, plan, pages)
+
+        def reject_handoff(_session: Session, **_kwargs: object) -> None:
+            raise ScopedMediaAuthorizationError(
+                "Injected exact replacement mismatch."
+            )
+
+        monkeypatch.setattr(
+            media_planning,
+            "bind_scoped_media_authorization_to_assignment",
+            reject_handoff,
+        )
+        with pytest.raises(PageMediaPlanningError, match="replacement mismatch"):
+            assign_media_to_requirement(
+                session,
+                plan.id,
+                requirement.id,
+                PageMediaAssignmentRequest(
+                    image_metadata_id=asset.id,
+                    assigned_by="Assignment Operator",
+                    rationale="Attempt a mismatched successor handoff.",
+                    expected_requirement_version=requirement.version,
+                    override_alt_text="This successor must roll back.",
+                ),
+            )
+
+        assignments = list(
+            session.exec(
+                select(PageImageAssignment).where(
+                    PageImageAssignment.media_requirement_id
+                    == requirement.id
+                )
+            ).all()
+        )
+        preserved = current_scoped_media_authorization(
+            session,
+            requirement.id,
+        )
+        assert len(assignments) == 1
+        assert assignments[0].id == predecessor.id
+        assert assignments[0].status == "active"
+        assert preserved is not None
+        assert preserved.id == authorization.id
+        assert preserved.page_image_assignment_id == predecessor.id
+
+
+@pytest.mark.parametrize(
+    ("placement_key", "expected_role", "hero_status", "hero_check"),
+    (
+        ("city-service-hero", "hero", "reviewed", "pass"),
+        ("city-service-evidence", "support", "missing", "fail"),
+    ),
+)
+def test_governed_semantic_role_reaches_every_page_and_wordpress_consumer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    placement_key: str,
+    expected_role: str,
+    hero_status: str,
+    hero_check: str,
+) -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        business, website, plan, pages = _scope(
+            session,
+            f"semantic-role-{expected_role}",
+            page_types=("city_service",),
+        )
+        county = County(
+            state="FL",
+            county_name=f"Semantic {expected_role} County",
+        )
+        session.add(county)
+        session.flush()
+        city = City(
+            county_id=county.id,
+            city_name=f"Semantic {expected_role} City",
+            city_slug=f"semantic-{expected_role}-city",
+        )
+        session.add(city)
+        session.flush()
+        pages[0][0].city_id = city.id
+        pages[0][0].county_id = county.id
+        pages[0][1].city_id = city.id
+        pages[0][1].county_id = county.id
+        session.add(pages[0][0])
+        session.add(pages[0][1])
+        session.commit()
+        _refresh_test_compositions(session, plan, pages)
+        workspace = refresh_site_plan_media_suggestions(session, plan.id)
+        workspace = _decide_all(session, plan.id, workspace)
+        requirement = next(
+            item
+            for item in effective_media_requirements(session, pages[0][0].id)
+            if item.placement_key == placement_key
+        )
+        asset = _create_asset(
+            session,
+            monkeypatch,
+            tmp_path / expected_role,
+            business_id=business.id,
+            website_id=website.id,
+            media_key=f"semantic-{expected_role}",
+            placement_key=placement_key,
+        )
+        asset = approve_page_media_asset(
+            session,
+            asset.id,
+            expected_website_id=website.id,
+            expected_business_id=business.id,
+            approved_by="Approval Operator",
+            expected_media_version=1,
+        )
+        assign_media_to_requirement(
+            session,
+            plan.id,
+            requirement.id,
+            PageMediaAssignmentRequest(
+                image_metadata_id=asset.id,
+                assigned_by="Assignment Operator",
+                rationale=f"Exercise the exact {placement_key} contract.",
+                expected_requirement_version=requirement.version,
+            ),
+        )
+        stored = session.exec(
+            select(PageImageAssignment).where(
+                PageImageAssignment.media_requirement_id == requirement.id,
+                PageImageAssignment.status == "active",
+            )
+        ).one()
+        assert stored.image_role == f"{placement_key}:assignment-1"
+        assert stored.image_role != expected_role
+
+        composition_row = session.exec(
+            select(PageComposition).where(
+                PageComposition.planned_page_id == pages[0][0].id
+            )
+        ).one()
+        composition_row.generated_components = [
+            *composition_row.generated_components,
+            {
+                "instance_key": f"media_placement:requirement-{requirement.id}",
+                "component_key": "media_placement",
+                "contract_version": 1,
+                "region": "main",
+                "variant": "approved_media",
+                "input_bindings": {
+                    "media_requirement_id": requirement.id,
+                    "target_component_key": requirement.component_or_section,
+                    "target_component_instance_key": (
+                        requirement.target_component_instance_key
+                    ),
+                    "placement_contract_version": requirement.contract_version,
+                    "page_image_assignment_id": stored.id,
+                },
+                "provenance": "atlas_generated",
+                "position": len(composition_row.generated_components),
+            },
+        ]
+        session.add(composition_row)
+        session.commit()
+        _refresh_test_compositions(session, plan, pages)
+        workspace = read_page_media_workspace(session, plan.id)
+        placement = next(
+            item
+            for item in workspace.placements
+            if item.effective_requirement
+            and item.effective_requirement.id == requirement.id
+        )
+        assert placement.readiness == "ready"
+        assert placement.active_assignment is not None
+        assert placement.active_assignment.image_role == expected_role
+
+        direct_media = list_page_media(pages[0][1].id, session)
+        assert [item.image_role for item in direct_media] == [expected_role]
+
+        composition = composition_service.read_composition_for_generated_page(
+            session,
+            pages[0][1].id,
+        )
+        resolved = next(
+            item
+            for item in composition.effective_components
+            if item.component_key == "media_placement"
+            and item.input_bindings.get("media_requirement_id") == requirement.id
+        )
+        assert resolved.resolved_data["image_role"] == expected_role
+
+        qa = evaluate_page_qa(session, pages[0][1].id)
+        assert next(item for item in qa.checks if item.key == "hero_assigned").status == hero_check
+
+        queue = build_approval_queue(session, website_id=website.id)
+        queue_item = next(item for item in queue.items if item.page_id == pages[0][1].id)
+        assert queue_item.hero_image_status == hero_status
+
+        package = build_page_export_package(session, pages[0][1].id)
+        assert [item.image_role for item in package.assigned_media] == [expected_role]
+        assert any(item.code == "hero_missing" for item in package.warnings) is (
+            expected_role != "hero"
+        )
+
+        preview = build_wordpress_payload_preview(session, pages[0][1].id)
+        featured = preview.payload.featured_media_reference
+        if expected_role == "hero":
+            assert featured is not None
+            assert featured["image_role"] == "hero"
+        else:
+            assert featured is None
 
 
 def test_assignment_rejects_cross_website_media_and_excluded_placements(

@@ -43,6 +43,7 @@ from app.models import (
     SiteConnectionPlanningRecord,
     Service,
     SemanticComponentDefinition,
+    ScopedMediaAuthorization,
     Setting,
     SitePlan,
     SupportingPageAuthorization,
@@ -75,9 +76,17 @@ from app.models import (
     WordPressPublishAudit,
     WordPressQualityReview,
 )
+from app.schemas.scoped_media_authorizations import (
+    SCOPED_MEDIA_AUTHORIZATION_TERMS,
+    normalize_scoped_media_authorization_terms,
+    normalize_scoped_media_required_terms,
+    scoped_media_approval_fingerprint,
+    scoped_media_authorization_fingerprint,
+    validate_scoped_media_authorization_policy_terms,
+)
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.55"
+BACKUP_VERSION = "0.56"
 BRAND_ASSET_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
 BRAND_ASSET_MIME_EXTENSIONS = {
     "image/jpeg": {".jpg", ".jpeg"},
@@ -124,6 +133,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.53",
     "0.54",
     "0.55",
+    "0.56",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -193,6 +203,7 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "wordpress_quality_reviews": WordPressQualityReview,
     "image_metadata": ImageMetadata,
     "page_image_assignments": PageImageAssignment,
+    "scoped_media_authorizations": ScopedMediaAuthorization,
     "settings": Setting,
     "knowledge_blocks": KnowledgeBlock,
 }
@@ -1682,6 +1693,188 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             )
             page_image_assignment_ids[old_assignment_id] = _required_id(restored_assignment)
 
+        source_authorization_max_versions: dict[int, int] = {}
+        for record in data["scoped_media_authorizations"]:
+            mapped_requirement_id = _mapped_id(
+                planned_page_media_requirement_ids,
+                record["media_requirement_id"],
+                "scoped_media_authorizations.media_requirement_id",
+            )
+            source_authorization_max_versions[mapped_requirement_id] = max(
+                source_authorization_max_versions.get(mapped_requirement_id, 0),
+                record["authorization_version"],
+            )
+        represented_authorization_requirements = set(
+            source_authorization_max_versions
+        )
+        mapped_website_ids = set(website_ids.values())
+        mapped_site_plan_ids = set(site_plan_ids.values())
+        mapped_planned_page_ids = set(planned_page_ids.values())
+        mapped_generated_page_ids = set(generated_page_ids.values())
+        mapped_requirement_ids = set(
+            planned_page_media_requirement_ids.values()
+        )
+        mapped_media_ids = set(image_metadata_ids.values())
+        mapped_assignment_ids = set(page_image_assignment_ids.values())
+        for target_authorization in session.exec(
+            select(ScopedMediaAuthorization)
+        ).all():
+            touches_restored_scope = (
+                target_authorization.website_id in mapped_website_ids
+                or target_authorization.site_plan_id in mapped_site_plan_ids
+                or target_authorization.planned_page_id in mapped_planned_page_ids
+                or (
+                    target_authorization.generated_page_id is not None
+                    and target_authorization.generated_page_id
+                    in mapped_generated_page_ids
+                )
+                or target_authorization.media_requirement_id
+                in mapped_requirement_ids
+                or target_authorization.image_metadata_id in mapped_media_ids
+                or (
+                    target_authorization.page_image_assignment_id is not None
+                    and target_authorization.page_image_assignment_id
+                    in mapped_assignment_ids
+                )
+            )
+            if (
+                touches_restored_scope
+                and target_authorization.media_requirement_id
+                not in represented_authorization_requirements
+            ):
+                raise BackupValidationError(
+                    "Target scoped-media authorization touches restored scope identities absent from the backup authorization graph; restore was refused."
+                )
+        for mapped_requirement_id in set(
+            planned_page_media_requirement_ids.values()
+        ):
+            source_max_version = source_authorization_max_versions.get(
+                mapped_requirement_id,
+                0,
+            )
+            target_history = list(
+                session.exec(
+                    select(ScopedMediaAuthorization)
+                    .where(
+                        ScopedMediaAuthorization.media_requirement_id
+                        == mapped_requirement_id
+                    )
+                    .order_by(ScopedMediaAuthorization.authorization_version)
+                ).all()
+            )
+            _require_restore_compatible_scoped_authorization_prefix(
+                target_history,
+                source_max_version=source_max_version,
+            )
+
+        scoped_media_authorization_ids: dict[int, int] = {}
+        scoped_media_authorization_fingerprints: dict[int, str] = {}
+        for record in sorted(
+            data["scoped_media_authorizations"],
+            key=lambda value: (
+                value.get("media_requirement_id") or 0,
+                value.get("authorization_version") or 0,
+            ),
+        ):
+            old_authorization_id = _record_id(
+                record,
+                "scoped_media_authorizations",
+            )
+            requirement_id = _mapped_id(
+                planned_page_media_requirement_ids,
+                record["media_requirement_id"],
+                "scoped_media_authorizations.media_requirement_id",
+            )
+            restored_record = {
+                **record,
+                "website_id": _mapped_id(
+                    website_ids,
+                    record["website_id"],
+                    "scoped_media_authorizations.website_id",
+                ),
+                "site_plan_id": _mapped_id(
+                    site_plan_ids,
+                    record["site_plan_id"],
+                    "scoped_media_authorizations.site_plan_id",
+                ),
+                "planned_page_id": _mapped_id(
+                    planned_page_ids,
+                    record["planned_page_id"],
+                    "scoped_media_authorizations.planned_page_id",
+                ),
+                "generated_page_id": _mapped_optional_id(
+                    generated_page_ids,
+                    record.get("generated_page_id"),
+                    "scoped_media_authorizations.generated_page_id",
+                ),
+                "media_requirement_id": requirement_id,
+                "image_metadata_id": _mapped_id(
+                    image_metadata_ids,
+                    record["image_metadata_id"],
+                    "scoped_media_authorizations.image_metadata_id",
+                ),
+                "page_image_assignment_id": _mapped_optional_id(
+                    page_image_assignment_ids,
+                    record.get("page_image_assignment_id"),
+                    "scoped_media_authorizations.page_image_assignment_id",
+                ),
+                "supersedes_authorization_id": _mapped_optional_id(
+                    scoped_media_authorization_ids,
+                    record.get("supersedes_authorization_id"),
+                    "scoped_media_authorizations.supersedes_authorization_id",
+                ),
+                "asset_approved_at": _datetime_value(
+                    record["asset_approved_at"],
+                    "scoped_media_authorizations.asset_approved_at",
+                ),
+                "authorized_at": _datetime_value(
+                    record["authorized_at"],
+                    "scoped_media_authorizations.authorized_at",
+                ),
+                "authorization_terms": normalize_scoped_media_authorization_terms(
+                    record["authorization_terms"]
+                ),
+            }
+            restored_asset = session.get(
+                ImageMetadata,
+                restored_record["image_metadata_id"],
+            )
+            if restored_asset is None:
+                raise BackupValidationError(
+                    "Restored scoped-media authorization asset is missing."
+                )
+            restored_record["approval_fingerprint"] = (
+                scoped_media_approval_fingerprint(
+                    {
+                        **restored_record,
+                        "asset_website_id": restored_asset.website_id,
+                        "asset_business_id": restored_asset.business_id,
+                        "usage_authorization_mode": (
+                            restored_asset.usage_authorization_mode
+                        ),
+                        "required_authorization_terms": (
+                            restored_asset.required_authorization_terms
+                        ),
+                    }
+                )
+            )
+            restored_record["authorization_fingerprint"] = (
+                scoped_media_authorization_fingerprint(restored_record)
+            )
+            restored_authorization = _restore_scoped_media_authorization(
+                session,
+                restored_record,
+                source_max_version=(
+                    source_authorization_max_versions[requirement_id]
+                ),
+            )
+            scoped_media_authorization_ids[old_authorization_id] = _required_id(
+                restored_authorization
+            )
+            scoped_media_authorization_fingerprints[old_authorization_id] = (
+                restored_authorization.authorization_fingerprint
+            )
+
         # Page Compositions are created before media assignments so their primary
         # ownership graph can be restored in dependency order. Remap every durable
         # Page Media identity now that the complete governed media graph exists.
@@ -1712,6 +1905,10 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 requirement_ids=planned_page_media_requirement_ids,
                 assignment_ids=page_image_assignment_ids,
                 image_ids=image_metadata_ids,
+                authorization_ids=scoped_media_authorization_ids,
+                authorization_fingerprints=(
+                    scoped_media_authorization_fingerprints
+                ),
             )
             composition.source_hash = _canonical_json_hash(
                 composition.source_snapshot
@@ -2372,7 +2569,7 @@ def _refresh_restored_current_compositions(
         ]
         graph_ready = (
             payload["metadata"]["version"]
-            in {"0.52", "0.53", "0.54", "0.55"}
+            in {"0.52", "0.53", "0.54", "0.55", "0.56"}
             and read_site_connection_plan(session, restored_plan_id).ready
         )
         claims_current = bool(backed_compositions) and all(
@@ -2507,12 +2704,12 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
+    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
         for group in ("site_plans", "planned_pages", "planning_records"):
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
+    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
         for group in (
             "site_connection_planning_records",
             "navigation_sets",
@@ -2522,7 +2719,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
+    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
         for group in (
             "website_coverage_planning_records",
             "website_service_coverage_decisions",
@@ -2533,7 +2730,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
+    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
         for group in (
             "drafting_eligibility_assessments",
             "drafting_eligibility_dispositions",
@@ -2541,7 +2738,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
+    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
         for group in (
             "supporting_page_authorizations",
             "pre_draft_distinctness_briefs",
@@ -2549,7 +2746,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
+    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
         for group in (
             "website_draft_generation_runs",
             "website_draft_generation_items",
@@ -2560,28 +2757,35 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "website_service_county_coverage_decisions" not in data:
         data.setdefault("website_service_county_coverage_decisions", [])
         counts.setdefault("website_service_county_coverage_decisions", 0)
-    if backup_version not in {"0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
+    if backup_version not in {"0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
         for group in ("semantic_component_definitions", "page_compositions"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.50", "0.51", "0.52", "0.53", "0.54", "0.55"}:
+    if backup_version not in {"0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
         for group in ("brand_assets", "website_identity_asset_assignments"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.51", "0.52", "0.53", "0.54", "0.55"}:
+    if backup_version not in {"0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
         for group in ("themes", "website_theme_selections"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.53", "0.54", "0.55"}:
+    if backup_version not in {"0.53", "0.54", "0.55", "0.56"}:
         for group in (
             "website_media_planning_records",
             "planned_page_media_requirements",
         ):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version != "0.55":
+    if backup_version not in {"0.55", "0.56"}:
         data.setdefault("generated_page_qa_results", [])
         counts.setdefault("generated_page_qa_results", 0)
+    if backup_version != "0.56":
+        data.setdefault("scoped_media_authorizations", [])
+        counts.setdefault("scoped_media_authorizations", 0)
+        for record in data.get("image_metadata", []):
+            if isinstance(record, dict):
+                record.setdefault("usage_authorization_mode", "contract_default")
+                record.setdefault("required_authorization_terms", [])
 
     for group in BACKUP_MODELS:
         records = data.get(group)
@@ -2875,6 +3079,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     _validate_brand_asset_ownership(data)
     _validate_theme_ownership(data)
     _validate_page_media_ownership(data, backup_version)
+    _validate_scoped_media_authorizations(data, backup_version)
     _validate_generated_page_qa_results(data, backup_version)
     return payload
 
@@ -2943,6 +3148,132 @@ def _upsert(
     session.add(record)
     session.flush()
     return record
+
+
+def _require_restore_compatible_scoped_authorization_prefix(
+    target_history: list[ScopedMediaAuthorization],
+    *,
+    source_max_version: int,
+) -> None:
+    """Reject newer or structurally divergent target authorization history.
+
+    A backup may populate an empty target or replay an exact prefix, but an older
+    backup must never roll a target lineage backward.  Same-version evidence is
+    compared separately after every source identity has been remapped.
+    """
+
+    if not target_history:
+        return
+    versions = [row.authorization_version for row in target_history]
+    if versions != list(range(1, len(target_history) + 1)):
+        raise BackupValidationError(
+            "Target scoped-media authorization lineage is incomplete or divergent; restore was refused."
+        )
+    if versions[-1] > source_max_version:
+        raise BackupValidationError(
+            "Target scoped-media authorization lineage is newer than the backup; restore was refused."
+        )
+    current = [row for row in target_history if row.lifecycle_status == "current"]
+    if len(current) > 1 or (current and current[0].id != target_history[-1].id):
+        raise BackupValidationError(
+            "Target scoped-media authorization current state is divergent; restore was refused."
+        )
+    for index, row in enumerate(target_history):
+        expected_predecessor = target_history[index - 1].id if index else None
+        if (
+            row.supersedes_authorization_id != expected_predecessor
+            or (index < len(target_history) - 1 and row.lifecycle_status != "superseded")
+        ):
+            raise BackupValidationError(
+                "Target scoped-media authorization lineage is divergent; restore was refused."
+            )
+
+
+def _restore_scoped_media_authorization(
+    session: Session,
+    payload: dict[str, Any],
+    *,
+    source_max_version: int,
+) -> ScopedMediaAuthorization:
+    """Insert immutable authorization evidence or reuse an exact existing row.
+
+    Generic backup upserts are intentionally forbidden here.  A natural-key
+    collision may be idempotently reused only when every immutable decision field
+    and both fingerprints match after foreign-key remapping.  Existing rows are
+    never rewritten by restore.
+    """
+
+    normalized = ScopedMediaAuthorization.model_validate(payload)
+    values = normalized.model_dump(exclude={"id"})
+    existing = session.exec(
+        select(ScopedMediaAuthorization).where(
+            ScopedMediaAuthorization.media_requirement_id
+            == normalized.media_requirement_id,
+            ScopedMediaAuthorization.authorization_version
+            == normalized.authorization_version,
+        )
+    ).first()
+    if existing is not None:
+        if _scoped_authorization_immutable_restore_projection(
+            existing
+        ) != _scoped_authorization_immutable_restore_projection(normalized):
+            raise BackupValidationError(
+                "Target scoped-media authorization same-version evidence differs from the backup; restore was refused."
+            )
+        if existing.lifecycle_status != normalized.lifecycle_status:
+            may_extend_exact_prefix = (
+                existing.lifecycle_status == "current"
+                and normalized.lifecycle_status == "superseded"
+                and existing.authorization_version < source_max_version
+            )
+            if not may_extend_exact_prefix:
+                raise BackupValidationError(
+                    "Target scoped-media authorization lifecycle differs from the backup; restore was refused."
+                )
+            existing.lifecycle_status = "superseded"
+            existing.updated_at = normalized.updated_at
+            session.add(existing)
+            session.flush()
+        return existing
+
+    record = ScopedMediaAuthorization(**values)
+    session.add(record)
+    session.flush()
+    return record
+
+
+def _scoped_authorization_immutable_restore_projection(
+    record: ScopedMediaAuthorization,
+) -> tuple[Any, ...]:
+    """Return exact immutable authorization evidence in comparable form."""
+
+    return (
+        record.website_id,
+        record.site_plan_id,
+        record.planned_page_id,
+        record.generated_page_id,
+        record.media_requirement_id,
+        record.requirement_version,
+        record.placement_key,
+        record.placement_contract_version,
+        record.image_metadata_id,
+        record.media_version,
+        record.asset_checksum_sha256,
+        record.approval_version,
+        record.asset_approved_by,
+        _comparable_datetime(record.asset_approved_at),
+        record.approval_fingerprint,
+        record.page_image_assignment_id,
+        record.assignment_version,
+        record.reuse_policy,
+        tuple(record.authorization_terms),
+        record.authorized_by,
+        record.authorization_rationale,
+        _comparable_datetime(record.authorized_at),
+        record.authorization_version,
+        record.authorization_fingerprint,
+        record.supersedes_authorization_id,
+    )
 
 
 def _record_id(record: dict[str, Any], group: str) -> int:
@@ -3038,6 +3369,8 @@ def _restore_page_media_source_binding(
     requirement_ids: dict[int, int],
     assignment_ids: dict[int, int],
     image_ids: dict[int, int],
+    authorization_ids: dict[int, int],
+    authorization_fingerprints: dict[int, str],
 ) -> dict[str, Any]:
     """Remap governed Page Media identities embedded in composition snapshots."""
 
@@ -3108,6 +3441,27 @@ def _restore_page_media_source_binding(
             assignment.get("asset_id"),
             "page_compositions.page_media.assignments.asset_id",
         )
+        if assignment.get("authorization_id") is not None:
+            old_authorization_id = assignment["authorization_id"]
+            assignment["authorization_id"] = _mapped_id(
+                authorization_ids,
+                old_authorization_id,
+                "page_compositions.page_media.assignments.authorization_id",
+            )
+            try:
+                assignment["authorization_fingerprint"] = (
+                    authorization_fingerprints[old_authorization_id]
+                )
+            except KeyError as exc:
+                raise BackupValidationError(
+                    "Backup Page Composition authorization fingerprint cannot be remapped."
+                ) from exc
+        if assignment.get("authorization_assignment_id") is not None:
+            assignment["authorization_assignment_id"] = _mapped_id(
+                assignment_ids,
+                assignment["authorization_assignment_id"],
+                "page_compositions.page_media.assignments.authorization_assignment_id",
+            )
     return restored
 
 
@@ -3648,7 +4002,7 @@ def _validate_site_connection_decision_provenance(
     data: dict[str, list[dict[str, Any]]],
     backup_version: str,
 ) -> None:
-    if backup_version in {"0.52", "0.53", "0.54", "0.55"}:
+    if backup_version in {"0.52", "0.53", "0.54", "0.55", "0.56"}:
         _validate_052_site_connection_provenance_fields(data)
 
     planning_by_plan = {
@@ -3719,7 +4073,7 @@ def _validate_site_connection_decision_provenance(
                 "Backup Internal Link Intent crosses a Website, Site Plan, or page boundary."
             )
 
-    if backup_version not in {"0.52", "0.53", "0.54", "0.55"}:
+    if backup_version not in {"0.52", "0.53", "0.54", "0.55", "0.56"}:
         return
 
     _validate_052_composition_connection_bindings(
@@ -4109,7 +4463,7 @@ def _validate_nested_qa_page_identities(
 ) -> None:
     """Reject QA projections that claim a page other than their owner."""
 
-    require_identity = backup_version == "0.55"
+    require_identity = backup_version in {"0.55", "0.56"}
     for record in data["generated_pages"]:
         qa_result = record.get("qa_result")
         if qa_result is None:
@@ -4234,6 +4588,10 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         "wordpress_quality_reviews": ("generated_page_id",),
         "image_metadata": ("business_id", "file_name"),
         "page_image_assignments": ("generated_page_id", "image_metadata_id", "image_role"),
+        "scoped_media_authorizations": (
+            "media_requirement_id",
+            "authorization_version",
+        ),
         "settings": ("setting_key",),
         "knowledge_blocks": ("slug",),
     }
@@ -4464,6 +4822,28 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
             (
                 "replaces_page_image_assignment_id",
                 "page_image_assignments",
+                True,
+            ),
+        ),
+        "scoped_media_authorizations": (
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+            ("planned_page_id", "planned_pages", False),
+            ("generated_page_id", "generated_pages", True),
+            (
+                "media_requirement_id",
+                "planned_page_media_requirements",
+                False,
+            ),
+            ("image_metadata_id", "image_metadata", False),
+            (
+                "page_image_assignment_id",
+                "page_image_assignments",
+                True,
+            ),
+            (
+                "supersedes_authorization_id",
+                "scoped_media_authorizations",
                 True,
             ),
         ),
@@ -4795,6 +5175,9 @@ def _validate_page_media_ownership(
     }
     images = {record["id"]: record for record in data["image_metadata"]}
     assignments = {record["id"]: record for record in data["page_image_assignments"]}
+    authorizations = {
+        record["id"]: record for record in data["scoped_media_authorizations"]
+    }
 
     v2_requirement_planning_ids = {
         record.get("planning_record_id")
@@ -5102,6 +5485,38 @@ def _validate_page_media_ownership(
     gps_statuses = {"absent", "stripped", "present_unverified", "verified_authorized"}
     media_settings = get_settings()
     for record in images.values():
+        authorization_mode = record.get("usage_authorization_mode")
+        if authorization_mode not in {"contract_default", "scoped_required"}:
+            raise BackupValidationError(
+                "Backup Image Metadata has an invalid usage-authorization mode."
+            )
+        if backup_version != "0.56" and authorization_mode != "contract_default":
+            raise BackupValidationError(
+                "Legacy backups cannot claim scoped-required Image Metadata."
+            )
+        try:
+            required_authorization_terms = normalize_scoped_media_required_terms(
+                record.get("required_authorization_terms")
+            )
+        except ValueError as exc:
+            raise BackupValidationError(
+                "Backup Image Metadata has invalid required authorization terms."
+            ) from exc
+        if (
+            record.get("required_authorization_terms")
+            != required_authorization_terms
+            or (
+                authorization_mode == "contract_default"
+                and required_authorization_terms
+            )
+            or (
+                authorization_mode == "scoped_required"
+                and not required_authorization_terms
+            )
+        ):
+            raise BackupValidationError(
+                "Backup Image Metadata usage-authorization mode and required terms are incoherent."
+            )
         website_id = record.get("website_id")
         if website_id is not None and websites[website_id]["business_id"] != record["business_id"]:
             raise BackupValidationError(
@@ -5440,6 +5855,21 @@ def _validate_page_media_ownership(
                     raise BackupValidationError(
                         "Backup Page Composition has an asset without a governed assignment."
                     )
+                if any(
+                    field in binding
+                    for field in (
+                        "authorization_id",
+                        "authorization_version",
+                        "authorization_fingerprint",
+                        "authorization_terms",
+                        "reuse_policy",
+                        "authorization_assignment_id",
+                        "authorization_assignment_version",
+                    )
+                ):
+                    raise BackupValidationError(
+                        "Backup Page Composition has scoped authorization evidence without an assignment."
+                    )
                 continue
             assignment = assignments.get(assignment_id)
             if (
@@ -5457,6 +5887,15 @@ def _validate_page_media_ownership(
                 raise BackupValidationError(
                     "Backup Page Composition Page Media assignment crosses scope or loses its exact version identity."
                 )
+            _validate_composition_media_authorization_binding(
+                binding,
+                composition=composition,
+                requirement=requirement,
+                assignment=assignment,
+                image=images[asset_id],
+                authorizations=authorizations,
+                backup_version=backup_version,
+            )
         for component in composition.get("generated_components", []):
             if not isinstance(component, dict):
                 raise BackupValidationError(
@@ -5500,10 +5939,482 @@ def _validate_page_media_ownership(
                     "Backup Page Composition generated media component crosses its governed placement binding."
                 )
 
-    if backup_version not in {"0.53", "0.54", "0.55"} and (planning_records or requirements):
+    if backup_version not in {"0.53", "0.54", "0.55", "0.56"} and (planning_records or requirements):
         raise BackupValidationError(
             "Legacy backup versions cannot claim Page Media planning governance."
         )
+
+
+def _validate_composition_media_authorization_binding(
+    binding: dict[str, Any],
+    *,
+    composition: dict[str, Any],
+    requirement: dict[str, Any],
+    assignment: dict[str, Any],
+    image: dict[str, Any],
+    authorizations: dict[int, dict[str, Any]],
+    backup_version: str,
+) -> None:
+    """Validate optional exact authorization evidence in one media snapshot.
+
+    Backups before 0.56 and unchanged contract-default snapshots do not contain
+    these keys.  Preserve that historical shape exactly; when any authorization
+    key is present, however, the complete immutable binding must be present and
+    must point to the exact durable authorization and assignment versions.
+    """
+
+    fields = {
+        "authorization_id",
+        "authorization_version",
+        "authorization_fingerprint",
+        "authorization_terms",
+        "reuse_policy",
+        "authorization_assignment_id",
+        "authorization_assignment_version",
+    }
+    present = fields.intersection(binding)
+    if not present:
+        if (
+            backup_version == "0.56"
+            and composition.get("status") == "current"
+            and assignment.get("status") == "active"
+            and image.get("usage_authorization_mode") == "scoped_required"
+        ):
+            raise BackupValidationError(
+                "Backup current Page Composition omits required scoped-media authorization evidence."
+            )
+        return
+    if present != fields or any(binding.get(field) is None for field in fields):
+        raise BackupValidationError(
+            "Backup Page Composition has partial scoped-media authorization evidence."
+        )
+    authorization = authorizations.get(binding["authorization_id"])
+    if authorization is None:
+        raise BackupValidationError(
+            "Backup Page Composition references an unknown scoped-media authorization."
+        )
+    try:
+        normalized_terms = normalize_scoped_media_authorization_terms(
+            binding["authorization_terms"]
+        )
+    except ValueError as exc:
+        raise BackupValidationError(
+            "Backup Page Composition has invalid scoped-media authorization terms."
+        ) from exc
+    if (
+        binding["authorization_terms"] != normalized_terms
+        or authorization.get("media_requirement_id") != requirement.get("id")
+        or authorization.get("requirement_version") != requirement.get("version")
+        or authorization.get("placement_contract_version")
+        != requirement.get("contract_version")
+        or authorization.get("planned_page_id") != composition.get("planned_page_id")
+        or authorization.get("generated_page_id") != composition.get("generated_page_id")
+        or authorization.get("image_metadata_id") != image.get("id")
+        or authorization.get("media_version") != assignment.get("media_version")
+        or authorization.get("page_image_assignment_id") != assignment.get("id")
+        or authorization.get("assignment_version")
+        != assignment.get("assignment_version")
+        or binding["authorization_assignment_id"] != assignment.get("id")
+        or binding["authorization_assignment_version"]
+        != assignment.get("assignment_version")
+        or binding["authorization_version"]
+        != authorization.get("authorization_version")
+        or binding["authorization_fingerprint"]
+        != authorization.get("authorization_fingerprint")
+        or binding["authorization_terms"]
+        != authorization.get("authorization_terms")
+        or binding["reuse_policy"] != authorization.get("reuse_policy")
+        or (
+            composition.get("status") == "current"
+            and authorization.get("lifecycle_status") != "current"
+        )
+    ):
+        raise BackupValidationError(
+            "Backup Page Composition scoped-media authorization loses its exact scope, version, policy, or assignment identity."
+        )
+
+
+def _validate_scoped_media_authorizations(
+    data: dict[str, list[dict[str, Any]]],
+    backup_version: str,
+) -> None:
+    """Validate exact authorization scope, approval, assignment, and lineage."""
+
+    records = data["scoped_media_authorizations"]
+    if backup_version != "0.56":
+        if records:
+            raise BackupValidationError(
+                "Legacy backup versions cannot claim scoped-media authorizations."
+            )
+        return
+
+    required_fields = {
+        "id",
+        "created_at",
+        "updated_at",
+        "website_id",
+        "site_plan_id",
+        "planned_page_id",
+        "generated_page_id",
+        "media_requirement_id",
+        "requirement_version",
+        "placement_key",
+        "placement_contract_version",
+        "image_metadata_id",
+        "media_version",
+        "asset_checksum_sha256",
+        "approval_version",
+        "asset_approved_by",
+        "asset_approved_at",
+        "approval_fingerprint",
+        "page_image_assignment_id",
+        "assignment_version",
+        "reuse_policy",
+        "authorization_terms",
+        "authorized_by",
+        "authorization_rationale",
+        "authorized_at",
+        "authorization_version",
+        "authorization_fingerprint",
+        "lifecycle_status",
+        "supersedes_authorization_id",
+    }
+    term_allowlist = set(SCOPED_MEDIA_AUTHORIZATION_TERMS)
+    websites = {record["id"]: record for record in data["websites"]}
+    site_plans = {record["id"]: record for record in data["site_plans"]}
+    planned_pages = {record["id"]: record for record in data["planned_pages"]}
+    generated_pages = {record["id"]: record for record in data["generated_pages"]}
+    requirements = {
+        record["id"]: record
+        for record in data["planned_page_media_requirements"]
+    }
+    images = {record["id"]: record for record in data["image_metadata"]}
+    assignments = {record["id"]: record for record in data["page_image_assignments"]}
+    records_by_id = {record["id"]: record for record in records}
+    current_requirements: set[int] = set()
+    fingerprints: set[str] = set()
+    successor_targets: set[int] = set()
+    current_asset_authorizations: dict[tuple[int, int], list[dict[str, Any]]] = {}
+
+    for record in records:
+        if not required_fields.issubset(record):
+            raise BackupValidationError(
+                "Backup scoped-media authorization is missing durable evidence."
+            )
+        website = websites[record["website_id"]]
+        plan = site_plans[record["site_plan_id"]]
+        page = planned_pages[record["planned_page_id"]]
+        requirement = requirements[record["media_requirement_id"]]
+        image = images[record["image_metadata_id"]]
+        generated_id = record["generated_page_id"]
+        generated = generated_pages.get(generated_id) if generated_id is not None else None
+        if (
+            plan.get("website_id") != record["website_id"]
+            or page.get("website_id") != record["website_id"]
+            or page.get("site_plan_id") != record["site_plan_id"]
+            or page.get("generated_page_id") != generated_id
+            or (
+                generated_id is not None
+                and (
+                    generated is None
+                    or generated.get("website_id") != record["website_id"]
+                    or generated.get("business_id") != website.get("business_id")
+                )
+            )
+            or requirement.get("website_id") != record["website_id"]
+            or requirement.get("business_id") != website.get("business_id")
+            or requirement.get("site_plan_id") != record["site_plan_id"]
+            or requirement.get("planned_page_id") != record["planned_page_id"]
+            or requirement.get("version") != record["requirement_version"]
+            or requirement.get("placement_key") != record["placement_key"]
+            or requirement.get("contract_version")
+            != record["placement_contract_version"]
+        ):
+            raise BackupValidationError(
+                "Backup scoped-media authorization crosses its exact page or requirement scope."
+            )
+        if (
+            image.get("website_id") != record["website_id"]
+            or image.get("business_id") != website.get("business_id")
+            or image.get("media_version") != record["media_version"]
+            or image.get("checksum_sha256") != record["asset_checksum_sha256"]
+            or image.get("approval_version") != record["approval_version"]
+            or image.get("approved_by") != record["asset_approved_by"]
+            or image.get("approved_at") is None
+            or image.get("governance_status") not in {"approved", "retired"}
+        ):
+            raise BackupValidationError(
+                "Backup scoped-media authorization loses its exact approved asset identity."
+            )
+        approved_at = _datetime_value(
+            record["asset_approved_at"],
+            "scoped_media_authorizations.asset_approved_at",
+        )
+        image_approved_at = _datetime_value(
+            image["approved_at"],
+            "image_metadata.approved_at",
+        )
+        authorized_at = _datetime_value(
+            record["authorized_at"],
+            "scoped_media_authorizations.authorized_at",
+        )
+        _datetime_value(
+            record["created_at"],
+            "scoped_media_authorizations.created_at",
+        )
+        _datetime_value(
+            record["updated_at"],
+            "scoped_media_authorizations.updated_at",
+        )
+        if (
+            _comparable_datetime(approved_at)
+            != _comparable_datetime(image_approved_at)
+            or _comparable_datetime(authorized_at) < _comparable_datetime(approved_at)
+            or not _is_positive_int(record.get("requirement_version"))
+            or not _is_positive_int(record.get("placement_contract_version"))
+            or not _is_positive_int(record.get("media_version"))
+            or not _is_positive_int(record.get("approval_version"))
+            or not _is_positive_int(record.get("authorization_version"))
+            or not str(record.get("placement_key") or "").strip()
+            or not str(record.get("asset_approved_by") or "").strip()
+            or not str(record.get("authorized_by") or "").strip()
+            or not str(record.get("authorization_rationale") or "").strip()
+            or record.get("lifecycle_status") not in {"current", "superseded"}
+            or not _is_lower_sha256(record.get("asset_checksum_sha256"))
+            or not _is_lower_sha256(record.get("approval_fingerprint"))
+            or not _is_lower_sha256(record.get("authorization_fingerprint"))
+        ):
+            raise BackupValidationError(
+                "Backup scoped-media authorization has malformed typed evidence."
+            )
+        terms = record.get("authorization_terms")
+        if not isinstance(terms, list):
+            raise BackupValidationError(
+                "Backup scoped-media authorization terms must be a list."
+            )
+        try:
+            normalized_terms = validate_scoped_media_authorization_policy_terms(
+                record.get("reuse_policy"),
+                terms,
+                required_terms=image.get("required_authorization_terms", []),
+            )
+        except ValueError as exc:
+            raise BackupValidationError(
+                "Backup scoped-media authorization has incoherent policy or typed terms."
+            ) from exc
+        if terms != normalized_terms or not set(terms).issubset(term_allowlist):
+            raise BackupValidationError(
+                "Backup scoped-media authorization terms are not normalized."
+            )
+        try:
+            expected_approval = scoped_media_approval_fingerprint(
+                {
+                    **record,
+                    "asset_website_id": image.get("website_id"),
+                    "asset_business_id": image.get("business_id"),
+                    "usage_authorization_mode": image.get(
+                        "usage_authorization_mode"
+                    ),
+                    "required_authorization_terms": image.get(
+                        "required_authorization_terms"
+                    ),
+                }
+            )
+            expected_authorization = scoped_media_authorization_fingerprint(record)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BackupValidationError(
+                "Backup scoped-media authorization fingerprint input is malformed."
+            ) from exc
+        if record["approval_fingerprint"] != expected_approval:
+            raise BackupValidationError(
+                "Backup scoped-media authorization approval fingerprint does not match."
+            )
+        if record["authorization_fingerprint"] != expected_authorization:
+            raise BackupValidationError(
+                "Backup scoped-media authorization fingerprint does not match."
+            )
+        if record["authorization_fingerprint"] in fingerprints:
+            raise BackupValidationError(
+                "Backup contains duplicate scoped-media authorization fingerprints."
+            )
+        fingerprints.add(record["authorization_fingerprint"])
+
+        assignment_id = record["page_image_assignment_id"]
+        assignment_version = record["assignment_version"]
+        if (assignment_id is None) != (assignment_version is None):
+            raise BackupValidationError(
+                "Backup scoped-media authorization has a partial assignment binding."
+            )
+        if assignment_id is not None:
+            assignment = assignments[assignment_id]
+            if (
+                not _is_positive_int(assignment_version)
+                or generated_id is None
+                or assignment.get("generated_page_id") != generated_id
+                or assignment.get("website_id") != record["website_id"]
+                or assignment.get("site_plan_id") != record["site_plan_id"]
+                or assignment.get("planned_page_id") != record["planned_page_id"]
+                or assignment.get("media_requirement_id")
+                != record["media_requirement_id"]
+                or assignment.get("image_metadata_id") != record["image_metadata_id"]
+                or assignment.get("media_version") != record["media_version"]
+                or assignment.get("assignment_version") != assignment_version
+                or assignment.get("placement_contract_version")
+                != record["placement_contract_version"]
+            ):
+                raise BackupValidationError(
+                    "Backup scoped-media authorization loses its exact assignment binding."
+                )
+            if (
+                record["lifecycle_status"] == "current"
+                and assignment.get("status") != "active"
+            ):
+                raise BackupValidationError(
+                    "Backup current scoped-media authorization binds an inactive assignment."
+                )
+        if (
+            record["lifecycle_status"] == "current"
+            and image.get("governance_status") != "approved"
+        ):
+            raise BackupValidationError(
+                "Backup current scoped-media authorization binds non-approved media."
+            )
+        if record["lifecycle_status"] == "current":
+            requirement_id = record["media_requirement_id"]
+            if (
+                requirement.get("lifecycle_status") != "active"
+                or requirement.get("requirement_state")
+                not in {"required", "advisory"}
+            ):
+                raise BackupValidationError(
+                    "Backup current scoped-media authorization binds a stale or disallowed requirement."
+                )
+            if any(
+                candidate.get("website_id") == image.get("website_id")
+                and candidate.get("media_key") == image.get("media_key")
+                and isinstance(candidate.get("media_version"), int)
+                and candidate["media_version"] > image.get("media_version", 0)
+                and (
+                    candidate.get("governance_status") == "approved"
+                    or candidate.get("approved_at") is not None
+                )
+                for candidate in images.values()
+            ):
+                raise BackupValidationError(
+                    "Backup current scoped-media authorization binds a superseded asset version."
+                )
+            if requirement_id in current_requirements:
+                raise BackupValidationError(
+                    "Backup has multiple current authorizations for one requirement."
+                )
+            current_requirements.add(requirement_id)
+            current_asset_authorizations.setdefault(
+                (record["image_metadata_id"], record["media_version"]), []
+            ).append(record)
+
+        predecessor_id = record["supersedes_authorization_id"]
+        if record["authorization_version"] == 1:
+            if predecessor_id is not None:
+                raise BackupValidationError(
+                    "Backup root scoped-media authorization claims a predecessor."
+                )
+        elif predecessor_id is None:
+            raise BackupValidationError(
+                "Backup successor scoped-media authorization lacks lineage."
+            )
+        if predecessor_id is not None:
+            if predecessor_id == record["id"] or predecessor_id in successor_targets:
+                raise BackupValidationError(
+                    "Backup scoped-media authorization lineage is self-referential or forked."
+                )
+            successor_targets.add(predecessor_id)
+
+    for record in records:
+        predecessor_id = record["supersedes_authorization_id"]
+        if predecessor_id is None:
+            continue
+        predecessor = records_by_id[predecessor_id]
+        if (
+            predecessor["website_id"] != record["website_id"]
+            or predecessor["site_plan_id"] != record["site_plan_id"]
+            or predecessor["planned_page_id"] != record["planned_page_id"]
+            or predecessor["media_requirement_id"] != record["media_requirement_id"]
+            or predecessor["requirement_version"] != record["requirement_version"]
+            or predecessor["placement_key"] != record["placement_key"]
+            or predecessor["placement_contract_version"]
+            != record["placement_contract_version"]
+            or record["authorization_version"]
+            != predecessor["authorization_version"] + 1
+            or predecessor["lifecycle_status"] != "superseded"
+            or _comparable_datetime(
+                _datetime_value(
+                    record["authorized_at"],
+                    "scoped_media_authorizations.authorized_at",
+                )
+            )
+            < _comparable_datetime(
+                _datetime_value(
+                    predecessor["authorized_at"],
+                    "scoped_media_authorizations.authorized_at",
+                )
+            )
+        ):
+            raise BackupValidationError(
+                "Backup scoped-media authorization lineage crosses scope, skips a version, or rewrites currentness."
+            )
+
+    records_by_requirement: dict[int, list[dict[str, Any]]] = {}
+    for record in records:
+        records_by_requirement.setdefault(record["media_requirement_id"], []).append(
+            record
+        )
+    for history in records_by_requirement.values():
+        ordered = sorted(history, key=lambda item: item["authorization_version"])
+        if [item["authorization_version"] for item in ordered] != list(
+            range(1, len(ordered) + 1)
+        ):
+            raise BackupValidationError(
+                "Backup scoped-media authorization lineage is incomplete."
+            )
+        for index, record in enumerate(ordered):
+            expected_predecessor = ordered[index - 1]["id"] if index else None
+            if record["supersedes_authorization_id"] != expected_predecessor:
+                raise BackupValidationError(
+                    "Backup scoped-media authorization lineage does not follow its exact predecessor chain."
+                )
+            if index < len(ordered) - 1 and record["lifecycle_status"] != "superseded":
+                raise BackupValidationError(
+                    "Backup scoped-media authorization current state is not the lineage tip."
+                )
+        current = [
+            record for record in ordered if record["lifecycle_status"] == "current"
+        ]
+        if current and current[0]["id"] != ordered[-1]["id"]:
+            raise BackupValidationError(
+                "Backup scoped-media authorization current state is not the lineage tip."
+            )
+
+    for scoped_rows in current_asset_authorizations.values():
+        for row in scoped_rows:
+            terms = set(row["authorization_terms"])
+            other_rows = [
+                candidate
+                for candidate in scoped_rows
+                if candidate["media_requirement_id"] != row["media_requirement_id"]
+            ]
+            if (
+                row["reuse_policy"] == "requirement_only" or "no_reuse" in terms
+            ) and other_rows:
+                raise BackupValidationError(
+                    "Backup requirement-only/no-reuse authorization crosses another current scope."
+                )
+            if row["reuse_policy"] == "page_only" and any(
+                candidate["planned_page_id"] != row["planned_page_id"]
+                for candidate in other_rows
+            ):
+                raise BackupValidationError(
+                    "Backup page-only authorization crosses another Planned Page."
+                )
 
 
 def _validate_bound_qa_projection(
@@ -5759,7 +6670,7 @@ def _validate_generated_page_qa_results(
     """Validate immutable QA identity, outcome integrity, and lineage."""
 
     records = data["generated_page_qa_results"]
-    if backup_version != "0.55":
+    if backup_version not in {"0.55", "0.56"}:
         if records:
             raise BackupValidationError(
                 "Legacy backup versions cannot claim durable Generated Page QA results."

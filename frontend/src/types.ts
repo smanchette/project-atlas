@@ -315,6 +315,9 @@ export type PageMediaAssetCandidate = {
   reviewed_alt_text: string | null;
   governance_status: string;
   approval_version: number | null;
+  approval_fingerprint: string | null;
+  usage_authorization_mode: "contract_default" | "scoped_required";
+  required_authorization_terms: ScopedMediaAuthorizationTerm[];
   approved_by: string | null;
   approved_at: string | null;
   retired_by: string | null;
@@ -326,6 +329,75 @@ export type PageMediaAssetCandidate = {
   gps_authorized_by: string | null;
   gps_authorized_at: string | null;
   gps_authorization_notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ScopedMediaReusePolicy =
+  | "contract_default"
+  | "requirement_only"
+  | "page_only"
+  | "website_limited"
+  | "explicitly_reusable";
+
+export type ScopedMediaAuthorizationTerm =
+  | "visible_branding_allowed"
+  | "authorized_person_likeness"
+  | "representative_nonlocalized"
+  | "not_documentary_evidence"
+  | "reference_guided_synthetic_asset"
+  | "visible_scale_reference_allowed"
+  | "requirement_only_usage"
+  | "page_only_usage"
+  | "no_reuse"
+  | "contract_deviation_authorized";
+
+export type ScopedMediaAuthorizationRequest = {
+  media_requirement_id: number;
+  expected_requirement_version: number;
+  expected_placement_contract_version: number;
+  image_metadata_id: number;
+  expected_media_version: number;
+  expected_asset_checksum_sha256: string;
+  expected_approval_version: number;
+  expected_approval_fingerprint: string;
+  page_image_assignment_id?: number | null;
+  expected_assignment_version?: number | null;
+  expected_current_authorization_fingerprint?: string | null;
+  reuse_policy: ScopedMediaReusePolicy;
+  authorization_terms: ScopedMediaAuthorizationTerm[];
+  authorized_by: string;
+  authorization_rationale: string;
+};
+
+export type ScopedMediaAuthorization = {
+  id: number;
+  website_id: number;
+  site_plan_id: number;
+  planned_page_id: number;
+  generated_page_id: number | null;
+  media_requirement_id: number;
+  requirement_version: number;
+  placement_key: string;
+  placement_contract_version: number;
+  image_metadata_id: number;
+  media_version: number;
+  asset_checksum_sha256: string;
+  approval_version: number;
+  asset_approved_by: string;
+  asset_approved_at: string;
+  approval_fingerprint: string;
+  page_image_assignment_id: number | null;
+  assignment_version: number | null;
+  reuse_policy: ScopedMediaReusePolicy;
+  authorization_terms: ScopedMediaAuthorizationTerm[];
+  authorized_by: string;
+  authorization_rationale: string;
+  authorized_at: string;
+  authorization_version: number;
+  authorization_fingerprint: string;
+  lifecycle_status: "current" | "superseded";
+  supersedes_authorization_id: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -876,6 +948,17 @@ export type ExportMediaReference = {
   image_id: number;
   image_role: string;
   sort_order: number;
+  media_requirement_id?: number | null;
+  media_requirement_version?: number | null;
+  placement_key?: string | null;
+  target_component_key?: string | null;
+  target_component_instance_key?: string | null;
+  placement_contract_version?: number | null;
+  scoped_authorization_id?: number | null;
+  scoped_authorization_version?: number | null;
+  scoped_authorization_fingerprint?: string | null;
+  scoped_authorization_terms?: ScopedMediaAuthorizationTerm[];
+  scoped_reuse_policy?: ScopedMediaReusePolicy | null;
   image_title?: string | null;
   alt_text: string;
   asset_url?: string | null;

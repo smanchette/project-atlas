@@ -28,6 +28,7 @@ from app.models import (
     Website,
     WebsiteMediaPlanningRecord,
 )
+from app.services.page_media_roles import resolve_semantic_media_role
 
 
 def _engine():
@@ -140,14 +141,14 @@ def _suggestion(
     page: PlannedPage,
 ) -> dict:
     return {
-        "suggestion_key": "home:v1:hero",
+        "suggestion_key": "home:v1:home-hero",
         "website_id": website.id,
         "business_id": business.id,
         "site_plan_id": plan.id,
         "planned_page_id": page.id,
         "page_type": "home",
         "contract_page_type": "home",
-        "placement_key": "hero",
+        "placement_key": "home-hero",
         "component_or_section": "hero",
         "requirement_state": "required",
         "purpose": "Introduce the approved business.",
@@ -208,7 +209,7 @@ def _seed_governed_graph(
     }
     suggestion_v2 = {
         **suggestion,
-        "suggestion_key": "home:v2:hero:exact-target",
+        "suggestion_key": "home:v2:home-hero:exact-target",
         "target_component_instance_key": "hero",
         "contract_version": 2,
     }
@@ -233,7 +234,7 @@ def _seed_governed_graph(
         "site_plan_id": plan.id,
         "planned_page_id": page.id,
         "component_or_section": "hero",
-        "placement_key": "hero",
+        "placement_key": "home-hero",
         "requirement_state": "required",
         "purpose": "Introduce the approved business.",
         "customer_outcome": "Understand the business and request service.",
@@ -259,7 +260,7 @@ def _seed_governed_graph(
         **requirement_values,
         planning_record_id=planning_v1.id,
         contract_version=1,
-        source_suggestion_key="home:v1:hero",
+        source_suggestion_key="home:v1:home-hero",
         version=1,
         lifecycle_status="superseded",
     )
@@ -270,7 +271,7 @@ def _seed_governed_graph(
         planning_record_id=planning_v2.id,
         contract_version=2,
         target_component_instance_key="hero",
-        source_suggestion_key="home:v2:hero:exact-target",
+        source_suggestion_key="home:v2:home-hero:exact-target",
         version=2,
         lifecycle_status="active",
         replaces_requirement_id=requirement_v1.id,
@@ -299,7 +300,7 @@ def _seed_governed_graph(
         "rights_notes": "Company ownership confirmed.",
         "approved_usage": ["hero", "page_media"],
         "prohibited_usage": ["favicon"],
-        "permitted_placement_keys": ["hero"],
+        "permitted_placement_keys": ["home-hero"],
         "accessibility_intent": "informative",
         "approval_version": 1,
         "approved_by": "Media Operator",
@@ -353,7 +354,7 @@ def _seed_governed_graph(
         assignment_version=1,
         media_version=1,
         placement_contract_version=2,
-        image_role="hero",
+        image_role="home-hero:assignment-1",
         display_preset="hero_desktop",
         status="replaced",
         assigned_by="Media Operator",
@@ -375,7 +376,7 @@ def _seed_governed_graph(
         assignment_version=2,
         media_version=2,
         placement_contract_version=2,
-        image_role="hero",
+        image_role="home-hero:assignment-2",
         display_preset="hero_desktop",
         status="active",
         assigned_by="Media Operator",
@@ -486,8 +487,8 @@ def test_backup_055_round_trip_remaps_complete_page_media_graph_and_is_idempoten
         exported = export_backup(session, backup_dir=tmp_path)
 
     loaded = load_backup(Path(exported["path"]))
-    assert BACKUP_VERSION == "0.55"
-    assert loaded["metadata"]["version"] == "0.55"
+    assert BACKUP_VERSION == "0.56"
+    assert loaded["metadata"]["version"] == "0.56"
     assert loaded["metadata"]["table_counts"]["website_media_planning_records"] == 2
     assert loaded["metadata"]["table_counts"]["planned_page_media_requirements"] == 2
 
@@ -564,6 +565,18 @@ def test_backup_055_round_trip_remaps_complete_page_media_graph_and_is_idempoten
         assert assignments[1].planned_page_id == page.id
         assert assignments[1].media_requirement_id == requirements[1].id
         assert assignments[1].image_metadata_id == images[1].id
+        assert [item.image_role for item in assignments] == [
+            "home-hero:assignment-1",
+            "home-hero:assignment-2",
+        ]
+        assert [
+            resolve_semantic_media_role(
+                item,
+                session=session,
+                allow_historical=True,
+            )
+            for item in assignments
+        ] == ["hero", "hero"]
 
         composition = session.exec(
             select(PageComposition).where(

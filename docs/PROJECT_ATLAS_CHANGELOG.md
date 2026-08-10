@@ -404,6 +404,32 @@ Identity, navigation, or content operation.
 
 ---
 
+## Website-Scoped Media Authorization and Canonical Role Safety Foundation
+
+Added typed, versioned, Website- and Site-Plan-scoped media authorizations that
+bind the exact Planned Page, optional Generated Page, media requirement and
+version, placement contract, approved asset version and checksum, optional
+assignment, operator decision, lifecycle, and supersession history. Enforceable
+reuse policies now fail closed across candidate discovery, assignment and
+replacement, composition, QA, approval, export, and publication preparation;
+free-text rationale does not grant authority or broaden use to another page or
+Website.
+
+Established canonical semantic media-role resolution from the complete
+versioned page-type placement contract while preserving exact stored placement
+identity. Migration `20260810_0044` adds the durable authorization records and
+asset authorization mode. Atlas Data backup format 0.56 preserves exact
+authorization and supersession graphs while retaining supported 0.55 restore
+compatibility.
+
+All existing Atlas page, plan, composition, QA, identity, navigation,
+legacy-media, WordPress, audit, deployment, and verification state remained
+unchanged. This milestone imported, approved, assigned, generated, or modified
+no image and performed no WordPress, SiteGround, publication, deployment, or
+external-provider activity.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.

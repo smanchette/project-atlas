@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
-from sqlalchemy import CheckConstraint, Column, Index, JSON, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, Column, Index, JSON, String, UniqueConstraint, text
 from sqlmodel import Field, SQLModel
 
 
@@ -1471,6 +1471,9 @@ class WordPressQualityReview(TimestampMixin, table=True):
     reviewed_by: str | None = None
 
 
+ImageUsageAuthorizationMode = Literal["contract_default", "scoped_required"]
+
+
 class ImageMetadata(TimestampMixin, table=True):
     __table_args__ = (
         CheckConstraint("focal_x >= 0 AND focal_x <= 1", name="ck_imagemetadata_focal_x_range"),
@@ -1491,6 +1494,17 @@ class ImageMetadata(TimestampMixin, table=True):
         CheckConstraint(
             "approval_version IS NULL OR approval_version >= 1",
             name="ck_imagemetadata_approval_version",
+        ),
+        CheckConstraint(
+            "usage_authorization_mode IN ('contract_default','scoped_required')",
+            name="ck_imagemetadata_usage_authorization_mode",
+        ),
+        CheckConstraint(
+            "(usage_authorization_mode = 'contract_default' "
+            "AND json_array_length(required_authorization_terms) = 0) OR "
+            "(usage_authorization_mode = 'scoped_required' "
+            "AND json_array_length(required_authorization_terms) >= 1)",
+            name="ck_imagemetadata_required_authorization_terms",
         ),
         CheckConstraint(
             "(media_version IS NULL AND replaces_image_metadata_id IS NULL) OR "
@@ -1582,6 +1596,23 @@ class ImageMetadata(TimestampMixin, table=True):
     permitted_placement_keys: list[str] | None = Field(default=None, sa_column=Column(JSON))
     accessibility_intent: str | None = None
     governance_status: str = Field(default="legacy_unverified", max_length=32, index=True)
+    required_authorization_terms: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(
+            JSON,
+            nullable=False,
+            server_default=text("'[]'"),
+        ),
+    )
+    usage_authorization_mode: ImageUsageAuthorizationMode = Field(
+        default="contract_default",
+        sa_column=Column(
+            String(32),
+            nullable=False,
+            server_default="contract_default",
+            index=True,
+        ),
+    )
     approval_version: int | None = Field(default=None, ge=1)
     approved_by: str | None = None
     approved_at: datetime | None = Field(default=None, index=True)
@@ -2300,6 +2331,158 @@ class PageImageAssignment(TimestampMixin, table=True):
     override_alt_text: str | None = None
     display_preset: str = Field(default="hero_desktop", index=True)
     status: str = Field(default="active", index=True)
+
+
+ScopedMediaAuthorizationTerm = Literal[
+    "visible_branding_allowed",
+    "authorized_person_likeness",
+    "representative_nonlocalized",
+    "not_documentary_evidence",
+    "reference_guided_synthetic_asset",
+    "visible_scale_reference_allowed",
+    "requirement_only_usage",
+    "page_only_usage",
+    "no_reuse",
+    "contract_deviation_authorized",
+]
+
+
+class ScopedMediaAuthorization(TimestampMixin, table=True):
+    """Durable, versioned authorization for one exact governed media binding.
+
+    A candidate authorization can precede draft generation and assignment.  Any
+    later binding is recorded as a successor version; the prior row is retained
+    with a superseded lifecycle state.
+    """
+
+    __table_args__ = (
+        CheckConstraint(
+            "reuse_policy IN ('contract_default','requirement_only','page_only',"
+            "'website_limited','explicitly_reusable')",
+            name="ck_scopedmediaauth_reuse_policy",
+        ),
+        CheckConstraint(
+            "lifecycle_status IN ('current','superseded')",
+            name="ck_scopedmediaauth_lifecycle",
+        ),
+        CheckConstraint(
+            "requirement_version >= 1 AND placement_contract_version >= 1 "
+            "AND media_version >= 1 AND approval_version >= 1 "
+            "AND authorization_version >= 1",
+            name="ck_scopedmediaauth_versions",
+        ),
+        CheckConstraint(
+            "(page_image_assignment_id IS NULL AND assignment_version IS NULL) "
+            "OR (page_image_assignment_id IS NOT NULL "
+            "AND assignment_version IS NOT NULL AND assignment_version >= 1)",
+            name="ck_scopedmediaauth_assignment_pair",
+        ),
+        CheckConstraint(
+            "length(trim(placement_key)) > 0 "
+            "AND length(trim(asset_approved_by)) > 0 "
+            "AND length(trim(authorized_by)) > 0 "
+            "AND length(trim(authorization_rationale)) > 0",
+            name="ck_scopedmediaauth_required_text",
+        ),
+        CheckConstraint(
+            "length(asset_checksum_sha256) = 64 "
+            "AND asset_checksum_sha256 = lower(asset_checksum_sha256) "
+            "AND length(approval_fingerprint) = 64 "
+            "AND approval_fingerprint = lower(approval_fingerprint) "
+            "AND length(authorization_fingerprint) = 64 "
+            "AND authorization_fingerprint = lower(authorization_fingerprint)",
+            name="ck_scopedmediaauth_fingerprints",
+        ),
+        CheckConstraint(
+            "(authorization_version = 1 AND supersedes_authorization_id IS NULL) "
+            "OR (authorization_version > 1 "
+            "AND supersedes_authorization_id IS NOT NULL)",
+            name="ck_scopedmediaauth_lineage",
+        ),
+        CheckConstraint(
+            "supersedes_authorization_id IS NULL "
+            "OR supersedes_authorization_id != id",
+            name="ck_scopedmediaauth_not_self",
+        ),
+        UniqueConstraint(
+            "media_requirement_id",
+            "authorization_version",
+            name="uq_scopedmediaauth_requirement_version",
+        ),
+        UniqueConstraint(
+            "authorization_fingerprint",
+            name="uq_scopedmediaauth_fingerprint",
+        ),
+        UniqueConstraint(
+            "supersedes_authorization_id",
+            name="uq_scopedmediaauth_successor",
+        ),
+        Index(
+            "uq_scopedmediaauth_current_requirement",
+            "media_requirement_id",
+            unique=True,
+            postgresql_where=text("lifecycle_status = 'current'"),
+            sqlite_where=text("lifecycle_status = 'current'"),
+        ),
+        Index(
+            "uq_scopedmediaauth_current_requirement_only_asset",
+            "image_metadata_id",
+            unique=True,
+            postgresql_where=text(
+                "lifecycle_status = 'current' "
+                "AND reuse_policy = 'requirement_only'"
+            ),
+            sqlite_where=text(
+                "lifecycle_status = 'current' "
+                "AND reuse_policy = 'requirement_only'"
+            ),
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
+    planned_page_id: int = Field(foreign_key="plannedpage.id", index=True)
+    generated_page_id: int | None = Field(
+        default=None,
+        foreign_key="generatedpage.id",
+        index=True,
+    )
+    media_requirement_id: int = Field(
+        foreign_key="plannedpagemediarequirement.id",
+        index=True,
+    )
+    requirement_version: int = Field(ge=1)
+    placement_key: str = Field(max_length=120, index=True)
+    placement_contract_version: int = Field(ge=1)
+    image_metadata_id: int = Field(foreign_key="imagemetadata.id", index=True)
+    media_version: int = Field(ge=1)
+    asset_checksum_sha256: str = Field(max_length=64)
+    approval_version: int = Field(ge=1)
+    asset_approved_by: str = Field(max_length=160)
+    asset_approved_at: datetime
+    approval_fingerprint: str = Field(max_length=64)
+    page_image_assignment_id: int | None = Field(
+        default=None,
+        foreign_key="pageimageassignment.id",
+        index=True,
+    )
+    assignment_version: int | None = Field(default=None, ge=1)
+    reuse_policy: str = Field(max_length=40, index=True)
+    authorization_terms: list[ScopedMediaAuthorizationTerm] = Field(
+        sa_column=Column(JSON, nullable=False),
+    )
+    authorized_by: str = Field(max_length=160)
+    authorization_rationale: str
+    authorized_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+    authorization_version: int = Field(default=1, ge=1)
+    authorization_fingerprint: str = Field(max_length=64)
+    lifecycle_status: str = Field(default="current", max_length=24, index=True)
+    supersedes_authorization_id: int | None = Field(
+        default=None,
+        foreign_key="scopedmediaauthorization.id",
+        index=True,
+    )
 
 
 class KnowledgeBlock(TimestampMixin, table=True):

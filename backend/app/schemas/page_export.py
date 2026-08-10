@@ -27,6 +27,11 @@ class ExportMediaReference(SQLModel):
     target_component_key: str | None = None
     target_component_instance_key: str | None = None
     placement_contract_version: int | None = None
+    scoped_authorization_id: int | None = None
+    scoped_authorization_version: int | None = None
+    scoped_authorization_fingerprint: str | None = None
+    scoped_authorization_terms: list[str] = Field(default_factory=list)
+    scoped_reuse_policy: str | None = None
     image_title: str | None = None
     alt_text: str
     asset_url: str | None = None

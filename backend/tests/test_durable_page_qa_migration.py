@@ -26,6 +26,7 @@ from app.services.page_qa import historical_qa_payload_hash
 BACKEND = Path(__file__).parents[1]
 REVISION_0042 = "20260809_0042"
 REVISION_0043 = "20260809_0043"
+REVISION_0044 = "20260810_0044"
 TABLE = "generatedpageqaresult"
 CURRENT_INDEX = "uq_generatedpageqaresult_current_page"
 
@@ -174,7 +175,7 @@ def test_0043_clean_upgrade_creates_empty_durable_qa_table(
         )
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == REVISION_0043
+        ).scalar_one() == REVISION_0044
     engine.dispose()
     get_settings.cache_clear()
 
@@ -208,7 +209,7 @@ def test_0043_adopts_exact_empty_model_created_table(
         ).scalar_one() == "historical_unbound"
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == REVISION_0043
+        ).scalar_one() == REVISION_0044
     inspector = inspect(engine)
     assert "uq_generatedpageqaresult_current_page" in {
         item["name"] for item in inspector.get_indexes(TABLE)

@@ -32,8 +32,16 @@ from app.schemas.page_composition import (
     SemanticComponentDefinitionRead,
     SitePlanCompositionRefreshResult,
 )
-from app.services.website_context import build_website_context
 from app.services.brand_assets import identity_asset_contract_error
+from app.services.page_media_roles import (
+    SemanticMediaRoleError,
+    resolve_semantic_media_role,
+)
+from app.services.scoped_media_authorizations import (
+    asset_requires_exact_scoped_use,
+    current_scoped_media_authorization,
+)
+from app.services.website_context import build_website_context
 from app.services.website_media_safety import (
     is_image_metadata_excluded,
 )
@@ -403,6 +411,10 @@ def _generate_components(
             image = session.get(ImageMetadata, assignment.image_metadata_id)
             if is_image_metadata_excluded(website, image):
                 continue
+            if image is not None and asset_requires_exact_scoped_use(session, image):
+                raise PageCompositionError(
+                    "Scoped governed media cannot enter a legacy or fallback composition path."
+                )
             add(
                 "media_placement",
                 "main",
@@ -1172,11 +1184,24 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
                     if bindings.get("media_requirement_id")
                     else None
                 )
+                try:
+                    semantic_role = resolve_semantic_media_role(
+                        assignment,
+                        session=session,
+                        requirement=requirement,
+                    )
+                except SemanticMediaRoleError as exc:
+                    raise PageCompositionError(str(exc)) from exc
+                authorization = (
+                    current_scoped_media_authorization(session, requirement.id or 0)
+                    if requirement
+                    else None
+                )
                 data = {
                     "purpose": (
                         requirement.purpose
                         if requirement
-                        else assignment.image_role.replace("_", " ").title()
+                        else semantic_role.replace("_", " ").title()
                     ),
                     "customer_outcome": requirement.customer_outcome if requirement else None,
                     "placement_key": requirement.placement_key if requirement else None,
@@ -1191,7 +1216,20 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
                     "placement_contract_version": (
                         requirement.contract_version if requirement else None
                     ),
-                    "image_role": assignment.image_role,
+                    "image_role": semantic_role,
+                    "scoped_authorization_id": (
+                        authorization.id if authorization else None
+                    ),
+                    "scoped_authorization_version": (
+                        authorization.authorization_version
+                        if authorization
+                        else None
+                    ),
+                    "scoped_authorization_fingerprint": (
+                        authorization.authorization_fingerprint
+                        if authorization
+                        else None
+                    ),
                     "asset_url": image.optimized_url or image.asset_url,
                     "alt_text": assignment.override_alt_text or image.reviewed_alt_text or image.alt_text,
                     "image_title": image.image_title,
@@ -1398,16 +1436,11 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
         ],
         "draft_related_targets": draft_related_targets,
         "media_assignments": [
-            {
-                "id": item.id,
-                "image_metadata_id": item.image_metadata_id,
-                "role": item.image_role,
-                "status": item.status,
-                "updated_at": item.updated_at.isoformat(),
-                "image_updated_at": images[item.image_metadata_id].updated_at.isoformat()
-                if images[item.image_metadata_id]
-                else None,
-            }
+            _media_assignment_source_identity(
+                session,
+                item,
+                images[item.image_metadata_id],
+            )
             for item in assignments
         ],
     }
@@ -1438,6 +1471,40 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
     if page_media["planning_record"] is not None or page_media["requirements"]:
         snapshot["page_media"] = page_media
     return snapshot
+
+
+def _semantic_role(
+    session: Session,
+    assignment: PageImageAssignment,
+) -> str:
+    try:
+        return resolve_semantic_media_role(assignment, session=session)
+    except SemanticMediaRoleError as exc:
+        raise PageCompositionError(str(exc)) from exc
+
+
+def _media_assignment_source_identity(
+    session: Session,
+    assignment: PageImageAssignment,
+    image: ImageMetadata | None,
+) -> dict[str, Any]:
+    """Preserve legacy source hashes while binding governed semantic identity."""
+
+    value: dict[str, Any] = {
+        "id": assignment.id,
+        "image_metadata_id": assignment.image_metadata_id,
+        "role": (
+            assignment.image_role
+            if assignment.media_requirement_id is None
+            else _semantic_role(session, assignment)
+        ),
+        "status": assignment.status,
+        "updated_at": assignment.updated_at.isoformat(),
+        "image_updated_at": image.updated_at.isoformat() if image else None,
+    }
+    if assignment.media_requirement_id is not None:
+        value["storage_role_token"] = assignment.image_role
+    return value
 
 
 def _resolved_theme(session: Session, website_id: int):

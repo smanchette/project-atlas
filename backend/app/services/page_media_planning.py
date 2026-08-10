@@ -38,12 +38,32 @@ from app.schemas.page_media_planning import (
     PageMediaWorkspace,
     PlannedPageMediaRequirementRead,
 )
+from app.schemas.scoped_media_authorizations import (
+    normalize_scoped_media_required_terms,
+    scoped_media_approval_fingerprint,
+)
 from app.services.media_uploads import (
     inspect_managed_original,
     is_safe_image_filename,
     managed_original_contains_gps,
     remove_stored_media_files,
     store_uploaded_image,
+)
+from app.services.page_media_roles import (
+    SemanticMediaRoleError,
+    resolve_requirement_semantic_media_role,
+    resolve_semantic_media_role,
+)
+from app.services.scoped_media_authorizations import (
+    ScopedMediaAuthorizationError,
+    bind_scoped_media_authorization_to_assignment,
+    current_scoped_media_authorization,
+    exact_contract_deviation_terms,
+    scoped_media_assignment_authorization_errors,
+    scoped_media_asset_use_errors,
+    supersede_current_scoped_media_authorization,
+    supersede_current_scoped_media_authorizations_for_asset,
+    validate_scoped_media_authorization_assignment_successor,
 )
 from app.services.website_media_safety import (
     is_image_metadata_excluded,
@@ -567,7 +587,10 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
                     effective_requirement=None,
                     requirement_history=[],
                     active_assignment=None,
-                    legacy_assignments=[_assignment_read(item) for item in legacy_by_page.get(page_id, [])],
+                    legacy_assignments=[
+                        _assignment_read(session, item)
+                        for item in legacy_by_page.get(page_id, [])
+                    ],
                     compatible_asset_ids=[],
                     blocking_reasons=[
                         "No current Page Media plan exists for this Planned Page.",
@@ -664,6 +687,7 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
                             asset = session.get(ImageMetadata, active_assignment.image_metadata_id)
                             errors = (
                                 _assignment_binding_errors(
+                                    session,
                                     active_assignment,
                                     asset,
                                     effective,
@@ -714,8 +738,15 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
                 suggestion=suggestion,
                 effective_requirement=_requirement_read(effective) if effective else None,
                 requirement_history=[_requirement_read(item) for item in history],
-                active_assignment=_assignment_read(active_assignment) if active_assignment else None,
-                legacy_assignments=[_assignment_read(item) for item in legacy_by_page.get(page_id, [])],
+                active_assignment=(
+                    _assignment_read(session, active_assignment)
+                    if active_assignment
+                    else None
+                ),
+                legacy_assignments=[
+                    _assignment_read(session, item)
+                    for item in legacy_by_page.get(page_id, [])
+                ],
                 compatible_asset_ids=compatible_ids,
                 blocking_reasons=blocking,
                 composition_status=composition_status,
@@ -752,7 +783,7 @@ def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorksp
         site_plan_version=plan.version,
         planning_record=_planning_record_read(planning_record) if planning_record else None,
         placements=placements,
-        assets=[_asset_read(item) for item in assets],
+        assets=[page_media_asset_read(item) for item in assets],
         diagnostics=diagnostics,
         summary=summary,
         ready=(
@@ -885,11 +916,26 @@ def decide_media_placement(
     plan, website = _plan_context(session, plan_id)
     if payload.site_plan_id != plan.id or payload.website_id != website.id:
         raise PageMediaPlanningError("Placement decision crosses the selected Website or Site Plan boundary.")
-    page = session.get(PlannedPage, payload.planned_page_id)
-    if not page or page.website_id != website.id or page.site_plan_id != plan.id:
-        raise PageMediaPlanningError("Planned Page does not belong to the selected Website and Site Plan.")
     placement_key = _identifier(payload.placement_key, "Placement key")
     payload = payload.model_copy(update={"placement_key": placement_key})
+    # Match authorization/assignment lock order: requirement, then page. The page
+    # lock also serializes first-version decisions where no requirement row exists.
+    history = list(session.exec(
+        select(PlannedPageMediaRequirement)
+        .where(
+            PlannedPageMediaRequirement.planned_page_id == payload.planned_page_id,
+            PlannedPageMediaRequirement.placement_key == payload.placement_key,
+        )
+        .order_by(PlannedPageMediaRequirement.version)
+        .with_for_update()
+    ).all())
+    page = session.exec(
+        select(PlannedPage)
+        .where(PlannedPage.id == payload.planned_page_id)
+        .with_for_update()
+    ).one_or_none()
+    if not page or page.website_id != website.id or page.site_plan_id != plan.id:
+        raise PageMediaPlanningError("Planned Page does not belong to the selected Website and Site Plan.")
     planning_record = _current_planning_record(session, plan.id or plan_id)
     _require_planning_record_scope(planning_record, plan, website)
     if not planning_record:
@@ -953,12 +999,6 @@ def decide_media_placement(
         composition_instances,
         contract_version=values["contract_version"],
     )
-    history = list(session.exec(
-        select(PlannedPageMediaRequirement).where(
-            PlannedPageMediaRequirement.planned_page_id == page.id,
-            PlannedPageMediaRequirement.placement_key == payload.placement_key,
-        ).order_by(PlannedPageMediaRequirement.version)
-    ).all())
     current = history[-1] if history else None
     duplicate_target = next(
         (
@@ -1014,12 +1054,17 @@ def decide_media_placement(
         current.lifecycle_status = "superseded"
         current.updated_at = datetime.now(UTC)
         session.add(current)
+        supersede_current_scoped_media_authorization(
+            session,
+            current.id or 0,
+            changed_at=current.updated_at,
+        )
         active_assignments = list(
             session.exec(
                 select(PageImageAssignment).where(
                     PageImageAssignment.media_requirement_id == current.id,
                     PageImageAssignment.status == "active",
-                )
+                ).with_for_update()
             ).all()
         )
         if len(active_assignments) > 1:
@@ -1080,6 +1125,8 @@ async def create_governed_page_media_asset(
     permitted_placement_keys: list[str],
     accessibility_intent: str,
     created_by: str,
+    usage_authorization_mode: str = "contract_default",
+    required_authorization_terms: list[str] | None = None,
     replaces_image_metadata_id: int | None = None,
 ) -> ImageMetadata:
     website = session.get(Website, website_id)
@@ -1089,10 +1136,27 @@ async def create_governed_page_media_asset(
     acquisition = acquisition_source.strip().lower()
     provenance = provenance_type.strip().lower()
     rights = rights_status.strip().lower()
+    authorization_mode = usage_authorization_mode.strip().lower()
     if acquisition not in ACQUISITION_SOURCES:
         raise PageMediaPlanningError("Unsupported media acquisition source.")
     if provenance not in PROVENANCE_TYPES or rights not in RIGHTS_STATUSES:
         raise PageMediaPlanningError("Approved provenance and rights classifications are required.")
+    if authorization_mode not in {"contract_default", "scoped_required"}:
+        raise PageMediaPlanningError("Unsupported page-media authorization mode.")
+    try:
+        required_terms = normalize_scoped_media_required_terms(
+            required_authorization_terms or []
+        )
+    except ValueError as exc:
+        raise PageMediaPlanningError(str(exc)) from exc
+    if authorization_mode == "contract_default" and required_terms:
+        raise PageMediaPlanningError(
+            "Contract-default media cannot declare scoped authorization terms."
+        )
+    if authorization_mode == "scoped_required" and not required_terms:
+        raise PageMediaPlanningError(
+            "Scoped-required media must declare its exact required authorization terms."
+        )
     if not _source_governance_valid(acquisition, provenance, rights):
         raise PageMediaPlanningError(
             "Media acquisition source, provenance classification, and rights status are inconsistent."
@@ -1128,6 +1192,16 @@ async def create_governed_page_media_asset(
             or replacement.media_version is None
         ):
             raise PageMediaPlanningError("Replacement must reference the same governed Website media key.")
+        if replacement.usage_authorization_mode != authorization_mode:
+            raise PageMediaPlanningError(
+                "Replacement cannot silently change the asset authorization mode."
+            )
+        if normalize_scoped_media_required_terms(
+            replacement.required_authorization_terms or []
+        ) != required_terms:
+            raise PageMediaPlanningError(
+                "Replacement cannot silently change required authorization terms."
+            )
         version = replacement.media_version + 1
     latest = session.exec(
         select(ImageMetadata).where(
@@ -1181,6 +1255,8 @@ async def create_governed_page_media_asset(
         governance_status="pending_review",
         review_status="pending_review",
         approval_version=None,
+        usage_authorization_mode=authorization_mode,
+        required_authorization_terms=required_terms,
         replaces_image_metadata_id=replaces_image_metadata_id,
         gps_metadata_status="present_unverified" if gps_present else "absent",
         gps_metadata={},
@@ -1207,7 +1283,7 @@ def approve_page_media_asset(
     approved_by: str,
     expected_media_version: int,
 ) -> ImageMetadata:
-    asset = _asset(session, image_id)
+    asset = _asset_for_update(session, image_id)
     if (
         asset.website_id != expected_website_id
         or asset.business_id != expected_business_id
@@ -1248,24 +1324,37 @@ def approve_page_media_asset(
     asset.approved_by = _required_text(approved_by, "Approval operator")
     asset.approved_at = datetime.now(UTC)
     asset.updated_at = datetime.now(UTC)
-    superseded_ids = [
-        row.id
-        for row in session.exec(
-            select(ImageMetadata).where(
+    superseded_assets = list(
+        session.exec(
+            select(ImageMetadata)
+            .where(
                 ImageMetadata.website_id == asset.website_id,
                 ImageMetadata.media_key == asset.media_key,
                 ImageMetadata.media_version < asset.media_version,
             )
+            .order_by(ImageMetadata.media_version, ImageMetadata.id)
+            .with_for_update()
         ).all()
-        if row.id is not None
+    )
+    superseded_ids = [
+        row.id for row in superseded_assets if row.id is not None
     ]
     if superseded_ids:
+        for superseded_asset in superseded_assets:
+            if superseded_asset.id is not None:
+                supersede_current_scoped_media_authorizations_for_asset(
+                    session,
+                    superseded_asset.id,
+                    changed_at=asset.approved_at,
+                )
         assignments = session.exec(
-            select(PageImageAssignment).where(
+            select(PageImageAssignment)
+            .where(
                 PageImageAssignment.image_metadata_id.in_(superseded_ids),
                 PageImageAssignment.status == "active",
                 PageImageAssignment.media_requirement_id.is_not(None),
             )
+            .with_for_update()
         ).all()
         for assignment in assignments:
             if assignment.planned_page_id:
@@ -1286,7 +1375,7 @@ def retire_page_media_asset(
     rationale: str,
     expected_media_version: int,
 ) -> ImageMetadata:
-    asset = _asset(session, image_id)
+    asset = _asset_for_update(session, image_id)
     if (
         asset.website_id != expected_website_id
         or asset.business_id != expected_business_id
@@ -1297,6 +1386,13 @@ def retire_page_media_asset(
     if asset.media_version != expected_media_version:
         raise PageMediaPlanningError("Page media version changed before retirement.")
     if asset.governance_status == "retired":
+        supersede_current_scoped_media_authorizations_for_asset(
+            session,
+            asset.id or 0,
+            changed_at=asset.retired_at,
+        )
+        session.commit()
+        session.refresh(asset)
         return asset
     if asset.governance_status != "approved":
         raise PageMediaPlanningError("Only approved governed page media can be retired.")
@@ -1306,12 +1402,19 @@ def retire_page_media_asset(
     asset.retirement_rationale = _required_text(rationale, "Retirement rationale")
     asset.retired_at = datetime.now(UTC)
     asset.updated_at = datetime.now(UTC)
+    supersede_current_scoped_media_authorizations_for_asset(
+        session,
+        asset.id or 0,
+        changed_at=asset.retired_at,
+    )
     assignments = list(session.exec(
-        select(PageImageAssignment).where(
+        select(PageImageAssignment)
+        .where(
             PageImageAssignment.image_metadata_id == asset.id,
             PageImageAssignment.status == "active",
             PageImageAssignment.media_requirement_id.is_not(None),
         )
+        .with_for_update()
     ).all())
     for assignment in assignments:
         assignment.status = "retired"
@@ -1335,7 +1438,11 @@ def assign_media_to_requirement(
     payload: PageMediaAssignmentRequest,
 ) -> PageMediaWorkspace:
     plan, website = _plan_context(session, plan_id)
-    requirement = session.get(PlannedPageMediaRequirement, requirement_id)
+    requirement = session.exec(
+        select(PlannedPageMediaRequirement)
+        .where(PlannedPageMediaRequirement.id == requirement_id)
+        .with_for_update()
+    ).one_or_none()
     if (
         not requirement
         or requirement.website_id != website.id
@@ -1369,7 +1476,11 @@ def assign_media_to_requirement(
         raise PageMediaPlanningError(
             "Page Media planning suggestions are stale and must be refreshed."
         )
-    page = session.get(PlannedPage, requirement.planned_page_id)
+    page = session.exec(
+        select(PlannedPage)
+        .where(PlannedPage.id == requirement.planned_page_id)
+        .with_for_update()
+    ).one_or_none()
     if not page or page.website_id != website.id or page.site_plan_id != plan.id or not page.generated_page_id:
         raise PageMediaPlanningError("Media placement does not resolve to a Generated Page in this Website.")
     generated = session.get(GeneratedPage, page.generated_page_id)
@@ -1382,15 +1493,27 @@ def assign_media_to_requirement(
         _exact_page_composition_instances(session, page, plan, website),
         contract_version=requirement.contract_version,
     )
-    asset = _asset(session, payload.image_metadata_id)
+    asset = _asset_for_update(session, payload.image_metadata_id)
     errors = _asset_compatibility_errors(session, asset, requirement, page, website)
+    errors.extend(
+        scoped_media_assignment_authorization_errors(
+            session,
+            asset=asset,
+            requirement=requirement,
+            page=page,
+            website=website,
+        )
+    )
     if errors:
         raise PageMediaPlanningError(" ".join(errors))
     _revalidate_managed_asset(asset)
     history = list(session.exec(
-        select(PageImageAssignment).where(
+        select(PageImageAssignment)
+        .where(
             PageImageAssignment.media_requirement_id == requirement.id,
-        ).order_by(PageImageAssignment.assignment_version.desc())
+        )
+        .order_by(PageImageAssignment.assignment_version.desc())
+        .with_for_update()
     ).all())
     active_rows = [item for item in history if item.status == "active"]
     if len(active_rows) > 1:
@@ -1402,9 +1525,31 @@ def assign_media_to_requirement(
     clean_override_alt = (
         payload.override_alt_text.strip() if payload.override_alt_text else None
     )
+    version = (latest.assignment_version + 1) if latest and latest.assignment_version else 1
+    # This value is an opaque, versioned uniqueness token. Semantic consumers must
+    # use resolve_semantic_media_role(), never parse or compare this persisted field.
+    role = f"{requirement.placement_key}:assignment-{version}"
+    try:
+        semantic_role = resolve_semantic_media_role(
+            {
+                "generated_page_id": generated.id,
+                "website_id": website.id,
+                "site_plan_id": plan.id,
+                "planned_page_id": page.id,
+                "media_requirement_id": requirement.id,
+                "assignment_version": version,
+                "media_version": asset.media_version,
+                "placement_contract_version": requirement.contract_version,
+                "image_role": role,
+            },
+            requirement=requirement,
+            planned_page=page,
+        )
+    except SemanticMediaRoleError as exc:  # pragma: no cover - guarded above
+        raise PageMediaPlanningError(str(exc)) from exc
     display_preset = (
         payload.display_preset
-        or ("hero_desktop" if "hero" in requirement.placement_key else "card_thumbnail")
+        or ("hero_desktop" if semantic_role == "hero" else "card_thumbnail")
     ).strip().lower()
     if display_preset not in DISPLAY_PRESETS:
         raise PageMediaPlanningError("Page-media display preset is unsupported.")
@@ -1422,15 +1567,11 @@ def assign_media_to_requirement(
         and active.display_preset == display_preset
     ):
         return read_page_media_workspace(session, plan_id)
-    version = (latest.assignment_version + 1) if latest and latest.assignment_version else 1
-    if active:
-        active.status = "replaced"
-        active.replaced_by = clean_operator
-        active.replacement_rationale = clean_rationale
-        active.replaced_at = datetime.now(UTC)
-        active.updated_at = datetime.now(UTC)
-        session.add(active)
-    role = f"{requirement.placement_key}:assignment-{version}"
+    if active is not None and latest is not None and active.id != latest.id:
+        raise PageMediaPlanningError(
+            "The active governed assignment is not the immutable assignment-history tip."
+        )
+    handoff_at = datetime.now(UTC)
     assignment = PageImageAssignment(
         generated_page_id=generated.id or 0,
         image_metadata_id=asset.id or 0,
@@ -1450,16 +1591,64 @@ def assign_media_to_requirement(
         status="active",
         assigned_by=clean_operator,
         assignment_rationale=clean_rationale,
-        assigned_at=datetime.now(UTC),
+        assigned_at=handoff_at,
         replaces_page_image_assignment_id=latest.id if latest else None,
     )
-    generated.qa_status = "not_run"
-    generated.qa_result = None
-    generated.qa_checked_at = None
-    session.add(generated)
-    session.add(assignment)
-    _mark_composition_stale(session, page.id or 0)
-    session.commit()
+    authorization = current_scoped_media_authorization(
+        session,
+        requirement.id or 0,
+    )
+    if (
+        authorization is not None
+        and authorization.image_metadata_id == asset.id
+        and authorization.page_image_assignment_id is not None
+    ):
+        if active is None:
+            raise PageMediaPlanningError(
+                "Scoped authorization is bound to a missing active predecessor assignment."
+            )
+        try:
+            validate_scoped_media_authorization_assignment_successor(
+                authorization=authorization,
+                predecessor=active,
+                successor=assignment,
+                page=page,
+                requirement=requirement,
+                asset=asset,
+            )
+        except ScopedMediaAuthorizationError as exc:
+            raise PageMediaPlanningError(str(exc)) from exc
+    try:
+        # The locked requirement serializes assignment handoffs. Validate the
+        # full successor first, then update/insert/authorize atomically; no
+        # intermediate state is visible outside this transaction.
+        if active:
+            active.status = "replaced"
+            active.replaced_by = clean_operator
+            active.replacement_rationale = clean_rationale
+            active.replaced_at = handoff_at
+            active.updated_at = handoff_at
+            session.add(active)
+        generated.qa_status = "not_run"
+        generated.qa_result = None
+        generated.qa_checked_at = None
+        session.add(generated)
+        session.add(assignment)
+        session.flush()
+        if authorization is not None and authorization.image_metadata_id == asset.id:
+            bind_scoped_media_authorization_to_assignment(
+                session,
+                authorization=authorization,
+                assignment=assignment,
+            )
+        _mark_composition_stale(session, page.id or 0)
+        session.commit()
+    except ScopedMediaAuthorizationError as exc:
+        session.rollback()
+        raise PageMediaPlanningError(str(exc)) from exc
+    except Exception:
+        session.rollback()
+        raise
     return read_page_media_workspace(session, plan_id)
 
 
@@ -1605,6 +1794,7 @@ def validate_required_media_for_page(
             continue
         errors.extend(
             _assignment_binding_errors(
+                session,
                 assignment,
                 asset,
                 requirement,
@@ -1686,10 +1876,14 @@ def media_source_snapshot(
     for requirement in requirements:
         assignment = governed_assignment_for_requirement(session, requirement.id or 0)
         asset = session.get(ImageMetadata, assignment.image_metadata_id) if assignment else None
+        authorization = current_scoped_media_authorization(
+            session,
+            requirement.id or 0,
+        )
         if is_image_metadata_excluded(website, asset):
             assignment = None
             asset = None
-        assignments.append({
+        assignment_snapshot: dict[str, Any] = {
             "requirement_id": requirement.id,
             "requirement_version": requirement.version,
             "placement_contract_version": requirement.contract_version,
@@ -1702,7 +1896,33 @@ def media_source_snapshot(
             "media_version": asset.media_version if asset else None,
             "checksum_sha256": asset.checksum_sha256 if asset else None,
             "governance_status": asset.governance_status if asset else None,
-        })
+        }
+        if (
+            authorization is not None
+            and assignment is not None
+            and authorization.page_image_assignment_id == assignment.id
+            and authorization.assignment_version == assignment.assignment_version
+        ):
+            assignment_snapshot.update(
+                {
+                    "authorization_id": authorization.id,
+                    "authorization_version": authorization.authorization_version,
+                    "authorization_fingerprint": (
+                        authorization.authorization_fingerprint
+                    ),
+                    "authorization_terms": list(
+                        authorization.authorization_terms
+                    ),
+                    "reuse_policy": authorization.reuse_policy,
+                    "authorization_assignment_id": (
+                        authorization.page_image_assignment_id
+                    ),
+                    "authorization_assignment_version": (
+                        authorization.assignment_version
+                    ),
+                }
+            )
+        assignments.append(assignment_snapshot)
     return {
         "planning_record": (
             _planning_page_binding(planning, planned_page.id or 0)
@@ -1971,6 +2191,10 @@ def _asset_compatibility_errors(
     if asset is None:
         return ["Governed media asset is missing."]
     errors: list[str] = []
+    try:
+        resolve_requirement_semantic_media_role(requirement, page)
+    except SemanticMediaRoleError as exc:
+        errors.append(str(exc))
     if asset.website_id != website.id or asset.business_id != website.business_id:
         errors.append("Media asset crosses the Website or Business boundary.")
     if is_image_metadata_excluded(website, asset):
@@ -2025,10 +2249,38 @@ def _asset_compatibility_errors(
             errors.append("Media aspect ratio is incompatible with the approved placement.")
     if requirement.accessibility_intent != "decorative" and not asset.reviewed_alt_text:
         errors.append("Informative media requires reviewed alt text.")
+    terms = exact_contract_deviation_terms(
+        session,
+        asset=asset,
+        requirement=requirement,
+        page=page,
+        website=website,
+    )
+    if "contract_deviation_authorized" in terms:
+        authorizable_messages: set[str] = set()
+        if (
+            "reference_guided_synthetic_asset" in terms
+            and asset.acquisition_source == "generated"
+            and asset.provenance_type == "generated"
+        ):
+            authorizable_messages.add(
+                "Media source provenance is not permitted by this placement contract."
+            )
+        errors = [error for error in errors if error not in authorizable_messages]
+    errors.extend(
+        scoped_media_asset_use_errors(
+            session,
+            asset=asset,
+            requirement=requirement,
+            page=page,
+            website=website,
+        )
+    )
     return list(dict.fromkeys(errors))
 
 
 def _assignment_binding_errors(
+    session: Session,
     assignment: PageImageAssignment,
     asset: ImageMetadata,
     requirement: PlannedPageMediaRequirement,
@@ -2051,6 +2303,14 @@ def _assignment_binding_errors(
         errors.append("Governed media assignment is not bound to the exact approved media version.")
     if assignment.placement_contract_version != requirement.contract_version:
         errors.append("Governed media assignment is not bound to the exact placement-contract version.")
+    try:
+        resolve_semantic_media_role(
+            assignment,
+            requirement=requirement,
+            planned_page=page,
+        )
+    except SemanticMediaRoleError as exc:
+        errors.append(str(exc))
     if (
         assignment.assignment_version is None
         or not assignment.assigned_by
@@ -2058,6 +2318,16 @@ def _assignment_binding_errors(
         or assignment.assigned_at is None
     ):
         errors.append("Governed media assignment provenance is incomplete.")
+    errors.extend(
+        scoped_media_asset_use_errors(
+            session,
+            asset=asset,
+            requirement=requirement,
+            page=page,
+            website=website,
+            assignment=assignment,
+        )
+    )
     return errors
 
 
@@ -2078,6 +2348,12 @@ def _validate_asset_governance(asset: ImageMetadata, *, require_approved: bool) 
 
 
 def _governance_complete(asset: ImageMetadata) -> bool:
+    try:
+        required_authorization_terms = normalize_scoped_media_required_terms(
+            asset.required_authorization_terms or []
+        )
+    except ValueError:
+        return False
     required = (
         asset.website_id,
         asset.media_key,
@@ -2106,6 +2382,17 @@ def _governance_complete(asset: ImageMetadata) -> bool:
         and asset.provenance_type in PROVENANCE_TYPES
         and asset.rights_status in RIGHTS_STATUSES
         and asset.acquisition_source in ACQUISITION_SOURCES
+        and asset.usage_authorization_mode in {"contract_default", "scoped_required"}
+        and (
+            (
+                asset.usage_authorization_mode == "contract_default"
+                and not required_authorization_terms
+            )
+            or (
+                asset.usage_authorization_mode == "scoped_required"
+                and bool(required_authorization_terms)
+            )
+        )
         and _source_governance_valid(
             asset.acquisition_source or "",
             asset.provenance_type or "",
@@ -2494,21 +2781,69 @@ def _requirement_read(row: PlannedPageMediaRequirement) -> PlannedPageMediaRequi
     return PlannedPageMediaRequirementRead(**row.model_dump())
 
 
-def _asset_read(row: ImageMetadata) -> PageMediaAssetRead:
+def page_media_asset_read(row: ImageMetadata) -> PageMediaAssetRead:
+    """Serialize governed media with its server-derived approval identity."""
+
     values = row.model_dump()
     for key in ("approved_usage", "prohibited_usage", "permitted_placement_keys"):
         values[key] = values.get(key) or []
     values["gps_metadata"] = values.get("gps_metadata") or {}
     values["gps_metadata_status"] = values.get("gps_metadata_status") or "unknown"
+    values["approval_fingerprint"] = None
+    if (
+        row.governance_status == "approved"
+        and row.id is not None
+        and row.website_id is not None
+        and row.media_version is not None
+        and row.checksum_sha256
+        and row.approval_version is not None
+        and row.approved_by
+        and row.approved_at is not None
+    ):
+        values["approval_fingerprint"] = scoped_media_approval_fingerprint(
+            {
+                "image_metadata_id": row.id,
+                "asset_website_id": row.website_id,
+                "asset_business_id": row.business_id,
+                "media_version": row.media_version,
+                "asset_checksum_sha256": row.checksum_sha256,
+                "approval_version": row.approval_version,
+                "asset_approved_by": row.approved_by,
+                "asset_approved_at": row.approved_at,
+                "usage_authorization_mode": row.usage_authorization_mode,
+                "required_authorization_terms": (
+                    row.required_authorization_terms or []
+                ),
+            }
+        )
     return PageMediaAssetRead(**values)
 
 
-def _assignment_read(row: PageImageAssignment) -> PageMediaAssignmentRead:
-    return PageMediaAssignmentRead(**row.model_dump())
+def _assignment_read(
+    session: Session,
+    row: PageImageAssignment,
+) -> PageMediaAssignmentRead:
+    values = row.model_dump()
+    try:
+        values["image_role"] = resolve_semantic_media_role(row, session=session)
+    except SemanticMediaRoleError as exc:
+        raise PageMediaPlanningError(str(exc)) from exc
+    return PageMediaAssignmentRead(**values)
 
 
 def _asset(session: Session, image_id: int) -> ImageMetadata:
     asset = session.get(ImageMetadata, image_id)
+    if not asset:
+        raise PageMediaPlanningError("Page media asset not found.")
+    return asset
+
+
+def _asset_for_update(session: Session, image_id: int) -> ImageMetadata:
+    asset = session.exec(
+        select(ImageMetadata)
+        .where(ImageMetadata.id == image_id)
+        .with_for_update()
+    ).one_or_none()
     if not asset:
         raise PageMediaPlanningError("Page media asset not found.")
     return asset

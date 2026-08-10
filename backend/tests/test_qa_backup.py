@@ -485,8 +485,8 @@ def test_backup_055_round_trip_remaps_qa_identity_and_preserves_history(
         exported = export_backup(session, backup_dir=tmp_path)
 
     loaded = load_backup(Path(exported["path"]))
-    assert BACKUP_VERSION == "0.55"
-    assert loaded["metadata"]["version"] == "0.55"
+    assert BACKUP_VERSION == "0.56"
+    assert loaded["metadata"]["version"] == "0.56"
     assert loaded["metadata"]["table_counts"]["generated_page_qa_results"] == 3
 
     target_engine = _engine()

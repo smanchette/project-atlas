@@ -20,6 +20,13 @@ from app.schemas.media import (
     MediaAssignmentRequest,
     MediaAssignmentUpdateRequest,
 )
+from app.services.page_media_roles import (
+    SemanticMediaRoleError,
+    resolve_semantic_media_role,
+)
+from app.services.scoped_media_authorizations import (
+    governed_assignment_authorization_errors,
+)
 from app.services.website_media_safety import is_image_metadata_excluded
 
 router = APIRouter(prefix="/generated-pages", tags=["page media"])
@@ -510,6 +517,12 @@ def _serialize_assignment(
     session: Session,
     assignment: PageImageAssignment,
 ) -> AssignedMediaRead:
+    authorization_errors = governed_assignment_authorization_errors(
+        session,
+        assignment,
+    )
+    if authorization_errors:
+        raise HTTPException(status_code=409, detail=" ".join(authorization_errors))
     image = session.get(ImageMetadata, assignment.image_metadata_id)
     if not image:
         raise HTTPException(status_code=500, detail="Assigned image metadata is missing")
@@ -523,10 +536,14 @@ def _serialize_assignment(
                 "safety policy"
             ),
         )
+    try:
+        semantic_role = resolve_semantic_media_role(assignment, session=session)
+    except SemanticMediaRoleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return AssignedMediaRead(
         assignment_id=assignment.id or 0,
         generated_page_id=assignment.generated_page_id,
-        image_role=assignment.image_role,
+        image_role=semantic_role,
         sort_order=assignment.sort_order,
         override_focal_x=assignment.override_focal_x,
         override_focal_y=assignment.override_focal_y,

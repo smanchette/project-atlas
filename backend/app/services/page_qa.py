@@ -40,6 +40,13 @@ from app.services.page_composition import (
     PageCompositionError,
     read_composition_for_generated_page,
 )
+from app.services.page_media_roles import (
+    SemanticMediaRoleError,
+    resolve_semantic_media_role,
+)
+from app.services.scoped_media_authorizations import (
+    governed_assignment_authorization_errors,
+)
 from app.services.website_context import build_website_context
 from app.services.website_scope import require_page_website, require_single_website_selection
 from app.services.website_media_safety import is_image_metadata_excluded
@@ -260,9 +267,22 @@ def _semantic_qa_source_snapshot(
     media: list[dict[str, Any]] = []
     for assignment in assignments:
         image = session.get(ImageMetadata, assignment.image_metadata_id)
-        media.append(
-            {
-                "role": assignment.image_role,
+        authorization_errors = governed_assignment_authorization_errors(
+            session,
+            assignment,
+        )
+        if authorization_errors:
+            raise HTTPException(status_code=409, detail=" ".join(authorization_errors))
+        try:
+            semantic_role = resolve_semantic_media_role(assignment, session=session)
+        except SemanticMediaRoleError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        media_identity = {
+                "role": (
+                    assignment.image_role
+                    if assignment.media_requirement_id is None
+                    else semantic_role
+                ),
                 "sort_order": assignment.sort_order,
                 "status": assignment.status,
                 "override_alt_text": assignment.override_alt_text,
@@ -286,7 +306,12 @@ def _semantic_qa_source_snapshot(
                     website, image
                 ),
             }
-        )
+        if assignment.media_requirement_id is not None:
+            # Governed roles retain their opaque storage identity independently
+            # from the canonical semantic projection. Legacy snapshots remain
+            # byte-for-byte compatible with prior exact QA source hashes.
+            media_identity["storage_role_token"] = assignment.image_role
+        media.append(media_identity)
     media.sort(
         key=lambda value: json.dumps(
             value,

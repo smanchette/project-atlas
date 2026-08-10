@@ -654,8 +654,8 @@ def test_backup_051_includes_asset_and_assignment_provenance(tmp_path: Path):
         assign_identity_asset(session, identity.id, asset_id=asset.id, slot="header_logo", assigned_by="Operator", rationale="Approved")
         result = export_backup(session, backup_dir=tmp_path)
     payload = load_backup(Path(result["path"]))
-    assert BACKUP_VERSION == "0.55"
-    assert payload["metadata"]["version"] == "0.55"
+    assert BACKUP_VERSION == "0.56"
+    assert payload["metadata"]["version"] == "0.56"
     assert payload["data"]["brand_assets"][0]["purpose"]
     assert payload["data"]["brand_assets"][0]["accessibility_description"]
     assert payload["data"]["brand_assets"][0]["provenance_notes"]
@@ -669,7 +669,7 @@ def test_backup_051_includes_asset_and_assignment_provenance(tmp_path: Path):
         restored_asset = target.exec(select(BrandAsset)).one()
         restored_assignment = target.exec(select(WebsiteIdentityAssetAssignment)).one()
         assert restored["status"] == "restored"
-        assert payload["metadata"]["version"] == "0.55"
+        assert payload["metadata"]["version"] == "0.56"
         assert restored_asset.checksum_sha256 == asset.checksum_sha256
         assert restored_asset.approved_usage == ["website_header"]
         assert restored_asset.restrictions == ["social_preview"]
