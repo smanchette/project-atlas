@@ -14,6 +14,10 @@ from sqlmodel import Session, SQLModel, select
 
 from app.core.config import get_settings
 from app.db.session import create_db_and_tables, engine
+from app.services.media_display_presets import (
+    DisplayPresetError,
+    effective_assignment_display_preset,
+)
 from app.services.page_qa import historical_qa_payload_hash, qa_result_record_hash
 from app.models import (
     ApprovalAudit,
@@ -5737,6 +5741,15 @@ def _validate_page_media_ownership(
             raise BackupValidationError(
                 "Backup governed Page Image Assignment crosses a Website, Business, Site Plan, Planned Page, requirement, draft, or media boundary."
             )
+        try:
+            effective_assignment_display_preset(
+                record,
+                requirement=requirement,
+            )
+        except DisplayPresetError as exc:
+            raise BackupValidationError(
+                f"Backup governed Page Image Assignment has an invalid display preset: {exc}"
+            ) from exc
         _datetime_value(record["assigned_at"], "page_image_assignments.assigned_at")
         if record["status"] == "active":
             if (
@@ -5886,6 +5899,33 @@ def _validate_page_media_ownership(
             ):
                 raise BackupValidationError(
                     "Backup Page Composition Page Media assignment crosses scope or loses its exact version identity."
+                )
+            try:
+                effective_display_preset = effective_assignment_display_preset(
+                    assignment,
+                    requirement=requirement,
+                )
+            except DisplayPresetError as exc:
+                raise BackupValidationError(
+                    "Backup Page Composition Page Media assignment has an invalid "
+                    f"display preset: {exc}"
+                ) from exc
+            has_stored_preset = "stored_display_preset" in binding
+            has_effective_preset = "effective_display_preset" in binding
+            if has_stored_preset != has_effective_preset:
+                raise BackupValidationError(
+                    "Backup Page Composition Page Media assignment has partial "
+                    "display-preset diagnostics."
+                )
+            if has_stored_preset and (
+                binding.get("stored_display_preset")
+                != assignment.get("display_preset")
+                or binding.get("effective_display_preset")
+                != effective_display_preset
+            ):
+                raise BackupValidationError(
+                    "Backup Page Composition Page Media assignment display-preset "
+                    "diagnostics do not match the stored assignment and exact contract."
                 )
             _validate_composition_media_authorization_binding(
                 binding,

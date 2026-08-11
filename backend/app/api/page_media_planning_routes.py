@@ -8,6 +8,8 @@ from app.schemas.page_media_planning import (
     PageMediaAssetApprovalRequest,
     PageMediaAssetRead,
     PageMediaAssetRetirementRequest,
+    PageMediaBatchAssignmentRequest,
+    PageMediaBatchAssignmentResult,
     PageMediaAssignmentRequest,
     PageMediaPlacementDecisionRequest,
     PageMediaWorkspace,
@@ -21,6 +23,7 @@ from app.services.brand_assets import parse_string_list
 from app.services.page_media_planning import (
     PageMediaPlanningError,
     approve_page_media_asset,
+    assign_media_batch_to_requirements,
     assign_media_to_requirement,
     create_governed_page_media_asset,
     decide_media_placement,
@@ -71,6 +74,23 @@ def record_page_media_decision(
     session: Session = Depends(get_session),
 ) -> PageMediaWorkspace:
     return _planning_call(decide_media_placement, session, plan_id, payload)
+
+
+@router.post(
+    "/site-plans/{plan_id}/page-media/placements/assign-batch",
+    response_model=PageMediaBatchAssignmentResult,
+)
+def assign_page_media_batch(
+    plan_id: int,
+    payload: PageMediaBatchAssignmentRequest,
+    session: Session = Depends(get_session),
+) -> PageMediaBatchAssignmentResult:
+    return _planning_call(
+        assign_media_batch_to_requirements,
+        session,
+        plan_id,
+        payload,
+    )
 
 
 @router.post(

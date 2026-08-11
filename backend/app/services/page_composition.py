@@ -33,6 +33,11 @@ from app.schemas.page_composition import (
     SitePlanCompositionRefreshResult,
 )
 from app.services.brand_assets import identity_asset_contract_error
+from app.services.media_display_presets import (
+    DisplayPresetError,
+    effective_assignment_display_preset,
+    resolve_requirement_display_preset,
+)
 from app.services.page_media_roles import (
     SemanticMediaRoleError,
     resolve_semantic_media_role,
@@ -239,13 +244,38 @@ def composition_diagnostics(session: Session, plan: SitePlan) -> tuple[list[int]
 
 
 def _compose(session: Session, plan: SitePlan, planned: PlannedPage) -> tuple[PageComposition, str]:
+    # Serialize regeneration with governed assignment writers. Both paths lock
+    # the exact page, draft, and composition in this order before inspecting
+    # effective media sources, so a refresh cannot publish a pre-assignment
+    # snapshot after a concurrent batch has committed.
+    locked_planned = session.exec(
+        select(PlannedPage)
+        .where(PlannedPage.id == planned.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).one_or_none()
+    if locked_planned is None:
+        raise PageCompositionError("Planned Page is missing during composition refresh.")
+    planned = locked_planned
     if planned.website_id != plan.website_id:
         raise PageCompositionError("Planned Page crosses the Site Plan Website boundary.")
-    generated = session.get(GeneratedPage, planned.generated_page_id)
+    generated = session.exec(
+        select(GeneratedPage)
+        .where(GeneratedPage.id == planned.generated_page_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).one_or_none()
     if not generated or generated.website_id != plan.website_id or not generated.draft_content:
         raise PageCompositionError("Generated draft is missing or crosses the Website boundary.")
     if generated.page_type not in ALL_PAGE_TYPES:
         raise PageCompositionError(f"Unsupported page type: {generated.page_type}.")
+    existing = session.exec(
+        select(PageComposition)
+        .where(PageComposition.planned_page_id == planned.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).first()
+
     from app.services.page_media_planning import validate_required_media_for_page
 
     # The controlled regeneration path may inspect the stale predecessor's
@@ -261,7 +291,6 @@ def _compose(session: Session, plan: SitePlan, planned: PlannedPage) -> tuple[Pa
         raise PageCompositionError(" ".join(media_errors))
     snapshot = _source_snapshot(session, plan, planned, generated)
     source_hash = _hash(snapshot)
-    existing = session.exec(select(PageComposition).where(PageComposition.planned_page_id == planned.id)).first()
     suppressed_instance_keys = {
         str(value.get("instance_key") or "").strip()
         for value in (existing.operator_decisions if existing else [])
@@ -1192,6 +1221,14 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
                     )
                 except SemanticMediaRoleError as exc:
                     raise PageCompositionError(str(exc)) from exc
+                try:
+                    effective_display_preset = effective_assignment_display_preset(
+                        assignment,
+                        requirement=requirement,
+                        semantic_role=semantic_role,
+                    )
+                except DisplayPresetError as exc:
+                    raise PageCompositionError(str(exc)) from exc
                 authorization = (
                     current_scoped_media_authorization(session, requirement.id or 0)
                     if requirement
@@ -1217,6 +1254,11 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
                         requirement.contract_version if requirement else None
                     ),
                     "image_role": semantic_role,
+                    "stored_display_preset": assignment.display_preset,
+                    "effective_display_preset": effective_display_preset,
+                    # Preserve the pre-existing generic consumer field while making
+                    # stored and effective values independently inspectable.
+                    "display_preset": effective_display_preset,
                     "scoped_authorization_id": (
                         authorization.id if authorization else None
                     ),
@@ -1247,6 +1289,12 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
                 bindings["media_requirement_id"],
             )
             if requirement:
+                try:
+                    effective_display_preset = resolve_requirement_display_preset(
+                        requirement,
+                    )
+                except DisplayPresetError as exc:
+                    raise PageCompositionError(str(exc)) from exc
                 data = {
                     "purpose": requirement.purpose,
                     "customer_outcome": requirement.customer_outcome,
@@ -1261,6 +1309,9 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
                     "requirement_state": requirement.requirement_state,
                     "media_requirement_id": requirement.id,
                     "placement_contract_version": requirement.contract_version,
+                    "stored_display_preset": None,
+                    "effective_display_preset": effective_display_preset,
+                    "display_preset": effective_display_preset,
                 }
         else:
             data = next(value for value in draft.get("image_placements", []) if value.get("key") == bindings["placement_key"])
@@ -1490,20 +1541,35 @@ def _media_assignment_source_identity(
 ) -> dict[str, Any]:
     """Preserve legacy source hashes while binding governed semantic identity."""
 
+    semantic_role = (
+        assignment.image_role
+        if assignment.media_requirement_id is None
+        else _semantic_role(session, assignment)
+    )
     value: dict[str, Any] = {
         "id": assignment.id,
         "image_metadata_id": assignment.image_metadata_id,
-        "role": (
-            assignment.image_role
-            if assignment.media_requirement_id is None
-            else _semantic_role(session, assignment)
-        ),
+        "role": semantic_role,
         "status": assignment.status,
         "updated_at": assignment.updated_at.isoformat(),
         "image_updated_at": image.updated_at.isoformat() if image else None,
     }
     if assignment.media_requirement_id is not None:
+        requirement = session.get(
+            PlannedPageMediaRequirement,
+            assignment.media_requirement_id,
+        )
+        try:
+            effective_display_preset = effective_assignment_display_preset(
+                assignment,
+                requirement=requirement,
+                semantic_role=semantic_role,
+            )
+        except DisplayPresetError as exc:
+            raise PageCompositionError(str(exc)) from exc
         value["storage_role_token"] = assignment.image_role
+        value["stored_display_preset"] = assignment.display_preset
+        value["effective_display_preset"] = effective_display_preset
     return value
 
 

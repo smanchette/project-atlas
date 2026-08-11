@@ -19,7 +19,11 @@ import {
   buildPageMediaDecisionPayload,
   pageMediaTargetLabel,
 } from "../src/pages/PageMediaPlanningPage";
-import { renderComponent } from "../src/pages/GeneratedPagePreview";
+import {
+  pageMediaDisplayPresetClassName,
+  renderComponent,
+  resolvePageMediaDisplayPreset,
+} from "../src/pages/GeneratedPagePreview";
 import type { DecisionFormState } from "../src/pages/PageMediaPlanningPage";
 import type {
   PageMediaAssetCandidate,
@@ -56,11 +60,13 @@ test("unassigned governed media renders an honest local placeholder", () => {
       media_requirement_id: 81,
       target_component_key: "hero",
       target_component_instance_key: "hero",
+      placement_contract_version: 2,
     },
     resolved_data: {
       purpose: "Establish the approved service visually.",
       intended_subject: "An authentic approved service photograph.",
       requirement_state: "required",
+      placement_contract_version: 2,
     },
   };
 
@@ -70,6 +76,183 @@ test("unassigned governed media renders an honest local placeholder", () => {
   assert.match(markup, /Placement reserved for future approved media\./);
   assert.doesNotMatch(markup, /<img\b/i);
   assert.doesNotMatch(markup, /\bsrc=/i);
+  assert.match(markup, /data-display-preset-status="unassigned"/);
+  assert.match(markup, /data-display-preset-source="unassigned"/);
+  assert.match(markup, /data-effective-display-preset="unassigned"/);
+  assert.doesNotMatch(markup, /Governed media unavailable/);
+});
+
+function governedMediaComponent(
+  resolvedOverrides: Record<string, unknown> = {},
+  bindingOverrides: Record<string, unknown> = {},
+): PageComponentInstance {
+  return {
+    instance_key: "media_placement:requirement-81",
+    component_key: "media_placement",
+    contract_version: 1,
+    region: "main",
+    position: 5,
+    variant: "approved_media",
+    input_bindings: {
+      media_requirement_id: 81,
+      target_component_key: "hero",
+      target_component_instance_key: "hero",
+      placement_contract_version: 2,
+      ...bindingOverrides,
+    },
+    resolved_data: {
+      purpose: "Establish the approved service visually.",
+      placement_contract_version: 2,
+      image_role: "hero",
+      asset_url: "/api/media/files/service.webp",
+      alt_text: "Approved service work.",
+      image_title: "Approved service photograph",
+      stored_display_preset: "hero_desktop",
+      effective_display_preset: "hero_desktop",
+      focal_x: 0.5,
+      focal_y: 0.5,
+      ...resolvedOverrides,
+    },
+  };
+}
+
+test("frontend receives and exposes the effective display preset", () => {
+  const markup = renderToStaticMarkup(renderComponent(governedMediaComponent()));
+
+  assert.match(markup, /data-effective-display-preset="hero_desktop"/);
+  assert.match(markup, /data-display-preset-source="effective"/);
+  assert.match(markup, /class="previewGalleryItem preset-hero-desktop"/);
+});
+
+test("landscape media uses an actual 16:9 frame without a 4:3 wrapper", () => {
+  const css = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+
+  assert.match(
+    css,
+    /\.previewGalleryItem\.preset-hero-desktop \.previewMediaFrame\s*\{[^}]*aspect-ratio:\s*16\s*\/\s*9;/s,
+  );
+  assert.doesNotMatch(
+    css,
+    /\.previewGalleryItem\.preset-hero-desktop \.previewMediaFrame\s*\{[^}]*aspect-ratio:\s*4\s*\/\s*3;/s,
+  );
+});
+
+test("the 16:9 preset preserves the full image without crop or stretching", () => {
+  const css = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+
+  assert.match(
+    css,
+    /\.previewGalleryItem\.preset-hero-desktop \.previewMediaFrame img\s*\{[^}]*object-fit:\s*contain;/s,
+  );
+  assert.match(css, /\.previewMediaFrame img\s*\{[^}]*width:\s*100%;[^}]*max-width:\s*100%;[^}]*height:\s*100%;/s);
+  assert.doesNotMatch(
+    css,
+    /\.previewGalleryItem\.preset-hero-desktop \.previewMediaFrame img\s*\{[^}]*object-fit:\s*(?:cover|fill);/s,
+  );
+});
+
+test("desktop tablet and mobile share the bounded 16:9 contain contract", () => {
+  const css = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+  const className = pageMediaDisplayPresetClassName("hero_desktop");
+
+  assert.equal(className, "previewGalleryItem preset-hero-desktop");
+  assert.match(css, /\.previewGalleryItem\s*\{[^}]*min-width:\s*0;[^}]*max-width:\s*100%;/s);
+  assert.match(css, /\.previewMediaFrame\s*\{[^}]*width:\s*100%;[^}]*max-width:\s*100%;[^}]*overflow:\s*hidden;/s);
+  assert.doesNotMatch(css, /@media[^{}]*\{[^{}]*preset-hero-desktop[^{}]*(?:cover|fill)/s);
+});
+
+test("unknown or missing current V2 presets fail closed", () => {
+  const unknown = governedMediaComponent({
+    stored_display_preset: "panorama",
+    effective_display_preset: "panorama",
+  });
+  const missing = governedMediaComponent({
+    stored_display_preset: undefined,
+    effective_display_preset: undefined,
+  });
+  const legacyAliasOnly = governedMediaComponent({
+    stored_display_preset: undefined,
+    display_preset: "hero_desktop",
+  });
+
+  for (const component of [unknown, missing, legacyAliasOnly]) {
+    const resolution = resolvePageMediaDisplayPreset(
+      component.resolved_data,
+      component.input_bindings,
+    );
+    const markup = renderToStaticMarkup(renderComponent(component));
+    assert.equal(resolution.preset, null);
+    assert.equal(resolution.source, "blocked_current");
+    assert.match(markup, /data-display-preset-status="blocked"/);
+    assert.doesNotMatch(markup, /<img\b/i);
+  }
+});
+
+test("historical missing presets use the explicit non-cropping legacy fallback", () => {
+  const component = governedMediaComponent(
+    {
+      placement_contract_version: 1,
+      stored_display_preset: undefined,
+      effective_display_preset: undefined,
+    },
+    { placement_contract_version: 1 },
+  );
+  const resolution = resolvePageMediaDisplayPreset(
+    component.resolved_data,
+    component.input_bindings,
+  );
+  const markup = renderToStaticMarkup(renderComponent(component));
+
+  assert.deepEqual(resolution, {
+    preset: "original",
+    source: "legacy_fallback",
+    error: null,
+  });
+  assert.match(markup, /preset-original/);
+  assert.match(markup, /data-display-preset-source="legacy_fallback"/);
+});
+
+test("filename rationale and alt text cannot control the display preset", () => {
+  const component = governedMediaComponent({
+    effective_display_preset: undefined,
+    stored_display_preset: undefined,
+    original_filename: "hero_desktop.webp",
+    assignment_rationale: "Use hero_desktop.",
+    alt_text: "hero_desktop",
+  });
+  const resolution = resolvePageMediaDisplayPreset(
+    component.resolved_data,
+    component.input_bindings,
+  );
+
+  assert.equal(resolution.preset, null);
+  assert.equal(resolution.source, "blocked_current");
+});
+
+test("process and evidence placements share a landscape preset without becoming hero roles", () => {
+  const processMarkup = renderToStaticMarkup(renderComponent(governedMediaComponent({
+    image_role: "service",
+  })));
+  const evidenceMarkup = renderToStaticMarkup(renderComponent(governedMediaComponent({
+    image_role: "support",
+  })));
+
+  assert.match(processMarkup, /preset-hero-desktop/);
+  assert.match(processMarkup, /data-semantic-media-role="service"/);
+  assert.match(evidenceMarkup, /preset-hero-desktop/);
+  assert.match(evidenceMarkup, /data-semantic-media-role="support"/);
+  assert.doesNotMatch(processMarkup, /data-semantic-media-role="hero"/);
+  assert.doesNotMatch(evidenceMarkup, /data-semantic-media-role="hero"/);
+});
+
+test("canonical semantic role and display preset remain separate concerns", () => {
+  const process = governedMediaComponent({ image_role: "service" });
+  const evidence = governedMediaComponent({ image_role: "support" });
+
+  assert.deepEqual(
+    resolvePageMediaDisplayPreset(process.resolved_data, process.input_bindings),
+    resolvePageMediaDisplayPreset(evidence.resolved_data, evidence.input_bindings),
+  );
 });
 
 const website: Website = {
@@ -191,6 +374,7 @@ function decision(overrides: Partial<PageMediaRequirementDecision> = {}): PageMe
     intended_subject: "Approved service work.",
     orientation: "landscape",
     aspect_ratio: "16:9",
+    effective_display_preset: "hero_desktop",
     minimum_width: 1200,
     minimum_height: 675,
     crop_intent: "Preserve the subject.",
@@ -277,6 +461,7 @@ function placement(overrides: Partial<PageMediaPlacement> = {}): PageMediaPlacem
       override_focal_y: null,
       override_alt_text: null,
       display_preset: "hero_desktop",
+      effective_display_preset: "hero_desktop",
       status: "active",
       assigned_by: "Operator",
       assignment_rationale: "Approved for the service hero.",

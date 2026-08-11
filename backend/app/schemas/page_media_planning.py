@@ -3,7 +3,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.schemas.scoped_media_authorizations import (
+    ScopedMediaAuthorizationTerm,
+    ScopedMediaReusePolicy,
+    normalize_scoped_media_authorization_terms,
+)
 
 
 RequirementState = Literal["required", "advisory", "excluded", "deferred"]
@@ -43,6 +49,7 @@ class PlannedPageMediaRequirementRead(BaseModel):
     intended_subject: str
     orientation: str
     aspect_ratio: str
+    effective_display_preset: str
     minimum_width: int
     minimum_height: int
     crop_intent: str
@@ -170,6 +177,86 @@ class PageMediaAssignmentRequest(BaseModel):
     display_preset: str | None = Field(default=None, max_length=80)
 
 
+class PageMediaBatchAssignmentOperation(BaseModel):
+    """One exact optimistic assignment operation inside an atomic page batch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    media_requirement_id: int = Field(gt=0)
+    expected_requirement_version: int = Field(ge=1)
+    expected_placement_contract_version: int = Field(ge=1)
+    placement_key: str = Field(min_length=1, max_length=120)
+    target_component_instance_key: str = Field(min_length=1, max_length=200)
+    image_metadata_id: int = Field(gt=0)
+    expected_media_version: int = Field(ge=1)
+    expected_asset_checksum_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_approval_version: int = Field(ge=1)
+    expected_approval_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_current_assignment_id: int | None = Field(default=None, gt=0)
+    expected_current_assignment_version: int | None = Field(default=None, ge=1)
+    expected_scoped_authorization_id: int = Field(gt=0)
+    expected_authorization_version: int = Field(ge=1)
+    expected_authorization_fingerprint: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    expected_authorization_reuse_policy: ScopedMediaReusePolicy
+    expected_authorization_terms: list[ScopedMediaAuthorizationTerm] = Field(
+        min_length=1,
+    )
+    canonical_media_role: Literal["hero", "service", "support"]
+    assigned_by: str = Field(min_length=1, max_length=160)
+    rationale: str = Field(min_length=1, max_length=2000)
+    override_focal_x: float | None = Field(default=None, ge=0, le=1)
+    override_focal_y: float | None = Field(default=None, ge=0, le=1)
+    override_alt_text: str | None = Field(default=None, max_length=1000)
+    display_preset: str | None = Field(default=None, max_length=80)
+
+    @field_validator("expected_authorization_terms", mode="before")
+    @classmethod
+    def normalize_expected_authorization_terms(
+        cls,
+        value: object,
+    ) -> list[str]:
+        return normalize_scoped_media_authorization_terms(value)
+
+    @field_validator("target_component_instance_key", mode="before")
+    @classmethod
+    def require_exact_component_instance_target(cls, value: object) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                "Batch assignment requires an exact component-instance target"
+            )
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_current_assignment_identity(
+        self,
+    ) -> "PageMediaBatchAssignmentOperation":
+        if (self.expected_current_assignment_id is None) != (
+            self.expected_current_assignment_version is None
+        ):
+            raise ValueError(
+                "Expected current assignment ID and version must both be null or "
+                "both be populated"
+            )
+        return self
+
+
+class PageMediaBatchAssignmentRequest(BaseModel):
+    """Exact starting page/composition identity for one atomic assignment batch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    website_id: int = Field(gt=0)
+    site_plan_id: int = Field(gt=0)
+    planned_page_id: int = Field(gt=0)
+    generated_page_id: int = Field(gt=0)
+    composition_id: int = Field(gt=0)
+    expected_composition_version: int = Field(ge=1)
+    expected_composition_source_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    assignments: list[PageMediaBatchAssignmentOperation] = Field(min_length=1)
+
+
 class PageMediaAssignmentRead(BaseModel):
     id: int
     generated_page_id: int
@@ -187,6 +274,7 @@ class PageMediaAssignmentRead(BaseModel):
     override_focal_y: float | None
     override_alt_text: str | None
     display_preset: str
+    effective_display_preset: str
     status: str
     assigned_by: str | None
     assignment_rationale: str | None
@@ -265,3 +353,16 @@ class PageMediaWorkspace(BaseModel):
     summary: PageMediaPlanningSummary
     ready: bool
     evaluated_at: datetime
+
+
+class PageMediaBatchAssignmentResult(BaseModel):
+    website_id: int
+    site_plan_id: int
+    planned_page_id: int
+    generated_page_id: int
+    composition_id: int
+    composition_version: int
+    starting_composition_source_hash: str
+    composition_status: str
+    assignments: list[PageMediaAssignmentRead]
+    workspace: PageMediaWorkspace

@@ -420,6 +420,7 @@ export type PageMediaRequirementDecision = {
   intended_subject: string;
   orientation: string;
   aspect_ratio: string;
+  effective_display_preset: PageMediaDisplayPreset;
   minimum_width: number | null;
   minimum_height: number | null;
   crop_intent: string;
@@ -457,7 +458,8 @@ export type PageMediaAssignment = {
   override_focal_x: number | null;
   override_focal_y: number | null;
   override_alt_text: string | null;
-  display_preset: string;
+  display_preset: PageMediaDisplayPreset;
+  effective_display_preset: PageMediaDisplayPreset;
   status: string;
   assigned_by: string | null;
   assignment_rationale: string | null;
@@ -471,6 +473,23 @@ export type PageMediaAssignment = {
   replaces_page_image_assignment_id: number | null;
   created_at: string;
   updated_at: string;
+};
+
+export type PageMediaDisplayPreset =
+  | "hero_desktop"
+  | "hero_mobile"
+  | "card_thumbnail"
+  | "square"
+  | "original";
+
+export type ResolvedPageMediaData = Record<string, unknown> & {
+  placement_contract_version?: number | null;
+  image_role?: string | null;
+  asset_url?: string | null;
+  stored_display_preset?: PageMediaDisplayPreset | string | null;
+  effective_display_preset?: PageMediaDisplayPreset | string | null;
+  /** Historical API payloads may expose only this stored assignment value. */
+  display_preset?: PageMediaDisplayPreset | string | null;
 };
 
 export type PageMediaPlannedPage = {
@@ -964,7 +983,9 @@ export type ExportMediaReference = {
   asset_url?: string | null;
   optimized_url?: string | null;
   thumbnail_url?: string | null;
-  display_preset: string;
+  display_preset: PageMediaDisplayPreset;
+  stored_display_preset?: PageMediaDisplayPreset | null;
+  effective_display_preset?: PageMediaDisplayPreset | null;
   focal_x: number;
   focal_y: number;
   review_status: string;
@@ -1890,7 +1911,7 @@ export type AssignedMedia = {
   override_focal_x?: number | null;
   override_focal_y?: number | null;
   override_alt_text?: string | null;
-  display_preset: "hero_desktop" | "hero_mobile" | "card_thumbnail" | "square" | "original";
+  display_preset: PageMediaDisplayPreset;
   effective_focal_x: number;
   effective_focal_y: number;
   effective_alt_text: string;

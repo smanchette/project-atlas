@@ -2245,41 +2245,68 @@ th {
 
 .previewGalleryItem {
   min-width: 0;
+  max-width: 100%;
   margin: 0;
 }
 
-.previewGalleryItem img {
+.previewMediaFrame {
+  width: 100%;
+  max-width: 100%;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--atlas-color-neutral, #e8eeeb);
+}
+
+.previewMediaFrame img {
   display: block;
   width: 100%;
-  aspect-ratio: 4 / 3;
-  border-radius: 8px;
+  max-width: 100%;
+  height: 100%;
   object-fit: cover;
   object-position: var(--focal-x, 50%) var(--focal-y, 50%);
 }
 
-.previewGalleryItem.preset-hero-desktop img {
-  aspect-ratio: 16 / 7;
+.previewGalleryItem.preset-hero-desktop .previewMediaFrame {
+  aspect-ratio: 16 / 9;
 }
 
-.previewGalleryItem.preset-hero-mobile img {
+.previewGalleryItem.preset-hero-desktop .previewMediaFrame img {
+  object-fit: contain;
+}
+
+.previewGalleryItem.preset-hero-mobile .previewMediaFrame {
   aspect-ratio: 4 / 5;
 }
 
-.previewGalleryItem.preset-square img {
+.previewGalleryItem.preset-card-thumbnail .previewMediaFrame {
+  aspect-ratio: 4 / 3;
+}
+
+.previewGalleryItem.preset-square .previewMediaFrame {
   aspect-ratio: 1;
 }
 
-.previewGalleryItem.preset-original img {
+.previewGalleryItem.preset-original .previewMediaFrame {
   aspect-ratio: auto;
   max-height: 420px;
+}
+
+.previewGalleryItem.preset-original .previewMediaFrame img {
+  height: auto;
+  max-height: 420px;
   object-fit: contain;
-  background: var(--atlas-color-neutral, #e8eeeb);
 }
 
 .previewGalleryItem figcaption {
   margin-top: 7px;
   color: var(--atlas-color-text, #66766f);
   font-size: 13px;
+}
+
+.previewMediaPresetError {
+  border-color: var(--atlas-color-error, #b42318);
+  color: var(--atlas-color-error, #b42318);
 }
 
 .previewServiceGallery {

@@ -28,6 +28,10 @@ from app.schemas.page_export import (
     PageExportPackage,
 )
 from app.services.draft_generation import FORBIDDEN_PHRASES
+from app.services.media_display_presets import (
+    DisplayPresetError,
+    effective_assignment_display_preset,
+)
 from app.services.page_type_review import (
     draft_content_sections,
     review_contract_for,
@@ -276,6 +280,27 @@ def _media_references(session: Session, page_id: int) -> list[ExportMediaReferen
             )
         except SemanticMediaRoleError as exc:
             _governed_export_conflict(str(exc))
+        requirement = (
+            session.get(
+                PlannedPageMediaRequirement,
+                assignment.media_requirement_id,
+            )
+            if assignment.media_requirement_id is not None
+            else None
+        )
+        try:
+            effective_display_preset = effective_assignment_display_preset(
+                assignment,
+                requirement=requirement,
+                semantic_role=semantic_role,
+            )
+        except DisplayPresetError as exc:
+            if assignment.media_requirement_id is not None:
+                _governed_export_conflict(str(exc))
+            raise HTTPException(
+                status_code=409,
+                detail=f"Page-media export blocked: {exc}",
+            ) from exc
         image = session.get(ImageMetadata, assignment.image_metadata_id)
         if not image:
             if assignment.media_requirement_id is not None:
@@ -297,7 +322,9 @@ def _media_references(session: Session, page_id: int) -> list[ExportMediaReferen
                 asset_url=image.asset_url,
                 optimized_url=image.optimized_url,
                 thumbnail_url=image.thumbnail_url,
-                display_preset=assignment.display_preset,
+                stored_display_preset=assignment.display_preset,
+                effective_display_preset=effective_display_preset,
+                display_preset=effective_display_preset,
                 focal_x=assignment.override_focal_x if assignment.override_focal_x is not None else image.focal_x,
                 focal_y=assignment.override_focal_y if assignment.override_focal_y is not None else image.focal_y,
                 review_status=image.review_status,

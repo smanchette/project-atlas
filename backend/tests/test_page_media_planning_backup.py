@@ -421,6 +421,8 @@ def _seed_governed_graph(
                 "media_version": image_v2.media_version,
                 "checksum_sha256": image_v2.checksum_sha256,
                 "governance_status": image_v2.governance_status,
+                "stored_display_preset": assignment_v2.display_preset,
+                "effective_display_preset": "hero_desktop",
             }
         ],
     }
@@ -491,6 +493,17 @@ def test_backup_055_round_trip_remaps_complete_page_media_graph_and_is_idempoten
     assert loaded["metadata"]["version"] == "0.56"
     assert loaded["metadata"]["table_counts"]["website_media_planning_records"] == 2
     assert loaded["metadata"]["table_counts"]["planned_page_media_requirements"] == 2
+    exported_assignment = next(
+        item
+        for item in loaded["data"]["page_image_assignments"]
+        if item["status"] == "active"
+    )
+    assert exported_assignment["display_preset"] == "hero_desktop"
+    exported_binding = loaded["data"]["page_compositions"][0]["source_snapshot"][
+        "page_media"
+    ]["assignments"][0]
+    assert exported_binding["stored_display_preset"] == "hero_desktop"
+    assert exported_binding["effective_display_preset"] == "hero_desktop"
 
     target_engine = _engine()
     SQLModel.metadata.create_all(target_engine)
@@ -577,6 +590,10 @@ def test_backup_055_round_trip_remaps_complete_page_media_graph_and_is_idempoten
             )
             for item in assignments
         ] == ["hero", "hero"]
+        assert [item.display_preset for item in assignments] == [
+            "hero_desktop",
+            "hero_desktop",
+        ]
 
         composition = session.exec(
             select(PageComposition).where(
@@ -605,6 +622,8 @@ def test_backup_055_round_trip_remaps_complete_page_media_graph_and_is_idempoten
         assert page_media["assignments"][0]["requirement_id"] == requirements[1].id
         assert page_media["assignments"][0]["assignment_id"] == assignments[1].id
         assert page_media["assignments"][0]["asset_id"] == images[1].id
+        assert page_media["assignments"][0]["stored_display_preset"] == "hero_desktop"
+        assert page_media["assignments"][0]["effective_display_preset"] == "hero_desktop"
         assert composition.source_hash == _hash(composition.source_snapshot)
 
         restore_backup(session, exported["path"])
@@ -612,6 +631,43 @@ def test_backup_055_round_trip_remaps_complete_page_media_graph_and_is_idempoten
         assert len(session.exec(select(PlannedPageMediaRequirement)).all()) == 2
         assert len(session.exec(select(ImageMetadata)).all()) == 2
         assert len(session.exec(select(PageImageAssignment)).all()) == 2
+
+
+def test_backup_056_restores_historical_composition_without_preset_diagnostics(
+    tmp_path: Path,
+) -> None:
+    source_engine = _engine()
+    SQLModel.metadata.create_all(source_engine)
+    with Session(source_engine) as session:
+        _seed_governed_graph(session)
+        exported = export_backup(session, backup_dir=tmp_path)
+
+    payload = json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
+    composition = payload["data"]["page_compositions"][0]
+    binding = composition["source_snapshot"]["page_media"]["assignments"][0]
+    binding.pop("stored_display_preset")
+    binding.pop("effective_display_preset")
+    composition["source_hash"] = _hash(composition["source_snapshot"])
+    historical_path = _write_payload(
+        tmp_path,
+        payload,
+        "historical-composition-without-preset-diagnostics.json",
+    )
+
+    loaded = load_backup(historical_path)
+    assert "stored_display_preset" not in loaded["data"]["page_compositions"][0][
+        "source_snapshot"
+    ]["page_media"]["assignments"][0]
+
+    target_engine = _engine()
+    SQLModel.metadata.create_all(target_engine)
+    with Session(target_engine) as session:
+        result = restore_backup(session, historical_path)
+        assert result["status"] == "restored"
+        active = session.exec(
+            select(PageImageAssignment).where(PageImageAssignment.status == "active")
+        ).one()
+        assert active.display_preset == "hero_desktop"
 
 
 def test_backup_053_accepts_human_readable_approved_source_constraints(
@@ -713,6 +769,8 @@ def test_backup_052_defaults_new_groups_empty_without_inventing_governance(
         ("requirement_website", "crosses a Website"),
         ("planning_snapshot", "source snapshot"),
         ("assignment_page", "crosses a Website"),
+        ("assignment_display_preset", "invalid display preset"),
+        ("composition_display_preset", "diagnostics do not match"),
         ("image_replacement", "replacement crosses ownership"),
         ("source_provenance", "incomplete or invalid governed page-media"),
         ("external_asset_url", "incomplete or invalid governed page-media"),
@@ -742,6 +800,19 @@ def test_backup_053_rejects_malformed_or_cross_scope_page_media_graphs(
         payload["data"]["page_image_assignments"][0]["website_id"] = ids[
             "other_website_id"
         ]
+    elif tamper == "assignment_display_preset":
+        active_assignment = next(
+            item
+            for item in payload["data"]["page_image_assignments"]
+            if item["status"] == "active"
+        )
+        active_assignment["display_preset"] = "card_thumbnail"
+    elif tamper == "composition_display_preset":
+        composition = payload["data"]["page_compositions"][0]
+        composition["source_snapshot"]["page_media"]["assignments"][0][
+            "effective_display_preset"
+        ] = "card_thumbnail"
+        composition["source_hash"] = _hash(composition["source_snapshot"])
     elif tamper == "source_provenance":
         payload["data"]["image_metadata"][0]["acquisition_source"] = "generated"
         payload["data"]["image_metadata"][0]["provenance_type"] = "company_original"

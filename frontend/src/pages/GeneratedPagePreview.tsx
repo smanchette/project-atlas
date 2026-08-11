@@ -18,7 +18,9 @@ import type {
   GeneratedPageRevision,
   PageComponentInstance,
   PageComposition,
-  PageQAResult
+  PageMediaDisplayPreset,
+  PageQAResult,
+  ResolvedPageMediaData,
 } from "../types";
 
 type PreviewData = {
@@ -262,28 +264,7 @@ export function renderComponent(component: PageComponentInstance) {
         </section>
       );
     case "media_placement":
-      return (
-        <section className="previewBand" key={component.instance_key} aria-label={text(data.purpose)}>
-          <div className="previewContainer">
-            {data.asset_url ? (
-              <figure className="previewGalleryItem">
-                <img
-                  src={text(data.asset_url)}
-                  alt={text(data.alt_text)}
-                  title={text(data.image_title)}
-                  style={{ objectPosition: `${number(data.focal_x, 0.5) * 100}% ${number(data.focal_y, 0.5) * 100}%` }}
-                />
-                {Boolean(data.caption) && <figcaption>{text(data.caption)}</figcaption>}
-              </figure>
-            ) : (
-              <div className="previewImagePlaceholder">
-                <Image size={28} aria-hidden="true" /><strong>{text(data.purpose)}</strong>
-                <span>Placement reserved for future approved media.</span>
-              </div>
-            )}
-          </div>
-        </section>
-      );
+      return <MediaPlacement component={component} key={component.instance_key} />;
     case "destination_cards":
     case "related_page_links":
       return <RelatedLinks component={component} key={component.instance_key} />;
@@ -332,6 +313,143 @@ export function renderComponent(component: PageComponentInstance) {
     default:
       return <PreviewState key={component.instance_key} message={`Unsupported semantic component: ${component.component_key}`} error />;
   }
+}
+
+const PAGE_MEDIA_DISPLAY_PRESETS = new Set<PageMediaDisplayPreset>([
+  "hero_desktop",
+  "hero_mobile",
+  "card_thumbnail",
+  "square",
+  "original",
+]);
+
+export type PageMediaDisplayPresetResolution = {
+  preset: PageMediaDisplayPreset | null;
+  source: "effective" | "stored_legacy" | "legacy_fallback" | "unassigned" | "blocked_current";
+  error: string | null;
+};
+
+/**
+ * Resolve presentation only from the governed preset contract. Free-text media
+ * metadata and semantic role are deliberately excluded from this decision.
+ */
+export function resolvePageMediaDisplayPreset(
+  resolvedData: Record<string, unknown>,
+  inputBindings: Record<string, unknown> = {},
+): PageMediaDisplayPresetResolution {
+  const contractVersion = positiveInteger(
+    resolvedData.placement_contract_version,
+  ) ?? positiveInteger(inputBindings.placement_contract_version);
+  const effectiveRaw = normalizedString(resolvedData.effective_display_preset);
+  const storedRaw = normalizedString(resolvedData.stored_display_preset);
+  const legacyStoredRaw = normalizedString(resolvedData.display_preset);
+  const effective = displayPreset(effectiveRaw);
+  const stored = displayPreset(storedRaw);
+  const legacyStored = displayPreset(legacyStoredRaw);
+  const isCurrentGovernedContract = contractVersion !== null && contractVersion >= 2;
+  const hasAssignedAsset = Boolean(normalizedString(resolvedData.asset_url));
+
+  if (isCurrentGovernedContract) {
+    if (!effective) {
+      if (!hasAssignedAsset) {
+        return { preset: null, source: "unassigned", error: null };
+      }
+      return {
+        preset: null,
+        source: "blocked_current",
+        error: "The current governed media display preset is missing or unsupported.",
+      };
+    }
+    if (hasAssignedAsset && (!stored || stored !== effective)) {
+      return {
+        preset: null,
+        source: "blocked_current",
+        error: "The stored and effective governed media display presets are not current.",
+      };
+    }
+    return { preset: effective, source: "effective", error: null };
+  }
+
+  if (effective) return { preset: effective, source: "effective", error: null };
+  const historicalStored = stored ?? legacyStored;
+  if (historicalStored) {
+    return {
+      preset: historicalStored,
+      source: "stored_legacy",
+      error: null,
+    };
+  }
+  return { preset: "original", source: "legacy_fallback", error: null };
+}
+
+export function pageMediaDisplayPresetClassName(
+  preset: PageMediaDisplayPreset,
+): string {
+  return `previewGalleryItem preset-${preset.replace(/_/g, "-")}`;
+}
+
+function MediaPlacement({ component }: { component: PageComponentInstance }) {
+  const data: ResolvedPageMediaData = component.resolved_data;
+  const resolution = resolvePageMediaDisplayPreset(data, component.input_bindings);
+  const semanticRole = normalizedString(data.image_role);
+  const hasAssignedAsset = Boolean(normalizedString(data.asset_url));
+  const diagnostics = {
+    "data-effective-display-preset": resolution.preset ?? (hasAssignedAsset ? "blocked" : "unassigned"),
+    "data-display-preset-source": resolution.source,
+    "data-semantic-media-role": semanticRole || undefined,
+  };
+
+  if (resolution.error || (hasAssignedAsset && !resolution.preset)) {
+    return (
+      <section
+        className="previewBand"
+        aria-label={text(data.purpose)}
+        data-display-preset-status="blocked"
+        {...diagnostics}
+      >
+        <div className="previewContainer">
+          <div className="previewImagePlaceholder previewMediaPresetError" role="alert">
+            <AlertTriangle size={28} aria-hidden="true" />
+            <strong>Governed media unavailable.</strong>
+            <span>{resolution.error}</span>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section
+      className="previewBand"
+      aria-label={text(data.purpose)}
+      data-display-preset-status={hasAssignedAsset ? "resolved" : "unassigned"}
+      {...diagnostics}
+    >
+      <div className="previewContainer">
+        {hasAssignedAsset && resolution.preset ? (
+          <figure
+            className={pageMediaDisplayPresetClassName(resolution.preset)}
+            {...diagnostics}
+          >
+            <div className="previewMediaFrame">
+              <img
+                src={text(data.asset_url)}
+                alt={text(data.alt_text)}
+                title={text(data.image_title)}
+                style={{ objectPosition: `${number(data.focal_x, 0.5) * 100}% ${number(data.focal_y, 0.5) * 100}%` }}
+              />
+            </div>
+            {Boolean(data.caption) && <figcaption>{text(data.caption)}</figcaption>}
+          </figure>
+        ) : (
+          <div className="previewImagePlaceholder" {...diagnostics}>
+            <Image size={28} aria-hidden="true" /><strong>{text(data.purpose)}</strong>
+            <span>Placement reserved for future approved media.</span>
+          </div>
+        )}
+      </div>
+    </section>
+  );
 }
 
 export function effectiveQaDisplayStatus(result: PageQAResult): string {
@@ -543,9 +661,18 @@ export function buildNavigationTree(values: unknown[]): NavigationTreeResult {
 }
 
 function text(value: unknown) { return typeof value === "string" || typeof value === "number" ? String(value) : ""; }
+function normalizedString(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
 function array(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 function record(value: unknown): Record<string, unknown> { return value && typeof value === "object" ? value as Record<string, unknown> : {}; }
 function number(value: unknown, fallback: number) { return typeof value === "number" && Number.isFinite(value) ? value : fallback; }
+function positiveInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
+function displayPreset(value: string): PageMediaDisplayPreset | null {
+  return PAGE_MEDIA_DISPLAY_PRESETS.has(value as PageMediaDisplayPreset)
+    ? value as PageMediaDisplayPreset
+    : null;
+}
 function nullablePositiveInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 }

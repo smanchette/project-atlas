@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -8,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException, UploadFile
+from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.core.config import get_settings
@@ -21,12 +24,16 @@ from app.models import (
     PlannedPageMediaRequirement,
     PlanningRecord,
     SemanticComponentDefinition,
+    ScopedMediaAuthorization,
     SitePlan,
     Website,
     WebsiteMediaPlanningRecord,
 )
 from app.schemas.page_media_planning import (
     PageMediaAssetRead,
+    PageMediaBatchAssignmentOperation,
+    PageMediaBatchAssignmentRequest,
+    PageMediaBatchAssignmentResult,
     PageMediaAssignmentRead,
     PageMediaAssignmentRequest,
     PageMediaDiagnostic,
@@ -38,7 +45,13 @@ from app.schemas.page_media_planning import (
     PageMediaWorkspace,
     PlannedPageMediaRequirementRead,
 )
+from app.services.media_display_presets import (
+    DisplayPresetError,
+    effective_assignment_display_preset,
+    resolve_requirement_display_preset,
+)
 from app.schemas.scoped_media_authorizations import (
+    normalize_scoped_media_authorization_terms,
     normalize_scoped_media_required_terms,
     scoped_media_approval_fingerprint,
 )
@@ -116,13 +129,6 @@ PROVENANCE_RIGHTS: dict[str, set[str]] = {
     "public_domain": {"public_domain"},
 }
 ORIENTATIONS = {"any", "landscape", "portrait", "square"}
-DISPLAY_PRESETS = {
-    "hero_desktop",
-    "hero_mobile",
-    "card_thumbnail",
-    "square",
-    "original",
-}
 DEFAULT_APPROVED_SOURCE_CONSTRAINTS = [
     "approved_company_media",
     "licensed_media",
@@ -425,6 +431,18 @@ PAGE_TYPE_MEDIA_CONTRACTS: dict[str, list[dict[str, Any]]] = {
 
 class PageMediaPlanningError(ValueError):
     pass
+
+
+@dataclass
+class _PreparedPageMediaAssignment:
+    operation: PageMediaBatchAssignmentOperation
+    requirement: PlannedPageMediaRequirement
+    asset: ImageMetadata
+    active: PageImageAssignment | None
+    latest: PageImageAssignment | None
+    authorization: ScopedMediaAuthorization | None
+    assignment: PageImageAssignment
+    is_noop: bool = False
 
 
 def read_page_media_workspace(session: Session, plan_id: int) -> PageMediaWorkspace:
@@ -1490,7 +1508,13 @@ def assign_media_to_requirement(
         page,
         requirement.component_or_section,
         requirement.target_component_instance_key,
-        _exact_page_composition_instances(session, page, plan, website),
+        _exact_page_composition_instances(
+            session,
+            page,
+            plan,
+            website,
+            lock=True,
+        ),
         contract_version=requirement.contract_version,
     )
     asset = _asset_for_update(session, payload.image_metadata_id)
@@ -1547,12 +1571,14 @@ def assign_media_to_requirement(
         )
     except SemanticMediaRoleError as exc:  # pragma: no cover - guarded above
         raise PageMediaPlanningError(str(exc)) from exc
-    display_preset = (
-        payload.display_preset
-        or ("hero_desktop" if semantic_role == "hero" else "card_thumbnail")
-    ).strip().lower()
-    if display_preset not in DISPLAY_PRESETS:
-        raise PageMediaPlanningError("Page-media display preset is unsupported.")
+    try:
+        display_preset = resolve_requirement_display_preset(
+            requirement,
+            requested_preset=payload.display_preset,
+            semantic_role=semantic_role,
+        )
+    except DisplayPresetError as exc:
+        raise PageMediaPlanningError(str(exc)) from exc
     if (
         active
         and active.image_metadata_id == asset.id
@@ -1650,6 +1676,643 @@ def assign_media_to_requirement(
         session.rollback()
         raise
     return read_page_media_workspace(session, plan_id)
+
+
+def assign_media_batch_to_requirements(
+    session: Session,
+    plan_id: int,
+    payload: PageMediaBatchAssignmentRequest,
+) -> PageMediaBatchAssignmentResult:
+    """Atomically bind multiple exact requirements on one current composition."""
+
+    try:
+        if payload.site_plan_id != plan_id:
+            raise PageMediaPlanningError(
+                "Batch assignment Site Plan identity does not match the route."
+            )
+        requirement_ids = [
+            operation.media_requirement_id for operation in payload.assignments
+        ]
+        if len(requirement_ids) != len(set(requirement_ids)):
+            raise PageMediaPlanningError(
+                "Batch assignment contains a duplicate media requirement."
+            )
+        asserted_targets = [
+            operation.target_component_instance_key.strip()
+            for operation in payload.assignments
+            if operation.target_component_instance_key is not None
+            and operation.target_component_instance_key.strip()
+        ]
+        if len(asserted_targets) != len(set(asserted_targets)):
+            raise PageMediaPlanningError(
+                "Batch assignment contains a duplicate exact component-instance target."
+            )
+        operations_by_asset: dict[int, list[PageMediaBatchAssignmentOperation]] = (
+            defaultdict(list)
+        )
+        for operation in payload.assignments:
+            operations_by_asset[operation.image_metadata_id].append(operation)
+        for operations in operations_by_asset.values():
+            if len(operations) < 2:
+                continue
+            if any(
+                operation.expected_authorization_reuse_policy
+                == "requirement_only"
+                or "no_reuse" in set(operation.expected_authorization_terms)
+                for operation in operations
+            ):
+                raise PageMediaPlanningError(
+                    "Batch assignment duplicates a governed asset whose exact "
+                    "authorization prohibits reuse."
+                )
+
+        plan = session.get(SitePlan, plan_id)
+        if plan is None:
+            raise PageMediaPlanningError("Site Plan not found.")
+        website = session.get(Website, payload.website_id)
+        if website is None or plan.website_id != website.id:
+            raise PageMediaPlanningError(
+                "Batch assignment crosses the selected Website or Site Plan boundary."
+            )
+        if session.get(Business, website.business_id) is None:
+            raise PageMediaPlanningError("Website Business not found.")
+
+        # Governed assignment writers acquire locks in the same order as the
+        # standalone workflow: requirements, page/composition, assets,
+        # assignment histories, then scoped authorization histories.
+        requirements = list(
+            session.exec(
+                select(PlannedPageMediaRequirement)
+                .where(PlannedPageMediaRequirement.id.in_(requirement_ids))
+                .order_by(PlannedPageMediaRequirement.id)
+                .with_for_update()
+            ).all()
+        )
+        requirements_by_id = {
+            requirement.id: requirement for requirement in requirements
+        }
+        if len(requirements_by_id) != len(requirement_ids):
+            raise PageMediaPlanningError(
+                "Batch assignment contains a missing media requirement."
+            )
+
+        page = session.exec(
+            select(PlannedPage)
+            .where(PlannedPage.id == payload.planned_page_id)
+            .with_for_update()
+        ).one_or_none()
+        if (
+            page is None
+            or page.website_id != website.id
+            or page.site_plan_id != plan.id
+            or page.generated_page_id != payload.generated_page_id
+        ):
+            raise PageMediaPlanningError(
+                "Batch assignment crosses its exact Planned Page boundary."
+            )
+        generated = session.exec(
+            select(GeneratedPage)
+            .where(GeneratedPage.id == payload.generated_page_id)
+            .with_for_update()
+        ).one_or_none()
+        if (
+            generated is None
+            or generated.website_id != website.id
+            or generated.business_id != website.business_id
+        ):
+            raise PageMediaPlanningError(
+                "Batch assignment crosses its exact Generated Page boundary."
+            )
+        composition = session.exec(
+            select(PageComposition)
+            .where(PageComposition.id == payload.composition_id)
+            .with_for_update()
+        ).one_or_none()
+        if (
+            composition is None
+            or composition.website_id != website.id
+            or composition.site_plan_id != plan.id
+            or composition.planned_page_id != page.id
+            or composition.generated_page_id != generated.id
+        ):
+            raise PageMediaPlanningError(
+                "Batch assignment crosses its exact Page Composition boundary."
+            )
+        if (
+            composition.composition_version
+            != payload.expected_composition_version
+            or composition.source_hash
+            != payload.expected_composition_source_hash
+        ):
+            raise PageMediaPlanningError(
+                "Starting Page Composition identity or version changed."
+            )
+        if composition.source_hash != _hash(composition.source_snapshot):
+            raise PageMediaPlanningError(
+                "Starting Page Composition source hash does not match its snapshot."
+            )
+        if composition.status != "current":
+            raise PageMediaPlanningError(
+                "Starting Page Composition is stale; refresh it before batch assignment."
+            )
+        current_planning = session.exec(
+            select(WebsiteMediaPlanningRecord)
+            .where(WebsiteMediaPlanningRecord.site_plan_id == plan.id)
+            .order_by(WebsiteMediaPlanningRecord.version.desc())
+        ).first()
+        _require_planning_record_scope(current_planning, plan, website)
+        if current_planning is None:
+            raise PageMediaPlanningError(
+                "Batch assignment requires a current Page Media planning record."
+            )
+        pages = list(
+            session.exec(
+                select(PlannedPage)
+                .where(PlannedPage.site_plan_id == plan.id)
+                .order_by(PlannedPage.id)
+            ).all()
+        )
+        if current_planning.source_hash != _hash(
+            _planning_source_snapshot(session, plan, pages)
+        ):
+            raise PageMediaPlanningError(
+                "Page Media planning suggestions are stale and must be refreshed."
+            )
+        composition_instances = _exact_page_composition_instances(
+            session,
+            page,
+            plan,
+            website,
+        )
+
+        asset_ids = sorted(
+            {operation.image_metadata_id for operation in payload.assignments}
+        )
+        assets = list(
+            session.exec(
+                select(ImageMetadata)
+                .where(ImageMetadata.id.in_(asset_ids))
+                .order_by(ImageMetadata.id)
+                .with_for_update()
+            ).all()
+        )
+        assets_by_id = {asset.id: asset for asset in assets}
+        if len(assets_by_id) != len(asset_ids):
+            raise PageMediaPlanningError(
+                "Batch assignment contains a missing governed media asset."
+            )
+
+        # Lock every assignment and authorization row that can affect the exact
+        # batch or one selected asset. Sorted lock acquisition avoids inverted
+        # ordering across concurrent batches.
+        selected_assignment_rows = list(
+            session.exec(
+                select(PageImageAssignment)
+                .where(
+                    PageImageAssignment.media_requirement_id.in_(
+                        requirement_ids
+                    )
+                )
+                .order_by(PageImageAssignment.id)
+                .with_for_update()
+            ).all()
+        )
+        page_assignment_rows = list(
+            session.exec(
+                select(PageImageAssignment)
+                .where(
+                    PageImageAssignment.planned_page_id == page.id,
+                    PageImageAssignment.status == "active",
+                )
+                .order_by(PageImageAssignment.id)
+                .with_for_update()
+            ).all()
+        )
+        assignment_history: dict[int, list[PageImageAssignment]] = defaultdict(list)
+        for row in selected_assignment_rows:
+            if row.media_requirement_id is not None:
+                assignment_history[row.media_requirement_id].append(row)
+        session.exec(
+            select(ScopedMediaAuthorization)
+            .where(
+                or_(
+                    ScopedMediaAuthorization.media_requirement_id.in_(
+                        requirement_ids
+                    ),
+                    ScopedMediaAuthorization.image_metadata_id.in_(asset_ids),
+                )
+            )
+            .order_by(ScopedMediaAuthorization.id)
+            .with_for_update()
+        ).all()
+
+        # Recompute effective currentness only after all records that can alter
+        # the governed media source have been locked, and hold those locks until
+        # commit. A self-consistent stored snapshot is not sufficient if another
+        # authoritative source has drifted without first flipping the status.
+        try:
+            from app.services.page_composition import (
+                PageCompositionError,
+                _source_snapshot as composition_source_snapshot,
+            )
+
+            live_composition_source = composition_source_snapshot(
+                session,
+                plan,
+                page,
+                generated,
+            )
+        except (PageCompositionError, PageMediaPlanningError) as exc:
+            raise PageMediaPlanningError(str(exc)) from exc
+        if _hash(live_composition_source) != composition.source_hash:
+            raise PageMediaPlanningError(
+                "Starting Page Composition is stale against its live authoritative sources."
+            )
+
+        actual_targets: set[str] = set()
+        target_requirement_ids: dict[str, int] = {}
+        for requirement in requirements:
+            target = str(requirement.target_component_instance_key or "").strip()
+            if target:
+                if target in actual_targets:
+                    raise PageMediaPlanningError(
+                        "Batch assignment contains a duplicate exact "
+                        "component-instance target."
+                    )
+                actual_targets.add(target)
+                target_requirement_ids[target] = requirement.id or 0
+        for active_row in page_assignment_rows:
+            if (
+                active_row.status != "active"
+                or active_row.media_requirement_id in requirements_by_id
+                or active_row.media_requirement_id is None
+            ):
+                continue
+            other_requirement = session.get(
+                PlannedPageMediaRequirement,
+                active_row.media_requirement_id,
+            )
+            other_target = str(
+                getattr(other_requirement, "target_component_instance_key", "") or ""
+            ).strip()
+            if other_target and other_target in target_requirement_ids:
+                raise PageMediaPlanningError(
+                    "An existing active governed assignment already occupies a "
+                    "batch exact component-instance target."
+                )
+
+        prepared: list[_PreparedPageMediaAssignment] = []
+        for operation in payload.assignments:
+            requirement = requirements_by_id[operation.media_requirement_id]
+            if (
+                requirement.website_id != website.id
+                or requirement.business_id != website.business_id
+                or requirement.site_plan_id != plan.id
+                or requirement.planned_page_id != page.id
+                or requirement.lifecycle_status != "active"
+            ):
+                raise PageMediaPlanningError(
+                    "Batch media placement is missing, stale, or crosses its exact page scope."
+                )
+            if (
+                requirement.version != operation.expected_requirement_version
+                or requirement.contract_version
+                != operation.expected_placement_contract_version
+            ):
+                raise PageMediaPlanningError(
+                    "Batch media requirement or placement-contract version changed."
+                )
+            if (
+                requirement.placement_key != operation.placement_key
+                or requirement.target_component_instance_key
+                != operation.target_component_instance_key
+            ):
+                raise PageMediaPlanningError(
+                    "Batch media placement key or exact component-instance target changed."
+                )
+            if requirement.requirement_state not in {"required", "advisory"}:
+                raise PageMediaPlanningError(
+                    "Excluded or deferred placements cannot receive media assignments."
+                )
+            if not _requirement_matches_current_planning(
+                session,
+                requirement,
+                current_planning,
+            ):
+                raise PageMediaPlanningError(
+                    "Batch media placement is bound to a stale planning record."
+                )
+            _require_exact_page_composition_target(
+                page,
+                requirement.component_or_section,
+                requirement.target_component_instance_key,
+                composition_instances,
+                contract_version=requirement.contract_version,
+            )
+            try:
+                semantic_role = resolve_requirement_semantic_media_role(
+                    requirement,
+                    page,
+                )
+            except SemanticMediaRoleError as exc:
+                raise PageMediaPlanningError(str(exc)) from exc
+            if semantic_role != operation.canonical_media_role:
+                raise PageMediaPlanningError(
+                    "Batch canonical semantic media role does not match the exact contract."
+                )
+            try:
+                display_preset = resolve_requirement_display_preset(
+                    requirement,
+                    requested_preset=operation.display_preset,
+                    semantic_role=semantic_role,
+                )
+            except DisplayPresetError as exc:
+                raise PageMediaPlanningError(str(exc)) from exc
+
+            asset = assets_by_id[operation.image_metadata_id]
+            actual_approval_fingerprint = page_media_asset_read(
+                asset
+            ).approval_fingerprint
+            if (
+                asset.media_version != operation.expected_media_version
+                or asset.checksum_sha256
+                != operation.expected_asset_checksum_sha256
+            ):
+                raise PageMediaPlanningError(
+                    "Governed media asset identity or version changed."
+                )
+            if (
+                asset.approval_version != operation.expected_approval_version
+                or actual_approval_fingerprint
+                != operation.expected_approval_fingerprint
+            ):
+                raise PageMediaPlanningError(
+                    "Governed media approval identity or fingerprint changed."
+                )
+            compatibility_errors = _asset_compatibility_errors(
+                session,
+                asset,
+                requirement,
+                page,
+                website,
+            )
+            compatibility_errors.extend(
+                scoped_media_assignment_authorization_errors(
+                    session,
+                    asset=asset,
+                    requirement=requirement,
+                    page=page,
+                    website=website,
+                )
+            )
+            if compatibility_errors:
+                raise PageMediaPlanningError(
+                    " ".join(dict.fromkeys(compatibility_errors))
+                )
+            _revalidate_managed_asset(asset)
+
+            authorization = current_scoped_media_authorization(
+                session,
+                requirement.id or 0,
+            )
+            if authorization is None:
+                raise PageMediaPlanningError(
+                    "Batch assignment requires a current exact scoped media authorization."
+                )
+            expected_terms = normalize_scoped_media_authorization_terms(
+                operation.expected_authorization_terms
+            )
+            if (
+                authorization.id
+                != operation.expected_scoped_authorization_id
+                or authorization.authorization_version
+                != operation.expected_authorization_version
+                or authorization.authorization_fingerprint
+                != operation.expected_authorization_fingerprint
+                or authorization.reuse_policy
+                != operation.expected_authorization_reuse_policy
+                or list(authorization.authorization_terms or [])
+                != expected_terms
+            ):
+                raise PageMediaPlanningError(
+                    "Scoped media authorization identity, typed terms, reuse "
+                    "policy, or fingerprint changed."
+                )
+
+            history = sorted(
+                assignment_history.get(requirement.id or 0, []),
+                key=lambda row: (
+                    row.assignment_version or 0,
+                    row.id or 0,
+                ),
+                reverse=True,
+            )
+            active_rows = [row for row in history if row.status == "active"]
+            if len(active_rows) > 1:
+                raise PageMediaPlanningError(
+                    "Media placement has multiple active governed assignments."
+                )
+            active = active_rows[0] if active_rows else None
+            latest = history[0] if history else None
+            if active is None:
+                if operation.expected_current_assignment_id is not None:
+                    raise PageMediaPlanningError(
+                        "Expected current governed assignment no longer exists."
+                    )
+            elif (
+                active.id != operation.expected_current_assignment_id
+                or active.assignment_version
+                != operation.expected_current_assignment_version
+            ):
+                raise PageMediaPlanningError(
+                    "Current governed assignment identity or version changed."
+                )
+            if active is not None and latest is not None and active.id != latest.id:
+                raise PageMediaPlanningError(
+                    "The active governed assignment is not the immutable "
+                    "assignment-history tip."
+                )
+
+            clean_operator = _required_text(
+                operation.assigned_by,
+                "Assignment operator",
+            )
+            clean_rationale = _required_text(
+                operation.rationale,
+                "Assignment rationale",
+            )
+            clean_override_alt = (
+                operation.override_alt_text.strip()
+                if operation.override_alt_text
+                else None
+            )
+            version = (
+                latest.assignment_version + 1
+                if latest is not None and latest.assignment_version is not None
+                else 1
+            )
+            role = f"{requirement.placement_key}:assignment-{version}"
+            assignment = PageImageAssignment(
+                generated_page_id=generated.id or 0,
+                image_metadata_id=asset.id or 0,
+                website_id=website.id,
+                site_plan_id=plan.id,
+                planned_page_id=page.id,
+                media_requirement_id=requirement.id,
+                assignment_version=version,
+                media_version=asset.media_version,
+                placement_contract_version=requirement.contract_version,
+                image_role=role,
+                sort_order=0,
+                override_focal_x=operation.override_focal_x,
+                override_focal_y=operation.override_focal_y,
+                override_alt_text=clean_override_alt,
+                display_preset=display_preset,
+                status="active",
+                assigned_by=clean_operator,
+                assignment_rationale=clean_rationale,
+                assigned_at=datetime.now(UTC),
+                replaces_page_image_assignment_id=latest.id if latest else None,
+            )
+            try:
+                resolved_assignment_role = resolve_semantic_media_role(
+                    assignment,
+                    requirement=requirement,
+                    planned_page=page,
+                )
+            except SemanticMediaRoleError as exc:
+                raise PageMediaPlanningError(str(exc)) from exc
+            if resolved_assignment_role != operation.canonical_media_role:
+                raise PageMediaPlanningError(
+                    "Batch assignment loses its canonical semantic media role."
+                )
+
+            is_noop = bool(
+                active
+                and active.image_metadata_id == asset.id
+                and active.media_version == asset.media_version
+                and active.placement_contract_version
+                == requirement.contract_version
+                and active.assigned_by == clean_operator
+                and active.assignment_rationale == clean_rationale
+                and active.override_focal_x == operation.override_focal_x
+                and active.override_focal_y == operation.override_focal_y
+                and active.override_alt_text == clean_override_alt
+                and active.display_preset == display_preset
+                and (
+                    authorization is None
+                    or (
+                        authorization.page_image_assignment_id == active.id
+                        and authorization.assignment_version
+                        == active.assignment_version
+                    )
+                )
+            )
+            if is_noop:
+                assignment = active  # type: ignore[assignment]
+            elif (
+                authorization is not None
+                and authorization.image_metadata_id == asset.id
+                and authorization.page_image_assignment_id is not None
+            ):
+                if active is None:
+                    raise PageMediaPlanningError(
+                        "Scoped authorization is bound to a missing active "
+                        "predecessor assignment."
+                    )
+                try:
+                    validate_scoped_media_authorization_assignment_successor(
+                        authorization=authorization,
+                        predecessor=active,
+                        successor=assignment,
+                        page=page,
+                        requirement=requirement,
+                        asset=asset,
+                    )
+                except ScopedMediaAuthorizationError as exc:
+                    raise PageMediaPlanningError(str(exc)) from exc
+            prepared.append(
+                _PreparedPageMediaAssignment(
+                    operation=operation,
+                    requirement=requirement,
+                    asset=asset,
+                    active=active,
+                    latest=latest,
+                    authorization=authorization,
+                    assignment=assignment,
+                    is_noop=is_noop,
+                )
+            )
+
+        changing = [item for item in prepared if not item.is_noop]
+        if changing:
+            handoff_at = datetime.now(UTC)
+            with session.begin_nested():
+                for item in changing:
+                    if item.active is not None:
+                        item.active.status = "replaced"
+                        item.active.replaced_by = item.assignment.assigned_by
+                        item.active.replacement_rationale = (
+                            item.assignment.assignment_rationale
+                        )
+                        item.active.replaced_at = handoff_at
+                        item.active.updated_at = handoff_at
+                        session.add(item.active)
+                    item.assignment.assigned_at = handoff_at
+                    session.add(item.assignment)
+                session.flush()
+                for item in changing:
+                    if (
+                        item.authorization is not None
+                        and item.authorization.image_metadata_id == item.asset.id
+                    ):
+                        bind_scoped_media_authorization_to_assignment(
+                            session,
+                            authorization=item.authorization,
+                            assignment=item.assignment,
+                        )
+                generated.qa_status = "not_run"
+                generated.qa_result = None
+                generated.qa_checked_at = None
+                session.add(generated)
+                _mark_composition_stale(session, page.id or 0)
+                session.flush()
+
+        assignment_results = [
+            _assignment_read(session, item.assignment) for item in prepared
+        ]
+        workspace = read_page_media_workspace(session, plan_id)
+        result = PageMediaBatchAssignmentResult(
+            website_id=website.id or 0,
+            site_plan_id=plan.id or 0,
+            planned_page_id=page.id or 0,
+            generated_page_id=generated.id or 0,
+            composition_id=composition.id or 0,
+            composition_version=composition.composition_version,
+            starting_composition_source_hash=(
+                payload.expected_composition_source_hash
+            ),
+            composition_status=composition.status,
+            assignments=assignment_results,
+            workspace=workspace,
+        )
+        session.commit()
+        return result
+    except ScopedMediaAuthorizationError as exc:
+        session.rollback()
+        raise PageMediaPlanningError(str(exc)) from exc
+    except IntegrityError as exc:
+        session.rollback()
+        raise PageMediaPlanningError(
+            "Concurrent governed media assignment conflict; reload the exact "
+            "page and retry."
+        ) from exc
+    except PageMediaPlanningError:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
 
 
 def effective_media_requirements(
@@ -1897,6 +2560,27 @@ def media_source_snapshot(
             "checksum_sha256": asset.checksum_sha256 if asset else None,
             "governance_status": asset.governance_status if asset else None,
         }
+        if assignment is not None and asset is not None:
+            try:
+                semantic_role = resolve_semantic_media_role(
+                    assignment,
+                    requirement=requirement,
+                    planned_page=planned_page,
+                )
+                assignment_snapshot.update(
+                    {
+                        "stored_display_preset": assignment.display_preset,
+                        "effective_display_preset": (
+                            effective_assignment_display_preset(
+                                assignment,
+                                requirement=requirement,
+                                semantic_role=semantic_role,
+                            )
+                        ),
+                    }
+                )
+            except (DisplayPresetError, SemanticMediaRoleError) as exc:
+                raise PageMediaPlanningError(str(exc)) from exc
         if (
             authorization is not None
             and assignment is not None
@@ -2304,13 +2988,22 @@ def _assignment_binding_errors(
     if assignment.placement_contract_version != requirement.contract_version:
         errors.append("Governed media assignment is not bound to the exact placement-contract version.")
     try:
-        resolve_semantic_media_role(
+        semantic_role = resolve_semantic_media_role(
             assignment,
             requirement=requirement,
             planned_page=page,
         )
     except SemanticMediaRoleError as exc:
         errors.append(str(exc))
+    else:
+        try:
+            effective_assignment_display_preset(
+                assignment,
+                requirement=requirement,
+                semantic_role=semantic_role,
+            )
+        except DisplayPresetError as exc:
+            errors.append(str(exc))
     if (
         assignment.assignment_version is None
         or not assignment.assigned_by
@@ -2539,12 +3232,14 @@ def _exact_page_composition_instances(
     *,
     require_current: bool = True,
     allow_media_only_stale: bool = False,
+    lock: bool = False,
 ) -> dict[str, dict[str, str]]:
-    composition = session.exec(
-        select(PageComposition).where(
-            PageComposition.planned_page_id == page.id
-        )
-    ).first()
+    statement = select(PageComposition).where(
+        PageComposition.planned_page_id == page.id
+    )
+    if lock:
+        statement = statement.with_for_update()
+    composition = session.exec(statement).first()
     if composition is None:
         raise PageMediaPlanningError(
             f"No exact Page Composition exists for Planned Page {page.id}."
@@ -2778,7 +3473,14 @@ def _planning_record_read(row: WebsiteMediaPlanningRecord) -> PageMediaPlanningR
 
 
 def _requirement_read(row: PlannedPageMediaRequirement) -> PlannedPageMediaRequirementRead:
-    return PlannedPageMediaRequirementRead(**row.model_dump())
+    values = row.model_dump()
+    try:
+        values["effective_display_preset"] = (
+            resolve_requirement_display_preset(row)
+        )
+    except DisplayPresetError as exc:
+        raise PageMediaPlanningError(str(exc)) from exc
+    return PlannedPageMediaRequirementRead(**values)
 
 
 def page_media_asset_read(row: ImageMetadata) -> PageMediaAssetRead:
@@ -2825,8 +3527,19 @@ def _assignment_read(
 ) -> PageMediaAssignmentRead:
     values = row.model_dump()
     try:
-        values["image_role"] = resolve_semantic_media_role(row, session=session)
-    except SemanticMediaRoleError as exc:
+        semantic_role = resolve_semantic_media_role(row, session=session)
+        requirement = (
+            session.get(PlannedPageMediaRequirement, row.media_requirement_id)
+            if row.media_requirement_id is not None
+            else None
+        )
+        values["image_role"] = semantic_role
+        values["effective_display_preset"] = effective_assignment_display_preset(
+            row,
+            requirement=requirement,
+            semantic_role=semantic_role,
+        )
+    except (DisplayPresetError, SemanticMediaRoleError) as exc:
         raise PageMediaPlanningError(str(exc)) from exc
     return PageMediaAssignmentRead(**values)
 

@@ -37,6 +37,8 @@ class ExportMediaReference(SQLModel):
     asset_url: str | None = None
     optimized_url: str | None = None
     thumbnail_url: str | None = None
+    stored_display_preset: str | None = None
+    effective_display_preset: str | None = None
     display_preset: str
     focal_x: float
     focal_y: float
