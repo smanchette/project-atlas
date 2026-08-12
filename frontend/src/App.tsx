@@ -27,6 +27,7 @@ import ApprovalQueuePage from "./pages/ApprovalQueuePage";
 import CitiesPage from "./pages/CitiesPage";
 import GeneratedPagesPage from "./pages/GeneratedPagesPage";
 import GeneratedPagePreview from "./pages/GeneratedPagePreview";
+import ThemeLabPage from "./pages/ThemeLabPage";
 import ExportPackagePage from "./pages/ExportPackagePage";
 import KnowledgeBlocksPage from "./pages/KnowledgeBlocksPage";
 import MediaLibraryPage from "./pages/MediaLibraryPage";
@@ -158,6 +159,7 @@ function App() {
   return (
     <Routes>
       <Route path="/generated-pages/:id/preview" element={<GeneratedPagePreview />} />
+      <Route path="/theme-lab/generated-pages/:id" element={<ThemeLabPage />} />
       <Route path="*" element={<DashboardShell />} />
     </Routes>
   );

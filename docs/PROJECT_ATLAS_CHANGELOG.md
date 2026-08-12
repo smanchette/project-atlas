@@ -430,6 +430,32 @@ external-provider activity.
 
 ---
 
+## Performance Local Theme Foundation v1
+
+Added the Website-independent, source-defined `performance-local` Theme Family
+as a local `preview_candidate`, while retaining the existing raw presentation
+as an internal diagnostic adapter. An operator-authorized, public read-only
+audit of the operator-owned reference website informed reusable conversion
+patterns without copying its source, assets, plugins, or unsafe overlapping
+controls.
+
+Performance Local maps current governed semantic composition, navigation,
+identity, content, and exact page-media bindings into modular header,
+dropdown/drawer navigation, visual hero, trust, split-media, card, FAQ, CTA,
+preview-form, footer, and responsive conversion contracts. Optional campaign,
+review, statistic, video, map, community, and language capabilities fail closed
+when their required approval, rights, provenance, routing, privacy, or provider
+configuration is absent. Sticky behavior reserves responsive safe space, and
+the compact estimate form is inert in Theme Lab: it sends, stores, and logs no
+visitor data.
+
+This milestone adds no durable Theme, component, or selection record; changes
+no Atlas database, schema, composition, QA, content, navigation, media, or
+identity state; and performs no WordPress, SiteGround, publication, deployment,
+or production operation.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.

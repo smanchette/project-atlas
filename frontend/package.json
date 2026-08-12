@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "test:brand-identity": "node tests/run-brand-identity-tests.mjs",
     "test:theme-foundation": "node tests/run-theme-foundation-tests.mjs",
+    "test:performance-local": "node tests/run-performance-local-theme-tests.mjs",
     "test:page-media-planning": "node tests/run-page-media-planning-tests.mjs",
     "test:qa-identity": "node tests/run-qa-identity-binding-tests.mjs",
     "test:renewal": "node tests/run-bootstrap-backup-renewal-tests.mjs",
