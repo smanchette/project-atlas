@@ -18,6 +18,7 @@ import {
   Settings,
   Wrench
 } from "lucide-react";
+import { lazy, Suspense, type ReactNode } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 
 import Dashboard from "./pages/Dashboard";
@@ -27,7 +28,6 @@ import ApprovalQueuePage from "./pages/ApprovalQueuePage";
 import CitiesPage from "./pages/CitiesPage";
 import GeneratedPagesPage from "./pages/GeneratedPagesPage";
 import GeneratedPagePreview from "./pages/GeneratedPagePreview";
-import ThemeLabPage from "./pages/ThemeLabPage";
 import ExportPackagePage from "./pages/ExportPackagePage";
 import KnowledgeBlocksPage from "./pages/KnowledgeBlocksPage";
 import MediaLibraryPage from "./pages/MediaLibraryPage";
@@ -45,6 +45,11 @@ import WordPressMediaSafetyPage from "./pages/WordPressMediaSafetyPage";
 import WordPressMetadataBridgeInstallPage from "./pages/WordPressMetadataBridgeInstallPage";
 import type { Business, City, County, FieldConfig, GeneratedPage, Service } from "./types";
 import type { Brand, Website, WebsiteIdentity } from "./types";
+
+const ThemeLabPage = lazy(() => import("./pages/ThemeLabPage"));
+const PerformanceLocalComponentGalleryPage = lazy(
+  () => import("./pages/PerformanceLocalComponentGalleryPage"),
+);
 
 const navItems = [
   { to: "/", label: "Dashboard", icon: Home },
@@ -159,9 +164,24 @@ function App() {
   return (
     <Routes>
       <Route path="/generated-pages/:id/preview" element={<GeneratedPagePreview />} />
-      <Route path="/theme-lab/generated-pages/:id" element={<ThemeLabPage />} />
+      <Route
+        path="/theme-lab/generated-pages/:id"
+        element={<ThemeLabRoute><ThemeLabPage /></ThemeLabRoute>}
+      />
+      <Route
+        path="/theme-lab/performance-local/components"
+        element={<ThemeLabRoute><PerformanceLocalComponentGalleryPage /></ThemeLabRoute>}
+      />
       <Route path="*" element={<DashboardShell />} />
     </Routes>
+  );
+}
+
+function ThemeLabRoute({ children }: { children: ReactNode }) {
+  return (
+    <Suspense fallback={<main className="previewState"><h1>Loading local Theme Lab…</h1></main>}>
+      {children}
+    </Suspense>
   );
 }
 

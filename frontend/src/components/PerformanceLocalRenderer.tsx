@@ -12,15 +12,17 @@ import {
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
+  type RefObject,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { Link } from "react-router-dom";
+import { Link, NavLink } from "react-router-dom";
 
 import { WebsiteIdentityLogo } from "./WebsiteIdentityPresentation";
 import {
+  PERFORMANCE_LOCAL_THEME_VERSION,
   performanceLocalOptionalComponentAttributes,
   performanceLocalOptionalConfiguration,
   resolveOptionalComponent,
@@ -40,14 +42,41 @@ import type {
   PageComposition,
   PageMediaDisplayPreset,
 } from "../types";
+import { resolvePerformanceLocalStickyVisibility } from "./performanceLocalInteractions";
 
 export type PerformanceLocalRuntimeToggles = {
   campaignBanner: boolean;
   compactEstimateForm: boolean;
   finalCta: boolean;
+  headerEstimateCta?: boolean;
   stickyActionBar: boolean;
   trustStrip: boolean;
 };
+
+export type PerformanceLocalEstimateFieldKey =
+  | "name"
+  | "phone"
+  | "postal-code"
+  | "requested-service"
+  | "message";
+
+export type PerformanceLocalEstimateField = Readonly<{
+  autoComplete?: string;
+  control: "input" | "textarea";
+  inputMode?: "email" | "numeric" | "search" | "tel" | "text" | "url";
+  key: PerformanceLocalEstimateFieldKey;
+  label: string;
+  required?: boolean;
+  rows?: number;
+  type?: "email" | "tel" | "text";
+}>;
+
+export type PerformanceLocalEstimateFormConfiguration = Readonly<{
+  fields: readonly PerformanceLocalEstimateField[];
+  previewNotice: string;
+  submitLabel: string;
+  visualState?: "idle" | "disabled" | "error" | "success";
+}>;
 
 export type PerformanceLocalCampaign = PerformanceLocalOptionalConfiguration & {
   approvalIdentity: string;
@@ -64,9 +93,11 @@ export type PerformanceLocalCampaign = PerformanceLocalOptionalConfiguration & {
 };
 
 export type PerformanceLocalDiagnostics = {
+  disabledComponents: string[];
   enabledComponents: string[];
   effectiveVariants: Record<string, string>;
   errors: string[];
+  failClosedComponents: string[];
   warnings: string[];
 };
 
@@ -75,6 +106,7 @@ export type PerformanceLocalRendererProps = {
   brandAccent?: string | null;
   campaign?: PerformanceLocalCampaign | null;
   composition: PageComposition;
+  estimateForm?: PerformanceLocalEstimateFormConfiguration | null;
   page: GeneratedPage;
   toggles: PerformanceLocalRuntimeToggles;
   /** A deterministic clock may be provided by tests. It never persists state. */
@@ -106,10 +138,30 @@ const EMPTY_TOGGLES: PerformanceLocalRuntimeToggles = {
   trustStrip: false,
 };
 
+const DEFAULT_ESTIMATE_FORM: PerformanceLocalEstimateFormConfiguration = Object.freeze({
+  fields: Object.freeze([
+    Object.freeze({ key: "name", label: "Name", control: "input", type: "text", autoComplete: "off" }),
+    Object.freeze({ key: "phone", label: "Phone", control: "input", type: "tel", inputMode: "tel", autoComplete: "off" }),
+    Object.freeze({ key: "postal-code", label: "ZIP code", control: "input", type: "text", inputMode: "numeric", autoComplete: "off" }),
+    Object.freeze({ key: "requested-service", label: "Requested service", control: "input", type: "text", autoComplete: "off" }),
+    Object.freeze({ key: "message", label: "Optional message", control: "textarea", rows: 3, autoComplete: "off" }),
+  ]),
+  previewNotice: "Preview only. Information entered here is not submitted or saved.",
+  submitLabel: "Preview request",
+  visualState: "idle",
+});
+
+const CANONICAL_PROCESS_SECTION_KEYS = Object.freeze([
+  "process_section",
+  "prep_section",
+  "realtor_property_manager_section",
+] as const);
+
 export function PerformanceLocalRenderer({
   brandAccent = null,
   campaign = null,
   composition,
+  estimateForm = DEFAULT_ESTIMATE_FORM,
   page,
   toggles = EMPTY_TOGGLES,
   previewedAt = new Date(),
@@ -117,15 +169,6 @@ export function PerformanceLocalRenderer({
   const components = composition.effective_components;
   const byKey = useMemo(() => indexComponents(components), [components]);
   const media = useMemo(() => bindMediaToExactTargets(components), [components]);
-  const validationError = rendererValidationError(page, composition);
-  if (validationError) {
-    return (
-      <main className="performanceLocalUnavailable" role="alert" data-atlas-adapter="performance-local">
-        <h1>Performance Local preview unavailable</h1>
-        <p>{validationError}</p>
-      </main>
-    );
-  }
   const header = first(byKey, "website_header");
   const hero = first(byKey, "hero");
   const trust = first(byKey, "trust_license");
@@ -137,9 +180,63 @@ export function PerformanceLocalRenderer({
   const headerData = header?.resolved_data ?? {};
   const phone = cleanText(headerData.phone) || cleanText(hero?.resolved_data.phone);
   const email = cleanText(headerData.email) || cleanText(hero?.resolved_data.email);
+  const resolvedEstimateForm = validateEstimateFormConfiguration(estimateForm);
   const estimateDestination =
-    toggles.compactEstimateForm && toggles.finalCta && finalCta ? "#estimate" : null;
+    toggles.compactEstimateForm && toggles.finalCta && finalCta && resolvedEstimateForm
+      ? "#estimate"
+      : null;
   const phoneDestination = safePhoneDestination(phone);
+  const heroActionRef = useRef<HTMLDivElement>(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [formFocusRisk, setFormFocusRisk] = useState(false);
+  const [heroConversionVisible, setHeroConversionVisible] = useState(true);
+  const mobileViewport = useMobileViewport();
+
+  useEffect(() => {
+    if (mobileViewport) return;
+    setMobileMenuOpen(false);
+    setFormFocusRisk(false);
+  }, [mobileViewport]);
+
+  useEffect(() => {
+    if (!estimateDestination) setFormFocusRisk(false);
+  }, [estimateDestination]);
+
+  useEffect(() => {
+    const target = heroActionRef.current;
+    if (!toggles.stickyActionBar || !mobileViewport || !target) {
+      setHeroConversionVisible(true);
+      return;
+    }
+    if (typeof IntersectionObserver === "undefined") {
+      // Fail closed when the browser cannot establish whether the opening
+      // conversion controls remain visible.
+      setHeroConversionVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        setHeroConversionVisible(Boolean(entry?.isIntersecting && entry.intersectionRatio >= 0.25));
+      },
+      {
+        root: null,
+        rootMargin: "-68px 0px 0px 0px",
+        threshold: [0, 0.25, 0.5, 1],
+      },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [mobileViewport, toggles.stickyActionBar, page.id]);
+
+  const validationError = rendererValidationError(page, composition);
+  if (validationError) {
+    return (
+      <main className="performanceLocalUnavailable" role="alert" data-atlas-adapter="performance-local">
+        <h1>Performance Local preview unavailable</h1>
+        <p>{validationError}</p>
+      </main>
+    );
+  }
   const trustState = toggles.trustStrip && trust && trustFacts(trust).length
     ? governedOptionalState(
         "trust_proof_strip",
@@ -175,7 +272,7 @@ export function PerformanceLocalRenderer({
         page.id,
       )
     : null;
-  const formState = finalState?.resolution.visible && toggles.compactEstimateForm
+  const formState = finalState?.resolution.visible && toggles.compactEstimateForm && resolvedEstimateForm
     ? governedOptionalState(
         "compact_estimate_form",
         composition.website_id,
@@ -203,7 +300,14 @@ export function PerformanceLocalRenderer({
   const trustVisible = Boolean(trustState?.resolution.visible);
   const finalCtaVisible = Boolean(finalState?.resolution.visible);
   const formVisible = Boolean(formState?.resolution.visible);
-  const stickyVisible = Boolean(stickyState?.resolution.visible);
+  const stickyConfigured = Boolean(stickyState?.resolution.visible);
+  const stickyVisibility = resolvePerformanceLocalStickyVisibility({
+    actionsAvailable: stickyConfigured,
+    formFocusRisk,
+    heroConversionVisible,
+    mobileMenuOpen,
+    mobileViewport,
+  });
   const campaignState = resolveCampaign(
     toggles.campaignBanner ? campaign : null,
     composition.website_id,
@@ -223,6 +327,7 @@ export function PerformanceLocalRenderer({
       component.component_key !== "final_cta" &&
       component.component_key !== "media_placement",
   );
+  const mainPresentation = buildMainPresentation(mainComponents);
   const runtimeAccent = validatedOpaqueCssColor(brandAccent);
   const runtimeStyle = runtimeAccent
     ? ({
@@ -234,12 +339,14 @@ export function PerformanceLocalRenderer({
     <div
       className="performanceLocalSite"
       data-atlas-adapter="performance-local"
-      data-atlas-adapter-version="1"
+      data-atlas-adapter-version={PERFORMANCE_LOCAL_THEME_VERSION}
       data-composition-id={composition.id}
       data-composition-version={composition.composition_version}
       data-generated-page-id={page.id}
       data-runtime-brand-accent={runtimeAccent ? "validated-preview-override" : "governed-primary"}
-      data-sticky-actions-visible={stickyVisible ? "true" : "false"}
+      data-mobile-menu-open={mobileMenuOpen ? "true" : "false"}
+      data-sticky-actions-visible={stickyVisibility.visible ? "true" : "false"}
+      data-sticky-actions-reason={stickyVisibility.reason}
       style={runtimeStyle}
     >
       <a className="performanceLocalSkipLink" href="#main-content">
@@ -254,6 +361,9 @@ export function PerformanceLocalRenderer({
           primaryNavigation={primaryNavigation}
           utilityNavigation={utilityNavigation}
           phone={phone}
+          estimateDestination={toggles.headerEstimateCta === false ? null : estimateDestination}
+          mobileMenuOpen={mobileMenuOpen}
+          onMobileMenuOpenChange={setMobileMenuOpen}
         />
       )}
       <main id="main-content">
@@ -263,6 +373,7 @@ export function PerformanceLocalRenderer({
             media={media.byTarget.get(hero.instance_key)}
             phone={phone}
             estimateDestination={estimateDestination}
+            conversionRef={heroActionRef}
           />
         )}
         {trustVisible && trust && trustState?.attributes && trustFeatureState?.attributes && (
@@ -272,11 +383,16 @@ export function PerformanceLocalRenderer({
             featureAttributes={trustFeatureState.attributes}
           />
         )}
-        {mainComponents.map((component, index) => (
+        {mainPresentation.map((item, index) => item.kind === "process" ? (
+          <CanonicalProcessSequence
+            key={item.components.map((component) => component.instance_key).join("|")}
+            components={item.components}
+          />
+        ) : (
           <PerformanceComponent
-            key={component.instance_key}
-            component={component}
-            media={media.byTarget.get(component.instance_key)}
+            key={item.component.instance_key}
+            component={item.component}
+            media={media.byTarget.get(item.component.instance_key)}
             index={index}
             phone={phone}
             email={email}
@@ -290,6 +406,8 @@ export function PerformanceLocalRenderer({
             showForm={formVisible}
             attributes={finalState.attributes}
             formAttributes={formState?.attributes ?? null}
+            formConfiguration={resolvedEstimateForm}
+            onFormFocusRiskChange={setFormFocusRisk}
           />
         )}
       </main>
@@ -301,8 +419,8 @@ export function PerformanceLocalRenderer({
           email={email}
         />
       )}
-      <BackToTopControl />
-      {stickyVisible && (
+      <BackToTopControl suppressed={formFocusRisk || mobileMenuOpen} />
+      {stickyVisibility.visible && (
         <StickyMobileActions
           phone={phone}
           estimateDestination={estimateDestination}
@@ -348,7 +466,13 @@ export function performanceLocalDiagnostics(
   if (toggles.trustStrip && trust && trustFacts(trust).length) {
     enabledComponents.push("trust_proof_strip", "trust_feature_cards");
   }
-  if (composition.effective_components.some((item) => structuredSteps(item).length)) {
+  const diagnosticMainComponents = composition.effective_components.filter(
+    (item) => item.region === "main" && item.component_key !== "media_placement",
+  );
+  if (
+    composition.effective_components.some((item) => structuredSteps(item).length) ||
+    buildMainPresentation(diagnosticMainComponents).some((item) => item.kind === "process")
+  ) {
     enabledComponents.push("numbered_process_steps");
   }
   const finalCtaVisible = toggles.finalCta && keys.has("final_cta");
@@ -357,8 +481,9 @@ export function performanceLocalDiagnostics(
   const header = composition.effective_components.find((item) => item.component_key === "website_header");
   const hero = composition.effective_components.find((item) => item.component_key === "hero");
   const phone = cleanText(header?.resolved_data.phone) || cleanText(hero?.resolved_data.phone);
+  const phoneDestination = safePhoneDestination(phone);
   const estimateDestination = finalCtaVisible && toggles.compactEstimateForm ? "#estimate" : "";
-  if (toggles.stickyActionBar && (phone || estimateDestination)) {
+  if (toggles.stickyActionBar && (phoneDestination || estimateDestination)) {
     enabledComponents.push("sticky_mobile_action_bar");
   }
   if (context.campaignVisible) enabledComponents.push("campaign_banner");
@@ -389,10 +514,33 @@ export function performanceLocalDiagnostics(
     effectiveVariants.content = "alternating_split";
   }
   if (enabledComponents.includes("site_footer")) effectiveVariants.footer = "structured";
+  const allOptionalComponents = [
+    "campaign_banner",
+    "trust_proof_strip",
+    "trust_feature_cards",
+    "visual_cta_band",
+    "compact_estimate_form",
+    "sticky_mobile_action_bar",
+    "review_badge_group",
+    "statistics_counter_band",
+    "video_embed_section",
+    "map_or_service_area_section",
+    "community_program_section",
+    "language_selector",
+  ];
+  const disabledComponents = allOptionalComponents.filter(
+    (key) => !enabledComponents.includes(key),
+  );
+  const failClosedComponents = [
+    ...(campaignError ? ["campaign_banner"] : []),
+    ...(media.errors.length || media.unbound.length ? ["split_media_text_section"] : []),
+  ];
   return {
+    disabledComponents,
     enabledComponents,
     effectiveVariants,
     errors: [],
+    failClosedComponents,
     warnings,
   };
 }
@@ -420,11 +568,17 @@ function CampaignBanner({
 
 function PerformanceHeader({
   component,
+  estimateDestination,
+  mobileMenuOpen,
+  onMobileMenuOpenChange,
   primaryNavigation,
   utilityNavigation,
   phone,
 }: {
   component: PageComponentInstance;
+  estimateDestination: string | null;
+  mobileMenuOpen: boolean;
+  onMobileMenuOpenChange: (open: boolean) => void;
   primaryNavigation?: PageComponentInstance;
   utilityNavigation?: PageComponentInstance;
   phone: string;
@@ -451,7 +605,18 @@ function PerformanceHeader({
         <DesktopNavigation navigation={navigation} />
         <div className="performanceLocalHeaderActions">
           {phone ? <PhoneLink value={phone} compact /> : null}
-          <MobileNavigation navigation={navigation} phone={phone} />
+          {estimateDestination ? (
+            <a className="performanceLocalButton performanceLocalHeaderEstimate" href={estimateDestination}>
+              Request estimate
+            </a>
+          ) : null}
+          <MobileNavigation
+            navigation={navigation}
+            phone={phone}
+            estimateDestination={estimateDestination}
+            open={mobileMenuOpen}
+            onOpenChange={onMobileMenuOpenChange}
+          />
         </div>
       </div>
     </header>
@@ -518,8 +683,19 @@ function DesktopNavigation({ navigation }: { navigation: NavigationResolution })
   );
 }
 
-function MobileNavigation({ navigation, phone }: { navigation: NavigationResolution; phone: string }) {
-  const [open, setOpen] = useState(false);
+function MobileNavigation({
+  estimateDestination,
+  navigation,
+  onOpenChange,
+  open,
+  phone,
+}: {
+  estimateDestination: string | null;
+  navigation: NavigationResolution;
+  onOpenChange: (open: boolean) => void;
+  open: boolean;
+  phone: string;
+}) {
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(() => new Set());
   const triggerRef = useRef<HTMLButtonElement>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
@@ -536,7 +712,7 @@ function MobileNavigation({ navigation, phone }: { navigation: NavigationResolut
   }, [open]);
 
   function close() {
-    setOpen(false);
+    onOpenChange(false);
     window.setTimeout(() => triggerRef.current?.focus(), 0);
   }
 
@@ -581,7 +757,7 @@ function MobileNavigation({ navigation, phone }: { navigation: NavigationResolut
         aria-label="Open website navigation"
         aria-expanded={open}
         aria-controls="performance-local-mobile-drawer"
-        onClick={() => setOpen(true)}
+        onClick={() => onOpenChange(true)}
       >
         <Menu aria-hidden="true" />
       </button>
@@ -642,7 +818,14 @@ function MobileNavigation({ navigation, phone }: { navigation: NavigationResolut
                 })}
               </ul>
             )}
-            {phone ? <PhoneLink value={phone} compact={false} /> : null}
+            <div className="performanceLocalDrawerActions">
+              {phone ? <PhoneLink value={phone} compact={false} /> : null}
+              {estimateDestination ? (
+                <a className="performanceLocalButton performanceLocalButtonSecondary" href={estimateDestination} onClick={close}>
+                  Request estimate
+                </a>
+              ) : null}
+            </div>
           </div>
         </div>
       ) : null}
@@ -670,22 +853,25 @@ function ThemeLabDestination({ node }: { node: ResolvedNavigationItem }) {
     return <span aria-disabled="true">{node.label}</span>;
   }
   return (
-    <Link
+    <NavLink
       to={`/theme-lab/generated-pages/${node.targetGeneratedPageId}`}
       data-canonical-slug={node.canonicalSlug}
+      className={({ isActive }) => isActive ? "performanceLocalActiveDestination" : undefined}
     >
       {node.label}
-    </Link>
+    </NavLink>
   );
 }
 
 function HeroSection({
   component,
+  conversionRef,
   media,
   phone,
   estimateDestination,
 }: {
   component: PageComponentInstance;
+  conversionRef: RefObject<HTMLDivElement>;
   media?: PageComponentInstance;
   phone: string;
   estimateDestination: string | null;
@@ -700,13 +886,13 @@ function HeroSection({
             <p className="performanceLocalEyebrow">{cleanText(data.page_type).replace(/_/g, " ")}</p>
           ) : null}
           <h1>{cleanText(data.title)}</h1>
-          {cleanText(data.intro) ? <p>{cleanText(data.intro)}</p> : null}
-          <div className="performanceLocalActionRow">
+          {cleanText(data.intro) ? <p className="performanceLocalHeroSummary">{cleanText(data.intro)}</p> : null}
+          <div ref={conversionRef} className="performanceLocalActionRow performanceLocalHeroActions" data-hero-conversion-actions>
             {phone ? <PhoneLink value={phone} compact={false} /> : null}
             {estimateDestination ? <a className="performanceLocalButton performanceLocalButtonSecondary" href={estimateDestination}>Request estimate</a> : null}
           </div>
         </div>
-        {resolvedMedia ? <GovernedMedia media={resolvedMedia} component={media!} className="performanceLocalHeroMedia" /> : null}
+        {resolvedMedia ? <GovernedMedia media={resolvedMedia} component={media!} className="performanceLocalHeroMedia" priority /> : null}
       </div>
     </section>
   );
@@ -815,14 +1001,83 @@ function AuthoritySection({
   );
 }
 
+type MainPresentationItem =
+  | Readonly<{ kind: "component"; component: PageComponentInstance }>
+  | Readonly<{ kind: "process"; components: readonly PageComponentInstance[] }>;
+
+/**
+ * The legacy Page draft exposes the process as three adjacent, source-identified
+ * semantic sections rather than a fabricated steps array. Group only the exact
+ * canonical sequence and leave partial or reordered source untouched.
+ */
+export function buildMainPresentation(
+  components: readonly PageComponentInstance[],
+): readonly MainPresentationItem[] {
+  const indices = CANONICAL_PROCESS_SECTION_KEYS.map((sectionKey) =>
+    components.findIndex((component) => sourceSectionIdentity(component) === sectionKey),
+  );
+  const completeAdjacentSequence = indices.every((index, position) =>
+    index >= 0 && (position === 0 || index === indices[position - 1] + 1),
+  );
+  if (!completeAdjacentSequence) {
+    return components.map((component) => ({ kind: "component" as const, component }));
+  }
+  const grouped = indices.map((index) => components[index]);
+  const groupedInstanceKeys = new Set(grouped.map((component) => component.instance_key));
+  return components.flatMap((component, index): MainPresentationItem[] => {
+    if (index === indices[0]) return [{ kind: "process", components: grouped }];
+    if (groupedInstanceKeys.has(component.instance_key)) return [];
+    return [{ kind: "component", component }];
+  });
+}
+
+function CanonicalProcessSequence({
+  components,
+}: {
+  components: readonly PageComponentInstance[];
+}) {
+  const steps = components.map((component) => ({
+    body: sourceText(component.resolved_data.body),
+    component,
+    heading: sourceText(component.resolved_data.heading),
+    sectionKey: sourceSectionIdentity(component),
+  }));
+  if (steps.some((step) => !step.heading && !step.body)) return null;
+  return (
+    <section
+      className="performanceLocalSection performanceLocalCanonicalProcess"
+      data-component-key="numbered_process_steps"
+      data-process-source="canonical_section_sequence"
+    >
+      <div className="performanceLocalContainer">
+        <ol className="performanceLocalCanonicalProcessList">
+          {steps.map((step, index) => (
+            <li key={step.component.instance_key} data-source-section-key={step.sectionKey}>
+              <span className="performanceLocalStepMarker" aria-hidden="true">
+                {String(index + 1).padStart(2, "0")}
+              </span>
+              <div className="performanceLocalProcessCopy">
+                {step.heading ? <h2>{step.heading}</h2> : null}
+                {step.body ? <p>{step.body}</p> : null}
+              </div>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </section>
+  );
+}
+
 function GovernedMedia({
   component,
   media,
   className = "",
+  priority = false,
 }: {
   component: PageComponentInstance;
   media: RenderableMedia;
   className?: string;
+  priority?: boolean;
 }) {
   return (
     <figure
@@ -836,6 +1091,8 @@ function GovernedMedia({
           src={media.source}
           alt={media.alt}
           title={media.title || undefined}
+          decoding="async"
+          loading={priority ? "eager" : "lazy"}
           style={{
             objectFit: "contain",
             objectPosition: `${media.focalX * 100}% ${media.focalY * 100}%`,
@@ -926,15 +1183,19 @@ function ContactPathways({
 
 function FinalConversionSection({
   component,
+  formConfiguration,
   phone,
   email,
+  onFormFocusRiskChange,
   showForm,
   attributes,
   formAttributes,
 }: {
   component: PageComponentInstance;
+  formConfiguration: PerformanceLocalEstimateFormConfiguration | null;
   phone: string;
   email: string;
+  onFormFocusRiskChange: (focused: boolean) => void;
   showForm: boolean;
   attributes: OptionalComponentDiagnosticAttributes;
   formAttributes: OptionalComponentDiagnosticAttributes | null;
@@ -954,49 +1215,87 @@ function FinalConversionSection({
             {email ? <EmailLink value={email} /> : null}
           </div>
         </div>
-        {showForm && formAttributes ? <CompactEstimateForm attributes={formAttributes} /> : null}
+        {showForm && formAttributes && formConfiguration ? (
+          <CompactEstimateForm
+            attributes={formAttributes}
+            configuration={formConfiguration}
+            onFocusRiskChange={onFormFocusRiskChange}
+          />
+        ) : null}
       </div>
     </section>
   );
 }
 
-function CompactEstimateForm({ attributes }: { attributes: OptionalComponentDiagnosticAttributes }) {
+function CompactEstimateForm({
+  attributes,
+  configuration,
+  onFocusRiskChange,
+}: {
+  attributes: OptionalComponentDiagnosticAttributes;
+  configuration: PerformanceLocalEstimateFormConfiguration;
+  onFocusRiskChange: (focused: boolean) => void;
+}) {
+  const formRef = useRef<HTMLFormElement>(null);
   function preventSubmission(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
   }
+  const disabled = configuration.visualState === "disabled";
+  const visualState = configuration.visualState ?? "idle";
+  const stateMessage = visualState === "success"
+    ? "Preview success appearance — no request was sent."
+    : visualState === "error"
+      ? "Preview error appearance — review the highlighted fields."
+      : visualState === "disabled"
+        ? "Preview controls are disabled."
+        : "Preview form is ready for local interaction only.";
   return (
     <form
+      ref={formRef}
       className="performanceLocalEstimateForm"
       aria-label="Estimate request preview"
       data-preview-only="true"
+      data-visual-state={visualState}
       autoComplete="off"
       onSubmit={preventSubmission}
+      onFocusCapture={() => onFocusRiskChange(true)}
+      onBlurCapture={() => {
+        window.requestAnimationFrame(() => {
+          onFocusRiskChange(Boolean(formRef.current?.contains(document.activeElement)));
+        });
+      }}
       {...attributes}
     >
       <div className="performanceLocalFormNotice" role="note">
-        Preview only. Information entered here is not submitted or saved.
+        {configuration.previewNotice}
       </div>
-      <label>
-        Name
-        <input name="preview-name" autoComplete="off" />
-      </label>
-      <label>
-        Phone
-        <input name="preview-phone" type="tel" autoComplete="off" />
-      </label>
-      <label>
-        ZIP code
-        <input name="preview-postal-code" inputMode="numeric" autoComplete="off" />
-      </label>
-      <label>
-        Requested service
-        <input name="preview-requested-service" autoComplete="off" />
-      </label>
-      <label className="performanceLocalFormWide">
-        Optional message
-        <textarea name="preview-message" rows={3} autoComplete="off" />
-      </label>
-      <button type="submit">Preview request</button>
+      <p className="performanceLocalFormState" role="status" aria-live="polite">
+        {stateMessage}
+      </p>
+      {configuration.fields.map((field) => (
+        <label key={field.key} className={field.control === "textarea" ? "performanceLocalFormWide" : undefined}>
+          {field.label}
+          {field.control === "textarea" ? (
+            <textarea
+              name={`preview-${field.key}`}
+              rows={field.rows ?? 3}
+              autoComplete={field.autoComplete ?? "off"}
+              required={field.required}
+              disabled={disabled}
+            />
+          ) : (
+            <input
+              name={`preview-${field.key}`}
+              type={field.type ?? "text"}
+              inputMode={field.inputMode}
+              autoComplete={field.autoComplete ?? "off"}
+              required={field.required}
+              disabled={disabled}
+            />
+          )}
+        </label>
+      ))}
+      <button type="submit" disabled={disabled}>{configuration.submitLabel}</button>
     </form>
   );
 }
@@ -1062,7 +1361,7 @@ function StickyMobileActions({
   );
 }
 
-function BackToTopControl() {
+function BackToTopControl({ suppressed }: { suppressed: boolean }) {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
     const updateVisibility = () => {
@@ -1072,7 +1371,7 @@ function BackToTopControl() {
     window.addEventListener("scroll", updateVisibility, { passive: true });
     return () => window.removeEventListener("scroll", updateVisibility);
   }, []);
-  if (!visible) return null;
+  if (!visible || suppressed) return null;
   return (
     <button
       className="performanceLocalBackToTop"
@@ -1090,10 +1389,10 @@ function BackToTopControl() {
 }
 
 function PhoneLink({ value, compact }: { value: string; compact: boolean }) {
-  const phone = value.replace(/[^\d+]/g, "");
-  if (!phone) return null;
+  const destination = safePhoneDestination(value);
+  if (!destination) return null;
   return (
-    <a className={`performanceLocalButton performanceLocalPhone${compact ? " performanceLocalButtonCompact" : ""}`} href={`tel:${phone}`}>
+    <a className={`performanceLocalButton performanceLocalPhone${compact ? " performanceLocalButtonCompact" : ""}`} href={destination}>
       <Phone size={18} aria-hidden="true" />
       <span>{compact ? "Call" : `Call ${value}`}</span>
     </a>
@@ -1319,6 +1618,58 @@ function positiveInteger(value: unknown): number | null {
 
 function cleanText(value: unknown): string {
   return typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
+}
+
+function sourceText(value: unknown): string {
+  return typeof value === "string" && value.trim().length > 0 ? value : "";
+}
+
+function sourceSectionIdentity(component: PageComponentInstance): string {
+  return cleanText(component.input_bindings.section_key);
+}
+
+function validateEstimateFormConfiguration(
+  value: PerformanceLocalEstimateFormConfiguration | null | undefined,
+): PerformanceLocalEstimateFormConfiguration | null {
+  if (!value || !cleanText(value.previewNotice) || !cleanText(value.submitLabel)) return null;
+  if (value.visualState && !["idle", "disabled", "error", "success"].includes(value.visualState)) {
+    return null;
+  }
+  if (!Array.isArray(value.fields) || value.fields.length !== 5) return null;
+  const expected = new Set<PerformanceLocalEstimateFieldKey>([
+    "name",
+    "phone",
+    "postal-code",
+    "requested-service",
+    "message",
+  ]);
+  const seen = new Set<PerformanceLocalEstimateFieldKey>();
+  for (const field of value.fields) {
+    if (!field || !expected.has(field.key) || seen.has(field.key) || !cleanText(field.label)) return null;
+    if (field.control !== "input" && field.control !== "textarea") return null;
+    if (field.autoComplete && field.autoComplete !== "off") return null;
+    if (field.control === "textarea" && field.type) return null;
+    seen.add(field.key);
+  }
+  return seen.size === expected.size ? value : null;
+}
+
+function useMobileViewport(): boolean {
+  const query = "(max-width: 760px)";
+  const [mobile, setMobile] = useState(() =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia(query).matches
+      : false,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia(query);
+    const update = () => setMobile(media.matches);
+    update();
+    media.addEventListener?.("change", update);
+    return () => media.removeEventListener?.("change", update);
+  }, []);
+  return mobile;
 }
 
 function asArray(value: unknown): unknown[] {

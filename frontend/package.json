@@ -9,6 +9,8 @@
     "test:brand-identity": "node tests/run-brand-identity-tests.mjs",
     "test:theme-foundation": "node tests/run-theme-foundation-tests.mjs",
     "test:performance-local": "node tests/run-performance-local-theme-tests.mjs",
+    "test:performance-local-contracts-v2": "node tests/run-performance-local-contracts-v2-tests.mjs",
+    "test:performance-local-interactions": "node --test tests/performance-local-interactions.test.mjs",
     "test:page-media-planning": "node tests/run-page-media-planning-tests.mjs",
     "test:qa-identity": "node tests/run-qa-identity-binding-tests.mjs",
     "test:renewal": "node tests/run-bootstrap-backup-renewal-tests.mjs",

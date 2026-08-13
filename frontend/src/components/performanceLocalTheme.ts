@@ -1,4 +1,6 @@
 export type ThemeFamilyLifecycleStatus = "preview_candidate" | "internal_diagnostic";
+export const PERFORMANCE_LOCAL_THEME_VERSION = 2 as const;
+export const PERFORMANCE_LOCAL_THEME_COMPATIBILITY = "performance-local@2" as const;
 export type PerformanceLocalViewport = "mobile" | "tablet" | "desktop";
 export type PerformanceLocalVisibility = {
   desktop: boolean;
@@ -33,7 +35,7 @@ export type PerformanceLocalComponentKey =
 
 export type ThemeFamilyComponentContract = {
   key: PerformanceLocalComponentKey;
-  version: 1;
+  version: typeof PERFORMANCE_LOCAL_THEME_VERSION;
   optional: boolean;
   defaultEnabled: boolean;
   scope: "website_with_optional_page_override";
@@ -41,7 +43,7 @@ export type ThemeFamilyComponentContract = {
   placement: string;
   variant: string;
   visibility: PerformanceLocalVisibility;
-  themeCompatibility: readonly ["performance-local@1"];
+  themeCompatibility: readonly [typeof PERFORMANCE_LOCAL_THEME_COMPATIBILITY];
   contentSource: "governed_semantic_composition" | "approved_runtime_configuration";
   supportsCtaLabel: true;
   supportsCtaDestination: true;
@@ -53,7 +55,7 @@ export type ThemeFamilyComponentContract = {
 export type ThemeFamilyDefinition = {
   key: string;
   displayName: string;
-  version: 1;
+  version: 1 | typeof PERFORMANCE_LOCAL_THEME_VERSION;
   status: ThemeFamilyLifecycleStatus;
   websiteIndependent: true;
   productionReady: boolean;
@@ -119,7 +121,7 @@ function componentContract(
     : [...(options.requiredConfiguration ?? [])];
   return Object.freeze({
     key,
-    version: 1,
+    version: PERFORMANCE_LOCAL_THEME_VERSION,
     optional: options.optional ?? false,
     defaultEnabled: options.defaultEnabled ?? true,
     scope: "website_with_optional_page_override",
@@ -127,7 +129,7 @@ function componentContract(
     placement: options.placement,
     variant: options.variant,
     visibility: Object.freeze(options.visibility ?? EVERY_VIEWPORT),
-    themeCompatibility: Object.freeze(["performance-local@1"] as const),
+    themeCompatibility: Object.freeze([PERFORMANCE_LOCAL_THEME_COMPATIBILITY] as const),
     contentSource: options.contentSource ?? "governed_semantic_composition",
     supportsCtaLabel: true,
     supportsCtaDestination: true,
@@ -155,13 +157,35 @@ export const PERFORMANCE_LOCAL_COMPONENT_CONTRACTS = Object.freeze([
   componentContract("sticky_mobile_action_bar", { optional: true, placement: "viewport_bottom", variant: "safe_area_single_layer", visibility: { desktop: false, tablet: false, mobile: true }, requiredConfiguration: ["sourceIdentity", "actionLabel", "phoneOrEstimateDestination"], diagnosticLabel: "Mobile conversion actions" }),
   componentContract("site_footer", { placement: "footer", variant: "structured", diagnosticLabel: "Governed site footer" }),
   componentContract("back_to_top_control", { placement: "viewport_edge", variant: "accessible_control", diagnosticLabel: "Back-to-top control" }),
-  componentContract("review_badge_group", { optional: true, defaultEnabled: false, placement: "main", variant: "verified_only", contentSource: "approved_runtime_configuration", requiredConfiguration: ["provider", "rating", "reviewCount", "ratingApprovalStatus", "reviewCountApprovalStatus", "verificationDate", "destination", "trademarkUseAuthorization"], diagnosticLabel: "Verified review or badge evidence" }),
+  componentContract("review_badge_group", { optional: true, defaultEnabled: false, placement: "main", variant: "verified_only", contentSource: "approved_runtime_configuration", requiredConfiguration: ["provider", "rating", "reviewCount", "ratingApprovalStatus", "reviewCountApprovalStatus", "verificationDate", "destination", "trademarkUseAuthorization", "approvalIdentity"], diagnosticLabel: "Verified review or badge evidence" }),
   componentContract("statistics_counter_band", { optional: true, defaultEnabled: false, placement: "main", variant: "sourced_metrics", contentSource: "approved_runtime_configuration", requiredConfiguration: ["metricLabel", "value", "source", "effectiveDate", "approvalIdentity"], diagnosticLabel: "Approved sourced statistics" }),
   componentContract("video_embed_section", { optional: true, defaultEnabled: false, placement: "main", variant: "privacy_gated", contentSource: "approved_runtime_configuration", requiredConfiguration: ["approvedProvider", "approvedUrlOrMediaIdentity", "title", "accessibilityText", "privacyMode", "approvalIdentity"], diagnosticLabel: "Approved privacy-aware video" }),
-  componentContract("map_or_service_area_section", { optional: true, defaultEnabled: false, placement: "main", variant: "accurate_location", contentSource: "approved_runtime_configuration", requiredConfiguration: ["approvedLocationOrServiceArea", "approvedProvider", "externalRequestConsent", "locationStatus", "approvalIdentity"], diagnosticLabel: "Approved location or service area" }),
-  componentContract("community_program_section", { optional: true, defaultEnabled: false, placement: "main", variant: "approved_program", contentSource: "approved_runtime_configuration", requiredConfiguration: ["approvedProgramIdentity", "approvedCopy", "approvalIdentity"], diagnosticLabel: "Approved community program" }),
-  componentContract("language_selector", { optional: true, defaultEnabled: false, placement: "header_utility", variant: "translated_routes_only", contentSource: "approved_runtime_configuration", requiredConfiguration: ["translatedRoutes", "languageLabels", "approvalIdentity"], diagnosticLabel: "Approved translated-route selector" }),
+  componentContract("map_or_service_area_section", { optional: true, defaultEnabled: false, placement: "main", variant: "accurate_location", contentSource: "approved_runtime_configuration", requiredConfiguration: ["approvedLocationOrServiceArea", "approvedProvider", "externalRequestConsent", "locationStatus", "storefrontStatus", "approvalIdentity"], diagnosticLabel: "Approved location or service area" }),
+  componentContract("community_program_section", { optional: true, defaultEnabled: false, placement: "main", variant: "approved_program", contentSource: "approved_runtime_configuration", requiredConfiguration: ["approvedProgramIdentity", "approvedCopy", "destination", "effectiveStartDate", "effectiveEndDate", "approvalIdentity"], diagnosticLabel: "Approved community program" }),
+  componentContract("language_selector", { optional: true, defaultEnabled: false, placement: "header_utility", variant: "translated_routes_only", contentSource: "approved_runtime_configuration", requiredConfiguration: ["actualTranslatedContent", "translatedRoutes", "canonicalHreflangConfiguration", "languageLabels", "routingBehavior", "approvalIdentity"], diagnosticLabel: "Approved translated-route selector" }),
 ] satisfies readonly ThemeFamilyComponentContract[]);
+
+export function performanceLocalComponentContract(
+  key: PerformanceLocalComponentKey | string,
+): ThemeFamilyComponentContract | undefined {
+  return PERFORMANCE_LOCAL_COMPONENT_CONTRACTS.find((item) => item.key === key);
+}
+
+/**
+ * Accepts only an opaque six-digit runtime color. Invalid preview input falls
+ * back to the approved governed primary color and never creates a Theme token.
+ */
+export function resolvePerformanceLocalBrandAccent(
+  runtimeBrandAccent: unknown,
+  governedPrimary: string,
+): string {
+  if (!/^#[\da-f]{6}$/i.test(governedPrimary)) {
+    throw new Error("The governed primary color must be an opaque #RRGGBB value.");
+  }
+  return typeof runtimeBrandAccent === "string" && /^#[\da-f]{6}$/i.test(runtimeBrandAccent)
+    ? runtimeBrandAccent
+    : governedPrimary;
+}
 
 const GOVERNED_TOKEN_ROLES = Object.freeze({
   typography: Object.freeze({ heading: "governed.typography.heading_family", body: "governed.typography.body_family", scale: "governed.typography.font_scale" }),
@@ -175,11 +199,11 @@ const GOVERNED_TOKEN_ROLES = Object.freeze({
 export const PERFORMANCE_LOCAL_THEME: ThemeFamilyDefinition = Object.freeze({
   key: "performance-local",
   displayName: "Performance Local",
-  version: 1,
+  version: PERFORMANCE_LOCAL_THEME_VERSION,
   status: "preview_candidate",
   websiteIndependent: true,
   productionReady: false,
-  compatibilityIdentity: "atlas-semantic-composition@1|performance-local@1",
+  compatibilityIdentity: `atlas-semantic-composition@1|${PERFORMANCE_LOCAL_THEME_COMPATIBILITY}`,
   designContract: Object.freeze({
     ...GOVERNED_TOKEN_ROLES,
     buttonVariants: Object.freeze(["primary", "secondary", "phone", "compact"]),
@@ -243,7 +267,7 @@ export type PerformanceLocalOptionalConfiguration = {
   enabled: boolean;
   websiteId: number;
   pageOverrideId?: number | null;
-  themeCompatibility: "performance-local@1";
+  themeCompatibility: typeof PERFORMANCE_LOCAL_THEME_COMPATIBILITY;
   placement: string;
   variant: string;
   visibility: PerformanceLocalVisibility;
@@ -256,13 +280,13 @@ export type PerformanceLocalOptionalConfiguration = {
 
 export type OptionalComponentDiagnosticAttributes = Readonly<{
   "data-component-key": PerformanceLocalComponentKey;
-  "data-component-version": "1";
+  "data-component-version": "2";
   "data-component-optional": "true";
   "data-component-scope": ThemeFamilyComponentContract["scope"];
   "data-component-placement": string;
   "data-component-variant": string;
   "data-component-content-source": ThemeFamilyComponentContract["contentSource"];
-  "data-component-theme-compatibility": "performance-local@1";
+  "data-component-theme-compatibility": typeof PERFORMANCE_LOCAL_THEME_COMPATIBILITY;
   "data-component-resolution": "visible";
 }>;
 
@@ -308,7 +332,7 @@ export function performanceLocalOptionalComponentAttributes(
   }
   return Object.freeze({
     "data-component-key": key,
-    "data-component-version": "1",
+    "data-component-version": String(PERFORMANCE_LOCAL_THEME_VERSION) as "2",
     "data-component-optional": "true",
     "data-component-scope": contract.scope,
     "data-component-placement": contract.placement,
@@ -340,6 +364,9 @@ export function resolveOptionalComponent(
   }
   const missing = contract.requiredConfiguration.filter((field) => !present(value[field]));
   const errors: string[] = missing.map((field) => `Missing required configuration: ${field}.`);
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+    errors.push("Optional component evaluation time is invalid.");
+  }
   if (!Number.isSafeInteger(expectedWebsiteId) || expectedWebsiteId <= 0) {
     errors.push("Expected Website identity must be a positive integer.");
   } else if (value.websiteId !== expectedWebsiteId) {
@@ -381,7 +408,7 @@ function validateOptionalScope(
     }
   }
   if (present(value.themeCompatibility) && value.themeCompatibility !== contract.themeCompatibility[0]) {
-    errors.push("Theme compatibility does not match performance-local@1.");
+    errors.push(`Theme compatibility does not match ${PERFORMANCE_LOCAL_THEME_COMPATIBILITY}.`);
   }
   if (present(value.placement) && value.placement !== contract.placement) {
     errors.push("Placement does not match the component contract.");
@@ -451,9 +478,16 @@ function validateCapabilityConfiguration(
       validateTextFields(value, ["approvedLocationOrServiceArea", "approvedProvider", "approvalIdentity"], "Map or service-area", errors);
       if (value.externalRequestConsent !== true) errors.push("Map or service-area external request consent is not approved.");
       if (value.locationStatus !== "approved") errors.push("Map or service-area location status is not approved.");
+      if (!["storefront", "service_area_only"].includes(String(value.storefrontStatus))) {
+        errors.push("Map or service-area storefront status is not approved.");
+      }
       break;
     case "community_program_section":
       validateTextFields(value, ["approvedProgramIdentity", "approvedCopy", "approvalIdentity"], "Community program", errors);
+      if (!isPerformanceLocalSafeDestination(value.destination)) {
+        errors.push("Community program destination is not an approved local action destination.");
+      }
+      validateEffectiveDateRange(value, "effectiveStartDate", "effectiveEndDate", now, "Community program", errors);
       break;
     case "language_selector":
       validateLanguageConfiguration(value, errors);
@@ -483,7 +517,7 @@ function validateCampaignDates(value: Record<string, unknown>, now: Date, errors
 }
 
 function validateReviewConfiguration(value: Record<string, unknown>, now: Date, errors: string[]) {
-  validateTextFields(value, ["provider", "trademarkUseAuthorization"], "Review", errors);
+  validateTextFields(value, ["provider", "trademarkUseAuthorization", "approvalIdentity"], "Review", errors);
   if (typeof value.rating !== "number" || !Number.isFinite(value.rating) || value.rating < 0 || value.rating > 5) {
     errors.push("Review rating must be a finite number from 0 through 5.");
   }
@@ -534,6 +568,13 @@ function validateVideoConfiguration(value: Record<string, unknown>, errors: stri
 
 function validateLanguageConfiguration(value: Record<string, unknown>, errors: string[]) {
   validateTextFields(value, ["approvalIdentity"], "Language selector", errors);
+  if (value.actualTranslatedContent !== true) errors.push("Actual translated content is not approved.");
+  if (value.canonicalHreflangConfiguration !== "approved") {
+    errors.push("Canonical and hreflang configuration is not approved.");
+  }
+  if (value.routingBehavior !== "approved_local_routes") {
+    errors.push("Translated routing behavior is not approved.");
+  }
   const routes = translatedRouteLanguages(value.translatedRoutes);
   const labels = translatedLanguageLabels(value.languageLabels);
   if (!routes || !labels || routes.length !== labels.size || routes.some((language) => !labels.has(language))) {
@@ -553,6 +594,7 @@ function validateEstimateFormConfiguration(value: Record<string, unknown>, error
     "privacyPolicyDestination",
     "retentionPolicy",
     "spamStrategy",
+    "requiredConsent",
     "successBehavior",
     "failureBehavior",
     "auditIdentity",
@@ -571,6 +613,31 @@ function validateEstimateFormConfiguration(value: Record<string, unknown>, error
   }
   if (present(value.privacyPolicyDestination) && !isApprovedHttpsOrLocalDestination(value.privacyPolicyDestination)) {
     errors.push("Production form privacy-policy destination is invalid.");
+  }
+  if (present(value.requiredConsent) && value.requiredConsent !== true) {
+    errors.push("Production form required consent is not approved.");
+  }
+}
+
+function validateEffectiveDateRange(
+  value: Record<string, unknown>,
+  startKey: string,
+  endKey: string,
+  now: Date,
+  label: string,
+  errors: string[],
+) {
+  const start = exactCalendarDate(value[startKey]);
+  const end = exactCalendarDate(value[endKey]);
+  if (!start || !end || end.getTime() < start.getTime()) {
+    errors.push(`${label} effective dates are missing or invalid.`);
+    return;
+  }
+  if (Number.isFinite(now.getTime()) && now.getTime() < start.getTime()) {
+    errors.push(`${label} approval is outside its effective dates.`);
+  }
+  if (Number.isFinite(now.getTime()) && now.getTime() > end.getTime() + 86_399_999) {
+    errors.push(`${label} approval is outside its effective dates.`);
   }
 }
 
@@ -679,5 +746,6 @@ function hasOwn(value: Record<string, unknown>, key: string): boolean {
 }
 
 function optionalContract(key: PerformanceLocalComponentKey): ThemeFamilyComponentContract | undefined {
-  return PERFORMANCE_LOCAL_COMPONENT_CONTRACTS.find((item) => item.key === key && item.optional);
+  const contract = performanceLocalComponentContract(key);
+  return contract?.optional ? contract : undefined;
 }

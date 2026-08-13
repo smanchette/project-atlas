@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { StaticRouter } from "react-router-dom/server";
 
 import {
+  buildMainPresentation,
   PerformanceLocalRenderer,
   performanceLocalDiagnostics,
   type PerformanceLocalCampaign,
@@ -130,13 +131,13 @@ test("visible optional components use one Website-scoped contract and expose exa
   const attributes = performanceLocalOptionalComponentAttributes("trust_proof_strip", resolution);
   assert.deepEqual(attributes, {
     "data-component-key": "trust_proof_strip",
-    "data-component-version": "1",
+    "data-component-version": "2",
     "data-component-optional": "true",
     "data-component-scope": "website_with_optional_page_override",
     "data-component-placement": "after_hero",
     "data-component-variant": "approved_facts_only",
     "data-component-content-source": "governed_semantic_composition",
-    "data-component-theme-compatibility": "performance-local@1",
+    "data-component-theme-compatibility": "performance-local@2",
     "data-component-resolution": "visible",
   });
   assert.throws(
@@ -422,12 +423,70 @@ test("the performance renderer consumes composition identity without mutating At
     page: sourcePage,
   });
   assert.match(markup, /data-atlas-adapter="performance-local"/);
-  assert.match(markup, /data-atlas-adapter-version="1"/);
+  assert.match(markup, /data-atlas-adapter-version="2"/);
   assert.match(markup, /data-composition-id="801"/);
   assert.match(markup, /data-composition-version="8"/);
   assert.match(markup, /data-generated-page-id="1101"/);
   assert.deepEqual(sourceComposition, beforeComposition);
   assert.deepEqual(sourcePage, beforePage);
+});
+
+test("canonical process grouping preserves exact source headings, bodies, order, and bytes", () => {
+  const source = [
+    component("process-a", "content_section", "main", {
+      heading: "How Service Works",
+      body: "Exact first sentence.  Two spaces remain.\nSecond line remains.",
+    }, { section_key: "process_section" }),
+    component("process-b", "content_section", "main", {
+      heading: "Preparing the Property",
+      body: "Exact preparation text — punctuation remains.",
+    }, { section_key: "prep_section" }),
+    component("process-c", "content_section", "main", {
+      heading: "Coordinated Service",
+      body: "Exact coordinated-service text remains unchanged.",
+    }, { section_key: "realtor_property_manager_section" }),
+  ];
+  const before = structuredClone(source);
+  const presentation = buildMainPresentation(source);
+  assert.equal(presentation.length, 1);
+  assert.equal(presentation[0]?.kind, "process");
+  if (presentation[0]?.kind !== "process") assert.fail("Expected canonical process grouping.");
+  assert.deepEqual(
+    presentation[0].components.map((item) => item.input_bindings.section_key),
+    ["process_section", "prep_section", "realtor_property_manager_section"],
+  );
+  assert.deepEqual(
+    presentation[0].components.map((item) => [item.resolved_data.heading, item.resolved_data.body]),
+    source.map((item) => [item.resolved_data.heading, item.resolved_data.body]),
+  );
+  assert.deepEqual(source, before);
+
+  const markup = render(disabledToggles, {
+    composition: composition([
+      ...fixtureComponents().filter((item) => item.component_key !== "related_page_links"),
+      ...source,
+    ]),
+  });
+  assert.match(markup, /data-process-source="canonical_section_sequence"/);
+  assert.match(markup, />01</);
+  assert.match(markup, />02</);
+  assert.match(markup, />03</);
+  assert.match(markup, /Exact first sentence\.  Two spaces remain\.\nSecond line remains\./);
+});
+
+test("partial, reordered, or duplicate process identities remain ordinary source sections", () => {
+  const processSection = component("process-a", "content_section", "main", { heading: "One", body: "A" }, { section_key: "process_section" });
+  const prep = component("process-b", "content_section", "main", { heading: "Two", body: "B" }, { section_key: "prep_section" });
+  const coordinated = component("process-c", "content_section", "main", { heading: "Three", body: "C" }, { section_key: "realtor_property_manager_section" });
+  for (const input of [
+    [processSection, prep],
+    [processSection, coordinated, prep],
+    [processSection, { ...processSection, instance_key: "process-duplicate" }, prep, coordinated],
+  ]) {
+    assert.ok(buildMainPresentation(input).every((item) => item.kind === "component"));
+  }
+  const css = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+  assert.match(css, /@media \(max-width:\s*1100px\)[\s\S]*\.performanceLocalCanonicalProcessList\s*\{[^}]*grid-template-columns:\s*1fr/s);
 });
 
 test("stale, cross-Website, and mismatched page compositions fail closed", () => {
@@ -485,7 +544,7 @@ test("missing approved estimate destination hides every Estimate action", () => 
   });
   assert.doesNotMatch(markup, />Request estimate</);
   assert.doesNotMatch(markup, /href="#estimate"/);
-  assert.match(markup, /class="performanceLocalStickyActions/);
+  assert.doesNotMatch(markup, /class="performanceLocalStickyActions/);
   assert.match(markup, /href="tel:\+15550100200"/);
 });
 
@@ -576,13 +635,12 @@ test("rendered optional wrappers expose the centralized contract identity", () =
     "trust_feature_cards",
     "visual_cta_band",
     "compact_estimate_form",
-    "sticky_mobile_action_bar",
   ]) {
     assert.match(markup, new RegExp(`data-component-key="${key}"`));
   }
-  assert.match(markup, /data-component-version="1"/);
+  assert.match(markup, /data-component-version="2"/);
   assert.match(markup, /data-component-scope="website_with_optional_page_override"/);
-  assert.match(markup, /data-component-theme-compatibility="performance-local@1"/);
+  assert.match(markup, /data-component-theme-compatibility="performance-local@2"/);
 });
 
 test("diagnostics describe only effective enabled capabilities and preserve fail-closed warnings", () => {
@@ -643,7 +701,11 @@ test("Theme Lab is a top-level local read-only route over the exact current page
   assert.match(labSource, /`\/api\/site-plans\/generated-pages\/\$\{pageId\}\/composition`/);
   assert.doesNotMatch(labSource, /method:\s*"(?:POST|PUT|PATCH|DELETE)"/);
   assert.doesNotMatch(labSource, /localStorage|sessionStorage|navigator\.sendBeacon|XMLHttpRequest/);
-  assert.doesNotMatch(labSource, /Flo-Zone|drywood|Orlando|Page\s*41|pestcontrolinorlandofl/i);
+  assert.doesNotMatch(labSource, /Flo-Zone|Orlando|Page\s*41|pestcontrolinorlandofl/i);
+  assert.equal((labSource.match(/Drywood Termite Tenting/g) ?? []).length, 1);
+  assert.match(labSource, /RUNTIME_PREVIEW_CAMPAIGN_LABEL/);
+  assert.match(appSource, /lazy\(\(\) => import\("\.\/pages\/ThemeLabPage"\)\)/);
+  assert.match(appSource, /path="\/theme-lab\/performance-local\/components"/);
 });
 
 test("responsive CSS reserves safe sticky space, preserves governed media, and keeps controls accessible", () => {
@@ -652,10 +714,14 @@ test("responsive CSS reserves safe sticky space, preserves governed media, and k
   assert.match(css, /\.performanceLocalMedia-hero-desktop[^}]*aspect-ratio:\s*16\s*\/\s*9/s);
   assert.match(css, /\.performanceLocalMedia img\s*\{[^}]*object-fit:\s*contain/s);
   assert.match(css, /\.performanceLocalButton[^}]*min-height:\s*48px/s);
+  assert.match(css, /\.performanceLocalSite a\.performanceLocalButton\s*\{[^}]*color:\s*var\(--performance-local-accent-text\)/s);
+  assert.match(css, /\.performanceLocalSite a\.performanceLocalHeaderEstimate\s*\{[^}]*color:\s*var\(--performance-local-forest\)/s);
+  assert.match(css, /\.performanceLocalCampaign\s*\{[^}]*z-index:\s*52/s);
+  assert.match(css, /\.performanceLocalHeader\s*\{[^}]*z-index:\s*60/s);
   assert.match(css, /\.performanceLocalMenuTrigger[^}]*width:\s*48px[^}]*height:\s*48px/s);
   assert.match(css, /@media \(max-width:\s*1100px\)[\s\S]*\.performanceLocalCardGrid\s*\{[^}]*repeat\(2/s);
   assert.match(css, /@media \(max-width:\s*760px\)[\s\S]*\.performanceLocalSplitGrid[^}]*grid-template-columns:\s*1fr/s);
-  assert.match(css, /\.performanceLocalSite\[data-sticky-actions-visible="true"\] \.performanceLocalFooter\s*\{[^}]*padding-bottom:\s*calc\(116px \+ env\(safe-area-inset-bottom\)\)/s);
+  assert.match(css, /\.performanceLocalSite\[data-sticky-actions-visible="true"\] \.performanceLocalFooter\s*\{[^}]*padding-bottom:\s*calc\(152px \+ env\(safe-area-inset-bottom\)\)/s);
   assert.match(css, /\.performanceLocalStickyActions\s*\{[^}]*bottom:\s*0[^}]*env\(safe-area-inset-bottom\)/s);
   assert.match(css, /\.performanceLocalBackToTop\s*\{[^}]*bottom:\s*calc\(80px \+ env\(safe-area-inset-bottom\)\)/s);
   assert.match(css, /@media \(prefers-reduced-motion:\s*reduce\)/);

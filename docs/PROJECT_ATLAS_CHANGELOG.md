@@ -456,6 +456,35 @@ or production operation.
 
 ---
 
+## Performance Local Conversion Theme v2
+
+Advanced the Website-independent, source-defined `performance-local` Theme
+Family to version 2 while retaining its `preview_candidate` lifecycle and
+`productionReady: false` boundary. A renewed public read-only review of the
+operator-owned reference website informed deeper conversion parity without
+copying its content, claims, assets, source, plugins, widgets, prices, contact
+details, or unsafe fixed-control behavior.
+
+Performance Local v2 strengthens the governed header, campaign, hero, trust,
+split-media, source-preserving numbered-process, related-page, FAQ, final-call-
+to-action, inert estimate-form, mobile-action, footer, and back-to-top
+presentation. Mobile conversion actions now respond to hero visibility, menu
+state, and form focus rather than competing with the visitor's current task.
+An isolated, demo-only optional-component gallery retains the enabled campaign
+example and now pairs unmistakably synthetic, contract-valid enabled
+presentations with resolver-backed fail-closed states for review, statistic,
+video, map, community, and language capabilities. The gallery adds no public
+facts, registered routes, provider integrations, requests, storage, or
+production-renderer output. Theme Lab reports activation-readiness gaps
+explicitly and cannot activate or persist a Theme.
+
+This milestone creates no durable Theme, selection, component configuration,
+or Atlas record; changes no database, schema, composition, QA, content,
+navigation, media, identity, or export state; and performs no WordPress,
+SiteGround, publication, deployment, or production operation.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.
