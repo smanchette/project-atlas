@@ -15,6 +15,7 @@ import {
 import {
   ATLAS_DIAGNOSTIC_THEME,
   PERFORMANCE_LOCAL_COMPONENT_CONTRACTS,
+  PERFORMANCE_LOCAL_SERIALIZED_COMPONENT_CONTRACTS,
   PERFORMANCE_LOCAL_THEME,
   PERFORMANCE_LOCAL_THEME_COMPATIBILITY,
   PERFORMANCE_LOCAL_THEME_VERSION,
@@ -54,11 +55,130 @@ test("every reusable component contract is versioned, Website-scoped, and discov
   assert.equal(performanceLocalComponentContract("unknown_component"), undefined);
 });
 
+test("serialized component contracts exactly match the backend canonical authority", () => {
+  const canonicalPath = resolve(
+    process.cwd(),
+    "..",
+    "backend",
+    "app",
+    "schemas",
+    "performance_local_v2_contract.json",
+  );
+  const canonical = JSON.parse(readFileSync(canonicalPath, "utf8"));
+  assert.deepEqual(PERFORMANCE_LOCAL_SERIALIZED_COMPONENT_CONTRACTS, canonical);
+  const serializedCampaign = PERFORMANCE_LOCAL_SERIALIZED_COMPONENT_CONTRACTS.find(
+    (item) => item.component_key === "campaign_banner",
+  );
+  assert.deepEqual(serializedCampaign?.required_configuration.slice(-7), [
+    "campaign_label",
+    "cta_label",
+    "cta_destination",
+    "start_date",
+    "end_date",
+    "terms_reference",
+    "approval_identity",
+  ]);
+  assert.equal(serializedCampaign?.diagnostic_label, "Approved time-bounded campaign");
+});
+
 test("runtime brand accent injection accepts safe opaque hex and otherwise uses governed primary", () => {
   assert.equal(resolvePerformanceLocalBrandAccent("#12aBcF", "#123456"), "#12aBcF");
   assert.equal(resolvePerformanceLocalBrandAccent("transparent", "#123456"), "#123456");
   assert.equal(resolvePerformanceLocalBrandAccent("#1234", "#123456"), "#123456");
   assert.throws(() => resolvePerformanceLocalBrandAccent(null, "green"), /governed primary color/);
+});
+
+test("evergreen conversion and time-bound campaign intents remain distinct and fail closed", () => {
+  const evergreen = performanceLocalOptionalConfiguration(
+    "campaign_banner",
+    websiteId,
+    "Evergreen estimate action",
+    {
+      approvalIdentity: "APPROVAL-IDENTITY",
+      campaignLabel: "Request an Estimate",
+      ctaDestination: "#configured-form-target",
+      ctaLabel: "Request Estimate",
+      intent: "evergreen_conversion",
+    },
+  );
+  assert.equal(
+    resolveOptionalComponent("campaign_banner", evergreen, websiteId, "desktop", evaluatedAt).visible,
+    true,
+  );
+  for (const campaignLabel of [
+    "$99 today",
+    "Request service today",
+    "Request service now",
+    "Get 50 off",
+    "Half off service",
+    "Save fifty dollars",
+    "Free service",
+    "Complimentary service",
+    "No-cost service",
+  ]) {
+    const unsafe = resolveOptionalComponent(
+      "campaign_banner",
+      { ...evergreen, campaignLabel },
+      websiteId,
+      "desktop",
+      evaluatedAt,
+    );
+    assert.equal(unsafe.visible, false);
+    assert.ok(unsafe.errors.some((error) => error.includes("promotional or unsupported")));
+  }
+  for (const prohibited of [
+    { startDate: "2026-08-01T00:00:00Z" },
+    { endDate: "2026-08-31T23:59:59Z" },
+    { termsReference: "Not applicable" },
+    { price: "$1" },
+    { discount: "discount" },
+    { urgency: "today" },
+    { financing: "available" },
+    { guarantee: "guaranteed" },
+  ]) {
+    const result = resolveOptionalComponent(
+      "campaign_banner",
+      { ...evergreen, ...prohibited },
+      websiteId,
+      "desktop",
+      evaluatedAt,
+    );
+    assert.equal(result.visible, false);
+    assert.ok(result.errors.some((error) => error.includes("Evergreen conversion configuration")));
+  }
+
+  const incompleteTimeBound = resolveOptionalComponent(
+    "campaign_banner",
+    { ...evergreen, intent: "time_bound_campaign" },
+    websiteId,
+    "desktop",
+    evaluatedAt,
+  );
+  assert.equal(incompleteTimeBound.visible, false);
+  assert.ok(incompleteTimeBound.errors.some((error) => error.includes("dates")));
+  assert.ok(incompleteTimeBound.errors.some((error) => error.includes("termsReference")));
+
+  const timeBound = {
+    ...evergreen,
+    intent: "time_bound_campaign" as const,
+    approvedOfferDetails: "Approved campaign details",
+    termsReference: "Approved campaign terms",
+    startDate: "2026-08-13T11:00:00Z",
+    endDate: "2026-08-13T13:00:00Z",
+  };
+  assert.equal(
+    resolveOptionalComponent("campaign_banner", timeBound, websiteId, "desktop", evaluatedAt).visible,
+    true,
+  );
+  const atExclusiveEnd = resolveOptionalComponent(
+    "campaign_banner",
+    timeBound,
+    websiteId,
+    "desktop",
+    new Date("2026-08-13T13:00:00Z"),
+  );
+  assert.equal(atExclusiveEnd.visible, false);
+  assert.ok(atExclusiveEnd.errors.some((error) => error.includes("outside")));
 });
 
 test("provider, local-area, community, language, and production-form capabilities fail closed", () => {

@@ -28,6 +28,13 @@ def remove_sqlite_database(path: Path) -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def isolated_test_run() -> None:
+    # The shared disposable test database represents a fully migrated Atlas
+    # database. Production startup intentionally excludes Alembic-owned 0045
+    # tables; tests opt in explicitly so backup/export coverage exercises the
+    # current schema without weakening that production boundary.
+    from app.db.session import create_db_and_tables
+
+    create_db_and_tables(include_alembic_owned=True)
     yield
     from app.db.session import engine
 

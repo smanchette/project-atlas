@@ -12,16 +12,21 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { apiRequest } from "../api";
 import {
   ATLAS_DIAGNOSTIC_THEME,
-  PERFORMANCE_LOCAL_THEME,
+  PERFORMANCE_LOCAL_SERIALIZED_COMPONENT_CONTRACTS,
+  PERFORMANCE_LOCAL_V2_SOURCE_COMMIT,
   performanceLocalOptionalConfiguration,
   performanceLocalViewport,
 } from "../components/performanceLocalTheme";
 import PerformanceLocalRenderer, {
   performanceLocalDiagnostics,
+  performanceLocalFormDomId,
   type PerformanceLocalCampaign,
+  type PerformanceLocalEstimateField,
+  type PerformanceLocalEstimateFormConfiguration,
+  type PerformanceLocalGovernedContact,
   type PerformanceLocalRuntimeToggles,
+  type PerformanceLocalStickyActionConfiguration,
 } from "../components/PerformanceLocalRenderer";
-import { performanceLocalActivationReadiness } from "../components/performanceLocalReadiness";
 import {
   installIdentityHeadTags,
   removeIdentityHeadTags,
@@ -31,26 +36,32 @@ import {
   compositionValidationError,
   renderComponent,
 } from "./GeneratedPagePreview";
-import type { GeneratedPage, PageComposition } from "../types";
+import type {
+  GeneratedPage,
+  PageComposition,
+  ThemeDraftPreviewRead,
+  WebsiteThemeComponentConfigurationRead,
+} from "../types";
 
 type AdapterKey = "atlas-diagnostic" | "performance-local";
 
 type ThemeLabData = {
   composition: PageComposition;
+  draftPreview: ThemeDraftPreviewRead;
   page: GeneratedPage;
   requestKey: string;
 };
 
 const INITIAL_TOGGLES: PerformanceLocalRuntimeToggles = {
-  campaignBanner: false,
+  campaignBanner: true,
   compactEstimateForm: true,
+  estimateAction: true,
   finalCta: true,
   headerEstimateCta: true,
+  phoneAction: true,
   stickyActionBar: true,
   trustStrip: true,
 };
-
-const RUNTIME_PREVIEW_CAMPAIGN_LABEL = "Request a Drywood Termite Tenting Estimate";
 
 function ThemeLabPage() {
   const { id } = useParams();
@@ -98,14 +109,17 @@ function ThemeLabPage() {
         return;
       }
       try {
-        const [page, composition] = await Promise.all([
-          apiRequest<GeneratedPage>(`/api/generated-pages/${pageId}`),
+        const page = await apiRequest<GeneratedPage>(`/api/generated-pages/${pageId}`);
+        const [composition, draftPreview] = await Promise.all([
           apiRequest<PageComposition>(`/api/site-plans/generated-pages/${pageId}/composition`),
+          apiRequest<ThemeDraftPreviewRead>(
+            `/api/websites/${page.website_id}/theme-configurations/draft-preview?family_key=performance-local&family_version=2&page_id=${pageId}`,
+          ),
         ]);
-        const validationError = themeLabValidationError(page, composition);
+        const validationError = themeLabValidationError(page, composition, draftPreview);
         if (validationError) throw new Error(validationError);
         if (!isCurrent()) return;
-        setData({ page, composition, requestKey });
+        setData({ page, composition, draftPreview, requestKey });
         document.title = `${page.page_title} | Performance Local Theme Lab`;
       } catch (value) {
         if (!isCurrent()) return;
@@ -142,34 +156,43 @@ function ThemeLabPage() {
     return <ThemeLabState message={error ?? "Theme Lab is unavailable."} error />;
   }
 
-  const { composition, page } = currentData;
+  const { composition, draftPreview, page } = currentData;
+  const durableConfiguration = performanceLocalDraftConfiguration(draftPreview);
+  if (!durableConfiguration) {
+    return <ThemeLabState message="Durable Performance Local configuration is incomplete or unsafe." error />;
+  }
   const governedPresentation = themePresentation(
     composition.resolved_theme,
     composition.website_id,
     viewportWidth,
   );
-  const adapterTheme = adapter === "performance-local"
-    ? PERFORMANCE_LOCAL_THEME
-    : ATLAS_DIAGNOSTIC_THEME;
-  const adapterMetadata = catalogMetadata(adapterTheme);
+  const adapterMetadata = adapter === "performance-local"
+    ? {
+        displayName: draftPreview.theme_family.display_name,
+        key: draftPreview.theme_family.family_key,
+        status: draftPreview.theme_version.lifecycle_status,
+        version: String(draftPreview.theme_version.version),
+      }
+    : catalogMetadata(ATLAS_DIAGNOSTIC_THEME);
   const breakpoint = adapter === "performance-local"
     ? performanceLocalViewport(viewportWidth)
     : governedPresentation.attributes["data-atlas-theme-viewport"];
-  const campaignPageId = positiveInteger(searchParams.get("campaignPageId"));
-  const runtimeCampaign = campaignPageId === page.id
-    ? performanceLocalPreviewCampaign(composition.website_id, page.id, previewSessionTime)
+  const estimateDestination = toggles.estimateAction !== false && toggles.compactEstimateForm && toggles.finalCta
+    ? `#${performanceLocalFormDomId(durableConfiguration.estimateForm.componentConfigurationId)}`
     : null;
-  const effectiveCampaign = toggles.campaignBanner && toggles.finalCta && toggles.compactEstimateForm
-    ? runtimeCampaign
-    : null;
+  const phoneDestination = toggles.phoneAction === false
+    ? null
+    : durableConfiguration.governedContact?.callDestination ?? null;
   const diagnostics = performanceLocalDiagnostics(composition, toggles, {
-    campaignVisible: Boolean(effectiveCampaign),
+    campaignVisible: Boolean(toggles.campaignBanner && estimateDestination),
+    estimateDestination,
+    phoneDestination,
   });
-  const readiness = performanceLocalActivationReadiness({
-    previewImplementationPresent: true,
-    observedThemeFamilyVersion: PERFORMANCE_LOCAL_THEME.version,
-  });
-  const governedContacts = themeLabGovernedContacts(composition);
+  const readiness = draftPreview.readiness;
+  const governedContacts = [
+    draftPreview.governed_actions.phone_display,
+    draftPreview.governed_actions.call_destination,
+  ].filter((value): value is string => Boolean(value));
   const runtimeBrandAccent = searchParams.get("brandAccent");
   const reviewMode = searchParams.get("review") === "1";
 
@@ -181,7 +204,7 @@ function ThemeLabPage() {
             <ArrowLeft size={16} aria-hidden="true" /> Diagnostic preview
           </Link>
           <span><FlaskConical size={17} aria-hidden="true" /> Local Theme Lab</span>
-          <strong>Not selected or published</strong>
+          <strong>{draftPreview.preview_label}</strong>
         </div>
         <div className="themeLabAdapterSelector" role="group" aria-label="Preview adapter">
           <button
@@ -203,28 +226,47 @@ function ThemeLabPage() {
         </div>
       </header> : null}
 
+      <div className="themeLabDraftBanner" role="status" data-draft-active="false">
+        <strong>{draftPreview.preview_label}</strong>
+        <span>Read-only durable Website draft · export ineligible · provider disabled</span>
+      </div>
+
       {!reviewMode ? <aside className="themeLabControls" aria-label="Runtime preview controls">
         <div>
-          <p className="themeLabEyebrow">Source-only preview adapter</p>
+          <p className="themeLabEyebrow">Durable inactive draft adapter</p>
           <h2>{adapterMetadata.displayName}</h2>
           <dl>
             <div><dt>Key</dt><dd>{adapterMetadata.key}</dd></div>
             <div><dt>Version</dt><dd>{adapterMetadata.version}</dd></div>
             <div><dt>Status</dt><dd>{adapterMetadata.status}</dd></div>
-            <div><dt>Production ready</dt><dd>{adapter === "performance-local" ? "No" : "Not applicable"}</dd></div>
+            <div><dt>Production ready</dt><dd>{adapter === "performance-local" ? formatBoolean(draftPreview.theme_version.production_ready) : "Not applicable"}</dd></div>
             <div><dt>Breakpoint</dt><dd>{breakpoint}</dd></div>
+            {adapter === "performance-local" ? <div><dt>Family ID</dt><dd>{draftPreview.theme_family.id}</dd></div> : null}
+            {adapter === "performance-local" ? <div><dt>Version ID</dt><dd>{draftPreview.theme_version.id}</dd></div> : null}
+            {adapter === "performance-local" ? <div><dt>Website config</dt><dd>{draftPreview.website_configuration.id} / v{draftPreview.website_configuration.version}</dd></div> : null}
+            {adapter === "performance-local" ? <div><dt>Draft lifecycle</dt><dd>{draftPreview.website_configuration.lifecycle_status}</dd></div> : null}
           </dl>
         </div>
         {adapter === "performance-local" ? (
           <fieldset>
             <legend>Client-only component toggles</legend>
             <RuntimeToggle
-              label="Campaign banner"
+              label="Evergreen conversion banner"
               checked={toggles.campaignBanner}
-              note={runtimeCampaign
-                ? "Runtime-only page-scoped preview; no price, urgency, or production offer."
-                : "Fails closed until the current Page identity is supplied through runtime-only preview scope."}
+              note="Suppresses the durable draft locally; it never edits the component configuration."
               onChange={(checked) => setToggle(setToggles, "campaignBanner", checked)}
+            />
+            <RuntimeToggle
+              label="Governed Call actions"
+              checked={toggles.phoneAction !== false}
+              note="Local fail-closed preview of the missing-phone state."
+              onChange={(checked) => setToggle(setToggles, "phoneAction", checked)}
+            />
+            <RuntimeToggle
+              label="Configured Estimate actions"
+              checked={toggles.estimateAction !== false}
+              note="Local fail-closed preview of a missing exact form destination."
+              onChange={(checked) => setToggle(setToggles, "estimateAction", checked)}
             />
             <RuntimeToggle
               label="Header estimate CTA"
@@ -299,19 +341,70 @@ function ThemeLabPage() {
           <pre>{JSON.stringify(composition.resolved_theme.effective_tokens, null, 2)}</pre>
         </details>
         {adapter === "performance-local" ? (
+          <details className="themeLabDurableMetadata" open>
+            <summary>Durable draft identity</summary>
+            <dl>
+              <div><dt>Theme Family</dt><dd>{draftPreview.theme_family.id} · {draftPreview.theme_family.family_key}</dd></div>
+              <div><dt>Family lifecycle</dt><dd>{draftPreview.theme_family.lifecycle_status}</dd></div>
+              <div><dt>Family fingerprint</dt><dd><code>{draftPreview.theme_family.integrity_fingerprint}</code></dd></div>
+              <div><dt>Theme Version</dt><dd>{draftPreview.theme_version.id} · v{draftPreview.theme_version.version}</dd></div>
+              <div><dt>Version lifecycle</dt><dd>{draftPreview.theme_version.lifecycle_status}</dd></div>
+              <div><dt>Production ready</dt><dd>{formatBoolean(draftPreview.theme_version.production_ready)}</dd></div>
+              <div><dt>Source commit</dt><dd><code>{draftPreview.theme_version.source_commit}</code></dd></div>
+              <div><dt>Compatibility</dt><dd>{draftPreview.theme_version.compatibility_identity}</dd></div>
+              <div><dt>Version fingerprint</dt><dd><code>{draftPreview.theme_version.integrity_fingerprint}</code></dd></div>
+              <div><dt>Website configuration</dt><dd>{draftPreview.website_configuration.id} · v{draftPreview.website_configuration.version}</dd></div>
+              <div><dt>Configuration lifecycle</dt><dd>{draftPreview.website_configuration.lifecycle_status}</dd></div>
+              <div><dt>Configuration fingerprint</dt><dd><code>{draftPreview.website_configuration.integrity_fingerprint}</code></dd></div>
+              <div><dt>Banner intent</dt><dd>{durableConfiguration.campaign?.intent ?? "disabled or outside effective window"}</dd></div>
+              <div><dt>Sticky actions</dt><dd>{durableConfiguration.stickyActions.enabled ? "configured · inactive draft" : "disabled"}</dd></div>
+              <div><dt>Form state</dt><dd>{draftPreview.provider_state.submission_state}</dd></div>
+              <div><dt>Provider</dt><dd>{draftPreview.provider_state.provider_key ?? "not configured"}</dd></div>
+              <div><dt>Privacy</dt><dd>{themeDraftPrivacyStatus(draftPreview)}</dd></div>
+              <div><dt>Activation</dt><dd>{draftPreview.activation_status}</dd></div>
+              <div><dt>Publication</dt><dd>{draftPreview.publication_status}</dd></div>
+              <div><dt>Deployment</dt><dd>{draftPreview.deployment_status}</dd></div>
+              <div><dt>Public export</dt><dd>{draftPreview.export_eligible ? "eligible" : "ineligible"}</dd></div>
+            </dl>
+            <h3>Component configuration identities</h3>
+            <ul className="themeLabIdentityList">
+              {draftPreview.components.map((component) => (
+                <li key={component.id}>
+                  <strong>{component.component_key}</strong>
+                  <span>ID {component.id} · revision {component.revision} · {component.scope_type} · {component.lifecycle_status}</span>
+                  <span>Target ID {component.destination_component_configuration_id ?? "none"}</span>
+                  <code>{component.integrity_fingerprint}</code>
+                </li>
+              ))}
+            </ul>
+            <h3>Audit identities</h3>
+            <ul className="themeLabIdentityList">
+              {draftPreview.audit_history.map((audit) => (
+                <li key={audit.id}>
+                  <strong>Audit {audit.id} · {audit.action_type}</strong>
+                  <span>{audit.actor} · {themeAuditTarget(audit)}</span>
+                  <code>{audit.snapshot_hash}</code>
+                </li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
+        {adapter === "performance-local" ? (
           <section className="themeLabReadiness" aria-labelledby="performance-local-activation-readiness">
             <p className="themeLabEyebrow">Diagnostic only</p>
             <h2 id="performance-local-activation-readiness">Activation readiness</h2>
             <p role="status"><strong>Blocked — Performance Local is not activated and is not production-ready.</strong></p>
             <dl>
-              <div><dt>Theme family</dt><dd>{readiness.themeKey} v{readiness.themeFamilyVersion}</dd></div>
-              <div><dt>Lifecycle</dt><dd>{readiness.lifecycle}</dd></div>
-              <div><dt>Incomplete inputs</dt><dd>{readiness.incompleteCount}</dd></div>
-              <div><dt>Can activate</dt><dd>No</dd></div>
+              <div><dt>Theme family</dt><dd>{draftPreview.theme_family.family_key} v{draftPreview.theme_version.version}</dd></div>
+              <div><dt>Lifecycle</dt><dd>{draftPreview.theme_version.lifecycle_status}</dd></div>
+              <div><dt>Incomplete inputs</dt><dd>{readiness.incomplete_items.length}</dd></div>
+              <div><dt>Can activate</dt><dd>{formatBoolean(readiness.can_activate)}</dd></div>
+              <div><dt>Can publish</dt><dd>{formatBoolean(readiness.can_publish)}</dd></div>
+              <div><dt>Can deploy</dt><dd>{formatBoolean(readiness.can_deploy)}</dd></div>
             </dl>
             <ul>
-              {readiness.items.map((item) => (
-                <li key={item.key} data-readiness-status={item.status}>
+              {readiness.incomplete_items.map((item) => (
+                <li key={item.key} data-readiness-status="incomplete">
                   <strong>{item.label}: incomplete</strong>
                   <span>{item.reason}</span>
                 </li>
@@ -336,10 +429,13 @@ function ThemeLabPage() {
         {adapter === "performance-local" ? (
           <PerformanceLocalRenderer
             brandAccent={runtimeBrandAccent}
-            campaign={effectiveCampaign}
+            campaign={durableConfiguration.campaign}
             page={page}
             composition={composition}
+            estimateForm={durableConfiguration.estimateForm}
+            governedContact={durableConfiguration.governedContact}
             previewedAt={previewSessionTime}
+            stickyActions={durableConfiguration.stickyActions}
             toggles={toggles}
           />
         ) : (
@@ -409,7 +505,11 @@ function ThemeLabState({ message, error = false }: { message: string; error?: bo
   );
 }
 
-function themeLabValidationError(page: GeneratedPage, composition: PageComposition): string | null {
+function themeLabValidationError(
+  page: GeneratedPage,
+  composition: PageComposition,
+  draftPreview: ThemeDraftPreviewRead,
+): string | null {
   const compositionError = compositionValidationError(composition);
   if (compositionError) return compositionError;
   if (page.id !== composition.generated_page_id) {
@@ -420,6 +520,59 @@ function themeLabValidationError(page: GeneratedPage, composition: PageCompositi
   }
   if (!page.draft_content) {
     return "Generate a structured draft before opening Theme Lab.";
+  }
+  if (
+    draftPreview.preview_label !== "DRAFT PREVIEW — NOT ACTIVE" ||
+    draftPreview.theme_family.family_key !== "performance-local" ||
+    draftPreview.theme_version.version !== 2 ||
+    draftPreview.theme_version.theme_family_id !== draftPreview.theme_family.id ||
+    draftPreview.theme_version.lifecycle_status !== "preview_candidate" ||
+    draftPreview.theme_version.production_ready !== false ||
+    draftPreview.website_configuration.website_id !== composition.website_id ||
+    draftPreview.website_configuration.theme_family_version_id !== draftPreview.theme_version.id ||
+    draftPreview.website_configuration.lifecycle_status !== "draft" ||
+    draftPreview.website_configuration.materialized_theme_id !== null ||
+    draftPreview.website_configuration.website_theme_selection_id !== null ||
+    draftPreview.requested_generated_page_id !== page.id
+  ) {
+    return "The durable Theme draft identity is incompatible, active, or crosses its Website or Page boundary.";
+  }
+  if (
+    draftPreview.export_eligible !== false ||
+    draftPreview.privacy_status !== "blocked_pending_privacy_configuration" ||
+    draftPreview.activation_status !== "blocked" ||
+    draftPreview.publication_status !== "blocked" ||
+    draftPreview.deployment_status !== "blocked" ||
+    draftPreview.readiness.can_activate !== false ||
+    draftPreview.readiness.can_publish !== false ||
+    draftPreview.readiness.can_deploy !== false ||
+    draftPreview.provider_state.submission_state !== "disabled_pending_provider_configuration" ||
+    draftPreview.provider_state.provider_key !== null ||
+    draftPreview.provider_state.destination !== null ||
+    draftPreview.provider_state.can_submit !== false ||
+    draftPreview.provider_state.collects_data !== false
+  ) {
+    return "The durable Theme draft is not safely blocked from activation, export, or form submission.";
+  }
+  if (
+    !canonicalFingerprint(draftPreview.theme_family.integrity_fingerprint) ||
+    !canonicalFingerprint(draftPreview.theme_version.integrity_fingerprint) ||
+    !canonicalFingerprint(draftPreview.website_configuration.integrity_fingerprint) ||
+    draftPreview.components.some((component) =>
+      component.website_id !== composition.website_id ||
+      component.website_theme_configuration_id !== draftPreview.website_configuration.id ||
+      component.theme_family_version_id !== draftPreview.theme_version.id ||
+      !canonicalFingerprint(component.integrity_fingerprint)
+    ) ||
+    draftPreview.audit_history.some((audit) => !canonicalFingerprint(audit.snapshot_hash))
+  ) {
+    return "Durable Theme draft fingerprints or ownership identities are invalid.";
+  }
+  if (!durableThemeContractIdentity(draftPreview)) {
+    return "The durable Theme Version or component metadata does not match the exact source contract.";
+  }
+  if (!performanceLocalDraftConfiguration(draftPreview)) {
+    return "The exact banner, sticky-action, governed-contact, or compact-form contract is incomplete.";
   }
   return null;
 }
@@ -450,57 +603,329 @@ function setToggle(
 function previewToggles(searchParams: URLSearchParams): PerformanceLocalRuntimeToggles {
   return {
     ...INITIAL_TOGGLES,
-    campaignBanner: searchParams.get("campaign") === "1",
+    campaignBanner: searchParams.get("campaign") !== "0",
     compactEstimateForm: searchParams.get("form") !== "0",
+    estimateAction: searchParams.get("estimate") !== "0",
     finalCta: searchParams.get("final") !== "0",
     headerEstimateCta: searchParams.get("headerEstimate") !== "0",
+    phoneAction: searchParams.get("phone") !== "0",
     stickyActionBar: searchParams.get("sticky") !== "0",
     trustStrip: searchParams.get("trust") !== "0",
   };
 }
 
-function performanceLocalPreviewCampaign(
-  websiteId: number,
-  pageId: number,
-  previewedAt: Date,
-): PerformanceLocalCampaign {
-  const startDate = new Date(previewedAt.getTime() - 60 * 60 * 1000).toISOString();
-  const endDate = new Date(previewedAt.getTime() + 24 * 60 * 60 * 1000).toISOString();
-  return {
-    ...performanceLocalOptionalConfiguration(
-      "campaign_banner",
-      websiteId,
-      "Estimate campaign preview",
-      {
-        pageOverrideId: pageId,
-        approvalIdentity: "operator-authorized-local-theme-lab-preview",
-        campaignLabel: RUNTIME_PREVIEW_CAMPAIGN_LABEL,
-        ctaDestination: "#estimate",
-        ctaLabel: "Request estimate",
-        endDate,
+type DurablePerformanceLocalConfiguration = Readonly<{
+  campaign: PerformanceLocalCampaign | null;
+  estimateForm: PerformanceLocalEstimateFormConfiguration;
+  governedContact: PerformanceLocalGovernedContact | null;
+  stickyActions: PerformanceLocalStickyActionConfiguration;
+}>;
+
+export function performanceLocalDraftConfiguration(
+  preview: ThemeDraftPreviewRead,
+): DurablePerformanceLocalConfiguration | null {
+  if (!durableThemeContractIdentity(preview)) return null;
+  const banners = preview.components.filter(
+    (component) => component.component_key === "campaign_banner",
+  );
+  if (banners.length > 1) return null;
+  const banner = banners[0] ?? null;
+  const sticky = exactComponent(preview.components, "sticky_mobile_action_bar");
+  const form = exactComponent(preview.components, "compact_estimate_form");
+  if (!sticky || !form || !sticky.enabled || !form.enabled) return null;
+  if (
+    sticky.destination_component_configuration_id !== form.id ||
+    preview.governed_actions.estimate_destination_component_configuration_id !== form.id
+  ) return null;
+
+  const stickyPayload = sticky.configuration_payload;
+  const formPayload = form.configuration_payload;
+  const stickyEstimateLabel = exactText(stickyPayload.estimate_label);
+  const callLabel = exactText(stickyPayload.call_label);
+  if (!stickyEstimateLabel || !callLabel) return null;
+  if (stickyPayload.call_source !== "governed_website_identity") return null;
+  if (
+    preview.governed_actions.call_label !== callLabel ||
+    preview.governed_actions.estimate_label !== stickyEstimateLabel ||
+    preview.governed_actions.desktop_header_actions_enabled !== true ||
+    preview.governed_actions.mobile_sticky_actions_enabled !== true ||
+    preview.governed_actions.desktop_header_estimate_destination_component_configuration_id !== form.id ||
+    preview.governed_actions.mobile_sticky_estimate_destination_component_configuration_id !== form.id
+  ) return null;
+  for (const requirement of [
+    "desktop_sticky_header",
+    "mobile_sticky_bottom",
+    "hide_while_hero_actions_visible",
+    "hide_while_navigation_open",
+    "protect_form_focus",
+    "safe_area_support",
+    "prevent_content_obstruction",
+  ]) {
+    if (stickyPayload[requirement] !== true) return null;
+  }
+
+  const estimateForm = durableEstimateForm(form, formPayload, preview, stickyEstimateLabel);
+  if (!estimateForm) return null;
+  let campaign: PerformanceLocalCampaign | null = null;
+  if (banner?.enabled) {
+    if (banner.destination_component_configuration_id !== form.id) return null;
+    const bannerPayload = banner.configuration_payload;
+    const bannerLabel = exactText(bannerPayload.message);
+    const ctaLabel = exactText(bannerPayload.cta_label);
+    const approvalIdentity = exactText(bannerPayload.approval_identity);
+    if (!bannerLabel || !ctaLabel || !approvalIdentity || ctaLabel !== stickyEstimateLabel) return null;
+    const ctaDestination = `#${performanceLocalFormDomId(form.id)}`;
+    const commonCampaign = {
+      ...performanceLocalOptionalConfiguration(
+        "campaign_banner",
+        preview.website_configuration.website_id,
+        bannerLabel,
+        {
+          approvalIdentity,
+          campaignLabel: bannerLabel,
+          ctaDestination,
+          ctaLabel,
+        },
+      ),
+      approvalIdentity,
+      campaignLabel: bannerLabel,
+      ctaDestination,
+      ctaLabel,
+      destinationComponentConfigurationId: form.id,
+      enabled: true,
+      websiteId: preview.website_configuration.website_id,
+    };
+    if (bannerPayload.intent === "evergreen_conversion") {
+      campaign = { ...commonCampaign, intent: "evergreen_conversion" };
+    } else if (bannerPayload.intent === "time_bound_campaign") {
+      const startDate = exactText(bannerPayload.start_at);
+      const endDate = exactText(bannerPayload.end_at);
+      const termsReference = exactText(bannerPayload.terms_reference);
+      const offerDetails = exactText(bannerPayload.approved_offer_details);
+      if (!startDate || !endDate || !termsReference || !offerDetails) return null;
+      campaign = {
+        ...commonCampaign,
+        intent: "time_bound_campaign",
         startDate,
-        termsReference: "Performance Local v2 Theme Lab preview only; no production offer or price.",
-      },
-    ),
-    approvalIdentity: "operator-authorized-local-theme-lab-preview",
-    campaignLabel: RUNTIME_PREVIEW_CAMPAIGN_LABEL,
-    ctaDestination: "#estimate",
-    ctaLabel: "Request estimate",
-    enabled: true,
-    endDate,
-    startDate,
-    termsReference: "Performance Local v2 Theme Lab preview only; no production offer or price.",
-    websiteId,
+        endDate,
+        termsReference,
+        offerDetails,
+      };
+    } else {
+      return null;
+    }
+  }
+
+  const phoneDisplay = exactText(preview.governed_actions.phone_display);
+  const callDestination = exactText(preview.governed_actions.call_destination);
+  const governedContact = phoneDisplay && callDestination
+    ? {
+        callDestination,
+        phoneDisplay,
+        websiteId: preview.website_configuration.website_id,
+      }
+    : null;
+  if (Boolean(phoneDisplay) !== Boolean(callDestination)) return null;
+
+  return {
+    campaign,
+    estimateForm,
+    governedContact,
+    stickyActions: {
+      callLabel,
+      componentConfigurationId: sticky.id,
+      desktopHeaderActionsEnabled: true,
+      destinationComponentConfigurationId: form.id,
+      enabled: true,
+      estimateLabel: stickyEstimateLabel,
+      mobileStickyActionsEnabled: true,
+    },
   };
 }
 
-function themeLabGovernedContacts(composition: PageComposition): string[] {
-  const header = composition.effective_components.find(
-    (component) => component.component_key === "website_header",
-  );
-  const data = asRecord(header?.resolved_data);
-  const contacts = [cleanText(data.phone), cleanText(data.email)].filter(Boolean);
-  return [...new Set(contacts)];
+function durableEstimateForm(
+  component: WebsiteThemeComponentConfigurationRead,
+  payload: Record<string, unknown>,
+  preview: ThemeDraftPreviewRead,
+  ctaLabel: string,
+): PerformanceLocalEstimateFormConfiguration | null {
+  if (
+    payload.submission_state !== "disabled_pending_provider_configuration" ||
+    payload.provider_key !== null ||
+    payload.destination !== null ||
+    payload.privacy_policy_destination !== null ||
+    payload.consent_language !== null ||
+    payload.data_retention_policy !== null ||
+    payload.spam_strategy !== null ||
+    payload.success_behavior !== null ||
+    payload.failure_behavior !== null ||
+    payload.audit_identity !== null ||
+    !Array.isArray(payload.fields) ||
+    payload.fields.length !== 5
+  ) return null;
+  const fields = payload.fields.map(performanceLocalDurableEstimateField);
+  if (fields.some((field) => field === null)) return null;
+  const submitLabel = exactText(payload.submit_label);
+  const previewNotice = exactText(payload.preview_notice);
+  if (!submitLabel || !previewNotice) return null;
+  return {
+    componentConfigurationId: component.id,
+    componentInstanceKey: component.component_instance_key,
+    ctaLabel,
+    fields: fields as PerformanceLocalEstimateField[],
+    previewNotice,
+    providerState: {
+      canSubmit: false,
+      collectsData: false,
+      destination: null,
+      providerKey: null,
+      submissionState: "disabled_pending_provider_configuration",
+    },
+    submitLabel,
+    visualState: "idle",
+  };
+}
+
+export function performanceLocalDurableEstimateField(
+  value: unknown,
+): PerformanceLocalEstimateField | null {
+  const field = asRecord(value);
+  const validation = asRecord(field.validation_contract);
+  const key = exactText(field.field_key);
+  const label = exactText(field.label);
+  const accessibilityLabel = exactText(field.accessibility_label);
+  const providerMapping = exactText(field.provider_mapping);
+  const autoComplete = exactText(field.autocomplete_policy);
+  const control = field.control;
+  const inputType = field.input_type;
+  const responsiveLayout = field.responsive_layout;
+  const rule = validation.rule;
+  if (
+    !isEstimateFieldKey(key) ||
+    !label ||
+    !accessibilityLabel ||
+    !providerMapping ||
+    autoComplete !== "off" ||
+    (control !== "input" && control !== "textarea") ||
+    (inputType !== "text" && inputType !== "tel") ||
+    (responsiveLayout !== "half" && responsiveLayout !== "full") ||
+    !["nonempty_text", "phone", "postal_code", "free_text"].includes(String(rule)) ||
+    typeof field.required !== "boolean" ||
+    !positiveInteger(field.order) ||
+    !positiveInteger(field.maximum_length) ||
+    !Number.isSafeInteger(validation.minimum_length) ||
+    Number(validation.minimum_length) < 0 ||
+    validation.maximum_length !== field.maximum_length
+  ) return null;
+  return {
+    accessibilityLabel,
+    autoComplete,
+    control,
+    inputMode: key === "phone" ? "tel" : key === "postal-code" ? "numeric" : "text",
+    key,
+    label,
+    maxLength: Number(field.maximum_length),
+    order: Number(field.order),
+    providerMapping,
+    required: field.required,
+    responsive: {
+      desktop: responsiveLayout,
+      tablet: responsiveLayout,
+      mobile: "full",
+    },
+    rows: control === "textarea" ? 3 : undefined,
+    type: control === "input" ? inputType : undefined,
+    validation: {
+      maximumLength: Number(validation.maximum_length),
+      minimumLength: Number(validation.minimum_length),
+      rule: rule as PerformanceLocalEstimateField["validation"]["rule"],
+    },
+  };
+}
+
+function exactComponent(
+  components: WebsiteThemeComponentConfigurationRead[],
+  key: string,
+): WebsiteThemeComponentConfigurationRead | null {
+  const matches = components.filter((component) => component.component_key === key);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function durableThemeContractIdentity(preview: ThemeDraftPreviewRead): boolean {
+  if (
+    preview.theme_version.source_commit !== PERFORMANCE_LOCAL_V2_SOURCE_COMMIT ||
+    !sameCanonicalJson(
+      preview.theme_version.supported_component_contracts,
+      PERFORMANCE_LOCAL_SERIALIZED_COMPONENT_CONTRACTS,
+    )
+  ) return false;
+  return preview.components.every((component) => {
+    const contract = PERFORMANCE_LOCAL_SERIALIZED_COMPONENT_CONTRACTS.find(
+      (candidate) => candidate.component_key === component.component_key,
+    );
+    return Boolean(
+      contract &&
+      component.component_contract_version === contract.contract_version &&
+      component.placement === contract.placement &&
+      component.variant === contract.variant &&
+      sameCanonicalJson(
+        component.responsive_visibility,
+        contract.responsive_visibility,
+      ) &&
+      (
+        component.scope_type === "website_default" ||
+        (component.scope_type === "page_override" && contract.supports_page_override)
+      )
+    );
+  });
+}
+
+function sameCanonicalJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(canonicalJsonValue(left)) === JSON.stringify(canonicalJsonValue(right));
+}
+
+function canonicalJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, canonicalJsonValue(item)]),
+    );
+  }
+  return value;
+}
+
+function isEstimateFieldKey(value: unknown): value is PerformanceLocalEstimateField["key"] {
+  return typeof value === "string" && ["name", "phone", "postal-code", "requested-service", "message"].includes(value);
+}
+
+function exactText(value: unknown): string | null {
+  return typeof value === "string" && value === value.trim() && value.length > 0 && !/[\u0000-\u001f\u007f]/.test(value)
+    ? value
+    : null;
+}
+
+function canonicalFingerprint(value: unknown): boolean {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function formatBoolean(value: boolean): "Yes" | "No" {
+  return value ? "Yes" : "No";
+}
+
+function themeDraftPrivacyStatus(preview: ThemeDraftPreviewRead): string {
+  return preview.privacy_status;
+}
+
+function themeAuditTarget(
+  audit: ThemeDraftPreviewRead["audit_history"][number],
+): string {
+  if (audit.component_configuration_id) return `component configuration ${audit.component_configuration_id}`;
+  if (audit.website_theme_configuration_id) return `Website configuration ${audit.website_theme_configuration_id}`;
+  if (audit.theme_family_version_id) return `Theme Version ${audit.theme_family_version_id}`;
+  if (audit.theme_family_id) return `Theme Family ${audit.theme_family_id}`;
+  return "unknown target";
 }
 
 function useViewportWidth() {

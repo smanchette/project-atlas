@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from sqlalchemy import CheckConstraint, Column, Index, JSON, String, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, Column, DateTime, Index, JSON, String, UniqueConstraint, text
 from sqlmodel import Field, SQLModel
 
 
@@ -272,6 +272,447 @@ class WebsiteThemeSelection(TimestampMixin, table=True):
     rationale: str = Field(max_length=2000)
     selected_at: datetime = Field(default_factory=utc_now, nullable=False)
     replaced_at: datetime | None = None
+
+
+class ThemeFamily(TimestampMixin, table=True):
+    """Website-independent Theme-family identity with governed lifecycle evidence."""
+
+    __table_args__ = (
+        UniqueConstraint("family_key", name="uq_themefamily_key"),
+        CheckConstraint(
+            "lifecycle_status IN ('registered','retired')",
+            name="ck_themefamily_lifecycle",
+        ),
+        CheckConstraint(
+            "length(integrity_fingerprint) = 64 "
+            "AND integrity_fingerprint = lower(integrity_fingerprint)",
+            name="ck_themefamily_fingerprint",
+        ),
+        CheckConstraint(
+            "(lifecycle_status = 'registered' AND retired_by IS NULL AND retired_at IS NULL) "
+            "OR (lifecycle_status = 'retired' AND retired_by IS NOT NULL AND retired_at IS NOT NULL)",
+            name="ck_themefamily_retirement",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    family_key: str = Field(max_length=120, index=True)
+    display_name: str = Field(max_length=160)
+    description: str = Field(max_length=2000)
+    provider_source_identity: str = Field(max_length=240)
+    lifecycle_status: str = Field(default="registered", max_length=24, index=True)
+    created_by: str = Field(max_length=160)
+    retired_by: str | None = Field(default=None, max_length=160)
+    retired_at: datetime | None = None
+    integrity_fingerprint: str = Field(max_length=64, index=True)
+
+
+class ThemeFamilyVersion(TimestampMixin, table=True):
+    """Immutable contract version for one Website-independent Theme family."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "theme_family_id",
+            "version",
+            name="uq_themefamilyversion_family_version",
+        ),
+        UniqueConstraint(
+            "compatibility_identity",
+            name="uq_themefamilyversion_compatibility",
+        ),
+        UniqueConstraint(
+            "supersedes_theme_family_version_id",
+            name="uq_themefamilyversion_successor",
+        ),
+        CheckConstraint(
+            "lifecycle_status IN ('preview_candidate','approved','retired')",
+            name="ck_themefamilyversion_lifecycle",
+        ),
+        CheckConstraint("version >= 1", name="ck_themefamilyversion_version"),
+        CheckConstraint(
+            "production_ready = false OR lifecycle_status = 'approved'",
+            name="ck_themefamilyversion_production_ready",
+        ),
+        CheckConstraint(
+            "length(source_commit) = 40 AND source_commit = lower(source_commit)",
+            name="ck_themefamilyversion_source_commit",
+        ),
+        CheckConstraint(
+            "length(compatibility_identity) = 64 "
+            "AND compatibility_identity = lower(compatibility_identity) "
+            "AND length(integrity_fingerprint) = 64 "
+            "AND integrity_fingerprint = lower(integrity_fingerprint)",
+            name="ck_themefamilyversion_fingerprints",
+        ),
+        CheckConstraint(
+            "supersedes_theme_family_version_id IS NULL "
+            "OR supersedes_theme_family_version_id != id",
+            name="ck_themefamilyversion_not_self",
+        ),
+        CheckConstraint(
+            "(lifecycle_status != 'retired' AND retired_by IS NULL AND retired_at IS NULL) "
+            "OR (lifecycle_status = 'retired' AND retired_by IS NOT NULL AND retired_at IS NOT NULL)",
+            name="ck_themefamilyversion_retirement",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    theme_family_id: int = Field(foreign_key="themefamily.id", index=True)
+    version: int = Field(ge=1)
+    lifecycle_status: str = Field(max_length=32, index=True)
+    production_ready: bool = Field(default=False, nullable=False)
+    source_commit: str = Field(max_length=40, index=True)
+    compatibility_identity: str = Field(max_length=64, index=True)
+    supported_component_contracts: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    created_by: str = Field(max_length=160)
+    retired_by: str | None = Field(default=None, max_length=160)
+    retired_at: datetime | None = None
+    supersedes_theme_family_version_id: int | None = Field(
+        default=None,
+        foreign_key="themefamilyversion.id",
+        index=True,
+    )
+    integrity_fingerprint: str = Field(max_length=64, index=True)
+
+
+class WebsiteThemeConfiguration(TimestampMixin, table=True):
+    """Versioned Website draft configuration for a reusable Theme-family version."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "website_id",
+            "theme_family_version_id",
+            "configuration_key",
+            "version",
+            name="uq_websitethemeconfiguration_scope_version",
+        ),
+        UniqueConstraint(
+            "supersedes_configuration_id",
+            name="uq_websitethemeconfiguration_successor",
+        ),
+        CheckConstraint(
+            "lifecycle_status IN ('draft','approved','active','superseded','retired')",
+            name="ck_websitethemeconfiguration_lifecycle",
+        ),
+        CheckConstraint("version >= 1", name="ck_websitethemeconfiguration_version"),
+        CheckConstraint(
+            "(version = 1 AND supersedes_configuration_id IS NULL) "
+            "OR (version > 1 AND supersedes_configuration_id IS NOT NULL)",
+            name="ck_websitethemeconfiguration_lineage",
+        ),
+        CheckConstraint(
+            "supersedes_configuration_id IS NULL OR supersedes_configuration_id != id",
+            name="ck_websitethemeconfiguration_not_self",
+        ),
+        CheckConstraint(
+            "(materialized_theme_id IS NULL AND website_theme_selection_id IS NULL) "
+            "OR (materialized_theme_id IS NOT NULL AND website_theme_selection_id IS NOT NULL)",
+            name="ck_websitethemeconfiguration_selection_pair",
+        ),
+        CheckConstraint(
+            "(approved_by IS NULL AND approved_at IS NULL) "
+            "OR (approved_by IS NOT NULL AND approved_at IS NOT NULL)",
+            name="ck_websitethemeconfiguration_approval_pair",
+        ),
+        CheckConstraint(
+            "lifecycle_status NOT IN ('approved','active') "
+            "OR (approved_by IS NOT NULL AND approved_at IS NOT NULL)",
+            name="ck_websitethemeconfiguration_approved_evidence",
+        ),
+        CheckConstraint(
+            "(activated_by IS NULL AND activated_at IS NULL) "
+            "OR (activated_by IS NOT NULL AND activated_at IS NOT NULL)",
+            name="ck_websitethemeconfiguration_activation_pair",
+        ),
+        CheckConstraint(
+            "lifecycle_status != 'active' "
+            "OR (activated_by IS NOT NULL AND activated_at IS NOT NULL "
+            "AND materialized_theme_id IS NOT NULL "
+            "AND website_theme_selection_id IS NOT NULL)",
+            name="ck_websitethemeconfiguration_active_evidence",
+        ),
+        CheckConstraint(
+            "(rollback_by IS NULL AND rollback_at IS NULL) "
+            "OR (rollback_by IS NOT NULL AND rollback_at IS NOT NULL)",
+            name="ck_websitethemeconfiguration_rollback_pair",
+        ),
+        CheckConstraint(
+            "length(integrity_fingerprint) = 64 "
+            "AND integrity_fingerprint = lower(integrity_fingerprint)",
+            name="ck_websitethemeconfiguration_fingerprint",
+        ),
+        Index(
+            "uq_websitethemeconfiguration_current",
+            "website_id",
+            "theme_family_version_id",
+            "configuration_key",
+            unique=True,
+            postgresql_where=text(
+                "lifecycle_status IN ('draft','approved','active')"
+            ),
+            sqlite_where=text(
+                "lifecycle_status IN ('draft','approved','active')"
+            ),
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int = Field(foreign_key="website.id", index=True)
+    business_id: int = Field(foreign_key="business.id", index=True)
+    theme_family_version_id: int = Field(
+        foreign_key="themefamilyversion.id",
+        index=True,
+    )
+    configuration_key: str = Field(max_length=120, index=True)
+    version: int = Field(default=1, ge=1)
+    lifecycle_status: str = Field(default="draft", max_length=24, index=True)
+    created_by: str = Field(max_length=160)
+    updated_by: str = Field(max_length=160)
+    creation_rationale: str = Field(max_length=2000)
+    approved_by: str | None = Field(default=None, max_length=160)
+    approved_at: datetime | None = None
+    activated_by: str | None = Field(default=None, max_length=160)
+    activated_at: datetime | None = None
+    rollback_by: str | None = Field(default=None, max_length=160)
+    rollback_at: datetime | None = None
+    materialized_theme_id: int | None = Field(
+        default=None,
+        foreign_key="theme.id",
+        index=True,
+    )
+    website_theme_selection_id: int | None = Field(
+        default=None,
+        foreign_key="websitethemeselection.id",
+        index=True,
+    )
+    supersedes_configuration_id: int | None = Field(
+        default=None,
+        foreign_key="websitethemeconfiguration.id",
+        index=True,
+    )
+    integrity_fingerprint: str = Field(max_length=64, index=True)
+
+
+class WebsiteThemeComponentConfiguration(TimestampMixin, table=True):
+    """One immutable component-configuration revision within a Website draft."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "website_theme_configuration_id",
+            "component_instance_key",
+            "revision",
+            name="uq_themecomponentconfiguration_instance_revision",
+        ),
+        UniqueConstraint(
+            "supersedes_component_configuration_id",
+            name="uq_themecomponentconfiguration_successor",
+        ),
+        CheckConstraint(
+            "scope_type IN ('website_default','page_override')",
+            name="ck_themecomponentconfiguration_scope",
+        ),
+        CheckConstraint(
+            "lifecycle_status IN ('current','superseded')",
+            name="ck_themecomponentconfiguration_lifecycle",
+        ),
+        CheckConstraint(
+            "component_contract_version >= 1 AND revision >= 1",
+            name="ck_themecomponentconfiguration_versions",
+        ),
+        CheckConstraint(
+            "(scope_type = 'website_default' AND planned_page_id IS NULL "
+            "AND overrides_component_configuration_id IS NULL) "
+            "OR (scope_type = 'page_override' AND planned_page_id IS NOT NULL "
+            "AND overrides_component_configuration_id IS NOT NULL)",
+            name="ck_themecomponentconfiguration_page_scope",
+        ),
+        CheckConstraint(
+            "(revision = 1 AND supersedes_component_configuration_id IS NULL) "
+            "OR (revision > 1 AND supersedes_component_configuration_id IS NOT NULL)",
+            name="ck_themecomponentconfiguration_lineage",
+        ),
+        CheckConstraint(
+            "supersedes_component_configuration_id IS NULL "
+            "OR supersedes_component_configuration_id != id",
+            name="ck_themecomponentconfiguration_not_self",
+        ),
+        CheckConstraint(
+            "destination_component_configuration_id IS NULL "
+            "OR destination_component_configuration_id != id",
+            name="ck_themecomponentconfiguration_destination_not_self",
+        ),
+        CheckConstraint(
+            "overrides_component_configuration_id IS NULL "
+            "OR overrides_component_configuration_id != id",
+            name="ck_themecomponentconfiguration_override_not_self",
+        ),
+        CheckConstraint(
+            "expires_at IS NULL OR effective_at IS NULL OR expires_at >= effective_at",
+            name="ck_themecomponentconfiguration_dates",
+        ),
+        CheckConstraint(
+            "(activation_identity IS NULL AND activated_at IS NULL) "
+            "OR (activation_identity IS NOT NULL AND activated_at IS NOT NULL)",
+            name="ck_themecomponentconfiguration_activation_pair",
+        ),
+        CheckConstraint(
+            "(rollback_identity IS NULL AND rollback_at IS NULL) "
+            "OR (rollback_identity IS NOT NULL AND rollback_at IS NOT NULL)",
+            name="ck_themecomponentconfiguration_rollback_pair",
+        ),
+        CheckConstraint(
+            "length(integrity_fingerprint) = 64 "
+            "AND integrity_fingerprint = lower(integrity_fingerprint)",
+            name="ck_themecomponentconfiguration_fingerprint",
+        ),
+        Index(
+            "uq_themecomponentconfiguration_current_website_instance",
+            "website_theme_configuration_id",
+            "component_instance_key",
+            unique=True,
+            postgresql_where=text(
+                "lifecycle_status = 'current' AND scope_type = 'website_default'"
+            ),
+            sqlite_where=text(
+                "lifecycle_status = 'current' AND scope_type = 'website_default'"
+            ),
+        ),
+        Index(
+            "uq_themecomponentconfiguration_current_page_override",
+            "website_theme_configuration_id",
+            "planned_page_id",
+            "overrides_component_configuration_id",
+            unique=True,
+            postgresql_where=text(
+                "lifecycle_status = 'current' AND scope_type = 'page_override'"
+            ),
+            sqlite_where=text(
+                "lifecycle_status = 'current' AND scope_type = 'page_override'"
+            ),
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_theme_configuration_id: int = Field(
+        foreign_key="websitethemeconfiguration.id",
+        index=True,
+    )
+    website_id: int = Field(foreign_key="website.id", index=True)
+    planned_page_id: int | None = Field(
+        default=None,
+        foreign_key="plannedpage.id",
+        index=True,
+    )
+    theme_family_version_id: int = Field(
+        foreign_key="themefamilyversion.id",
+        index=True,
+    )
+    component_instance_key: str = Field(max_length=120, index=True)
+    component_key: str = Field(max_length=80, index=True)
+    component_contract_version: int = Field(ge=1)
+    revision: int = Field(default=1, ge=1)
+    scope_type: str = Field(max_length=24, index=True)
+    lifecycle_status: str = Field(default="current", max_length=24, index=True)
+    enabled: bool = Field(default=False, nullable=False)
+    variant: str = Field(max_length=120)
+    placement: str = Field(max_length=120)
+    responsive_visibility: dict[str, bool] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    configuration_payload: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    effective_at: datetime | None = None
+    expires_at: datetime | None = None
+    approval_identity: str | None = Field(default=None, max_length=160)
+    created_by: str = Field(max_length=160)
+    updated_by: str = Field(max_length=160)
+    activation_identity: str | None = Field(default=None, max_length=160)
+    activated_at: datetime | None = None
+    rollback_identity: str | None = Field(default=None, max_length=160)
+    rollback_at: datetime | None = None
+    destination_component_configuration_id: int | None = Field(
+        default=None,
+        foreign_key="websitethemecomponentconfiguration.id",
+        index=True,
+    )
+    overrides_component_configuration_id: int | None = Field(
+        default=None,
+        foreign_key="websitethemecomponentconfiguration.id",
+        index=True,
+    )
+    supersedes_component_configuration_id: int | None = Field(
+        default=None,
+        foreign_key="websitethemecomponentconfiguration.id",
+        index=True,
+    )
+    integrity_fingerprint: str = Field(max_length=64, index=True)
+
+
+class ThemeConfigurationAudit(SQLModel, table=True):
+    """Append-only audit snapshot for one exact Theme-configuration entity."""
+
+    __table_args__ = (
+        CheckConstraint(
+            "(CASE WHEN theme_family_id IS NULL THEN 0 ELSE 1 END + "
+            "CASE WHEN theme_family_version_id IS NULL THEN 0 ELSE 1 END + "
+            "CASE WHEN website_theme_configuration_id IS NULL THEN 0 ELSE 1 END + "
+            "CASE WHEN component_configuration_id IS NULL THEN 0 ELSE 1 END) = 1",
+            name="ck_themeconfigurationaudit_exact_target",
+        ),
+        CheckConstraint(
+            "action_type IN ('family_registered','family_version_registered',"
+            "'family_version_approved','website_draft_created',"
+            "'website_configuration_revision_created','website_configuration_approved',"
+            "'website_configuration_activated','website_configuration_superseded',"
+            "'website_configuration_rolled_back','website_configuration_retired',"
+            "'component_created','component_revision_created','component_superseded',"
+            "'component_activated','component_rolled_back',"
+            "'family_retired','family_version_retired')",
+            name="ck_themeconfigurationaudit_action",
+        ),
+        CheckConstraint(
+            "length(snapshot_hash) = 64 AND snapshot_hash = lower(snapshot_hash)",
+            name="ck_themeconfigurationaudit_hash",
+        ),
+        UniqueConstraint("snapshot_hash", name="uq_themeconfigurationaudit_hash"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    theme_family_id: int | None = Field(
+        default=None,
+        foreign_key="themefamily.id",
+        index=True,
+    )
+    theme_family_version_id: int | None = Field(
+        default=None,
+        foreign_key="themefamilyversion.id",
+        index=True,
+    )
+    website_theme_configuration_id: int | None = Field(
+        default=None,
+        foreign_key="websitethemeconfiguration.id",
+        index=True,
+    )
+    component_configuration_id: int | None = Field(
+        default=None,
+        foreign_key="websitethemecomponentconfiguration.id",
+        index=True,
+    )
+    action_type: str = Field(max_length=48, index=True)
+    actor: str = Field(max_length=160)
+    rationale: str = Field(max_length=2000)
+    snapshot: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    snapshot_hash: str = Field(max_length=64, index=True)
+    created_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
 
 
 class SitePlan(TimestampMixin, table=True):
@@ -561,7 +1002,10 @@ class NavigationSet(TimestampMixin, table=True):
     rationale: str | None = None
     decided_by: str | None = None
     decision_version: int | None = Field(default=None, ge=1)
-    decided_at: datetime | None = Field(default=None, index=True)
+    decided_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True, index=True),
+    )
     source_suggestion_key: str | None = Field(default=None, max_length=200)
 
 
@@ -598,7 +1042,10 @@ class NavigationItem(TimestampMixin, table=True):
     rationale: str | None = None
     decided_by: str | None = None
     decision_version: int | None = Field(default=None, ge=1)
-    decided_at: datetime | None = Field(default=None, index=True)
+    decided_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True, index=True),
+    )
     source_suggestion_key: str | None = Field(default=None, max_length=200)
 
 
@@ -633,7 +1080,10 @@ class InternalLinkIntent(TimestampMixin, table=True):
     rationale: str | None = None
     decided_by: str | None = None
     decision_version: int | None = Field(default=None, ge=1)
-    decided_at: datetime | None = Field(default=None, index=True)
+    decided_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True, index=True),
+    )
     source_suggestion_key: str | None = Field(default=None, max_length=200)
 
 

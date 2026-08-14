@@ -195,8 +195,8 @@ def test_backup_056_round_trips_remapped_scoped_authorization_lineage(
     source_engine.dispose()
 
     loaded = load_backup(Path(exported["path"]))
-    assert BACKUP_VERSION == "0.56"
-    assert loaded["metadata"]["version"] == "0.56"
+    assert BACKUP_VERSION == "0.57"
+    assert loaded["metadata"]["version"] == "0.57"
     assert loaded["metadata"]["table_counts"]["scoped_media_authorizations"] == 2
     assert [
         record["authorization_version"]

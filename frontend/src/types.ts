@@ -1629,6 +1629,155 @@ export type WebsiteThemeState = {
   history: WebsiteThemeSelection[];
 };
 
+export type ThemeFamilyRead = {
+  id: number;
+  family_key: string;
+  display_name: string;
+  description: string;
+  provider_source_identity: string;
+  lifecycle_status: string;
+  created_by: string;
+  retired_by: string | null;
+  retired_at: string | null;
+  integrity_fingerprint: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ThemeFamilyVersionRead = {
+  id: number;
+  theme_family_id: number;
+  version: number;
+  lifecycle_status: string;
+  production_ready: boolean;
+  source_commit: string;
+  compatibility_identity: string;
+  supported_component_contracts: Record<string, unknown>[];
+  created_by: string;
+  retired_by: string | null;
+  retired_at: string | null;
+  supersedes_theme_family_version_id: number | null;
+  integrity_fingerprint: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WebsiteThemeConfigurationRead = {
+  id: number;
+  website_id: number;
+  business_id: number;
+  theme_family_version_id: number;
+  configuration_key: string;
+  version: number;
+  lifecycle_status: string;
+  created_by: string;
+  updated_by: string;
+  creation_rationale: string;
+  approved_by: string | null;
+  approved_at: string | null;
+  activated_by: string | null;
+  activated_at: string | null;
+  rollback_by: string | null;
+  rollback_at: string | null;
+  materialized_theme_id: number | null;
+  website_theme_selection_id: number | null;
+  supersedes_configuration_id: number | null;
+  integrity_fingerprint: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WebsiteThemeComponentConfigurationRead = {
+  id: number;
+  website_theme_configuration_id: number;
+  website_id: number;
+  planned_page_id: number | null;
+  theme_family_version_id: number;
+  component_instance_key: string;
+  component_key: string;
+  component_contract_version: number;
+  revision: number;
+  scope_type: string;
+  lifecycle_status: string;
+  enabled: boolean;
+  variant: string;
+  placement: string;
+  responsive_visibility: Record<string, boolean>;
+  configuration_payload: Record<string, unknown>;
+  effective_at: string | null;
+  expires_at: string | null;
+  approval_identity: string | null;
+  created_by: string;
+  updated_by: string;
+  activation_identity: string | null;
+  activated_at: string | null;
+  rollback_identity: string | null;
+  rollback_at: string | null;
+  destination_component_configuration_id: number | null;
+  overrides_component_configuration_id: number | null;
+  supersedes_component_configuration_id: number | null;
+  integrity_fingerprint: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ThemeConfigurationAuditIdentityRead = {
+  id: number;
+  theme_family_id: number | null;
+  theme_family_version_id: number | null;
+  website_theme_configuration_id: number | null;
+  component_configuration_id: number | null;
+  action_type: string;
+  actor: string;
+  rationale: string;
+  snapshot: Record<string, unknown>;
+  snapshot_hash: string;
+  created_at: string;
+};
+
+export type ThemeDraftPreviewReadiness = {
+  status: "blocked";
+  can_activate: false;
+  can_publish: false;
+  can_deploy: false;
+  production_ready: false;
+  incomplete_items: Array<{ key: string; label: string; reason: string }>;
+};
+
+export type ThemeDraftPreviewRead = {
+  preview_label: "DRAFT PREVIEW — NOT ACTIVE";
+  theme_family: ThemeFamilyRead;
+  theme_version: ThemeFamilyVersionRead;
+  website_configuration: WebsiteThemeConfigurationRead;
+  components: WebsiteThemeComponentConfigurationRead[];
+  audit_history: ThemeConfigurationAuditIdentityRead[];
+  governed_actions: {
+    phone_display: string | null;
+    call_destination: string | null;
+    call_label: string | null;
+    estimate_label: string | null;
+    estimate_destination_component_configuration_id: number | null;
+    desktop_header_actions_enabled: boolean;
+    mobile_sticky_actions_enabled: boolean;
+    desktop_header_estimate_destination_component_configuration_id: number | null;
+    mobile_sticky_estimate_destination_component_configuration_id: number | null;
+  };
+  provider_state: {
+    submission_state: "disabled_pending_provider_configuration";
+    provider_key: null;
+    destination: null;
+    can_submit: false;
+    collects_data: false;
+  };
+  readiness: ThemeDraftPreviewReadiness;
+  requested_generated_page_id: number | null;
+  export_eligible: false;
+  privacy_status: "blocked_pending_privacy_configuration";
+  activation_status: "blocked";
+  publication_status: "blocked";
+  deployment_status: "blocked";
+};
+
 export type PageComposition = {
   id: number;
   website_id: number;

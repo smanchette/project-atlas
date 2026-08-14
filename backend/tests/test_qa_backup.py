@@ -467,6 +467,116 @@ def _seed_filler_scope(session: Session) -> None:
     session.commit()
 
 
+def test_backup_057_clean_target_preserves_exact_composition_and_qa_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_engine = _engine()
+    SQLModel.metadata.create_all(source_engine)
+    with Session(source_engine) as session:
+        source_ids = _seed_qa_graph(session)
+        composition = session.get(PageComposition, source_ids["composition_id"])
+        current = session.get(GeneratedPageQAResult, source_ids["current_id"])
+        assert composition is not None
+        assert current is not None
+        composition.status = "current"
+        session.add(composition)
+        session.commit()
+        source_composition_identity = (
+            composition.id,
+            composition.composition_version,
+            composition.status,
+            composition.source_hash,
+        )
+        source_qa_identity = (
+            current.id,
+            current.composition_version,
+            current.composition_source_hash,
+            current.result_hash,
+        )
+        exported = export_backup(session, backup_dir=tmp_path)
+
+    def _ready_site_connection_plan(*_args, **_kwargs):
+        return SimpleNamespace(ready=True)
+
+    def _verify_unchanged_composition(
+        session: Session,
+        site_plan_id: int,
+        *,
+        commit: bool,
+    ):
+        assert commit is False
+        compositions = list(
+            session.exec(
+                select(PageComposition).where(
+                    PageComposition.site_plan_id == site_plan_id
+                )
+            ).all()
+        )
+        assert [
+            (
+                item.id,
+                item.composition_version,
+                item.status,
+                item.source_hash,
+            )
+            for item in compositions
+        ] == [source_composition_identity]
+        return SimpleNamespace(
+            created=0,
+            refreshed=0,
+            unchanged=len(compositions),
+            blocked=0,
+            compositions=compositions,
+        )
+
+    monkeypatch.setattr(
+        "app.services.site_connections.read_site_connection_plan",
+        _ready_site_connection_plan,
+    )
+    monkeypatch.setattr(
+        "app.services.page_composition.refresh_site_plan_compositions",
+        _verify_unchanged_composition,
+    )
+
+    target_engine = _engine()
+    SQLModel.metadata.create_all(target_engine)
+    with Session(target_engine) as session:
+        first = restore_backup(session, exported["path"])
+        second = restore_backup(session, exported["path"])
+        assert first["status"] == second["status"] == "restored"
+
+        composition = session.get(PageComposition, source_ids["composition_id"])
+        current = session.get(GeneratedPageQAResult, source_ids["current_id"])
+        assert composition is not None
+        assert current is not None
+        assert (
+            composition.id,
+            composition.composition_version,
+            composition.status,
+            composition.source_hash,
+        ) == source_composition_identity
+        assert (
+            current.id,
+            current.composition_version,
+            current.composition_source_hash,
+            current.result_hash,
+        ) == source_qa_identity
+        assert current.composition_source_hash == composition.source_hash
+        assert current.result_hash == qa_result_record_hash(
+            current.model_dump(mode="python")
+        )
+
+        page = session.get(GeneratedPage, source_ids["generated_page_id"])
+        assert page is not None
+        assert page.qa_result is not None
+        assert page.qa_result["qa_result_id"] == source_ids["current_id"]
+        assert page.qa_result["result_hash"] == source_ids["current_hash"]
+        audit = session.exec(select(ApprovalAudit)).one()
+        assert audit.qa_result_snapshot["qa_result_id"] == source_ids["current_id"]
+        assert audit.qa_result_snapshot["result_hash"] == source_ids["current_hash"]
+
+
 def test_backup_055_round_trip_remaps_qa_identity_and_preserves_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -485,8 +595,8 @@ def test_backup_055_round_trip_remaps_qa_identity_and_preserves_history(
         exported = export_backup(session, backup_dir=tmp_path)
 
     loaded = load_backup(Path(exported["path"]))
-    assert BACKUP_VERSION == "0.56"
-    assert loaded["metadata"]["version"] == "0.56"
+    assert BACKUP_VERSION == "0.57"
+    assert loaded["metadata"]["version"] == "0.57"
     assert loaded["metadata"]["table_counts"]["generated_page_qa_results"] == 3
 
     target_engine = _engine()

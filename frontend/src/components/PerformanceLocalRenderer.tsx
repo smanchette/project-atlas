@@ -47,8 +47,10 @@ import { resolvePerformanceLocalStickyVisibility } from "./performanceLocalInter
 export type PerformanceLocalRuntimeToggles = {
   campaignBanner: boolean;
   compactEstimateForm: boolean;
+  estimateAction?: boolean;
   finalCta: boolean;
   headerEstimateCta?: boolean;
+  phoneAction?: boolean;
   stickyActionBar: boolean;
   trustStrip: boolean;
 };
@@ -61,36 +63,102 @@ export type PerformanceLocalEstimateFieldKey =
   | "message";
 
 export type PerformanceLocalEstimateField = Readonly<{
+  accessibilityLabel: string;
   autoComplete?: string;
   control: "input" | "textarea";
   inputMode?: "email" | "numeric" | "search" | "tel" | "text" | "url";
   key: PerformanceLocalEstimateFieldKey;
   label: string;
-  required?: boolean;
+  maxLength: number;
+  order: number;
+  providerMapping: string;
+  required: boolean;
+  responsive: Readonly<{
+    desktop: "half" | "full";
+    tablet: "half" | "full";
+    mobile: "full";
+  }>;
   rows?: number;
   type?: "email" | "tel" | "text";
+  validation: Readonly<{
+    maximumLength: number;
+    minimumLength: number;
+    rule: "nonempty_text" | "phone" | "postal_code" | "free_text";
+  }>;
 }>;
 
 export type PerformanceLocalEstimateFormConfiguration = Readonly<{
+  componentConfigurationId: number;
+  componentInstanceKey: string;
+  ctaLabel: string;
   fields: readonly PerformanceLocalEstimateField[];
   previewNotice: string;
+  providerState: Readonly<{
+    canSubmit: false;
+    collectsData: false;
+    destination: null;
+    providerKey: null;
+    submissionState: "disabled_pending_provider_configuration";
+  }>;
   submitLabel: string;
   visualState?: "idle" | "disabled" | "error" | "success";
 }>;
 
-export type PerformanceLocalCampaign = PerformanceLocalOptionalConfiguration & {
+type PerformanceLocalCampaignBase = PerformanceLocalOptionalConfiguration & {
   approvalIdentity: string;
   campaignLabel: string;
   ctaDestination: string;
   ctaLabel: string;
+  destinationComponentConfigurationId: number;
   enabled: boolean;
+  websiteId: number;
+};
+
+export type PerformanceLocalEvergreenCampaign = PerformanceLocalCampaignBase & {
+  intent: "evergreen_conversion";
+  endDate?: never;
+  qualifier?: never;
+  price?: never;
+  startDate?: never;
+  termsReference?: never;
+};
+
+export type PerformanceLocalTimeBoundCampaign = PerformanceLocalCampaignBase & {
+  intent: "time_bound_campaign";
   endDate: string;
+  offerDetails: string;
   qualifier?: string | null;
   price?: string | null;
   startDate: string;
   termsReference: string;
-  websiteId: number;
 };
+
+export type PerformanceLocalCampaign =
+  | PerformanceLocalEvergreenCampaign
+  | PerformanceLocalTimeBoundCampaign;
+
+export type PerformanceLocalGovernedContact = Readonly<{
+  callDestination: string;
+  phoneDisplay: string;
+  websiteId: number;
+}>;
+
+export type PerformanceLocalStickyActionConfiguration = Readonly<{
+  callLabel: string;
+  componentConfigurationId: number;
+  desktopHeaderActionsEnabled: boolean;
+  destinationComponentConfigurationId: number;
+  enabled: boolean;
+  estimateLabel: string;
+  mobileStickyActionsEnabled: boolean;
+}>;
+
+export function performanceLocalFormDomId(componentConfigurationId: number): string {
+  if (!Number.isSafeInteger(componentConfigurationId) || componentConfigurationId <= 0) {
+    throw new Error("Compact estimate form configuration identity must be a positive integer.");
+  }
+  return `performance-local-form-config-${componentConfigurationId}`;
+}
 
 export type PerformanceLocalDiagnostics = {
   disabledComponents: string[];
@@ -107,7 +175,9 @@ export type PerformanceLocalRendererProps = {
   campaign?: PerformanceLocalCampaign | null;
   composition: PageComposition;
   estimateForm?: PerformanceLocalEstimateFormConfiguration | null;
+  governedContact?: PerformanceLocalGovernedContact | null;
   page: GeneratedPage;
+  stickyActions?: PerformanceLocalStickyActionConfiguration | null;
   toggles: PerformanceLocalRuntimeToggles;
   /** A deterministic clock may be provided by tests. It never persists state. */
   previewedAt?: Date;
@@ -138,19 +208,6 @@ const EMPTY_TOGGLES: PerformanceLocalRuntimeToggles = {
   trustStrip: false,
 };
 
-const DEFAULT_ESTIMATE_FORM: PerformanceLocalEstimateFormConfiguration = Object.freeze({
-  fields: Object.freeze([
-    Object.freeze({ key: "name", label: "Name", control: "input", type: "text", autoComplete: "off" }),
-    Object.freeze({ key: "phone", label: "Phone", control: "input", type: "tel", inputMode: "tel", autoComplete: "off" }),
-    Object.freeze({ key: "postal-code", label: "ZIP code", control: "input", type: "text", inputMode: "numeric", autoComplete: "off" }),
-    Object.freeze({ key: "requested-service", label: "Requested service", control: "input", type: "text", autoComplete: "off" }),
-    Object.freeze({ key: "message", label: "Optional message", control: "textarea", rows: 3, autoComplete: "off" }),
-  ]),
-  previewNotice: "Preview only. Information entered here is not submitted or saved.",
-  submitLabel: "Preview request",
-  visualState: "idle",
-});
-
 const CANONICAL_PROCESS_SECTION_KEYS = Object.freeze([
   "process_section",
   "prep_section",
@@ -161,8 +218,10 @@ export function PerformanceLocalRenderer({
   brandAccent = null,
   campaign = null,
   composition,
-  estimateForm = DEFAULT_ESTIMATE_FORM,
+  estimateForm = null,
+  governedContact = null,
   page,
+  stickyActions = null,
   toggles = EMPTY_TOGGLES,
   previewedAt = new Date(),
 }: PerformanceLocalRendererProps) {
@@ -178,14 +237,27 @@ export function PerformanceLocalRenderer({
   const utilityNavigation = first(byKey, "utility_navigation");
   const footerNavigation = first(byKey, "footer_navigation");
   const headerData = header?.resolved_data ?? {};
-  const phone = cleanText(headerData.phone) || cleanText(hero?.resolved_data.phone);
   const email = cleanText(headerData.email) || cleanText(hero?.resolved_data.email);
   const resolvedEstimateForm = validateEstimateFormConfiguration(estimateForm);
+  const resolvedContact = toggles.phoneAction === false
+    ? null
+    : validateGovernedContact(governedContact, composition.website_id);
+  const resolvedStickyActions = validateStickyActionConfiguration(
+    stickyActions,
+    resolvedEstimateForm,
+  );
   const estimateDestination =
-    toggles.compactEstimateForm && toggles.finalCta && finalCta && resolvedEstimateForm
-      ? "#estimate"
+    toggles.estimateAction !== false &&
+    toggles.compactEstimateForm &&
+    toggles.finalCta &&
+    finalCta &&
+    resolvedStickyActions &&
+    (resolvedStickyActions.desktopHeaderActionsEnabled || resolvedStickyActions.mobileStickyActionsEnabled) &&
+    resolvedEstimateForm
+      ? `#${performanceLocalFormDomId(resolvedEstimateForm.componentConfigurationId)}`
       : null;
-  const phoneDestination = safePhoneDestination(phone);
+  const estimateLabel = resolvedEstimateForm?.ctaLabel ?? "";
+  const phoneDestination = resolvedContact?.callDestination ?? null;
   const heroActionRef = useRef<HTMLDivElement>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [formFocusRisk, setFormFocusRisk] = useState(false);
@@ -258,7 +330,7 @@ export function PerformanceLocalRenderer({
       )
     : null;
   const finalAction = estimateDestination
-    ? { ctaLabel: "Request estimate", ctaDestination: estimateDestination }
+    ? { ctaLabel: estimateLabel, ctaDestination: estimateDestination }
     : phoneDestination
       ? { ctaLabel: "Call", ctaDestination: phoneDestination }
       : null;
@@ -282,17 +354,21 @@ export function PerformanceLocalRenderer({
         page.id,
       )
     : null;
-  const stickyAction = estimateDestination
-    ? { actionLabel: "Request estimate", phoneOrEstimateDestination: estimateDestination }
-    : phoneDestination
-      ? { actionLabel: "Call", phoneOrEstimateDestination: phoneDestination }
-      : null;
-  const stickyState = toggles.stickyActionBar && stickyAction
+  const stickyAction = resolvedStickyActions && (estimateDestination || phoneDestination)
+    ? {
+        actionLabel: estimateDestination
+          ? resolvedStickyActions.estimateLabel
+          : resolvedStickyActions.callLabel,
+        phoneOrEstimateDestination: estimateDestination ?? phoneDestination,
+        sourceIdentity: `component-configuration:${resolvedStickyActions.componentConfigurationId}`,
+      }
+    : null;
+  const stickyState = toggles.stickyActionBar && resolvedStickyActions?.mobileStickyActionsEnabled && stickyAction
     ? governedOptionalState(
         "sticky_mobile_action_bar",
         composition.website_id,
         "Contact actions",
-        { sourceIdentity: composition.source_hash, ...stickyAction },
+        stickyAction,
         "mobile",
         page.id,
       )
@@ -313,11 +389,14 @@ export function PerformanceLocalRenderer({
     composition.website_id,
     page.id,
     previewedAt,
+    estimateDestination ? resolvedEstimateForm : null,
   );
   const diagnostics = performanceLocalDiagnostics(composition, toggles, {
     campaignError: campaignState.error,
     campaignVisible: Boolean(campaignState.campaign),
+    estimateDestination,
     media,
+    phoneDestination,
   });
   const mainComponents = components.filter(
     (component) =>
@@ -360,8 +439,13 @@ export function PerformanceLocalRenderer({
           component={header}
           primaryNavigation={primaryNavigation}
           utilityNavigation={utilityNavigation}
-          phone={phone}
-          estimateDestination={toggles.headerEstimateCta === false ? null : estimateDestination}
+          contact={resolvedStickyActions?.desktopHeaderActionsEnabled ? resolvedContact : null}
+          estimateLabel={estimateLabel}
+          estimateDestination={
+            toggles.headerEstimateCta === false || !resolvedStickyActions?.desktopHeaderActionsEnabled
+              ? null
+              : estimateDestination
+          }
           mobileMenuOpen={mobileMenuOpen}
           onMobileMenuOpenChange={setMobileMenuOpen}
         />
@@ -371,8 +455,9 @@ export function PerformanceLocalRenderer({
           <HeroSection
             component={hero}
             media={media.byTarget.get(hero.instance_key)}
-            phone={phone}
+            contact={resolvedContact}
             estimateDestination={estimateDestination}
+            estimateLabel={estimateLabel}
             conversionRef={heroActionRef}
           />
         )}
@@ -394,14 +479,14 @@ export function PerformanceLocalRenderer({
             component={item.component}
             media={media.byTarget.get(item.component.instance_key)}
             index={index}
-            phone={phone}
+            contact={resolvedContact}
             email={email}
           />
         ))}
         {finalCtaVisible && finalCta && finalState?.attributes && (
           <FinalConversionSection
             component={finalCta}
-            phone={phone}
+            contact={resolvedContact}
             email={email}
             showForm={formVisible}
             attributes={finalState.attributes}
@@ -415,15 +500,17 @@ export function PerformanceLocalRenderer({
         <PerformanceFooter
           component={footer}
           navigation={footerNavigation}
-          phone={phone}
+          contact={resolvedContact}
           email={email}
         />
       )}
       <BackToTopControl suppressed={formFocusRisk || mobileMenuOpen} />
       {stickyVisibility.visible && (
         <StickyMobileActions
-          phone={phone}
+          contact={resolvedContact}
           estimateDestination={estimateDestination}
+          estimateLabel={resolvedStickyActions!.estimateLabel}
+          callLabel={resolvedStickyActions!.callLabel}
           attributes={stickyState!.attributes!}
         />
       )}
@@ -440,7 +527,9 @@ export function performanceLocalDiagnostics(
   context: {
     campaignError?: string | null;
     campaignVisible?: boolean;
+    estimateDestination?: string | null;
     media?: MediaBindingResult;
+    phoneDestination?: string | null;
   } = {},
 ): PerformanceLocalDiagnostics {
   const media = context.media ?? bindMediaToExactTargets(composition.effective_components);
@@ -478,11 +567,8 @@ export function performanceLocalDiagnostics(
   const finalCtaVisible = toggles.finalCta && keys.has("final_cta");
   if (finalCtaVisible) enabledComponents.push("visual_cta_band");
   if (finalCtaVisible && toggles.compactEstimateForm) enabledComponents.push("compact_estimate_form");
-  const header = composition.effective_components.find((item) => item.component_key === "website_header");
-  const hero = composition.effective_components.find((item) => item.component_key === "hero");
-  const phone = cleanText(header?.resolved_data.phone) || cleanText(hero?.resolved_data.phone);
-  const phoneDestination = safePhoneDestination(phone);
-  const estimateDestination = finalCtaVisible && toggles.compactEstimateForm ? "#estimate" : "";
+  const phoneDestination = context.phoneDestination ?? "";
+  const estimateDestination = context.estimateDestination ?? "";
   if (toggles.stickyActionBar && (phoneDestination || estimateDestination)) {
     enabledComponents.push("sticky_mobile_action_bar");
   }
@@ -553,7 +639,12 @@ function CampaignBanner({
   attributes: OptionalComponentDiagnosticAttributes;
 }) {
   return (
-    <aside className="performanceLocalCampaign" aria-label={campaign.campaignLabel} {...attributes}>
+    <aside
+      className="performanceLocalCampaign"
+      aria-label={campaign.campaignLabel}
+      data-conversion-intent={campaign.intent}
+      {...attributes}
+    >
       <div className="performanceLocalContainer performanceLocalCampaignInner">
         <p>
           <strong>{campaign.campaignLabel}</strong>
@@ -567,21 +658,23 @@ function CampaignBanner({
 }
 
 function PerformanceHeader({
+  contact,
   component,
+  estimateLabel,
   estimateDestination,
   mobileMenuOpen,
   onMobileMenuOpenChange,
   primaryNavigation,
   utilityNavigation,
-  phone,
 }: {
+  contact: PerformanceLocalGovernedContact | null;
   component: PageComponentInstance;
+  estimateLabel: string;
   estimateDestination: string | null;
   mobileMenuOpen: boolean;
   onMobileMenuOpenChange: (open: boolean) => void;
   primaryNavigation?: PageComponentInstance;
   utilityNavigation?: PageComponentInstance;
-  phone: string;
 }) {
   const data = component.resolved_data;
   const identityAssets = asRecord(data.identity_assets);
@@ -604,16 +697,17 @@ function PerformanceHeader({
         </div>
         <DesktopNavigation navigation={navigation} />
         <div className="performanceLocalHeaderActions">
-          {phone ? <PhoneLink value={phone} compact /> : null}
+          {contact ? <PhoneLink contact={contact} compact /> : null}
           {estimateDestination ? (
             <a className="performanceLocalButton performanceLocalHeaderEstimate" href={estimateDestination}>
-              Request estimate
+              {estimateLabel}
             </a>
           ) : null}
           <MobileNavigation
             navigation={navigation}
-            phone={phone}
+            contact={contact}
             estimateDestination={estimateDestination}
+            estimateLabel={estimateLabel}
             open={mobileMenuOpen}
             onOpenChange={onMobileMenuOpenChange}
           />
@@ -684,17 +778,19 @@ function DesktopNavigation({ navigation }: { navigation: NavigationResolution })
 }
 
 function MobileNavigation({
+  contact,
   estimateDestination,
+  estimateLabel,
   navigation,
   onOpenChange,
   open,
-  phone,
 }: {
+  contact: PerformanceLocalGovernedContact | null;
   estimateDestination: string | null;
+  estimateLabel: string;
   navigation: NavigationResolution;
   onOpenChange: (open: boolean) => void;
   open: boolean;
-  phone: string;
 }) {
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(() => new Set());
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -819,10 +915,10 @@ function MobileNavigation({
               </ul>
             )}
             <div className="performanceLocalDrawerActions">
-              {phone ? <PhoneLink value={phone} compact={false} /> : null}
+              {contact ? <PhoneLink contact={contact} compact={false} /> : null}
               {estimateDestination ? (
                 <a className="performanceLocalButton performanceLocalButtonSecondary" href={estimateDestination} onClick={close}>
-                  Request estimate
+                  {estimateLabel}
                 </a>
               ) : null}
             </div>
@@ -864,16 +960,18 @@ function ThemeLabDestination({ node }: { node: ResolvedNavigationItem }) {
 }
 
 function HeroSection({
+  contact,
   component,
   conversionRef,
+  estimateLabel,
   media,
-  phone,
   estimateDestination,
 }: {
+  contact: PerformanceLocalGovernedContact | null;
   component: PageComponentInstance;
   conversionRef: RefObject<HTMLDivElement>;
+  estimateLabel: string;
   media?: PageComponentInstance;
-  phone: string;
   estimateDestination: string | null;
 }) {
   const data = component.resolved_data;
@@ -888,8 +986,8 @@ function HeroSection({
           <h1>{cleanText(data.title)}</h1>
           {cleanText(data.intro) ? <p className="performanceLocalHeroSummary">{cleanText(data.intro)}</p> : null}
           <div ref={conversionRef} className="performanceLocalActionRow performanceLocalHeroActions" data-hero-conversion-actions>
-            {phone ? <PhoneLink value={phone} compact={false} /> : null}
-            {estimateDestination ? <a className="performanceLocalButton performanceLocalButtonSecondary" href={estimateDestination}>Request estimate</a> : null}
+            {contact ? <PhoneLink contact={contact} compact={false} /> : null}
+            {estimateDestination ? <a className="performanceLocalButton performanceLocalButtonSecondary" href={estimateDestination}>{estimateLabel}</a> : null}
           </div>
         </div>
         {resolvedMedia ? <GovernedMedia media={resolvedMedia} component={media!} className="performanceLocalHeroMedia" priority /> : null}
@@ -930,16 +1028,16 @@ function TrustStrip({
 }
 
 function PerformanceComponent({
+  contact,
   component,
   media,
   index,
-  phone,
   email,
 }: {
+  contact: PerformanceLocalGovernedContact | null;
   component: PageComponentInstance;
   media?: PageComponentInstance;
   index: number;
-  phone: string;
   email: string;
 }) {
   switch (component.component_key) {
@@ -952,7 +1050,7 @@ function PerformanceComponent({
     case "faq":
       return <FaqAccordion component={component} />;
     case "contact_pathways":
-      return <ContactPathways component={component} phone={phone} email={email} />;
+      return <ContactPathways component={component} contact={contact} email={email} />;
     default:
       return null;
   }
@@ -1159,21 +1257,21 @@ function FaqAccordion({ component }: { component: PageComponentInstance }) {
 
 function ContactPathways({
   component,
-  phone,
+  contact,
   email,
 }: {
   component: PageComponentInstance;
-  phone: string;
+  contact: PerformanceLocalGovernedContact | null;
   email: string;
 }) {
   const displayName = cleanText(component.resolved_data.display_name);
-  if (!phone && !email) return null;
+  if (!contact && !email) return null;
   return (
     <section className="performanceLocalSection performanceLocalContact" aria-label="Contact options">
       <div className="performanceLocalContainer performanceLocalSectionCopy">
         <h2>{displayName ? `Contact ${displayName}` : "Contact the business"}</h2>
         <div className="performanceLocalActionRow">
-          {phone ? <PhoneLink value={phone} compact={false} /> : null}
+          {contact ? <PhoneLink contact={contact} compact={false} /> : null}
           {email ? <EmailLink value={email} /> : null}
         </div>
       </div>
@@ -1182,18 +1280,18 @@ function ContactPathways({
 }
 
 function FinalConversionSection({
+  contact,
   component,
   formConfiguration,
-  phone,
   email,
   onFormFocusRiskChange,
   showForm,
   attributes,
   formAttributes,
 }: {
+  contact: PerformanceLocalGovernedContact | null;
   component: PageComponentInstance;
   formConfiguration: PerformanceLocalEstimateFormConfiguration | null;
-  phone: string;
   email: string;
   onFormFocusRiskChange: (focused: boolean) => void;
   showForm: boolean;
@@ -1203,15 +1301,15 @@ function FinalConversionSection({
   const data = component.resolved_data;
   const heading = cleanText(data.heading);
   const body = cleanText(data.body);
-  if (!heading && !body && !showForm && !phone && !email) return null;
+  if (!heading && !body && !showForm && !contact && !email) return null;
   return (
-    <section id="estimate" className="performanceLocalFinalCta" {...attributes}>
+    <section className="performanceLocalFinalCta" {...attributes}>
       <div className={`performanceLocalContainer ${showForm ? "performanceLocalFinalGrid" : "performanceLocalFinalSingle"}`}>
         <div className="performanceLocalSectionCopy">
           {heading ? <h2>{heading}</h2> : null}
           {body ? <p>{body}</p> : null}
           <div className="performanceLocalActionRow">
-            {phone ? <PhoneLink value={phone} compact={false} /> : null}
+            {contact ? <PhoneLink contact={contact} compact={false} /> : null}
             {email ? <EmailLink value={email} /> : null}
           </div>
         </div>
@@ -1248,13 +1346,18 @@ function CompactEstimateForm({
       ? "Preview error appearance — review the highlighted fields."
       : visualState === "disabled"
         ? "Preview controls are disabled."
-        : "Preview form is ready for local interaction only.";
+        : "Provider is not configured. Submission is disabled and no data is collected.";
   return (
     <form
       ref={formRef}
+      id={performanceLocalFormDomId(configuration.componentConfigurationId)}
       className="performanceLocalEstimateForm"
       aria-label="Estimate request preview"
       data-preview-only="true"
+      data-provider-state={configuration.providerState.submissionState}
+      data-provider-configured="false"
+      data-collects-data="false"
+      data-controls-read-only="true"
       data-visual-state={visualState}
       autoComplete="off"
       onSubmit={preventSubmission}
@@ -1273,42 +1376,55 @@ function CompactEstimateForm({
         {stateMessage}
       </p>
       {configuration.fields.map((field) => (
-        <label key={field.key} className={field.control === "textarea" ? "performanceLocalFormWide" : undefined}>
+        <label
+          key={field.key}
+          className={field.responsive.desktop === "full" ? "performanceLocalFormWide" : undefined}
+          data-field-order={field.order}
+          data-field-responsive={`${field.responsive.desktop}:${field.responsive.tablet}:${field.responsive.mobile}`}
+          data-provider-mapping={field.providerMapping}
+          data-validation-contract={`${field.validation.rule}:${field.validation.minimumLength}:${field.validation.maximumLength}`}
+        >
           {field.label}
           {field.control === "textarea" ? (
             <textarea
-              name={`preview-${field.key}`}
+              data-field-key={field.key}
+              aria-label={field.accessibilityLabel}
               rows={field.rows ?? 3}
               autoComplete={field.autoComplete ?? "off"}
+              maxLength={field.maxLength}
+              readOnly
               required={field.required}
               disabled={disabled}
             />
           ) : (
             <input
-              name={`preview-${field.key}`}
+              data-field-key={field.key}
+              aria-label={field.accessibilityLabel}
               type={field.type ?? "text"}
               inputMode={field.inputMode}
               autoComplete={field.autoComplete ?? "off"}
+              maxLength={field.maxLength}
+              readOnly
               required={field.required}
               disabled={disabled}
             />
           )}
         </label>
       ))}
-      <button type="submit" disabled={disabled}>{configuration.submitLabel}</button>
+      <button type="submit" disabled>{configuration.submitLabel}</button>
     </form>
   );
 }
 
 function PerformanceFooter({
+  contact,
   component,
   navigation,
-  phone,
   email,
 }: {
+  contact: PerformanceLocalGovernedContact | null;
   component: PageComponentInstance;
   navigation?: PageComponentInstance;
-  phone: string;
   email: string;
 }) {
   const data = component.resolved_data;
@@ -1334,7 +1450,7 @@ function PerformanceFooter({
           </nav>
         ) : null}
         <div className="performanceLocalFooterContact">
-          {phone ? <PhoneLink value={phone} compact={false} /> : null}
+          {contact ? <PhoneLink contact={contact} compact={false} /> : null}
           {email ? <EmailLink value={email} /> : null}
           {cleanText(data.license_number) ? <span>License {cleanText(data.license_number)}</span> : null}
         </div>
@@ -1344,19 +1460,23 @@ function PerformanceFooter({
 }
 
 function StickyMobileActions({
-  phone,
+  callLabel,
+  contact,
   estimateDestination,
+  estimateLabel,
   attributes,
 }: {
-  phone: string;
+  callLabel: string;
+  contact: PerformanceLocalGovernedContact | null;
   estimateDestination: string | null;
+  estimateLabel: string;
   attributes: OptionalComponentDiagnosticAttributes;
 }) {
-  if (!phone && !estimateDestination) return null;
+  if (!contact && !estimateDestination) return null;
   return (
     <aside className="performanceLocalStickyActions" aria-label="Contact actions" {...attributes}>
-      {phone ? <PhoneLink value={phone} compact /> : null}
-      {estimateDestination ? <a href={estimateDestination}>Request estimate</a> : null}
+      {contact ? <PhoneLink contact={contact} compact label={callLabel} /> : null}
+      {estimateDestination ? <a href={estimateDestination}>{estimateLabel}</a> : null}
     </aside>
   );
 }
@@ -1388,13 +1508,19 @@ function BackToTopControl({ suppressed }: { suppressed: boolean }) {
   );
 }
 
-function PhoneLink({ value, compact }: { value: string; compact: boolean }) {
-  const destination = safePhoneDestination(value);
-  if (!destination) return null;
+function PhoneLink({
+  compact,
+  contact,
+  label,
+}: {
+  compact: boolean;
+  contact: PerformanceLocalGovernedContact;
+  label?: string;
+}) {
   return (
-    <a className={`performanceLocalButton performanceLocalPhone${compact ? " performanceLocalButtonCompact" : ""}`} href={destination}>
+    <a className={`performanceLocalButton performanceLocalPhone${compact ? " performanceLocalButtonCompact" : ""}`} href={contact.callDestination}>
       <Phone size={18} aria-hidden="true" />
-      <span>{compact ? "Call" : `Call ${value}`}</span>
+      <span>{label ?? (compact ? "Call" : `Call ${contact.phoneDisplay}`)}</span>
     </a>
   );
 }
@@ -1500,6 +1626,7 @@ function resolveCampaign(
   websiteId: number,
   pageId: number,
   previewedAt: Date,
+  estimateForm: PerformanceLocalEstimateFormConfiguration | null,
 ): {
   campaign: PerformanceLocalCampaign | null;
   error: string | null;
@@ -1513,10 +1640,17 @@ function resolveCampaign(
     previewedAt,
     pageId,
   );
-  if (!campaign?.enabled || !resolution.visible) {
+  const exactDestinationError = campaign && (
+    !estimateForm ||
+    campaign.destinationComponentConfigurationId !== estimateForm.componentConfigurationId ||
+    campaign.ctaDestination !== `#${performanceLocalFormDomId(estimateForm.componentConfigurationId)}`
+  )
+    ? "Campaign CTA does not resolve to the exact configured compact estimate form."
+    : null;
+  if (!campaign?.enabled || !resolution.visible || exactDestinationError) {
     return {
       campaign: null,
-      error: resolution.errors.length ? resolution.errors.join(" ") : null,
+      error: [resolution.errors.join(" "), exactDestinationError].filter(Boolean).join(" ") || null,
       attributes: null,
     };
   }
@@ -1631,27 +1765,100 @@ function sourceSectionIdentity(component: PageComponentInstance): string {
 function validateEstimateFormConfiguration(
   value: PerformanceLocalEstimateFormConfiguration | null | undefined,
 ): PerformanceLocalEstimateFormConfiguration | null {
-  if (!value || !cleanText(value.previewNotice) || !cleanText(value.submitLabel)) return null;
+  if (
+    !value ||
+    !positiveInteger(value.componentConfigurationId) ||
+    !safeDomId(value.componentInstanceKey) ||
+    !cleanText(value.ctaLabel) ||
+    !cleanText(value.previewNotice) ||
+    !cleanText(value.submitLabel)
+  ) return null;
+  if (
+    value.providerState.submissionState !== "disabled_pending_provider_configuration" ||
+    value.providerState.providerKey !== null ||
+    value.providerState.destination !== null ||
+    value.providerState.canSubmit !== false ||
+    value.providerState.collectsData !== false
+  ) return null;
   if (value.visualState && !["idle", "disabled", "error", "success"].includes(value.visualState)) {
     return null;
   }
   if (!Array.isArray(value.fields) || value.fields.length !== 5) return null;
-  const expected = new Set<PerformanceLocalEstimateFieldKey>([
-    "name",
-    "phone",
-    "postal-code",
-    "requested-service",
-    "message",
-  ]);
+  const expectedFields = [
+    ["name", "Name"],
+    ["phone", "Phone"],
+    ["postal-code", "ZIP code"],
+    ["requested-service", "Requested service"],
+    ["message", "Optional message"],
+  ] as const satisfies readonly (readonly [PerformanceLocalEstimateFieldKey, string])[];
+  const expected = new Set<PerformanceLocalEstimateFieldKey>(expectedFields.map(([key]) => key));
   const seen = new Set<PerformanceLocalEstimateFieldKey>();
-  for (const field of value.fields) {
-    if (!field || !expected.has(field.key) || seen.has(field.key) || !cleanText(field.label)) return null;
+  for (const [index, field] of value.fields.entries()) {
+    const expectedField = expectedFields[index];
+    if (
+      !field ||
+      !expectedField ||
+      field.key !== expectedField[0] ||
+      field.label !== expectedField[1] ||
+      field.order !== index + 1 ||
+      !expected.has(field.key) ||
+      seen.has(field.key) ||
+      !cleanText(field.accessibilityLabel) ||
+      !Number.isSafeInteger(field.maxLength) ||
+      field.maxLength <= 0 ||
+      field.maxLength > 10_000 ||
+      !cleanText(field.providerMapping) ||
+      !["nonempty_text", "phone", "postal_code", "free_text"].includes(field.validation?.rule) ||
+      !Number.isSafeInteger(field.validation?.minimumLength) ||
+      field.validation.minimumLength < 0 ||
+      field.validation.maximumLength !== field.maxLength ||
+      field.validation.minimumLength > field.validation.maximumLength ||
+      !["half", "full"].includes(field.responsive?.desktop) ||
+      !["half", "full"].includes(field.responsive?.tablet) ||
+      field.responsive?.mobile !== "full"
+    ) return null;
     if (field.control !== "input" && field.control !== "textarea") return null;
-    if (field.autoComplete && field.autoComplete !== "off") return null;
+    if (field.autoComplete && !["off", "name", "tel", "postal-code"].includes(field.autoComplete)) return null;
     if (field.control === "textarea" && field.type) return null;
     seen.add(field.key);
   }
   return seen.size === expected.size ? value : null;
+}
+
+function validateGovernedContact(
+  value: PerformanceLocalGovernedContact | null | undefined,
+  websiteId: number,
+): PerformanceLocalGovernedContact | null {
+  if (
+    !value ||
+    value.websiteId !== websiteId ||
+    !cleanText(value.phoneDisplay) ||
+    safePhoneDestination(value.phoneDisplay) !== value.callDestination
+  ) return null;
+  return value;
+}
+
+function validateStickyActionConfiguration(
+  value: PerformanceLocalStickyActionConfiguration | null | undefined,
+  form: PerformanceLocalEstimateFormConfiguration | null,
+): PerformanceLocalStickyActionConfiguration | null {
+  if (
+    !value ||
+    value.enabled !== true ||
+    !positiveInteger(value.componentConfigurationId) ||
+    !positiveInteger(value.destinationComponentConfigurationId) ||
+    typeof value.desktopHeaderActionsEnabled !== "boolean" ||
+    typeof value.mobileStickyActionsEnabled !== "boolean" ||
+    !cleanText(value.callLabel) ||
+    !cleanText(value.estimateLabel) ||
+    !form ||
+    value.destinationComponentConfigurationId !== form.componentConfigurationId
+  ) return null;
+  return value;
+}
+
+function safeDomId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z][A-Za-z0-9_:.-]*$/.test(value);
 }
 
 function useMobileViewport(): boolean {

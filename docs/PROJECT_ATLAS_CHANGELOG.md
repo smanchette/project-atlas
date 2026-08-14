@@ -485,6 +485,38 @@ SiteGround, publication, deployment, or production operation.
 
 ---
 
+## Durable Performance Local Theme and Conversion Configuration Foundation
+
+Added a generic durable Theme-family architecture separating reusable Theme
+identity and version contracts from Website activation. Migration
+`20260813_0045` adds governed Theme Family, Theme Version, Website
+configuration, component-revision, and immutable audit records. Performance
+Local remains version 2, `preview_candidate`, `productionReady: false`, and
+bound to source commit `1b766664ea99d923195bbf98e8a1e4d833b50084`.
+
+Theme Lab now renders an explicitly requested durable draft as `DRAFT PREVIEW
+— NOT ACTIVE`. The Website-scoped configuration supports one evergreen
+“Request an Estimate” banner, sticky governed Call and Request Estimate
+actions, and one inert compact estimate form with exactly five fields. The
+form remains provider-disabled, collects and submits no data, and stores no
+credentials or delivery destination.
+
+Atlas Data backup format 0.57 preserves Theme-family identity, versions,
+inactive Website configurations, component lineage, lifecycle evidence,
+fingerprints, audits, and provider-disabled state. Restore remains fail-closed
+and inactive; draft or preview-candidate configurations are ineligible for
+public export.
+
+The authorized active-local mutation created exactly one Website-independent
+Performance Local family, one version-2 record, one inactive Flo-Zone Website
+draft, three component configurations, and their six required immutable audit
+records. Existing Theme 1 and active selection 1, Page 41 composition and QA
+identities, and governed media remained unchanged. No Theme was activated, no
+provider was enabled, and no WordPress, publication, deployment, or
+customer-data operation occurred.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.

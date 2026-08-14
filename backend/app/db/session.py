@@ -9,9 +9,32 @@ settings = get_settings()
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, echo=False, pool_pre_ping=True, connect_args=connect_args)
 
+ALEMBIC_OWNED_DURABLE_THEME_TABLES = frozenset(
+    {
+        "themefamily",
+        "themefamilyversion",
+        "websitethemeconfiguration",
+        "websitethemecomponentconfiguration",
+        "themeconfigurationaudit",
+    }
+)
 
-def create_db_and_tables() -> None:
-    SQLModel.metadata.create_all(engine)
+
+def create_db_and_tables(*, include_alembic_owned: bool = False) -> None:
+    """Create local runtime tables without bypassing Alembic-owned contracts.
+
+    The explicit opt-in exists only for a canonical empty restore target whose
+    caller validates the backup schema before mutation. Normal application
+    startup must retain the default and let Alembic revision 0045 create the
+    complete durable Theme contract.
+    """
+
+    runtime_tables = [
+        table
+        for name, table in SQLModel.metadata.tables.items()
+        if include_alembic_owned or name not in ALEMBIC_OWNED_DURABLE_THEME_TABLES
+    ]
+    SQLModel.metadata.create_all(engine, tables=runtime_tables)
     ensure_city_schema()
     ensure_generated_page_schema()
     ensure_image_metadata_schema()

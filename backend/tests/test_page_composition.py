@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import hashlib
 import json
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -10,7 +11,7 @@ from fastapi import HTTPException
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.db.backup import export_backup, restore_backup
+from app.db.backup import export_backup, load_backup, restore_backup
 from app.models import (
     Brand,
     BrandAsset,
@@ -26,12 +27,14 @@ from app.models import (
     PlannedPageMediaRequirement,
     SemanticComponentDefinition,
     Service,
+    SiteConnectionPlanningRecord,
     SitePlan,
     Theme,
     Website,
     WebsiteIdentity,
     WebsiteIdentityAssetAssignment,
     WebsiteMediaPlanningRecord,
+    WebsiteCoveragePlanningRecord,
     WebsiteThemeSelection,
 )
 from app.schemas.page_composition import PageCompositionDecisionUpdate
@@ -52,6 +55,7 @@ from app.services.page_media_planning import (
     validate_required_media_for_page,
 )
 from app.services.site_connections import ensure_site_connection_foundation
+from app.services.site_coverage import ensure_coverage_foundation
 from app.services.themes import (
     DEFAULT_THEME_TOKENS,
     approve_theme,
@@ -1193,9 +1197,42 @@ def test_backup_051_round_trip_preserves_assets_theme_and_scoped_compositions(tm
             session, website.id, theme_id=theme.id,
             selected_by="Theme Operator", rationale="Backup round-trip selection.",
         )
+        ensure_coverage_foundation(session, plan)
         refresh_site_plan_compositions(session, plan.id)
         website_id = website.id
+        source_composition_identity = {
+            row.id: (
+                row.composition_version,
+                row.status,
+                row.source_hash,
+            )
+            for row in session.exec(select(PageComposition)).all()
+        }
         exported = export_backup(session, backup_dir=tmp_path)
+        source_data = load_backup(Path(exported["path"]))["data"]
+        deterministic_groups = (
+            "site_connection_planning_records",
+            "website_coverage_planning_records",
+            "navigation_sets",
+            "navigation_items",
+            "internal_link_intents",
+        )
+        source_deterministic_state = {
+            group: source_data[group] for group in deterministic_groups
+        }
+        assert source_data["site_connection_planning_records"][0][
+            "source_snapshot"
+        ]["planned_pages"] == []
+        for group in (
+            "navigation_sets",
+            "navigation_items",
+            "internal_link_intents",
+        ):
+            assert all(
+                record["decided_at"] is None
+                or record["decided_at"].endswith("Z")
+                for record in source_data[group]
+            )
         assert exported["table_counts"]["website_identity_asset_assignments"] == 1
         assert exported["table_counts"]["themes"] == 1
         assert exported["table_counts"]["website_theme_selections"] == 1
@@ -1209,6 +1246,14 @@ def test_backup_051_round_trip_preserves_assets_theme_and_scoped_compositions(tm
         assert len(session.exec(select(SemanticComponentDefinition)).all()) == 15
         rows = list(session.exec(select(PageComposition)).all())
         assert len(rows) == 2
+        assert {
+            row.id: (
+                row.composition_version,
+                row.status,
+                row.source_hash,
+            )
+            for row in rows
+        } == source_composition_identity
         assert all(row.website_id == website_id for row in rows)
         assert len(session.exec(select(WebsiteIdentityAssetAssignment)).all()) == 1
         restored_theme = session.exec(select(Theme)).one()
@@ -1220,6 +1265,56 @@ def test_backup_051_round_trip_preserves_assets_theme_and_scoped_compositions(tm
         )
         assert restored_composition.source_snapshot["theme"]["theme_id"] == restored_theme.id
         assert restored_composition.source_snapshot["theme"]["selection_id"] == restored_selection.id
+        first_reexport = export_backup(session, backup_dir=tmp_path)
+        first_data = load_backup(Path(first_reexport["path"]))["data"]
+        assert {
+            group: first_data[group] for group in deterministic_groups
+        } == source_deterministic_state
+        restore_backup(session, exported["path"])
+        assert {
+            row.id: (
+                row.composition_version,
+                row.status,
+                row.source_hash,
+            )
+            for row in session.exec(select(PageComposition)).all()
+        } == source_composition_identity
+        second_reexport = export_backup(session, backup_dir=tmp_path)
+        second_data = load_backup(Path(second_reexport["path"]))["data"]
+        assert {
+            group: second_data[group] for group in deterministic_groups
+        } == source_deterministic_state
+        assert session.exec(select(SiteConnectionPlanningRecord)).one().model_dump(
+            mode="json"
+        )["source_snapshot"]["planned_pages"] == []
+        assert session.exec(select(WebsiteCoveragePlanningRecord)).one()
+
+    legacy_payload = json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
+    legacy_payload["metadata"]["version"] = "0.56"
+    for group in (
+        "theme_families",
+        "theme_family_versions",
+        "website_theme_configurations",
+        "website_theme_component_configurations",
+        "theme_configuration_audits",
+    ):
+        assert legacy_payload["data"].pop(group) == []
+        assert legacy_payload["metadata"]["table_counts"].pop(group) == 0
+    legacy_path = tmp_path / "atlas-backup-legacy-056.json"
+    legacy_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+    legacy_source_data = load_backup(legacy_path)["data"]
+
+    legacy_engine = _engine(); SQLModel.metadata.create_all(legacy_engine)
+    with Session(legacy_engine) as session:
+        restore_backup(session, legacy_path)
+        restore_backup(session, legacy_path)
+        legacy_reexport = export_backup(session, backup_dir=tmp_path)
+        legacy_restored_data = load_backup(Path(legacy_reexport["path"]))["data"]
+        assert {
+            group: legacy_restored_data[group] for group in deterministic_groups
+        } == {
+            group: legacy_source_data[group] for group in deterministic_groups
+        }
 
 
 def test_real_050_backup_without_theme_groups_restores_with_neutral_fallback(tmp_path):

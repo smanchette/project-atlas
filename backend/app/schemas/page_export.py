@@ -2,6 +2,8 @@ from typing import Any, Literal
 
 from sqlmodel import Field, SQLModel
 
+from app.schemas.theme_families import ThemeConfigurationExportEligibilityRead
+
 
 class ExportWarning(SQLModel):
     code: str
@@ -73,6 +75,10 @@ class PageExportPackage(SQLModel):
     slug_conflicts: list[int]
     export_ready: bool
     warnings: list[ExportWarning]
+
+
+class ThemeConfiguredPageExportPackage(PageExportPackage):
+    theme_configuration_identity: ThemeConfigurationExportEligibilityRead
 
 
 class BulkExportRequest(SQLModel):

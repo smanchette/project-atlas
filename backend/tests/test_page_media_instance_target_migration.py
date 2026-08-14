@@ -226,7 +226,7 @@ def test_0042_adds_nullable_exact_target_contract_and_indexes(
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260810_0044"
+        ).scalar_one() == "20260813_0045"
     get_settings.cache_clear()
 
 
@@ -498,7 +498,7 @@ def test_0042_empty_schema_downgrades_and_reupgrades_cleanly(
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260810_0044"
+        ).scalar_one() == "20260813_0045"
     get_settings.cache_clear()
 
 

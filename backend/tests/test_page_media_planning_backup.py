@@ -489,8 +489,8 @@ def test_backup_055_round_trip_remaps_complete_page_media_graph_and_is_idempoten
         exported = export_backup(session, backup_dir=tmp_path)
 
     loaded = load_backup(Path(exported["path"]))
-    assert BACKUP_VERSION == "0.56"
-    assert loaded["metadata"]["version"] == "0.56"
+    assert BACKUP_VERSION == "0.57"
+    assert loaded["metadata"]["version"] == "0.57"
     assert loaded["metadata"]["table_counts"]["website_media_planning_records"] == 2
     assert loaded["metadata"]["table_counts"]["planned_page_media_requirements"] == 2
     exported_assignment = next(
@@ -607,6 +607,9 @@ def test_backup_055_round_trip_remaps_complete_page_media_graph_and_is_idempoten
         )
         bindings = media_component["input_bindings"]
         assert composition.status == "stale"
+        assert media_component["instance_key"] == (
+            f"media_placement:requirement-{requirements[1].id}"
+        )
         assert bindings["media_requirement_id"] == requirements[1].id
         assert bindings["page_image_assignment_id"] == assignments[1].id
         assert requirements[0].contract_version == 1

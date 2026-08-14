@@ -2621,6 +2621,7 @@ th {
 .performanceLocalComponentGallery,
 .performanceLocalGalleryPage > .panel,
 .themeLabReadiness {
+  grid-column: 1 / -1;
   margin-top: 24px;
   padding: clamp(22px, 4vw, 38px);
   border: 1px solid #cddbd3;
@@ -5955,7 +5956,7 @@ th {
   }
 }
 
-/* Performance Local is a source-defined, read-only Theme Lab adapter. */
+/* Performance Local is rendered from a durable inactive draft in read-only Theme Lab. */
 .themeLab {
   --theme-lab-ink: #13211a;
   --theme-lab-muted: #5d6b64;
@@ -6000,6 +6001,30 @@ th {
   font-size: 11px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.themeLabDraftBanner {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: center;
+  gap: 12px 20px;
+  padding: 10px 20px;
+  border-bottom: 1px solid #6d3f09;
+  background: #fff2d8;
+  color: #4c2b03;
+  text-align: center;
+}
+
+.themeLabDraftBanner strong {
+  font-size: clamp(0.9rem, 2vw, 1.1rem);
+  letter-spacing: 0.045em;
+}
+
+.themeLabDraftBanner span {
+  color: #72460f;
+  font-size: 0.9rem;
+  font-weight: 700;
 }
 
 .themeLabBackLink {
@@ -6075,7 +6100,8 @@ th {
 
 .themeLabControls fieldset,
 .themeLabDiagnostics,
-.themeLabTokens {
+.themeLabTokens,
+.themeLabDurableMetadata {
   min-width: 0;
   margin: 0;
   padding: 14px;
@@ -6085,7 +6111,8 @@ th {
 }
 
 .themeLabControls legend,
-.themeLabControls summary {
+.themeLabControls summary,
+.themeLabDurableMetadata h3 {
   font-weight: 850;
 }
 
@@ -6117,7 +6144,8 @@ th {
 }
 
 .themeLabDiagnostics[open] summary,
-.themeLabTokens[open] summary {
+.themeLabTokens[open] summary,
+.themeLabDurableMetadata[open] summary {
   margin-bottom: 12px;
 }
 
@@ -6125,6 +6153,43 @@ th {
   max-height: 240px;
   overflow: auto;
   white-space: pre-wrap;
+}
+
+.themeLabDurableMetadata {
+  grid-column: 1 / -1;
+}
+
+.themeLabDurableMetadata > dl {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 18px;
+}
+
+.themeLabDurableMetadata h3 {
+  margin: 20px 0 8px;
+}
+
+.themeLabIdentityList {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.themeLabIdentityList li {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid #d8e1dc;
+  border-radius: 8px;
+  background: #f6f9f7;
+}
+
+.themeLabIdentityList code {
+  overflow-wrap: anywhere;
+  font-size: 0.72rem;
 }
 
 .themeLabCanvas {
@@ -7086,6 +7151,11 @@ th {
     grid-column: 1 / -1;
   }
 
+  .themeLabDurableMetadata > dl,
+  .themeLabIdentityList {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .performanceLocalHeaderInner {
     grid-template-columns: minmax(170px, 1fr) auto;
   }
@@ -7156,6 +7226,17 @@ th {
 
   .themeLabDiagnostics {
     grid-column: auto;
+  }
+
+  .themeLabDraftBanner {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .themeLabDurableMetadata > dl,
+  .themeLabIdentityList {
+    grid-template-columns: 1fr;
   }
 
   .performanceLocalSite {

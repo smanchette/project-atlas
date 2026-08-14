@@ -296,7 +296,7 @@ def test_0041_adds_page_media_planning_and_governance_on_clean_database(
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260810_0044"
+        ).scalar_one() == "20260813_0045"
     get_settings.cache_clear()
 
 
@@ -406,7 +406,8 @@ def test_0041_adopts_compatible_precreated_planning_tables(
     config = _config(monkeypatch, database)
     command.upgrade(config, "20260805_0040")
     engine = create_engine(f"sqlite:///{database.as_posix()}")
-    SQLModel.metadata.create_all(engine)
+    SQLModel.metadata.tables[PLANNING_TABLE].create(engine)
+    SQLModel.metadata.tables[REQUIREMENT_TABLE].create(engine)
 
     command.upgrade(config, "head")
 
@@ -419,7 +420,7 @@ def test_0041_adopts_compatible_precreated_planning_tables(
         ).scalar_one() == 0
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260810_0044"
+        ).scalar_one() == "20260813_0045"
     get_settings.cache_clear()
 
 

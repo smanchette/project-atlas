@@ -10,6 +10,7 @@ import tempfile
 from typing import Any
 from urllib.parse import urlsplit
 
+from sqlalchemy import text
 from sqlmodel import Session, SQLModel, select
 
 from app.core.config import get_settings
@@ -52,6 +53,9 @@ from app.models import (
     SitePlan,
     SupportingPageAuthorization,
     Theme,
+    ThemeConfigurationAudit,
+    ThemeFamily,
+    ThemeFamilyVersion,
     Website,
     WebsiteCityCoverageDecision,
     WebsiteCountyCoverageDecision,
@@ -60,6 +64,8 @@ from app.models import (
     WebsiteIdentityAssetAssignment,
     WebsiteMediaPlanningRecord,
     WebsiteThemeSelection,
+    WebsiteThemeComponentConfiguration,
+    WebsiteThemeConfiguration,
     WebsiteServiceCityCoverageDecision,
     WebsiteServiceCountyCoverageDecision,
     WebsiteServiceCoverageDecision,
@@ -90,7 +96,7 @@ from app.schemas.scoped_media_authorizations import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.56"
+BACKUP_VERSION = "0.57"
 BRAND_ASSET_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
 BRAND_ASSET_MIME_EXTENSIONS = {
     "image/jpeg": {".jpg", ".jpeg"},
@@ -138,6 +144,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.54",
     "0.55",
     "0.56",
+    "0.57",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -149,6 +156,8 @@ SENSITIVE_SETTING_MARKERS = (
     "secret",
     "token",
 )
+_RESTORE_PRESERVE_SOURCE_IDS = "atlas_restore_preserve_source_ids"
+_RESTORE_EXPLICIT_ID_MODELS = "atlas_restore_explicit_id_models"
 
 BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "businesses": Business,
@@ -187,6 +196,11 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "internal_link_intents": InternalLinkIntent,
     "semantic_component_definitions": SemanticComponentDefinition,
     "page_compositions": PageComposition,
+    "theme_families": ThemeFamily,
+    "theme_family_versions": ThemeFamilyVersion,
+    "website_theme_configurations": WebsiteThemeConfiguration,
+    "website_theme_component_configurations": WebsiteThemeComponentConfiguration,
+    "theme_configuration_audits": ThemeConfigurationAudit,
     "approval_audits": ApprovalAudit,
     "page_revisions": GeneratedPageRevision,
     "wordpress_draft_audits": WordPressDraftAudit,
@@ -211,6 +225,12 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "settings": Setting,
     "knowledge_blocks": KnowledgeBlock,
 }
+
+_UTC_NAVIGATION_DECISION_GROUPS = (
+    "navigation_sets",
+    "navigation_items",
+    "internal_link_intents",
+)
 
 
 class BackupValidationError(ValueError):
@@ -276,6 +296,7 @@ def export_backup(
                 if not is_sensitive_setting_key(record.setting_key)
             ]
         data[group] = [record.model_dump(mode="json") for record in records]
+    _canonicalize_navigation_decision_timestamps(data)
     table_counts = {group: len(records) for group, records in data.items()}
     payload = {
         "metadata": {
@@ -357,6 +378,15 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
     backup_path = resolve_backup_path(backup_file)
     payload = load_backup(backup_path)
     data = payload["data"]
+
+    try:
+        preserve_source_ids = _restore_managed_tables_are_empty(session)
+    except Exception as exc:
+        raise BackupValidationError(
+            "Restore could not prove whether every managed target table is empty."
+        ) from exc
+    session.info[_RESTORE_PRESERVE_SOURCE_IDS] = preserve_source_ids
+    session.info[_RESTORE_EXPLICIT_ID_MODELS] = set()
 
     try:
         business_ids: dict[int, int] = {}
@@ -1280,7 +1310,9 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             session.add(restored)
         session.flush()
 
+        internal_link_intent_ids: dict[int, int] = {}
         for record in data.get("internal_link_intents", []):
+            old_id = _record_id(record, "internal_link_intents")
             site_plan_id = _mapped_id(
                 site_plan_ids,
                 record["site_plan_id"],
@@ -1296,7 +1328,7 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 record["target_planned_page_id"],
                 "internal_link_intents.target_planned_page_id",
             )
-            _upsert(
+            restored = _upsert(
                 session,
                 InternalLinkIntent,
                 select(InternalLinkIntent).where(
@@ -1322,6 +1354,7 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     ),
                 },
             )
+            internal_link_intent_ids[old_id] = _required_id(restored)
 
         for record in data.get("semantic_component_definitions", []):
             _upsert(
@@ -1375,19 +1408,317 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             page_composition_ids[old_composition_id] = _required_id(
                 restored_composition
             )
-        if payload["metadata"]["version"] not in {
-            "0.44",
-            "0.45",
-            "0.46",
-            "0.47",
-            "0.48",
-            "0.49",
-        }:
+
+        theme_family_ids: dict[int, int] = {}
+        for record in data.get("theme_families", []):
+            old_id = _record_id(record, "theme_families")
+            restored = _restore_immutable_record(
+                session,
+                ThemeFamily,
+                select(ThemeFamily).where(
+                    ThemeFamily.family_key == record["family_key"]
+                ),
+                record,
+                label="Theme Family",
+            )
+            theme_family_ids[old_id] = _required_id(restored)
+
+        theme_family_version_ids: dict[int, int] = {}
+        pending_family_versions = list(data.get("theme_family_versions", []))
+        while pending_family_versions:
+            deferred: list[dict[str, Any]] = []
+            for record in pending_family_versions:
+                predecessor_id = record.get("supersedes_theme_family_version_id")
+                if (
+                    predecessor_id is not None
+                    and predecessor_id not in theme_family_version_ids
+                ):
+                    deferred.append(record)
+                    continue
+                old_id = _record_id(record, "theme_family_versions")
+                family_id = _mapped_id(
+                    theme_family_ids,
+                    record["theme_family_id"],
+                    "theme_family_versions.theme_family_id",
+                )
+                restored_record = {
+                    **record,
+                    "theme_family_id": family_id,
+                    "supersedes_theme_family_version_id": _mapped_optional_id(
+                        theme_family_version_ids,
+                        predecessor_id,
+                        "theme_family_versions.supersedes_theme_family_version_id",
+                    ),
+                }
+                restored_record["integrity_fingerprint"] = _canonical_json_hash(
+                    _theme_family_version_fingerprint_payload(restored_record)
+                )
+                restored = _restore_immutable_record(
+                    session,
+                    ThemeFamilyVersion,
+                    select(ThemeFamilyVersion).where(
+                        ThemeFamilyVersion.theme_family_id == family_id,
+                        ThemeFamilyVersion.version == record["version"],
+                    ),
+                    restored_record,
+                    label="Theme Family Version",
+                )
+                theme_family_version_ids[old_id] = _required_id(restored)
+            if len(deferred) == len(pending_family_versions):
+                raise BackupValidationError(
+                    "Theme Family Version restore lineage is cyclic or unresolved."
+                )
+            pending_family_versions = deferred
+
+        website_theme_configuration_ids: dict[int, int] = {}
+        pending_theme_configurations = list(
+            data.get("website_theme_configurations", [])
+        )
+        while pending_theme_configurations:
+            deferred = []
+            for record in pending_theme_configurations:
+                predecessor_id = record.get("supersedes_configuration_id")
+                if (
+                    predecessor_id is not None
+                    and predecessor_id not in website_theme_configuration_ids
+                ):
+                    deferred.append(record)
+                    continue
+                old_id = _record_id(record, "website_theme_configurations")
+                website_id = _mapped_id(
+                    website_ids,
+                    record["website_id"],
+                    "website_theme_configurations.website_id",
+                )
+                family_version_id = _mapped_id(
+                    theme_family_version_ids,
+                    record["theme_family_version_id"],
+                    "website_theme_configurations.theme_family_version_id",
+                )
+                restored_record = {
+                    **record,
+                    "website_id": website_id,
+                    "business_id": _mapped_id(
+                        business_ids,
+                        record["business_id"],
+                        "website_theme_configurations.business_id",
+                    ),
+                    "theme_family_version_id": family_version_id,
+                    "materialized_theme_id": _mapped_optional_id(
+                        theme_ids,
+                        record.get("materialized_theme_id"),
+                        "website_theme_configurations.materialized_theme_id",
+                    ),
+                    "website_theme_selection_id": _mapped_optional_id(
+                        website_theme_selection_ids,
+                        record.get("website_theme_selection_id"),
+                        "website_theme_configurations.website_theme_selection_id",
+                    ),
+                    "supersedes_configuration_id": _mapped_optional_id(
+                        website_theme_configuration_ids,
+                        predecessor_id,
+                        "website_theme_configurations.supersedes_configuration_id",
+                    ),
+                }
+                restored_record["integrity_fingerprint"] = _canonical_json_hash(
+                    _website_theme_configuration_fingerprint_payload(
+                        restored_record
+                    )
+                )
+                restored = _restore_immutable_record(
+                    session,
+                    WebsiteThemeConfiguration,
+                    select(WebsiteThemeConfiguration).where(
+                        WebsiteThemeConfiguration.website_id == website_id,
+                        WebsiteThemeConfiguration.theme_family_version_id
+                        == family_version_id,
+                        WebsiteThemeConfiguration.configuration_key
+                        == record["configuration_key"],
+                        WebsiteThemeConfiguration.version == record["version"],
+                    ),
+                    restored_record,
+                    label="Website Theme configuration",
+                )
+                website_theme_configuration_ids[old_id] = _required_id(restored)
+            if len(deferred) == len(pending_theme_configurations):
+                raise BackupValidationError(
+                    "Website Theme configuration restore lineage is cyclic or unresolved."
+                )
+            pending_theme_configurations = deferred
+
+        theme_component_configuration_ids: dict[int, int] = {}
+        pending_component_configurations = list(
+            data.get("website_theme_component_configurations", [])
+        )
+        component_dependency_fields = (
+            "destination_component_configuration_id",
+            "overrides_component_configuration_id",
+            "supersedes_component_configuration_id",
+        )
+        while pending_component_configurations:
+            deferred = []
+            for record in pending_component_configurations:
+                if any(
+                    record.get(field) is not None
+                    and record[field] not in theme_component_configuration_ids
+                    for field in component_dependency_fields
+                ):
+                    deferred.append(record)
+                    continue
+                old_id = _record_id(
+                    record,
+                    "website_theme_component_configurations",
+                )
+                configuration_id = _mapped_id(
+                    website_theme_configuration_ids,
+                    record["website_theme_configuration_id"],
+                    "website_theme_component_configurations.website_theme_configuration_id",
+                )
+                restored_record = {
+                    **record,
+                    "website_theme_configuration_id": configuration_id,
+                    "website_id": _mapped_id(
+                        website_ids,
+                        record["website_id"],
+                        "website_theme_component_configurations.website_id",
+                    ),
+                    "planned_page_id": _mapped_optional_id(
+                        planned_page_ids,
+                        record.get("planned_page_id"),
+                        "website_theme_component_configurations.planned_page_id",
+                    ),
+                    "theme_family_version_id": _mapped_id(
+                        theme_family_version_ids,
+                        record["theme_family_version_id"],
+                        "website_theme_component_configurations.theme_family_version_id",
+                    ),
+                }
+                for field in component_dependency_fields:
+                    restored_record[field] = _mapped_optional_id(
+                        theme_component_configuration_ids,
+                        record.get(field),
+                        f"website_theme_component_configurations.{field}",
+                    )
+                restored_record["integrity_fingerprint"] = _canonical_json_hash(
+                    _theme_component_configuration_fingerprint_payload(
+                        restored_record
+                    )
+                )
+                restored = _restore_immutable_record(
+                    session,
+                    WebsiteThemeComponentConfiguration,
+                    select(WebsiteThemeComponentConfiguration).where(
+                        WebsiteThemeComponentConfiguration.website_theme_configuration_id
+                        == configuration_id,
+                        WebsiteThemeComponentConfiguration.component_instance_key
+                        == record["component_instance_key"],
+                        WebsiteThemeComponentConfiguration.revision
+                        == record["revision"],
+                    ),
+                    restored_record,
+                    label="Website Theme component configuration",
+                )
+                theme_component_configuration_ids[old_id] = _required_id(restored)
+            if len(deferred) == len(pending_component_configurations):
+                raise BackupValidationError(
+                    "Theme component restore dependencies are cyclic or unresolved."
+                )
+            pending_component_configurations = deferred
+
+        for record in data.get("theme_configuration_audits", []):
+            restored_record = {
+                **record,
+                "theme_family_id": _mapped_optional_id(
+                    theme_family_ids,
+                    record.get("theme_family_id"),
+                    "theme_configuration_audits.theme_family_id",
+                ),
+                "theme_family_version_id": _mapped_optional_id(
+                    theme_family_version_ids,
+                    record.get("theme_family_version_id"),
+                    "theme_configuration_audits.theme_family_version_id",
+                ),
+                "website_theme_configuration_id": _mapped_optional_id(
+                    website_theme_configuration_ids,
+                    record.get("website_theme_configuration_id"),
+                    "theme_configuration_audits.website_theme_configuration_id",
+                ),
+                "component_configuration_id": _mapped_optional_id(
+                    theme_component_configuration_ids,
+                    record.get("component_configuration_id"),
+                    "theme_configuration_audits.component_configuration_id",
+                ),
+                "snapshot": _restore_theme_configuration_audit_snapshot(
+                    record.get("snapshot"),
+                    website_ids=website_ids,
+                    business_ids=business_ids,
+                    planned_page_ids=planned_page_ids,
+                    theme_ids=theme_ids,
+                    selection_ids=website_theme_selection_ids,
+                    family_ids=theme_family_ids,
+                    family_version_ids=theme_family_version_ids,
+                    configuration_ids=website_theme_configuration_ids,
+                    component_ids=theme_component_configuration_ids,
+                ),
+            }
+            restored_record["snapshot_hash"] = _canonical_json_hash(
+                _theme_configuration_audit_hash_payload(restored_record)
+            )
+            _restore_immutable_record(
+                session,
+                ThemeConfigurationAudit,
+                select(ThemeConfigurationAudit).where(
+                    ThemeConfigurationAudit.snapshot_hash
+                    == restored_record["snapshot_hash"]
+                ),
+                restored_record,
+                label="Theme configuration audit",
+            )
+
+        if any(
+            data.get(group)
+            for group in (
+                "theme_families",
+                "theme_family_versions",
+                "website_theme_configurations",
+                "website_theme_component_configurations",
+                "theme_configuration_audits",
+            )
+        ):
+            from app.services.theme_configurations import (
+                validate_theme_configuration_records,
+            )
+
+            validate_theme_configuration_records(session)
+
+        backup_version = payload["metadata"]["version"]
+        backed_connection_plan_ids = {
+            record["site_plan_id"]
+            for record in data.get("site_connection_planning_records", [])
+        }
+        backed_navigation_set_types = {
+            old_plan_id: {
+                record["set_type"]
+                for record in data.get("navigation_sets", [])
+                if record["site_plan_id"] == old_plan_id
+            }
+            for old_plan_id in site_plan_ids
+        }
+        connection_foundation_plan_ids = {
+            old_plan_id
+            for old_plan_id in site_plan_ids
+            if _backup_version_before(backup_version, "0.44")
+            or old_plan_id not in backed_connection_plan_ids
+            or backed_navigation_set_types[old_plan_id]
+            != {"primary", "utility", "footer"}
+        }
+        if connection_foundation_plan_ids:
             from app.services.site_connections import (
                 ensure_site_connection_foundation,
             )
 
-            for restored_plan_id in site_plan_ids.values():
+            for old_plan_id in sorted(connection_foundation_plan_ids):
+                restored_plan_id = site_plan_ids[old_plan_id]
                 restored_plan = session.get(SitePlan, restored_plan_id)
                 if restored_plan:
                     ensure_site_connection_foundation(
@@ -1395,16 +1726,21 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                         restored_plan,
                         commit=False,
                     )
-        if payload["metadata"]["version"] not in {
-            "0.45",
-            "0.46",
-            "0.47",
-            "0.48",
-            "0.49",
-        }:
+        backed_coverage_plan_ids = {
+            record["site_plan_id"]
+            for record in data.get("website_coverage_planning_records", [])
+        }
+        coverage_foundation_plan_ids = {
+            old_plan_id
+            for old_plan_id in site_plan_ids
+            if _backup_version_before(backup_version, "0.45")
+            or old_plan_id not in backed_coverage_plan_ids
+        }
+        if coverage_foundation_plan_ids:
             from app.services.site_coverage import ensure_coverage_foundation
 
-            for restored_plan_id in site_plan_ids.values():
+            for old_plan_id in sorted(coverage_foundation_plan_ids):
+                restored_plan_id = site_plan_ids[old_plan_id]
                 restored_plan = session.get(SitePlan, restored_plan_id)
                 if restored_plan:
                     ensure_coverage_foundation(
@@ -1893,18 +2229,42 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     PageComposition.planned_page_id == planned_page_id
                 )
             ).one()
-            composition.generated_components = _restore_page_media_component_bindings(
+            composition.generated_components = _restore_composition_component_bindings(
                 composition.generated_components,
+                website_ids=website_ids,
+                navigation_set_ids=navigation_set_ids,
+                generated_page_ids=generated_page_ids,
+                planned_page_ids=planned_page_ids,
+                internal_link_intent_ids=internal_link_intent_ids,
                 requirement_ids=planned_page_media_requirement_ids,
                 assignment_ids=page_image_assignment_ids,
             )
-            composition.operator_decisions = _restore_page_media_component_bindings(
+            composition.operator_decisions = _restore_composition_component_bindings(
                 composition.operator_decisions,
+                website_ids=website_ids,
+                navigation_set_ids=navigation_set_ids,
+                generated_page_ids=generated_page_ids,
+                planned_page_ids=planned_page_ids,
+                internal_link_intent_ids=internal_link_intent_ids,
                 requirement_ids=planned_page_media_requirement_ids,
                 assignment_ids=page_image_assignment_ids,
             )
-            composition.source_snapshot = _restore_page_media_source_binding(
+            composition.source_snapshot = _restore_composition_source_binding(
+                session,
                 composition.source_snapshot,
+                website_ids=website_ids,
+                business_ids=business_ids,
+                website_identity_ids=website_identity_ids,
+                site_plan_ids=site_plan_ids,
+                planned_page_ids=planned_page_ids,
+                generated_page_ids=generated_page_ids,
+                service_ids=service_ids,
+                city_ids=city_ids,
+                county_ids=county_ids,
+                navigation_set_ids=navigation_set_ids,
+                navigation_item_ids=navigation_item_ids,
+                internal_link_intent_ids=internal_link_intent_ids,
+                brand_asset_ids=brand_asset_ids,
                 planning_record_ids=website_media_planning_record_ids,
                 requirement_ids=planned_page_media_requirement_ids,
                 assignment_ids=page_image_assignment_ids,
@@ -2522,12 +2882,17 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             site_plan_ids=site_plan_ids,
         )
 
+        if preserve_source_ids:
+            _synchronize_postgresql_restore_sequences(session)
         session.commit()
     except Exception as exc:
         session.rollback()
         if isinstance(exc, BackupValidationError):
             raise
         raise BackupValidationError(f"Restore failed and was rolled back: {exc}") from exc
+    finally:
+        session.info.pop(_RESTORE_PRESERVE_SOURCE_IDS, None)
+        session.info.pop(_RESTORE_EXPLICIT_ID_MODELS, None)
 
     return {
         "file_name": backup_path.name,
@@ -2573,7 +2938,7 @@ def _refresh_restored_current_compositions(
         ]
         graph_ready = (
             payload["metadata"]["version"]
-            in {"0.52", "0.53", "0.54", "0.55", "0.56"}
+            in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}
             and read_site_connection_plan(session, restored_plan_id).ready
         )
         claims_current = bool(backed_compositions) and all(
@@ -2708,12 +3073,12 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
+    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
         for group in ("site_plans", "planned_pages", "planning_records"):
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
+    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
         for group in (
             "site_connection_planning_records",
             "navigation_sets",
@@ -2723,7 +3088,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
+    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
         for group in (
             "website_coverage_planning_records",
             "website_service_coverage_decisions",
@@ -2734,7 +3099,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
+    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
         for group in (
             "drafting_eligibility_assessments",
             "drafting_eligibility_dispositions",
@@ -2742,7 +3107,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
+    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
         for group in (
             "supporting_page_authorizations",
             "pre_draft_distinctness_briefs",
@@ -2750,7 +3115,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
+    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
         for group in (
             "website_draft_generation_runs",
             "website_draft_generation_items",
@@ -2761,35 +3126,49 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "website_service_county_coverage_decisions" not in data:
         data.setdefault("website_service_county_coverage_decisions", [])
         counts.setdefault("website_service_county_coverage_decisions", 0)
-    if backup_version not in {"0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
+    if backup_version not in {"0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
         for group in ("semantic_component_definitions", "page_compositions"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
+    if backup_version not in {"0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
         for group in ("brand_assets", "website_identity_asset_assignments"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.51", "0.52", "0.53", "0.54", "0.55", "0.56"}:
+    if backup_version not in {"0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
         for group in ("themes", "website_theme_selections"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.53", "0.54", "0.55", "0.56"}:
+    if backup_version not in {"0.53", "0.54", "0.55", "0.56", "0.57"}:
         for group in (
             "website_media_planning_records",
             "planned_page_media_requirements",
         ):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.55", "0.56"}:
+    if backup_version not in {"0.55", "0.56", "0.57"}:
         data.setdefault("generated_page_qa_results", [])
         counts.setdefault("generated_page_qa_results", 0)
-    if backup_version != "0.56":
+    if backup_version not in {"0.56", "0.57"}:
         data.setdefault("scoped_media_authorizations", [])
         counts.setdefault("scoped_media_authorizations", 0)
         for record in data.get("image_metadata", []):
             if isinstance(record, dict):
                 record.setdefault("usage_authorization_mode", "contract_default")
                 record.setdefault("required_authorization_terms", [])
+    if backup_version != "0.57":
+        for group in (
+            "theme_families",
+            "theme_family_versions",
+            "website_theme_configurations",
+            "website_theme_component_configurations",
+            "theme_configuration_audits",
+        ):
+            records = data.setdefault(group, [])
+            if records:
+                raise BackupValidationError(
+                    f"Legacy backup version cannot contain '{group}' records."
+                )
+            counts.setdefault(group, 0)
 
     for group in BACKUP_MODELS:
         records = data.get(group)
@@ -2799,6 +3178,8 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             raise BackupValidationError(f"Backup count mismatch for '{group}'.")
         if not all(isinstance(record, dict) for record in records):
             raise BackupValidationError(f"Backup data group '{group}' contains an invalid record.")
+
+    _canonicalize_navigation_decision_timestamps(data)
 
     valid_asset_statuses = {"draft", "pending_review", "approved", "rejected", "retired"}
     valid_asset_types = {
@@ -3078,6 +3459,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
 
     _validate_site_connection_decision_provenance(data, backup_version)
     _validate_nested_qa_page_identities(data, backup_version)
+    _validate_theme_configuration_graph(data, backup_version)
     _validate_unique_records(data)
     _validate_backup_references(data)
     _validate_brand_asset_ownership(data)
@@ -3134,6 +3516,93 @@ def _reserve_backup_path(destination: Path, timestamp: datetime) -> Path:
         candidate_time += timedelta(seconds=1)
 
 
+def _restore_managed_tables_are_empty(session: Session) -> bool:
+    """Prove the restore target has no rows in any backup-managed table."""
+
+    checked_tables: set[str] = set()
+    for model in BACKUP_MODELS.values():
+        table_key = model.__table__.key
+        if table_key in checked_tables:
+            continue
+        checked_tables.add(table_key)
+        if session.exec(select(model).limit(1)).first() is not None:
+            return False
+    return True
+
+
+def _restore_insert_values(
+    session: Session,
+    model: type[SQLModel],
+    normalized: SQLModel,
+) -> dict[str, Any]:
+    values = normalized.model_dump(exclude={"id"})
+    if not session.info.get(_RESTORE_PRESERVE_SOURCE_IDS):
+        return values
+
+    source_id = getattr(normalized, "id", None)
+    if isinstance(source_id, bool) or not isinstance(source_id, int):
+        raise BackupValidationError(
+            f"Clean-target restore requires an integer source id for {model.__name__}."
+        )
+    if session.get(model, source_id) is not None:
+        raise BackupValidationError(
+            f"Clean-target restore found a duplicate source id for {model.__name__}."
+        )
+    values["id"] = source_id
+    explicit_models = session.info.get(_RESTORE_EXPLICIT_ID_MODELS)
+    if not isinstance(explicit_models, set):
+        raise BackupValidationError(
+            "Clean-target restore identity tracking is unavailable."
+        )
+    explicit_models.add(model)
+    return values
+
+
+def _synchronize_postgresql_restore_sequences(session: Session) -> None:
+    """Advance PostgreSQL sequences after a clean restore inserted source ids."""
+
+    bind = session.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    explicit_models = session.info.get(_RESTORE_EXPLICIT_ID_MODELS)
+    if not isinstance(explicit_models, set):
+        raise BackupValidationError(
+            "Clean-target restore identity tracking is unavailable."
+        )
+    session.flush()
+    connection = session.connection()
+    for model in sorted(explicit_models, key=lambda value: value.__table__.key):
+        table = model.__table__
+        primary_keys = list(table.primary_key.columns)
+        if len(primary_keys) != 1 or primary_keys[0].name != "id":
+            raise BackupValidationError(
+                f"Clean-target restore cannot synchronize {table.fullname} identity."
+            )
+        primary_key = primary_keys[0]
+        table_name = table.fullname
+        sequence_name = connection.execute(
+            text(
+                "SELECT pg_get_serial_sequence(:table_name, :column_name)"
+            ),
+            {"table_name": table_name, "column_name": primary_key.name},
+        ).scalar_one_or_none()
+        if sequence_name is None:
+            continue
+        maximum_id = connection.execute(
+            select(primary_key).order_by(primary_key.desc()).limit(1)
+        ).scalar_one_or_none()
+        if not isinstance(maximum_id, int):
+            raise BackupValidationError(
+                f"Clean-target restore cannot resolve {table.fullname} maximum id."
+            )
+        connection.execute(
+            text(
+                "SELECT setval(CAST(:sequence_name AS regclass), :maximum_id, true)"
+            ),
+            {"sequence_name": sequence_name, "maximum_id": maximum_id},
+        )
+
+
 def _upsert(
     session: Session,
     model: type[SQLModel],
@@ -3141,17 +3610,61 @@ def _upsert(
     payload: dict[str, Any],
 ) -> SQLModel:
     normalized = model.model_validate(payload)
-    values = normalized.model_dump(exclude={"id"})
     existing = session.exec(statement).first()
     if existing:
+        values = normalized.model_dump(exclude={"id"})
         for key, value in values.items():
             setattr(existing, key, value)
         record = existing
     else:
+        values = _restore_insert_values(session, model, normalized)
         record = model(**values)
     session.add(record)
     session.flush()
     return record
+
+
+def _restore_immutable_record(
+    session: Session,
+    model: type[SQLModel],
+    statement: Any,
+    payload: dict[str, Any],
+    *,
+    label: str,
+) -> SQLModel:
+    """Insert a durable Theme record or reuse one exact immutable match."""
+
+    normalized = model.model_validate(payload)
+    existing = session.exec(statement).first()
+    if existing is not None:
+        expected = _normalized_immutable_projection(normalized)
+        observed = _normalized_immutable_projection(existing)
+        if observed != expected:
+            raise BackupValidationError(
+                f"Target {label} immutable state diverges from the backup; restore was refused."
+            )
+        return existing
+
+    values = _restore_insert_values(session, model, normalized)
+    record = model(**values)
+    session.add(record)
+    session.flush()
+    return record
+
+
+def _normalized_immutable_projection(record: SQLModel) -> dict[str, Any]:
+    def normalize(value: Any) -> Any:
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=UTC)
+            return value.astimezone(UTC).isoformat()
+        if isinstance(value, dict):
+            return {key: normalize(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [normalize(item) for item in value]
+        return value
+
+    return normalize(record.model_dump(mode="python", exclude={"id"}))
 
 
 def _require_restore_compatible_scoped_authorization_prefix(
@@ -3208,7 +3721,6 @@ def _restore_scoped_media_authorization(
     """
 
     normalized = ScopedMediaAuthorization.model_validate(payload)
-    values = normalized.model_dump(exclude={"id"})
     existing = session.exec(
         select(ScopedMediaAuthorization).where(
             ScopedMediaAuthorization.media_requirement_id
@@ -3240,6 +3752,11 @@ def _restore_scoped_media_authorization(
             session.flush()
         return existing
 
+    values = _restore_insert_values(
+        session,
+        ScopedMediaAuthorization,
+        normalized,
+    )
     record = ScopedMediaAuthorization(**values)
     session.add(record)
     session.flush()
@@ -3328,13 +3845,46 @@ def _restore_theme_source_binding(
     return restored
 
 
-def _restore_page_media_component_bindings(
-    components: Any,
+def _restore_composition_instance_key(
+    value: Any,
     *,
     requirement_ids: dict[int, int],
     assignment_ids: dict[int, int],
+) -> Any:
+    """Remap the derived durable id in governed or legacy media instance keys."""
+
+    if not isinstance(value, str):
+        return value
+    prefixes = (
+        ("media_placement:requirement-", requirement_ids, "media requirement"),
+        ("media_placement:assignment-", assignment_ids, "media assignment"),
+    )
+    for prefix, mapping, label in prefixes:
+        if not value.startswith(prefix):
+            continue
+        raw_id = value[len(prefix) :]
+        try:
+            old_id = int(raw_id)
+        except ValueError as exc:
+            raise BackupValidationError(
+                f"Backup Page Composition {label} instance key is malformed."
+            ) from exc
+        return f"{prefix}{_mapped_id(mapping, old_id, f'page_compositions.{label}_instance_key')}"
+    return value
+
+
+def _restore_composition_component_bindings(
+    components: Any,
+    *,
+    website_ids: dict[int, int],
+    navigation_set_ids: dict[int, int],
+    generated_page_ids: dict[int, int],
+    planned_page_ids: dict[int, int],
+    internal_link_intent_ids: dict[int, int],
+    requirement_ids: dict[int, int],
+    assignment_ids: dict[int, int],
 ) -> list[dict[str, Any]]:
-    """Remap exact governed Page Media identities embedded in components."""
+    """Remap every durable identity embedded in composition components."""
 
     if not isinstance(components, list) or not all(
         isinstance(item, dict) for item in components
@@ -3344,6 +3894,12 @@ def _restore_page_media_component_bindings(
         )
     restored = deepcopy(components)
     for component in restored:
+        if component.get("instance_key") is not None:
+            component["instance_key"] = _restore_composition_instance_key(
+                component["instance_key"],
+                requirement_ids=requirement_ids,
+                assignment_ids=assignment_ids,
+            )
         bindings = component.get("input_bindings")
         if bindings is None:
             continue
@@ -3351,6 +3907,38 @@ def _restore_page_media_component_bindings(
             raise BackupValidationError(
                 "Backup Page Composition component bindings must be an object."
             )
+        for field, mapping in (
+            ("website_id", website_ids),
+            ("navigation_set_id", navigation_set_ids),
+            ("generated_page_id", generated_page_ids),
+            ("planned_page_id", planned_page_ids),
+            ("target_planned_page_id", planned_page_ids),
+        ):
+            if bindings.get(field) is not None:
+                bindings[field] = _mapped_id(
+                    mapping,
+                    bindings[field],
+                    f"page_compositions.generated_components.{field}",
+                )
+        for field, mapping in (
+            ("internal_link_intent_ids", internal_link_intent_ids),
+            ("draft_related_page_ids", planned_page_ids),
+        ):
+            if field not in bindings:
+                continue
+            values = bindings[field]
+            if not isinstance(values, list):
+                raise BackupValidationError(
+                    f"Backup Page Composition component {field} must be a list."
+                )
+            bindings[field] = [
+                _mapped_id(
+                    mapping,
+                    value,
+                    f"page_compositions.generated_components.{field}",
+                )
+                for value in values
+            ]
         if bindings.get("media_requirement_id") is not None:
             bindings["media_requirement_id"] = _mapped_id(
                 requirement_ids,
@@ -3366,9 +3954,60 @@ def _restore_page_media_component_bindings(
     return restored
 
 
-def _restore_page_media_source_binding(
+def _restore_composition_target_binding(
+    value: Any,
+    *,
+    website_ids: dict[int, int],
+    site_plan_ids: dict[int, int],
+    planned_page_ids: dict[int, int],
+    generated_page_ids: dict[int, int],
+    field: str,
+) -> Any:
+    if type(value) is int:
+        # Legacy draft-graph snapshots stored only the target Planned Page id.
+        # Preserve that shape while still remapping the embedded identity.
+        return _mapped_id(
+            planned_page_ids,
+            value,
+            f"page_compositions.{field}.planned_page_id",
+        )
+    if not isinstance(value, dict):
+        raise BackupValidationError(
+            f"Backup Page Composition {field} target binding must be an object or legacy Planned Page id."
+        )
+    restored = dict(value)
+    for key, mapping in (
+        ("website_id", website_ids),
+        ("site_plan_id", site_plan_ids),
+        ("planned_page_id", planned_page_ids),
+        ("generated_page_id", generated_page_ids),
+    ):
+        if restored.get(key) is not None:
+            restored[key] = _mapped_id(
+                mapping,
+                restored[key],
+                f"page_compositions.{field}.{key}",
+            )
+    return restored
+
+
+def _restore_composition_source_binding(
+    session: Session,
     source_snapshot: Any,
     *,
+    website_ids: dict[int, int],
+    business_ids: dict[int, int],
+    website_identity_ids: dict[int, int],
+    site_plan_ids: dict[int, int],
+    planned_page_ids: dict[int, int],
+    generated_page_ids: dict[int, int],
+    service_ids: dict[int, int],
+    city_ids: dict[int, int],
+    county_ids: dict[int, int],
+    navigation_set_ids: dict[int, int],
+    navigation_item_ids: dict[int, int],
+    internal_link_intent_ids: dict[int, int],
+    brand_asset_ids: dict[int, int],
     planning_record_ids: dict[int, int],
     requirement_ids: dict[int, int],
     assignment_ids: dict[int, int],
@@ -3376,13 +4015,186 @@ def _restore_page_media_source_binding(
     authorization_ids: dict[int, int],
     authorization_fingerprints: dict[int, str],
 ) -> dict[str, Any]:
-    """Remap governed Page Media identities embedded in composition snapshots."""
+    """Remap every durable identity embedded in composition source snapshots."""
 
     if not isinstance(source_snapshot, dict):
         raise BackupValidationError(
             "Backup Page Composition source snapshot must be an object."
         )
     restored = deepcopy(source_snapshot)
+    for field, mapping in (
+        ("website_id", website_ids),
+        ("site_plan_id", site_plan_ids),
+        ("planned_page_id", planned_page_ids),
+        ("generated_page_id", generated_page_ids),
+        ("website_identity_id", website_identity_ids),
+    ):
+        if restored.get(field) is not None:
+            restored[field] = _mapped_id(
+                mapping,
+                restored[field],
+                f"page_compositions.source_snapshot.{field}",
+            )
+
+    if restored.get("website_context_hash") is not None:
+        from app.services.website_context import build_website_context
+
+        generated_page_id = restored.get("generated_page_id")
+        if not isinstance(generated_page_id, int):
+            raise BackupValidationError(
+                "Backup Page Composition website context lacks a Generated Page binding."
+            )
+        restored["website_context_hash"] = _canonical_json_hash(
+            build_website_context(
+                session,
+                page_id=generated_page_id,
+            ).model_dump(mode="json")
+        )
+
+    navigation_sets = restored.get("navigation_sets")
+    if navigation_sets is not None:
+        if not isinstance(navigation_sets, list):
+            raise BackupValidationError(
+                "Backup Page Composition Navigation Sets must be a list."
+            )
+        for item in navigation_sets:
+            if not isinstance(item, dict):
+                raise BackupValidationError(
+                    "Backup Page Composition Navigation Set binding must be an object."
+                )
+            if item.get("id") is not None:
+                item["id"] = _mapped_id(
+                    navigation_set_ids,
+                    item["id"],
+                    "page_compositions.navigation_sets.id",
+                )
+
+    navigation_items = restored.get("navigation_items")
+    if navigation_items is not None:
+        if not isinstance(navigation_items, list):
+            raise BackupValidationError(
+                "Backup Page Composition Navigation Items must be a list."
+            )
+        for item in navigation_items:
+            if not isinstance(item, dict):
+                raise BackupValidationError(
+                    "Backup Page Composition Navigation Item binding must be an object."
+                )
+            if item.get("id") is not None:
+                item["id"] = _mapped_id(
+                    navigation_item_ids,
+                    item["id"],
+                    "page_compositions.navigation_items.id",
+                )
+            if item.get("navigation_set_id") is not None:
+                item["navigation_set_id"] = _mapped_id(
+                    navigation_set_ids,
+                    item["navigation_set_id"],
+                    "page_compositions.navigation_items.navigation_set_id",
+                )
+            if item.get("parent_navigation_item_id") is not None:
+                item["parent_navigation_item_id"] = _mapped_id(
+                    navigation_item_ids,
+                    item["parent_navigation_item_id"],
+                    "page_compositions.navigation_items.parent_navigation_item_id",
+                )
+            if item.get("target") is not None:
+                item["target"] = _restore_composition_target_binding(
+                    item["target"],
+                    website_ids=website_ids,
+                    site_plan_ids=site_plan_ids,
+                    planned_page_ids=planned_page_ids,
+                    generated_page_ids=generated_page_ids,
+                    field="navigation_items.target",
+                )
+
+    internal_links = restored.get("internal_links")
+    if internal_links is not None:
+        if not isinstance(internal_links, list):
+            raise BackupValidationError(
+                "Backup Page Composition Internal Links must be a list."
+            )
+        for item in internal_links:
+            if not isinstance(item, dict):
+                raise BackupValidationError(
+                    "Backup Page Composition Internal Link binding must be an object."
+                )
+            if item.get("id") is not None:
+                item["id"] = _mapped_id(
+                    internal_link_intent_ids,
+                    item["id"],
+                    "page_compositions.internal_links.id",
+                )
+            if item.get("target") is not None:
+                item["target"] = _restore_composition_target_binding(
+                    item["target"],
+                    website_ids=website_ids,
+                    site_plan_ids=site_plan_ids,
+                    planned_page_ids=planned_page_ids,
+                    generated_page_ids=generated_page_ids,
+                    field="internal_links.target",
+                )
+
+    draft_related_targets = restored.get("draft_related_targets")
+    if draft_related_targets is not None:
+        if not isinstance(draft_related_targets, list):
+            raise BackupValidationError(
+                "Backup Page Composition draft-related targets must be a list."
+            )
+        restored["draft_related_targets"] = [
+            _restore_composition_target_binding(
+                item,
+                website_ids=website_ids,
+                site_plan_ids=site_plan_ids,
+                planned_page_ids=planned_page_ids,
+                generated_page_ids=generated_page_ids,
+                field="draft_related_targets",
+            )
+            for item in draft_related_targets
+        ]
+
+    media_assignments = restored.get("media_assignments")
+    if media_assignments is not None:
+        if not isinstance(media_assignments, list):
+            raise BackupValidationError(
+                "Backup Page Composition media assignments must be a list."
+            )
+        for item in media_assignments:
+            if not isinstance(item, dict):
+                raise BackupValidationError(
+                    "Backup Page Composition media assignment binding must be an object."
+                )
+            if item.get("id") is not None:
+                item["id"] = _mapped_id(
+                    assignment_ids,
+                    item["id"],
+                    "page_compositions.media_assignments.id",
+                )
+            if item.get("image_metadata_id") is not None:
+                item["image_metadata_id"] = _mapped_id(
+                    image_ids,
+                    item["image_metadata_id"],
+                    "page_compositions.media_assignments.image_metadata_id",
+                )
+
+    identity_assets = restored.get("website_identity_assets")
+    if identity_assets is not None:
+        if not isinstance(identity_assets, list):
+            raise BackupValidationError(
+                "Backup Page Composition Website Identity assets must be a list."
+            )
+        for item in identity_assets:
+            if not isinstance(item, dict):
+                raise BackupValidationError(
+                    "Backup Page Composition Website Identity asset binding must be an object."
+                )
+            if item.get("asset_id") is not None:
+                item["asset_id"] = _mapped_id(
+                    brand_asset_ids,
+                    item["asset_id"],
+                    "page_compositions.website_identity_assets.asset_id",
+                )
+
     page_media = restored.get("page_media")
     if page_media is None:
         return restored
@@ -3403,6 +4215,48 @@ def _restore_page_media_source_binding(
                     planning[field],
                     f"page_compositions.page_media.planning_record.{field}",
                 )
+        planned_page = planning.get("planned_page")
+        if planned_page is not None:
+            if not isinstance(planned_page, dict):
+                raise BackupValidationError(
+                    "Backup Page Composition Page Media Planned Page binding must be an object."
+                )
+            for field, mapping in (
+                ("id", planned_page_ids),
+                ("service_id", service_ids),
+                ("city_id", city_ids),
+                ("county_id", county_ids),
+                ("generated_page_id", generated_page_ids),
+            ):
+                if planned_page.get(field) is not None:
+                    planned_page[field] = _mapped_id(
+                        mapping,
+                        planned_page[field],
+                        f"page_compositions.page_media.planning_record.planned_page.{field}",
+                    )
+        suggestions = planning.get("suggestions")
+        if suggestions is not None:
+            if not isinstance(suggestions, list):
+                raise BackupValidationError(
+                    "Backup Page Composition Page Media suggestions must be a list."
+                )
+            for suggestion in suggestions:
+                if not isinstance(suggestion, dict):
+                    raise BackupValidationError(
+                        "Backup Page Composition Page Media suggestion binding must be an object."
+                    )
+                for field, mapping in (
+                    ("website_id", website_ids),
+                    ("business_id", business_ids),
+                    ("site_plan_id", site_plan_ids),
+                    ("planned_page_id", planned_page_ids),
+                ):
+                    if suggestion.get(field) is not None:
+                        suggestion[field] = _mapped_id(
+                            mapping,
+                            suggestion[field],
+                            f"page_compositions.page_media.planning_record.suggestions.{field}",
+                        )
     requirements = page_media.get("requirements", [])
     assignments = page_media.get("assignments", [])
     if not isinstance(requirements, list) or not isinstance(assignments, list):
@@ -3697,6 +4551,236 @@ def _canonical_json_hash(value: Any) -> str:
             default=str,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _backup_version_before(value: str, minimum: str) -> bool:
+    """Compare validated Atlas backup versions without lexicographic ordering."""
+
+    return tuple(int(part) for part in value.split(".")) < tuple(
+        int(part) for part in minimum.split(".")
+    )
+
+
+def _canonicalize_navigation_decision_timestamps(
+    data: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Keep timezone-aware navigation decisions stable across SQL backends."""
+
+    for group in _UTC_NAVIGATION_DECISION_GROUPS:
+        for record in data.get(group, []):
+            value = record.get("decided_at")
+            if value is None:
+                continue
+            parsed = _datetime_value(value, f"{group}.decided_at")
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            record["decided_at"] = (
+                parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+            )
+
+
+def _canonical_theme_datetime(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    parsed = _datetime_value(value, field)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat()
+
+
+def _theme_family_fingerprint_payload(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "family_key": record.get("family_key"),
+        "display_name": record.get("display_name"),
+        "description": record.get("description"),
+        "provider_source_identity": record.get("provider_source_identity"),
+        "lifecycle_status": record.get("lifecycle_status"),
+        "created_by": record.get("created_by"),
+        "retired_by": record.get("retired_by"),
+        "retired_at": _canonical_theme_datetime(
+            record.get("retired_at"),
+            "theme_families.retired_at",
+        ),
+    }
+
+
+def _theme_family_version_fingerprint_payload(
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "theme_family_id": record.get("theme_family_id"),
+        "version": record.get("version"),
+        "lifecycle_status": record.get("lifecycle_status"),
+        "production_ready": record.get("production_ready"),
+        "source_commit": record.get("source_commit"),
+        "compatibility_identity": record.get("compatibility_identity"),
+        "supported_component_contracts": record.get(
+            "supported_component_contracts"
+        ),
+        "created_by": record.get("created_by"),
+        "retired_by": record.get("retired_by"),
+        "retired_at": _canonical_theme_datetime(
+            record.get("retired_at"),
+            "theme_family_versions.retired_at",
+        ),
+        "supersedes_theme_family_version_id": record.get(
+            "supersedes_theme_family_version_id"
+        ),
+    }
+
+
+def _website_theme_configuration_fingerprint_payload(
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "website_id": record.get("website_id"),
+        "business_id": record.get("business_id"),
+        "theme_family_version_id": record.get("theme_family_version_id"),
+        "configuration_key": record.get("configuration_key"),
+        "version": record.get("version"),
+        "lifecycle_status": record.get("lifecycle_status"),
+        "created_by": record.get("created_by"),
+        "updated_by": record.get("updated_by"),
+        "creation_rationale": record.get("creation_rationale"),
+        "approved_by": record.get("approved_by"),
+        "approved_at": _canonical_theme_datetime(
+            record.get("approved_at"),
+            "website_theme_configurations.approved_at",
+        ),
+        "activated_by": record.get("activated_by"),
+        "activated_at": _canonical_theme_datetime(
+            record.get("activated_at"),
+            "website_theme_configurations.activated_at",
+        ),
+        "rollback_by": record.get("rollback_by"),
+        "rollback_at": _canonical_theme_datetime(
+            record.get("rollback_at"),
+            "website_theme_configurations.rollback_at",
+        ),
+        "materialized_theme_id": record.get("materialized_theme_id"),
+        "website_theme_selection_id": record.get("website_theme_selection_id"),
+        "supersedes_configuration_id": record.get(
+            "supersedes_configuration_id"
+        ),
+    }
+
+
+def _theme_component_configuration_fingerprint_payload(
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "website_theme_configuration_id": record.get(
+            "website_theme_configuration_id"
+        ),
+        "website_id": record.get("website_id"),
+        "planned_page_id": record.get("planned_page_id"),
+        "theme_family_version_id": record.get("theme_family_version_id"),
+        "component_instance_key": record.get("component_instance_key"),
+        "component_key": record.get("component_key"),
+        "component_contract_version": record.get("component_contract_version"),
+        "revision": record.get("revision"),
+        "scope_type": record.get("scope_type"),
+        "lifecycle_status": record.get("lifecycle_status"),
+        "enabled": record.get("enabled"),
+        "variant": record.get("variant"),
+        "placement": record.get("placement"),
+        "responsive_visibility": record.get("responsive_visibility"),
+        "configuration_payload": record.get("configuration_payload"),
+        "effective_at": _canonical_theme_datetime(
+            record.get("effective_at"),
+            "website_theme_component_configurations.effective_at",
+        ),
+        "expires_at": _canonical_theme_datetime(
+            record.get("expires_at"),
+            "website_theme_component_configurations.expires_at",
+        ),
+        "approval_identity": record.get("approval_identity"),
+        "created_by": record.get("created_by"),
+        "updated_by": record.get("updated_by"),
+        "activation_identity": record.get("activation_identity"),
+        "activated_at": _canonical_theme_datetime(
+            record.get("activated_at"),
+            "website_theme_component_configurations.activated_at",
+        ),
+        "rollback_identity": record.get("rollback_identity"),
+        "rollback_at": _canonical_theme_datetime(
+            record.get("rollback_at"),
+            "website_theme_component_configurations.rollback_at",
+        ),
+        "destination_component_configuration_id": record.get(
+            "destination_component_configuration_id"
+        ),
+        "overrides_component_configuration_id": record.get(
+            "overrides_component_configuration_id"
+        ),
+        "supersedes_component_configuration_id": record.get(
+            "supersedes_component_configuration_id"
+        ),
+    }
+
+
+def _theme_configuration_audit_hash_payload(
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "theme_family_id": record.get("theme_family_id"),
+        "theme_family_version_id": record.get("theme_family_version_id"),
+        "website_theme_configuration_id": record.get(
+            "website_theme_configuration_id"
+        ),
+        "component_configuration_id": record.get("component_configuration_id"),
+        "action_type": record.get("action_type"),
+        "actor": record.get("actor"),
+        "rationale": record.get("rationale"),
+        "snapshot": record.get("snapshot"),
+        "created_at": _canonical_theme_datetime(
+            record.get("created_at"),
+            "theme_configuration_audits.created_at",
+        ),
+    }
+
+
+def _restore_theme_configuration_audit_snapshot(
+    snapshot: Any,
+    *,
+    website_ids: dict[int, int],
+    business_ids: dict[int, int],
+    planned_page_ids: dict[int, int],
+    theme_ids: dict[int, int],
+    selection_ids: dict[int, int],
+    family_ids: dict[int, int],
+    family_version_ids: dict[int, int],
+    configuration_ids: dict[int, int],
+    component_ids: dict[int, int],
+) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        raise BackupValidationError(
+            "Theme configuration audit snapshot must be an object."
+        )
+    restored = deepcopy(snapshot)
+    mappings = (
+        ("website_id", website_ids),
+        ("business_id", business_ids),
+        ("planned_page_id", planned_page_ids),
+        ("materialized_theme_id", theme_ids),
+        ("website_theme_selection_id", selection_ids),
+        ("theme_family_id", family_ids),
+        ("theme_family_version_id", family_version_ids),
+        ("supersedes_theme_family_version_id", family_version_ids),
+        ("website_theme_configuration_id", configuration_ids),
+        ("supersedes_configuration_id", configuration_ids),
+        ("destination_component_configuration_id", component_ids),
+        ("overrides_component_configuration_id", component_ids),
+        ("supersedes_component_configuration_id", component_ids),
+    )
+    for field, mapping in mappings:
+        if restored.get(field) is not None:
+            restored[field] = _mapped_id(
+                mapping,
+                restored[field],
+                f"theme_configuration_audits.snapshot.{field}",
+            )
+    return restored
 
 
 def _required_id(record: SQLModel) -> int:
@@ -4002,11 +5086,42 @@ def _comparable_datetime(value: datetime) -> datetime:
     return value.astimezone(UTC).replace(tzinfo=None)
 
 
+def _require_backup_timestamp_order(
+    earlier: Any,
+    later: Any,
+    message: str,
+) -> None:
+    if earlier is None or later is None:
+        raise BackupValidationError(message)
+    if _comparable_datetime(
+        _datetime_value(later, "durable Theme lifecycle timestamp")
+    ) < _comparable_datetime(
+        _datetime_value(earlier, "durable Theme lifecycle timestamp")
+    ):
+        raise BackupValidationError(message)
+
+
+def _require_backup_stored_text(
+    value: Any,
+    label: str,
+    maximum_length: int,
+) -> None:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > maximum_length
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise BackupValidationError(
+            f"{label} must be non-empty bounded text without control characters."
+        )
+
+
 def _validate_site_connection_decision_provenance(
     data: dict[str, list[dict[str, Any]]],
     backup_version: str,
 ) -> None:
-    if backup_version in {"0.52", "0.53", "0.54", "0.55", "0.56"}:
+    if backup_version in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
         _validate_052_site_connection_provenance_fields(data)
 
     planning_by_plan = {
@@ -4077,7 +5192,7 @@ def _validate_site_connection_decision_provenance(
                 "Backup Internal Link Intent crosses a Website, Site Plan, or page boundary."
             )
 
-    if backup_version not in {"0.52", "0.53", "0.54", "0.55", "0.56"}:
+    if backup_version not in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
         return
 
     _validate_052_composition_connection_bindings(
@@ -4467,7 +5582,7 @@ def _validate_nested_qa_page_identities(
 ) -> None:
     """Reject QA projections that claim a page other than their owner."""
 
-    require_identity = backup_version in {"0.55", "0.56"}
+    require_identity = backup_version in {"0.55", "0.56", "0.57"}
     for record in data["generated_pages"]:
         qa_result = record.get("qa_result")
         if qa_result is None:
@@ -4517,6 +5632,1026 @@ def _validate_nested_qa_page_identities(
             )
 
 
+def _validate_theme_configuration_graph(
+    data: dict[str, list[dict[str, Any]]],
+    backup_version: str,
+) -> None:
+    groups = (
+        "theme_families",
+        "theme_family_versions",
+        "website_theme_configurations",
+        "website_theme_component_configurations",
+        "theme_configuration_audits",
+    )
+    if backup_version != "0.57":
+        if any(data[group] for group in groups):
+            raise BackupValidationError(
+                "Legacy backup contains unsupported durable Theme configuration records."
+            )
+        return
+
+    from app.schemas.theme_families import (
+        CompactEstimateFormConfiguration,
+        PERFORMANCE_LOCAL_V2_COMPONENT_CONTRACTS,
+        PERFORMANCE_LOCAL_V2_SOURCE_COMMIT,
+        ThemeConfigurationAuditRead,
+        ThemeFamilyCreate,
+        ThemeFamilyRead,
+        ThemeFamilyVersionCreate,
+        ThemeFamilyVersionRead,
+        WebsiteThemeComponentConfigurationCreate,
+        WebsiteThemeComponentConfigurationRead,
+        WebsiteThemeConfigurationCreate,
+        WebsiteThemeConfigurationRead,
+        validate_component_payload,
+        validate_component_schedule,
+    )
+    from app.services.form_submission_contracts import (
+        validate_provider_disabled_form,
+    )
+    from app.schemas.themes import ThemeDesignTokens
+    from app.services.themes import validate_theme_accessibility
+
+    def indexed(group: str) -> dict[int, dict[str, Any]]:
+        result: dict[int, dict[str, Any]] = {}
+        for record in data[group]:
+            record_id = _record_id(record, group)
+            if record_id in result:
+                raise BackupValidationError(
+                    f"Backup contains duplicate ids in '{group}'."
+                )
+            result[record_id] = record
+        return result
+
+    families = indexed("theme_families")
+    versions = indexed("theme_family_versions")
+    configurations = indexed("website_theme_configurations")
+    components = indexed("website_theme_component_configurations")
+    audits = indexed("theme_configuration_audits")
+    businesses = indexed("businesses")
+    websites = indexed("websites")
+    planned_pages = indexed("planned_pages")
+    themes = indexed("themes")
+    selections = indexed("website_theme_selections")
+
+    try:
+        for record in families.values():
+            ThemeFamilyRead.model_validate(record)
+            ThemeFamilyCreate.model_validate(
+                {
+                    field: record.get(field)
+                    for field in (
+                        "family_key",
+                        "display_name",
+                        "description",
+                        "provider_source_identity",
+                        "created_by",
+                    )
+                }
+            )
+            lifecycle_status = record.get("lifecycle_status")
+            retired_by = record.get("retired_by")
+            retired_at = record.get("retired_at")
+            retirement_complete = (
+                isinstance(retired_by, str)
+                and bool(retired_by.strip())
+                and retired_at is not None
+            )
+            if retired_at is not None:
+                _datetime_value(retired_at, "theme_families.retired_at")
+            _require_backup_timestamp_order(
+                record.get("created_at"),
+                record.get("updated_at"),
+                "Theme Family update precedes its creation.",
+            )
+            if retired_at is not None:
+                _require_backup_timestamp_order(
+                    record.get("created_at"),
+                    retired_at,
+                    "Theme Family retirement precedes its creation.",
+                )
+            if (
+                (lifecycle_status == "registered" and (retired_by is not None or retired_at is not None))
+                or (lifecycle_status == "retired" and not retirement_complete)
+                or record.get("integrity_fingerprint")
+                != _canonical_json_hash(
+                    _theme_family_fingerprint_payload(record)
+                )
+            ):
+                raise BackupValidationError(
+                    "Backup contains an invalid Theme Family lifecycle or fingerprint."
+                )
+
+        compatibility_identities: set[str] = set()
+        family_version_predecessors: set[int] = set()
+        for record in versions.values():
+            ThemeFamilyVersionRead.model_validate(record)
+            version_create_shape = {
+                    field: record.get(field)
+                    for field in (
+                        "version",
+                        "lifecycle_status",
+                        "production_ready",
+                        "source_commit",
+                        "supported_component_contracts",
+                        "created_by",
+                        "supersedes_theme_family_version_id",
+                    )
+                }
+            version_create_shape["lifecycle_status"] = "preview_candidate"
+            version_create_shape["production_ready"] = False
+            ThemeFamilyVersionCreate.model_validate(version_create_shape)
+            family = families.get(record.get("theme_family_id"))
+            if family is None:
+                raise BackupValidationError(
+                    "Theme Family Version references a missing Theme Family."
+                )
+            contracts = record.get("supported_component_contracts")
+            if (
+                family.get("family_key") == "performance-local"
+                and record.get("version") == 2
+                and (
+                    contracts != list(PERFORMANCE_LOCAL_V2_COMPONENT_CONTRACTS)
+                    or record.get("source_commit")
+                    != PERFORMANCE_LOCAL_V2_SOURCE_COMMIT
+                )
+            ):
+                raise BackupValidationError(
+                    "Performance Local v2 backup source commit or contract is not canonical."
+                )
+            compatibility = _canonical_json_hash(
+                {
+                    "family_key": family.get("family_key"),
+                    "version": record.get("version"),
+                    "supported_component_contracts": contracts,
+                }
+            )
+            lifecycle_status = record.get("lifecycle_status")
+            retired_by = record.get("retired_by")
+            retired_at = record.get("retired_at")
+            retirement_complete = (
+                isinstance(retired_by, str)
+                and bool(retired_by.strip())
+                and retired_at is not None
+            )
+            if retired_at is not None:
+                _datetime_value(
+                    retired_at,
+                    "theme_family_versions.retired_at",
+                )
+            _require_backup_timestamp_order(
+                record.get("created_at"),
+                record.get("updated_at"),
+                "Theme Version update precedes its creation.",
+            )
+            if retired_at is not None:
+                _require_backup_timestamp_order(
+                    record.get("created_at"),
+                    retired_at,
+                    "Theme Version retirement precedes its creation.",
+                )
+            if (
+                (lifecycle_status != "retired" and (retired_by is not None or retired_at is not None))
+                or (lifecycle_status == "retired" and not retirement_complete)
+                or (
+                    record.get("production_ready") is True
+                    and lifecycle_status != "approved"
+                )
+                or record.get("compatibility_identity") != compatibility
+                or compatibility in compatibility_identities
+                or record.get("integrity_fingerprint")
+                != _canonical_json_hash(
+                    _theme_family_version_fingerprint_payload(record)
+                )
+            ):
+                raise BackupValidationError(
+                    "Backup contains an invalid Theme Family Version lifecycle or identity."
+                )
+            compatibility_identities.add(compatibility)
+            predecessor_id = record.get("supersedes_theme_family_version_id")
+            if predecessor_id is not None:
+                if predecessor_id in family_version_predecessors:
+                    raise BackupValidationError(
+                        "Theme Family Version predecessor has multiple successors."
+                    )
+                family_version_predecessors.add(predecessor_id)
+                predecessor = versions.get(predecessor_id)
+                if (
+                    predecessor is None
+                    or predecessor.get("theme_family_id")
+                    != record.get("theme_family_id")
+                    or not isinstance(predecessor.get("version"), int)
+                    or predecessor["version"] >= record.get("version", 0)
+                ):
+                    raise BackupValidationError(
+                        "Theme Family Version lineage is inconsistent."
+                    )
+                _require_backup_timestamp_order(
+                    predecessor.get("updated_at"),
+                    record.get("created_at"),
+                    "Theme Version successor predates predecessor transition.",
+                )
+
+        current_configuration_scopes: set[tuple[Any, ...]] = set()
+        configuration_predecessors: set[int] = set()
+        for record in configurations.values():
+            WebsiteThemeConfigurationRead.model_validate(record)
+            WebsiteThemeConfigurationCreate.model_validate(
+                {
+                    field: record.get(field)
+                    for field in (
+                        "theme_family_version_id",
+                        "configuration_key",
+                        "created_by",
+                        "creation_rationale",
+                        "supersedes_configuration_id",
+                    )
+                }
+            )
+            _require_backup_stored_text(
+                record.get("updated_by"),
+                "Website Theme configuration updater",
+                160,
+            )
+            website = websites.get(record.get("website_id"))
+            if (
+                website is None
+                or record.get("business_id") != website.get("business_id")
+                or record.get("business_id") not in businesses
+                or record.get("theme_family_version_id") not in versions
+            ):
+                raise BackupValidationError(
+                    "Website Theme configuration crosses its ownership boundary."
+                )
+            paired_fields = (
+                ("approved_by", "approved_at"),
+                ("activated_by", "activated_at"),
+                ("rollback_by", "rollback_at"),
+            )
+            for actor_field, timestamp_field in paired_fields:
+                actor = record.get(actor_field)
+                timestamp = record.get(timestamp_field)
+                if (actor is None) != (timestamp is None):
+                    raise BackupValidationError(
+                        "Website Theme configuration lifecycle evidence is incomplete."
+                    )
+                if actor is not None and (
+                    not isinstance(actor, str) or not actor.strip()
+                ):
+                    raise BackupValidationError(
+                        "Website Theme configuration lifecycle actor is invalid."
+                    )
+                if timestamp is not None:
+                    _datetime_value(
+                        timestamp,
+                        f"website_theme_configurations.{timestamp_field}",
+                    )
+            materialized_theme_id = record.get("materialized_theme_id")
+            selection_id = record.get("website_theme_selection_id")
+            if (materialized_theme_id is None) != (selection_id is None):
+                raise BackupValidationError(
+                    "Website Theme configuration Theme-selection identity is incomplete."
+                )
+            if materialized_theme_id is not None:
+                theme = themes.get(materialized_theme_id)
+                selection = selections.get(selection_id)
+                version = versions.get(record.get("theme_family_version_id"))
+                family = (
+                    families.get(version.get("theme_family_id"))
+                    if version is not None
+                    else None
+                )
+                if (
+                    theme is None
+                    or selection is None
+                    or family is None
+                    or theme.get("website_id") != record.get("website_id")
+                    or theme.get("business_id") != record.get("business_id")
+                    or theme.get("brand_id") != website.get("brand_id")
+                    or theme.get("theme_key") != family.get("family_key")
+                    or selection.get("website_id") != record.get("website_id")
+                    or selection.get("theme_id") != materialized_theme_id
+                ):
+                    raise BackupValidationError(
+                        "Website Theme configuration crosses its exact governed Theme-selection identity."
+                    )
+            lifecycle_status = record.get("lifecycle_status")
+            lifecycle_evidence = (
+                "approved_by",
+                "activated_by",
+                "rollback_by",
+                "materialized_theme_id",
+                "website_theme_selection_id",
+            )
+            if lifecycle_status == "draft" and any(
+                record.get(field) is not None for field in lifecycle_evidence
+            ):
+                raise BackupValidationError(
+                    "Draft Website Theme configuration contains later lifecycle evidence."
+                )
+            if lifecycle_status == "approved" and (
+                record.get("approved_by") is None
+                or any(
+                    record.get(field) is not None
+                    for field in (
+                        "activated_by",
+                        "rollback_by",
+                        "materialized_theme_id",
+                        "website_theme_selection_id",
+                    )
+                )
+            ):
+                raise BackupValidationError(
+                    "Approved Website Theme configuration has invalid lifecycle evidence."
+                )
+            if lifecycle_status == "active":
+                theme = themes.get(materialized_theme_id)
+                selection = selections.get(selection_id)
+                version = versions.get(record.get("theme_family_version_id"))
+                if (
+                    record.get("approved_by") is None
+                    or record.get("activated_by") is None
+                    or record.get("rollback_by") is not None
+                    or theme is None
+                    or selection is None
+                    or version is None
+                    or version.get("lifecycle_status") != "approved"
+                    or version.get("production_ready") is not True
+                    or family.get("lifecycle_status") != "registered"
+                    or theme.get("lifecycle_status") != "available"
+                    or theme.get("approval_status") != "approved"
+                    or selection.get("status") != "active"
+                    or [
+                        candidate.get("id")
+                        for candidate in selections.values()
+                        if candidate.get("website_id") == record.get("website_id")
+                        and candidate.get("status") == "active"
+                    ]
+                    != [selection_id]
+                    or not validate_theme_accessibility(
+                        ThemeDesignTokens.model_validate(theme.get("design_tokens"))
+                    ).valid
+                ):
+                    raise BackupValidationError(
+                        "Active Website Theme configuration lacks its exact approved active Theme selection."
+                    )
+            if (
+                record.get("rollback_by") is not None
+                and record.get("activated_by") is None
+            ):
+                raise BackupValidationError(
+                    "Website Theme configuration rollback lacks activation evidence."
+                )
+            if (
+                record.get("activated_by") is not None
+                and record.get("approved_by") is None
+            ):
+                raise BackupValidationError(
+                    "Website Theme configuration activation lacks approval evidence."
+                )
+            _require_backup_timestamp_order(
+                record.get("created_at"),
+                record.get("updated_at"),
+                "Website Theme configuration update precedes its creation.",
+            )
+            if record.get("approved_at") is not None:
+                _require_backup_timestamp_order(
+                    record.get("created_at"),
+                    record.get("approved_at"),
+                    "Website Theme configuration approval precedes its creation.",
+                )
+            if record.get("activated_at") is not None:
+                _require_backup_timestamp_order(
+                    record.get("approved_at"),
+                    record.get("activated_at"),
+                    "Website Theme configuration activation precedes its approval.",
+                )
+            if record.get("rollback_at") is not None:
+                _require_backup_timestamp_order(
+                    record.get("activated_at"),
+                    record.get("rollback_at"),
+                    "Website Theme configuration rollback precedes its activation.",
+                )
+            if (
+                record.get("integrity_fingerprint")
+                != _canonical_json_hash(
+                    _website_theme_configuration_fingerprint_payload(record)
+                )
+            ):
+                raise BackupValidationError(
+                    "Backup Website Theme configuration fingerprint does not match."
+                )
+            scope = (
+                record.get("website_id"),
+                record.get("theme_family_version_id"),
+                record.get("configuration_key"),
+            )
+            if record.get("lifecycle_status") in {"draft", "approved", "active"}:
+                if scope in current_configuration_scopes:
+                    raise BackupValidationError(
+                        "Backup contains multiple current Website Theme configurations for one scope."
+                    )
+                current_configuration_scopes.add(scope)
+            predecessor_id = record.get("supersedes_configuration_id")
+            version = record.get("version")
+            if (version == 1) != (predecessor_id is None):
+                raise BackupValidationError(
+                    "Website Theme configuration lineage is incomplete."
+                )
+            if predecessor_id is not None:
+                if predecessor_id in configuration_predecessors:
+                    raise BackupValidationError(
+                        "Website Theme configuration predecessor has multiple successors."
+                    )
+                configuration_predecessors.add(predecessor_id)
+                predecessor = configurations.get(predecessor_id)
+                if (
+                    predecessor is None
+                    or predecessor.get("website_id") != record.get("website_id")
+                    or predecessor.get("theme_family_version_id")
+                    != record.get("theme_family_version_id")
+                    or predecessor.get("configuration_key")
+                    != record.get("configuration_key")
+                    or predecessor.get("version", 0) + 1 != version
+                ):
+                    raise BackupValidationError(
+                        "Website Theme configuration lineage is inconsistent."
+                    )
+                _require_backup_timestamp_order(
+                    predecessor.get("updated_at"),
+                    record.get("created_at"),
+                    "Website Theme configuration successor predates predecessor supersession.",
+                )
+
+        for configuration_id, record in configurations.items():
+            lifecycle_status = record.get("lifecycle_status")
+            if (
+                configuration_id in configuration_predecessors
+                and lifecycle_status not in {"superseded", "retired"}
+            ) or (
+                lifecycle_status == "superseded"
+                and configuration_id not in configuration_predecessors
+            ):
+                raise BackupValidationError(
+                    "Website Theme configuration lifecycle does not match its lineage."
+                )
+
+        current_website_components: set[tuple[Any, ...]] = set()
+        current_page_overrides: set[tuple[Any, ...]] = set()
+        component_predecessors: set[int] = set()
+        for record in components.values():
+            WebsiteThemeComponentConfigurationRead.model_validate(record)
+            configuration = configurations.get(
+                record.get("website_theme_configuration_id")
+            )
+            family_version = versions.get(record.get("theme_family_version_id"))
+            if (
+                configuration is None
+                or family_version is None
+                or record.get("website_id") != configuration.get("website_id")
+                or record.get("theme_family_version_id")
+                != configuration.get("theme_family_version_id")
+            ):
+                raise BackupValidationError(
+                    "Theme component configuration crosses its governed scope."
+                )
+            scope_type = record.get("scope_type")
+            planned_page_id = record.get("planned_page_id")
+            if scope_type == "website_default":
+                if (
+                    planned_page_id is not None
+                    or record.get("overrides_component_configuration_id")
+                    is not None
+                ):
+                    raise BackupValidationError(
+                        "Website-default Theme component has a Page override binding."
+                    )
+            elif scope_type == "page_override":
+                page = planned_pages.get(planned_page_id)
+                if (
+                    page is None
+                    or page.get("website_id") != record.get("website_id")
+                    or record.get("overrides_component_configuration_id") is None
+                ):
+                    raise BackupValidationError(
+                        "Theme component Page override crosses its Website boundary."
+                    )
+            else:
+                raise BackupValidationError(
+                    "Theme component configuration has an invalid scope."
+                )
+            normalized_payload = validate_component_payload(
+                record.get("component_key"),
+                record.get("configuration_payload"),
+            )
+            if normalized_payload != record.get("configuration_payload"):
+                raise BackupValidationError(
+                    "Theme component configuration payload is not canonical."
+                )
+            effective_at_value = (
+                _datetime_value(
+                    record.get("effective_at"),
+                    "website_theme_component_configurations.effective_at",
+                )
+                if record.get("effective_at") is not None
+                else None
+            )
+            expires_at_value = (
+                _datetime_value(
+                    record.get("expires_at"),
+                    "website_theme_component_configurations.expires_at",
+                )
+                if record.get("expires_at") is not None
+                else None
+            )
+            try:
+                validate_component_schedule(
+                    record.get("component_key"),
+                    normalized_payload,
+                    effective_at_value,
+                    expires_at_value,
+                )
+            except ValueError as exc:
+                raise BackupValidationError(
+                    f"Theme component schedule is invalid: {exc}"
+                ) from exc
+            WebsiteThemeComponentConfigurationCreate.model_validate(
+                {
+                    field: record.get(field)
+                    for field in (
+                        "component_instance_key",
+                        "component_key",
+                        "component_contract_version",
+                        "scope_type",
+                        "planned_page_id",
+                        "enabled",
+                        "variant",
+                        "placement",
+                        "responsive_visibility",
+                        "configuration_payload",
+                        "effective_at",
+                        "expires_at",
+                        "approval_identity",
+                        "created_by",
+                        "destination_component_configuration_id",
+                        "overrides_component_configuration_id",
+                    )
+                }
+            )
+            _require_backup_stored_text(
+                record.get("updated_by"),
+                "Theme component updater",
+                160,
+            )
+            approval_identity = record.get("approval_identity")
+            if not isinstance(approval_identity, str) or not approval_identity.strip():
+                raise BackupValidationError(
+                    "Theme component configuration lacks approval identity."
+                )
+            if (
+                record.get("component_key") == "campaign_banner"
+                and normalized_payload.get("approval_identity")
+                != approval_identity
+            ):
+                raise BackupValidationError(
+                    "Theme campaign approval identity does not match."
+                )
+            if record.get("component_key") == "compact_estimate_form":
+                validate_provider_disabled_form(
+                    CompactEstimateFormConfiguration.model_validate(
+                        normalized_payload
+                    )
+                )
+            matching_contracts = [
+                contract
+                for contract in family_version.get(
+                    "supported_component_contracts", []
+                )
+                if contract.get("component_key")
+                == record.get("component_key")
+            ]
+            if len(matching_contracts) != 1:
+                raise BackupValidationError(
+                    "Theme component lacks one exact Theme Version contract."
+                )
+            contract = matching_contracts[0]
+            if (
+                contract.get("contract_version")
+                != record.get("component_contract_version")
+                or contract.get("placement") != record.get("placement")
+                or contract.get("variant") != record.get("variant")
+                or contract.get("responsive_visibility")
+                != record.get("responsive_visibility")
+                or (
+                    scope_type == "page_override"
+                    and contract.get("supports_page_override") is not True
+                )
+            ):
+                raise BackupValidationError(
+                    "Theme component does not match its exact Theme Version contract."
+                )
+            for identity_field, timestamp_field in (
+                ("activation_identity", "activated_at"),
+                ("rollback_identity", "rollback_at"),
+            ):
+                identity = record.get(identity_field)
+                timestamp = record.get(timestamp_field)
+                if (identity is None) != (timestamp is None):
+                    raise BackupValidationError(
+                        "Theme component lifecycle evidence is incomplete."
+                    )
+                if identity is not None and (
+                    not isinstance(identity, str) or not identity.strip()
+                ):
+                    raise BackupValidationError(
+                        "Theme component lifecycle identity is invalid."
+                    )
+                if timestamp is not None:
+                    _datetime_value(
+                        timestamp,
+                        f"website_theme_component_configurations.{timestamp_field}",
+                    )
+            if (
+                record.get("rollback_identity") is not None
+                and record.get("activation_identity") is None
+            ):
+                raise BackupValidationError(
+                    "Theme component rollback lacks activation evidence."
+                )
+            _require_backup_timestamp_order(
+                record.get("created_at"),
+                record.get("updated_at"),
+                "Theme component update precedes its creation.",
+            )
+            if record.get("activated_at") is not None:
+                _require_backup_timestamp_order(
+                    record.get("created_at"),
+                    record.get("activated_at"),
+                    "Theme component activation precedes its creation.",
+                )
+            if record.get("rollback_at") is not None:
+                _require_backup_timestamp_order(
+                    record.get("activated_at"),
+                    record.get("rollback_at"),
+                    "Theme component rollback precedes its activation.",
+                )
+            effective_at = effective_at_value
+            expires_at = expires_at_value
+            if (
+                effective_at is not None
+                and expires_at is not None
+                and _comparable_datetime(expires_at)
+                < _comparable_datetime(effective_at)
+            ):
+                raise BackupValidationError(
+                    "Theme component expiration precedes its effective time."
+                )
+            if record.get("integrity_fingerprint") != _canonical_json_hash(
+                _theme_component_configuration_fingerprint_payload(record)
+            ):
+                raise BackupValidationError(
+                    "Theme component integrity fingerprint does not match."
+                )
+            predecessor_id = record.get("supersedes_component_configuration_id")
+            revision = record.get("revision")
+            if (revision == 1) != (predecessor_id is None):
+                raise BackupValidationError(
+                    "Theme component revision lineage is incomplete."
+                )
+            if predecessor_id is not None:
+                if predecessor_id in component_predecessors:
+                    raise BackupValidationError(
+                        "Theme component predecessor has multiple successors."
+                    )
+                component_predecessors.add(predecessor_id)
+                predecessor = components.get(predecessor_id)
+                if (
+                    predecessor is None
+                    or predecessor.get("website_theme_configuration_id")
+                    != record.get("website_theme_configuration_id")
+                    or predecessor.get("component_instance_key")
+                    != record.get("component_instance_key")
+                    or predecessor.get("revision", 0) + 1 != revision
+                ):
+                    raise BackupValidationError(
+                        "Theme component revision lineage is inconsistent."
+                    )
+                _require_backup_timestamp_order(
+                    predecessor.get("updated_at"),
+                    record.get("created_at"),
+                    "Theme component successor predates predecessor supersession.",
+                )
+            destination_id = record.get(
+                "destination_component_configuration_id"
+            )
+            requires_destination = record.get("component_key") in {
+                "campaign_banner",
+                "sticky_mobile_action_bar",
+            }
+            if requires_destination != (destination_id is not None):
+                raise BackupValidationError(
+                    "Theme conversion action has an invalid destination binding."
+                )
+            if destination_id is not None:
+                destination = components.get(destination_id)
+                if (
+                    destination is None
+                    or destination.get("website_theme_configuration_id")
+                    != record.get("website_theme_configuration_id")
+                    or destination.get("website_id") != record.get("website_id")
+                    or destination.get("theme_family_version_id")
+                    != record.get("theme_family_version_id")
+                    or destination.get("component_key")
+                    != "compact_estimate_form"
+                    or (
+                        record.get("lifecycle_status") == "current"
+                        and destination.get("lifecycle_status") != "current"
+                    )
+                    or destination.get("lifecycle_status")
+                    not in {"current", "superseded"}
+                    or destination.get("enabled") is not True
+                ):
+                    raise BackupValidationError(
+                        "Theme conversion destination is not the exact current compact form."
+                    )
+            override_id = record.get("overrides_component_configuration_id")
+            if override_id is not None:
+                target = components.get(override_id)
+                if (
+                    target is None
+                    or target.get("website_theme_configuration_id")
+                    != record.get("website_theme_configuration_id")
+                    or target.get("website_id") != record.get("website_id")
+                    or target.get("theme_family_version_id")
+                    != record.get("theme_family_version_id")
+                    or target.get("scope_type") != "website_default"
+                    or (
+                        record.get("lifecycle_status") == "current"
+                        and target.get("lifecycle_status") != "current"
+                    )
+                    or target.get("lifecycle_status")
+                    not in {"current", "superseded"}
+                    or target.get("component_key")
+                    != record.get("component_key")
+                    or target.get("component_contract_version")
+                    != record.get("component_contract_version")
+                ):
+                    raise BackupValidationError(
+                        "Theme Page override does not bind the exact Website-default component."
+                    )
+            if record.get("lifecycle_status") == "current":
+                if scope_type == "website_default":
+                    key = (
+                        record.get("website_theme_configuration_id"),
+                        record.get("component_instance_key"),
+                    )
+                    if key in current_website_components:
+                        raise BackupValidationError(
+                            "Backup contains duplicate current Website Theme components."
+                        )
+                    current_website_components.add(key)
+                else:
+                    key = (
+                        record.get("website_theme_configuration_id"),
+                        planned_page_id,
+                        override_id,
+                    )
+                    if key in current_page_overrides:
+                        raise BackupValidationError(
+                            "Backup contains duplicate current Theme Page overrides."
+                        )
+                    current_page_overrides.add(key)
+
+        for component_id, record in components.items():
+            lifecycle_status = record.get("lifecycle_status")
+            if (
+                component_id in component_predecessors
+                and lifecycle_status != "superseded"
+            ) or (
+                lifecycle_status == "superseded"
+                and component_id not in component_predecessors
+            ):
+                raise BackupValidationError(
+                    "Theme component lifecycle does not match its revision lineage."
+                )
+
+        def required_audit_actions(
+            target_field: str,
+            target: dict[str, Any],
+        ) -> tuple[dict[str, Any], dict[str, Any]]:
+            if target_field == "theme_family_id":
+                required = {"family_registered": target.get("created_at")}
+                if target.get("lifecycle_status") == "retired":
+                    required["family_retired"] = target.get("retired_at")
+                return required, {}
+            if target_field == "theme_family_version_id":
+                required = {"family_version_registered": target.get("created_at")}
+                optional = {}
+                if target.get("lifecycle_status") == "approved":
+                    required["family_version_approved"] = target.get(
+                        "updated_at"
+                    )
+                if target.get("lifecycle_status") == "retired":
+                    required["family_version_retired"] = target.get("retired_at")
+                    # Retirement may follow preview directly or preserve a
+                    # prior approval. There is no separate approved_at column,
+                    # so approval evidence is optional only in this state.
+                    optional["family_version_approved"] = target.get(
+                        "created_at"
+                    )
+                return required, optional
+            if target_field == "website_theme_configuration_id":
+                required = {
+                    (
+                        "website_draft_created"
+                        if target.get("version") == 1
+                        else "website_configuration_revision_created"
+                    ): target.get("created_at")
+                }
+                if target.get("approved_at") is not None:
+                    required["website_configuration_approved"] = target.get(
+                        "approved_at"
+                    )
+                if target.get("activated_at") is not None:
+                    required["website_configuration_activated"] = target.get(
+                        "activated_at"
+                    )
+                if target.get("lifecycle_status") == "superseded":
+                    required["website_configuration_superseded"] = target.get(
+                        "updated_at"
+                    )
+                if target.get("rollback_at") is not None:
+                    required["website_configuration_rolled_back"] = target.get(
+                        "rollback_at"
+                    )
+                if target.get("lifecycle_status") == "retired":
+                    required["website_configuration_retired"] = target.get(
+                        "updated_at"
+                    )
+                return required, {}
+
+            required = {
+                (
+                    "component_created"
+                    if target.get("revision") == 1
+                    else "component_revision_created"
+                ): target.get("created_at")
+            }
+            if target.get("lifecycle_status") == "superseded":
+                required["component_superseded"] = target.get("updated_at")
+            if target.get("activated_at") is not None:
+                required["component_activated"] = target.get("activated_at")
+            if target.get("rollback_at") is not None:
+                required["component_rolled_back"] = target.get("rollback_at")
+            return required, {}
+
+        required_audits: dict[tuple[str, int, str], Any] = {}
+        allowed_audits: dict[tuple[str, int, str], Any] = {}
+        for target_field, records in {
+            "theme_family_id": families,
+            "theme_family_version_id": versions,
+            "website_theme_configuration_id": configurations,
+            "component_configuration_id": components,
+        }.items():
+            for target_id, target in records.items():
+                required, optional = required_audit_actions(
+                    target_field,
+                    target,
+                )
+                for action_type, not_before in {**optional, **required}.items():
+                    allowed_audits[(target_field, target_id, action_type)] = (
+                        not_before
+                    )
+                for action_type, not_before in required.items():
+                    required_audits[(target_field, target_id, action_type)] = (
+                        not_before
+                    )
+        seen_audits: set[tuple[str, int, str]] = set()
+        target_groups = {
+            "theme_family_id": families,
+            "theme_family_version_id": versions,
+            "website_theme_configuration_id": configurations,
+            "component_configuration_id": components,
+        }
+        for record in audits.values():
+            ThemeConfigurationAuditRead.model_validate(record)
+            _require_backup_stored_text(
+                record.get("actor"),
+                "Theme configuration audit actor",
+                160,
+            )
+            _require_backup_stored_text(
+                record.get("rationale"),
+                "Theme configuration audit rationale",
+                2000,
+            )
+            populated = [
+                field
+                for field in target_groups
+                if record.get(field) is not None
+            ]
+            if (
+                len(populated) != 1
+                or record[populated[0]] not in target_groups[populated[0]]
+                or not isinstance(record.get("snapshot"), dict)
+                or record.get("snapshot_hash")
+                != _canonical_json_hash(
+                    _theme_configuration_audit_hash_payload(record)
+                )
+            ):
+                raise BackupValidationError(
+                    "Theme configuration audit identity or hash is invalid."
+                )
+            target_field = populated[0]
+            target_id = record[target_field]
+            target = target_groups[target_field][target_id]
+            action_type = record.get("action_type")
+            audit_identity = (target_field, target_id, action_type)
+            if (
+                audit_identity not in allowed_audits
+                or audit_identity in seen_audits
+            ):
+                raise BackupValidationError(
+                    "Theme configuration entity has an unsupported or duplicate "
+                    "immutable audit."
+                )
+            seen_audits.add(audit_identity)
+            not_before = allowed_audits[audit_identity]
+            if _comparable_datetime(
+                _datetime_value(
+                    record.get("created_at"),
+                    "theme_configuration_audits.created_at",
+                )
+            ) < _comparable_datetime(
+                _datetime_value(
+                    not_before,
+                    "durable Theme transition timestamp",
+                )
+            ):
+                raise BackupValidationError(
+                    "Theme configuration audit chronology precedes its durable transition."
+                )
+            snapshot = record["snapshot"]
+            stable_fields = {
+                "theme_family_id": ("family_key",),
+                "theme_family_version_id": ("theme_family_id", "version"),
+                "website_theme_configuration_id": (
+                    "website_id",
+                    "theme_family_version_id",
+                    "configuration_key",
+                    "version",
+                ),
+                "component_configuration_id": (
+                    "website_theme_configuration_id",
+                    "website_id",
+                    "planned_page_id",
+                    "theme_family_version_id",
+                    "component_instance_key",
+                    "component_key",
+                    "component_contract_version",
+                    "revision",
+                    "scope_type",
+                ),
+            }[target_field]
+            if any(snapshot.get(field) != target.get(field) for field in stable_fields):
+                raise BackupValidationError(
+                    "Theme configuration audit snapshot crosses its exact target."
+                )
+            embedded_references = (
+                ("website_id", websites),
+                ("business_id", businesses),
+                ("planned_page_id", planned_pages),
+                ("materialized_theme_id", themes),
+                ("website_theme_selection_id", selections),
+                ("theme_family_id", families),
+                ("theme_family_version_id", versions),
+                ("supersedes_theme_family_version_id", versions),
+                ("website_theme_configuration_id", configurations),
+                ("supersedes_configuration_id", configurations),
+                ("destination_component_configuration_id", components),
+                ("overrides_component_configuration_id", components),
+                ("supersedes_component_configuration_id", components),
+            )
+            if any(
+                snapshot.get(field) is not None
+                and snapshot[field] not in target_records
+                for field, target_records in embedded_references
+            ):
+                raise BackupValidationError(
+                    "Theme configuration audit snapshot contains an unresolved identity."
+                )
+        if not set(required_audits) <= seen_audits:
+            raise BackupValidationError(
+                "Theme configuration backup lacks complete exact-target audit coverage."
+            )
+    except BackupValidationError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise BackupValidationError(
+            "Backup contains invalid durable Theme configuration data."
+        ) from exc
+
+
 def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
     key_fields: dict[str, tuple[str, ...]] = {
         "businesses": ("company_name",),
@@ -4563,6 +6698,20 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         ),
         "semantic_component_definitions": ("component_key", "contract_version"),
         "page_compositions": ("planned_page_id",),
+        "theme_families": ("family_key",),
+        "theme_family_versions": ("theme_family_id", "version"),
+        "website_theme_configurations": (
+            "website_id",
+            "theme_family_version_id",
+            "configuration_key",
+            "version",
+        ),
+        "website_theme_component_configurations": (
+            "website_theme_configuration_id",
+            "component_instance_key",
+            "revision",
+        ),
+        "theme_configuration_audits": ("snapshot_hash",),
         "brand_assets": ("brand_id", "asset_key", "version"),
         "website_identity_asset_assignments": (
             "website_identity_id",
@@ -4665,6 +6814,65 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
         "website_theme_selections": (
             ("website_id", "websites", False),
             ("theme_id", "themes", False),
+        ),
+        "theme_family_versions": (
+            ("theme_family_id", "theme_families", False),
+            (
+                "supersedes_theme_family_version_id",
+                "theme_family_versions",
+                True,
+            ),
+        ),
+        "website_theme_configurations": (
+            ("website_id", "websites", False),
+            ("business_id", "businesses", False),
+            ("theme_family_version_id", "theme_family_versions", False),
+            ("materialized_theme_id", "themes", True),
+            ("website_theme_selection_id", "website_theme_selections", True),
+            (
+                "supersedes_configuration_id",
+                "website_theme_configurations",
+                True,
+            ),
+        ),
+        "website_theme_component_configurations": (
+            (
+                "website_theme_configuration_id",
+                "website_theme_configurations",
+                False,
+            ),
+            ("website_id", "websites", False),
+            ("planned_page_id", "planned_pages", True),
+            ("theme_family_version_id", "theme_family_versions", False),
+            (
+                "destination_component_configuration_id",
+                "website_theme_component_configurations",
+                True,
+            ),
+            (
+                "overrides_component_configuration_id",
+                "website_theme_component_configurations",
+                True,
+            ),
+            (
+                "supersedes_component_configuration_id",
+                "website_theme_component_configurations",
+                True,
+            ),
+        ),
+        "theme_configuration_audits": (
+            ("theme_family_id", "theme_families", True),
+            ("theme_family_version_id", "theme_family_versions", True),
+            (
+                "website_theme_configuration_id",
+                "website_theme_configurations",
+                True,
+            ),
+            (
+                "component_configuration_id",
+                "website_theme_component_configurations",
+                True,
+            ),
         ),
         "services": (("business_id", "businesses", False),),
         "cities": (("county_id", "counties", False),),
@@ -5494,7 +7702,7 @@ def _validate_page_media_ownership(
             raise BackupValidationError(
                 "Backup Image Metadata has an invalid usage-authorization mode."
             )
-        if backup_version != "0.56" and authorization_mode != "contract_default":
+        if backup_version not in {"0.56", "0.57"} and authorization_mode != "contract_default":
             raise BackupValidationError(
                 "Legacy backups cannot claim scoped-required Image Metadata."
             )
@@ -5979,7 +8187,7 @@ def _validate_page_media_ownership(
                     "Backup Page Composition generated media component crosses its governed placement binding."
                 )
 
-    if backup_version not in {"0.53", "0.54", "0.55", "0.56"} and (planning_records or requirements):
+    if backup_version not in {"0.53", "0.54", "0.55", "0.56", "0.57"} and (planning_records or requirements):
         raise BackupValidationError(
             "Legacy backup versions cannot claim Page Media planning governance."
         )
@@ -6015,7 +8223,7 @@ def _validate_composition_media_authorization_binding(
     present = fields.intersection(binding)
     if not present:
         if (
-            backup_version == "0.56"
+            backup_version in {"0.56", "0.57"}
             and composition.get("status") == "current"
             and assignment.get("status") == "active"
             and image.get("usage_authorization_mode") == "scoped_required"
@@ -6081,7 +8289,7 @@ def _validate_scoped_media_authorizations(
     """Validate exact authorization scope, approval, assignment, and lineage."""
 
     records = data["scoped_media_authorizations"]
-    if backup_version != "0.56":
+    if backup_version not in {"0.56", "0.57"}:
         if records:
             raise BackupValidationError(
                 "Legacy backup versions cannot claim scoped-media authorizations."
@@ -6710,7 +8918,7 @@ def _validate_generated_page_qa_results(
     """Validate immutable QA identity, outcome integrity, and lineage."""
 
     records = data["generated_page_qa_results"]
-    if backup_version not in {"0.55", "0.56"}:
+    if backup_version not in {"0.55", "0.56", "0.57"}:
         if records:
             raise BackupValidationError(
                 "Legacy backup versions cannot claim durable Generated Page QA results."
@@ -7225,12 +9433,22 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        create_db_and_tables()
+        restore_path: Path | None = None
+        if args.command == "restore":
+            # Validate the complete raw contract before the restore-only schema
+            # opt-in mutates an otherwise empty target database.
+            restore_path = resolve_backup_path(args.backup_file)
+            load_backup(restore_path)
+        create_db_and_tables(include_alembic_owned=args.command == "restore")
         with Session(engine) as session:
             if args.command == "export":
                 result = export_backup(session)
             else:
-                result = restore_backup(session, args.backup_file)
+                if restore_path is None:  # pragma: no cover - parser narrows this
+                    raise BackupValidationError(
+                        "Restore path resolution did not complete."
+                    )
+                result = restore_backup(session, restore_path)
     except (BackupValidationError, OSError) as exc:
         parser.exit(1, f"Backup error: {exc}\n")
     print(json.dumps(result, indent=2))

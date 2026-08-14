@@ -52,6 +52,25 @@ export type ThemeFamilyComponentContract = {
   diagnosticLabel: string;
 };
 
+export type SerializedThemeFamilyComponentContract = Readonly<{
+  component_key: PerformanceLocalComponentKey;
+  contract_version: typeof PERFORMANCE_LOCAL_THEME_VERSION;
+  optional: boolean;
+  default_enabled: boolean;
+  scope: "website_with_optional_page_override";
+  supports_page_override: true;
+  placement: string;
+  variant: string;
+  responsive_visibility: PerformanceLocalVisibility;
+  theme_compatibility: readonly [typeof PERFORMANCE_LOCAL_THEME_COMPATIBILITY];
+  content_source: ThemeFamilyComponentContract["contentSource"];
+  required_configuration: readonly string[];
+  supports_cta_label: true;
+  supports_cta_destination: true;
+  accessibility_label_required: boolean;
+  diagnostic_label: string;
+}>;
+
 export type ThemeFamilyDefinition = {
   key: string;
   displayName: string;
@@ -143,7 +162,7 @@ export const PERFORMANCE_LOCAL_COMPONENT_CONTRACTS = Object.freeze([
   componentContract("site_header", { placement: "header", variant: "compact_sticky", diagnosticLabel: "Compact governed site header" }),
   componentContract("desktop_dropdown_navigation", { placement: "header_navigation", variant: "intentional_dropdown", visibility: { desktop: true, tablet: false, mobile: false }, diagnosticLabel: "Collapsed desktop navigation groups" }),
   componentContract("mobile_navigation_drawer", { placement: "header_navigation", variant: "modal_drawer", visibility: { desktop: false, tablet: true, mobile: true }, diagnosticLabel: "Collapsed mobile navigation drawer" }),
-  componentContract("campaign_banner", { optional: true, defaultEnabled: false, placement: "before_header", variant: "single_safe_strip", contentSource: "approved_runtime_configuration", requiredConfiguration: ["campaignLabel", "ctaLabel", "ctaDestination", "startDate", "endDate", "termsReference", "approvalIdentity"], diagnosticLabel: "Approved time-bounded campaign" }),
+  componentContract("campaign_banner", { optional: true, defaultEnabled: false, placement: "before_header", variant: "single_safe_strip", contentSource: "approved_runtime_configuration", requiredConfiguration: ["intent", "campaignLabel", "ctaLabel", "ctaDestination", "approvalIdentity"], diagnosticLabel: "Approved evergreen or time-bounded conversion banner" }),
   componentContract("hero_conversion_section", { placement: "main_start", variant: "visual_conversion", diagnosticLabel: "Governed visual conversion hero" }),
   componentContract("trust_proof_strip", { optional: true, placement: "after_hero", variant: "approved_facts_only", requiredConfiguration: ["sourceIdentity", "approvalIdentity"], diagnosticLabel: "Approved credential proof" }),
   componentContract("service_or_related_card_grid", { placement: "main", variant: "responsive_cards", diagnosticLabel: "Governed related destinations" }),
@@ -164,6 +183,96 @@ export const PERFORMANCE_LOCAL_COMPONENT_CONTRACTS = Object.freeze([
   componentContract("community_program_section", { optional: true, defaultEnabled: false, placement: "main", variant: "approved_program", contentSource: "approved_runtime_configuration", requiredConfiguration: ["approvedProgramIdentity", "approvedCopy", "destination", "effectiveStartDate", "effectiveEndDate", "approvalIdentity"], diagnosticLabel: "Approved community program" }),
   componentContract("language_selector", { optional: true, defaultEnabled: false, placement: "header_utility", variant: "translated_routes_only", contentSource: "approved_runtime_configuration", requiredConfiguration: ["actualTranslatedContent", "translatedRoutes", "canonicalHreflangConfiguration", "languageLabels", "routingBehavior", "approvalIdentity"], diagnosticLabel: "Approved translated-route selector" }),
 ] satisfies readonly ThemeFamilyComponentContract[]);
+
+const RUNTIME_TO_DURABLE_CONFIGURATION_KEY = Object.freeze({
+  visibility: "responsive_visibility",
+} satisfies Readonly<Record<string, string>>);
+
+const OPTIONAL_RUNTIME_CONFIGURATION_KEYS = Object.freeze([
+  "enabled",
+  "websiteId",
+  "themeCompatibility",
+  "placement",
+  "variant",
+  "visibility",
+  "contentSource",
+  "accessibilityLabel",
+]);
+
+export const PERFORMANCE_LOCAL_V2_SOURCE_COMMIT =
+  "1b766664ea99d923195bbf98e8a1e4d833b50084" as const;
+
+// The durable Theme Version is attributed to source commit 1b766664..., where
+// the v2 campaign contract was time-bounded. Later typed evergreen support is
+// configuration validation, not a silent rewrite of that source contract.
+const SOURCE_COMMIT_CONTRACT_OVERRIDES = Object.freeze({
+  campaign_banner: Object.freeze({
+    requiredConfiguration: Object.freeze([
+      "campaignLabel",
+      "ctaLabel",
+      "ctaDestination",
+      "startDate",
+      "endDate",
+      "termsReference",
+      "approvalIdentity",
+    ]),
+    diagnosticLabel: "Approved time-bounded campaign",
+  }),
+});
+
+function durableConfigurationKey(value: string): string {
+  const explicit = RUNTIME_TO_DURABLE_CONFIGURATION_KEY[
+    value as keyof typeof RUNTIME_TO_DURABLE_CONFIGURATION_KEY
+  ];
+  if (explicit) return explicit;
+  return value.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+}
+
+export function serializePerformanceLocalComponentContract(
+  contract: ThemeFamilyComponentContract,
+): SerializedThemeFamilyComponentContract {
+  const sourceOverride = SOURCE_COMMIT_CONTRACT_OVERRIDES[
+    contract.key as keyof typeof SOURCE_COMMIT_CONTRACT_OVERRIDES
+  ];
+  const runtimeCapabilityKeys = sourceOverride?.requiredConfiguration ?? (
+    contract.optional
+      ? contract.requiredConfiguration.slice(OPTIONAL_RUNTIME_CONFIGURATION_KEYS.length)
+      : contract.requiredConfiguration
+  );
+  const durableCapabilityKeys = runtimeCapabilityKeys.map(durableConfigurationKey);
+  const requiredConfiguration = contract.optional
+    ? [
+        ...OPTIONAL_RUNTIME_CONFIGURATION_KEYS.map(durableConfigurationKey),
+        ...durableCapabilityKeys,
+      ]
+    : [...durableCapabilityKeys];
+  return Object.freeze({
+    component_key: contract.key,
+    contract_version: contract.version,
+    optional: contract.optional,
+    default_enabled: contract.defaultEnabled,
+    scope: contract.scope,
+    supports_page_override: contract.supportsPageOverride,
+    placement: contract.placement,
+    variant: contract.variant,
+    responsive_visibility: Object.freeze({ ...contract.visibility }),
+    theme_compatibility: Object.freeze([...contract.themeCompatibility]) as readonly [
+      typeof PERFORMANCE_LOCAL_THEME_COMPATIBILITY,
+    ],
+    content_source: contract.contentSource,
+    required_configuration: Object.freeze(requiredConfiguration),
+    supports_cta_label: contract.supportsCtaLabel,
+    supports_cta_destination: contract.supportsCtaDestination,
+    accessibility_label_required: contract.accessibilityLabelRequired,
+    diagnostic_label: sourceOverride?.diagnosticLabel ?? contract.diagnosticLabel,
+  });
+}
+
+export const PERFORMANCE_LOCAL_SERIALIZED_COMPONENT_CONTRACTS = Object.freeze(
+  PERFORMANCE_LOCAL_COMPONENT_CONTRACTS.map(
+    serializePerformanceLocalComponentContract,
+  ),
+);
 
 export function performanceLocalComponentContract(
   key: PerformanceLocalComponentKey | string,
@@ -303,8 +412,19 @@ export function performanceLocalOptionalConfiguration(
 ): PerformanceLocalOptionalConfiguration {
   const contract = optionalContract(key);
   if (!contract) throw new Error(`${key} is not an optional Performance Local capability.`);
+  const resolvedConfiguration = key === "campaign_banner" &&
+    !hasOwn(configuration, "intent") &&
+    present(configuration.startDate) &&
+    present(configuration.endDate) &&
+    present(configuration.termsReference)
+    ? {
+        ...configuration,
+        intent: "time_bound_campaign",
+        offerDetails: configuration.offerDetails ?? configuration.campaignLabel,
+      }
+    : configuration;
   return Object.freeze({
-    ...configuration,
+    ...resolvedConfiguration,
     enabled: true,
     websiteId,
     themeCompatibility: contract.themeCompatibility[0],
@@ -374,7 +494,6 @@ export function resolveOptionalComponent(
   }
   validateOptionalScope(value, contract, expectedPageId, errors);
 
-  if (key === "campaign_banner") validateCampaignDates(value, now, errors);
   validateCapabilityConfiguration(key, value, now, errors);
 
   return {
@@ -444,10 +563,11 @@ function validateCapabilityConfiguration(
 ) {
   switch (key) {
     case "campaign_banner":
-      validateTextFields(value, ["campaignLabel", "ctaLabel", "termsReference", "approvalIdentity"], "Campaign", errors);
+      validateTextFields(value, ["campaignLabel", "ctaLabel", "approvalIdentity"], "Campaign", errors);
       if (!isPerformanceLocalSafeDestination(value.ctaDestination)) {
         errors.push("Campaign CTA destination is not an approved local action destination.");
       }
+      validateCampaignConfiguration(value, now, errors);
       break;
     case "trust_proof_strip":
     case "trust_feature_cards":
@@ -500,10 +620,65 @@ function validateCapabilityConfiguration(
   }
 }
 
+function validateCampaignConfiguration(
+  value: Record<string, unknown>,
+  now: Date,
+  errors: string[],
+) {
+  const intent = value.intent === "evergreen_conversion" || value.intent === "time_bound_campaign"
+    ? value.intent
+    : null;
+  if (!intent) {
+    errors.push("Campaign intent must be evergreen_conversion or time_bound_campaign.");
+    return;
+  }
+  if (intent === "evergreen_conversion") {
+    const prohibitedFields = [
+      "startDate",
+      "endDate",
+      "termsReference",
+      "price",
+      "qualifier",
+      "discount",
+      "urgency",
+      "financing",
+      "guarantee",
+    ] as const;
+    for (const field of prohibitedFields) {
+      if (present(value[field])) {
+        errors.push(`Evergreen conversion configuration cannot include ${field}.`);
+      }
+    }
+    const evergreenCopy = [value.campaignLabel, value.ctaLabel]
+      .filter((item): item is string => typeof item === "string")
+      .join(" ");
+    if (
+      /(?:[$€£]\s*\d|\b\d+(?:\.\d{1,2})?\s*%|\b\d+(?:\.\d{1,2})?\s*(?:percent|dollars?|usd)\b|\b(?:special|sale|discount|limited[- ]time|expires?|urgenc(?:y|t)|urgent|act\s+now|now|hurry|last\s+chance|ends?\s+soon|today(?:\s+only)?|immediately|guarantee[ds]?|financ(?:e|ing)|price|only\s+\$|save|savings?|free|complimentary|no[- ]cost|dollars?|usd|bucks?)\b|\b(?:\d+(?:\.\d+)?|half|one|two|three|four|five|six|seven|eight|nine|ten|twenty|thirty|forty|fifty|hundred)\s+off\b)/i.test(
+        evergreenCopy,
+      )
+    ) {
+      errors.push("Evergreen conversion copy contains promotional or unsupported language.");
+    }
+    return;
+  }
+  if (!present(value.termsReference)) {
+    errors.push("Time-bound campaign configuration requires termsReference.");
+  }
+  if (
+    value.intent === "time_bound_campaign" &&
+    !present(value.offerDetails) &&
+    !present(value.approvedOfferDetails)
+  ) {
+    errors.push("Time-bound campaign configuration requires approved offer details.");
+  }
+  validateTextFields(value, ["termsReference"], "Campaign", errors);
+  validateCampaignDates(value, now, errors);
+}
+
 function validateCampaignDates(value: Record<string, unknown>, now: Date, errors: string[]) {
   const start = exactInstant(value.startDate);
   const end = exactInstant(value.endDate);
-  if (!start || !end || end.getTime() < start.getTime()) {
+  if (!start || !end || end.getTime() <= start.getTime()) {
     errors.push("Campaign dates are missing or invalid.");
     return;
   }
@@ -511,7 +686,7 @@ function validateCampaignDates(value: Record<string, unknown>, now: Date, errors
     errors.push("Campaign evaluation time is invalid.");
     return;
   }
-  if (now.getTime() < start.getTime() || now.getTime() > end.getTime()) {
+  if (now.getTime() < start.getTime() || now.getTime() >= end.getTime()) {
     errors.push("Campaign is outside its approved active dates.");
   }
 }

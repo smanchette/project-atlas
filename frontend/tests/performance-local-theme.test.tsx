@@ -10,13 +10,20 @@ import {
   buildMainPresentation,
   PerformanceLocalRenderer,
   performanceLocalDiagnostics,
+  performanceLocalFormDomId,
   type PerformanceLocalCampaign,
+  type PerformanceLocalEstimateFormConfiguration,
+  type PerformanceLocalGovernedContact,
   type PerformanceLocalRuntimeToggles,
+  type PerformanceLocalStickyActionConfiguration,
+  type PerformanceLocalTimeBoundCampaign,
 } from "../src/components/PerformanceLocalRenderer";
 import {
   ATLAS_DIAGNOSTIC_THEME,
   PERFORMANCE_LOCAL_COMPONENT_CONTRACTS,
+  PERFORMANCE_LOCAL_SERIALIZED_COMPONENT_CONTRACTS,
   PERFORMANCE_LOCAL_THEME,
+  PERFORMANCE_LOCAL_V2_SOURCE_COMMIT,
   performanceLocalOptionalComponentAttributes,
   performanceLocalOptionalConfiguration,
   performanceLocalViewport,
@@ -26,10 +33,17 @@ import type {
   GeneratedPage,
   PageComponentInstance,
   PageComposition,
+  ThemeDraftPreviewRead,
+  WebsiteThemeComponentConfigurationRead,
 } from "../src/types";
+import {
+  performanceLocalDraftConfiguration,
+  performanceLocalDurableEstimateField,
+} from "../src/pages/ThemeLabPage";
 import { selectedTheme } from "./theme-fixtures";
 
 const websiteId = 31;
+const formConfigurationId = 44;
 const enabledToggles: PerformanceLocalRuntimeToggles = {
   campaignBanner: true,
   compactEstimateForm: true,
@@ -368,7 +382,9 @@ function page(overrides: Partial<GeneratedPage> = {}): GeneratedPage {
   };
 }
 
-function campaign(overrides: Partial<PerformanceLocalCampaign> = {}): PerformanceLocalCampaign {
+function campaign(
+  overrides: Partial<PerformanceLocalTimeBoundCampaign> = {},
+): PerformanceLocalTimeBoundCampaign {
   return {
     ...performanceLocalOptionalConfiguration(
       "campaign_banner",
@@ -377,14 +393,315 @@ function campaign(overrides: Partial<PerformanceLocalCampaign> = {}): Performanc
     ),
     approvalIdentity: "operator-approval-1",
     campaignLabel: "Request an approved estimate",
-    ctaDestination: "#estimate",
+    ctaDestination: `#${performanceLocalFormDomId(formConfigurationId)}`,
     ctaLabel: "Request estimate",
+    destinationComponentConfigurationId: formConfigurationId,
     enabled: true,
     endDate: "2026-08-31T23:59:59Z",
+    intent: "time_bound_campaign",
+    offerDetails: "Approved offer details",
     startDate: "2026-08-01T00:00:00Z",
     termsReference: "approved-terms-1",
     websiteId,
     ...overrides,
+  };
+}
+
+function estimateForm(
+  overrides: Partial<PerformanceLocalEstimateFormConfiguration> = {},
+): PerformanceLocalEstimateFormConfiguration {
+  const field = (
+    key: "name" | "phone" | "postal-code" | "requested-service" | "message",
+    label: string,
+    order: number,
+    options: Partial<PerformanceLocalEstimateFormConfiguration["fields"][number]> = {},
+  ) => ({
+    accessibilityLabel: label,
+    autoComplete: "off",
+    control: key === "message" ? "textarea" as const : "input" as const,
+    inputMode: key === "phone" ? "tel" as const : key === "postal-code" ? "numeric" as const : "text" as const,
+    key,
+    label,
+    maxLength: key === "message" ? 1000 : 160,
+    order,
+    providerMapping: `contact_${key.replace(/-/g, "_")}`,
+    required: key !== "message",
+    responsive: { desktop: key === "message" ? "full" as const : "half" as const, tablet: key === "message" ? "full" as const : "half" as const, mobile: "full" as const },
+    rows: key === "message" ? 3 : undefined,
+    type: key === "message" ? undefined : key === "phone" ? "tel" as const : "text" as const,
+    validation: {
+      maximumLength: key === "message" ? 1000 : 160,
+      minimumLength: key === "message" ? 0 : 1,
+      rule: key === "phone" ? "phone" as const : key === "postal-code" ? "postal_code" as const : key === "message" ? "free_text" as const : "nonempty_text" as const,
+    },
+    ...options,
+  });
+  return {
+    componentConfigurationId: formConfigurationId,
+    componentInstanceKey: "compact-estimate-form-default",
+    ctaLabel: "Request estimate",
+    fields: [
+      field("name", "Name", 1),
+      field("phone", "Phone", 2),
+      field("postal-code", "ZIP code", 3),
+      field("requested-service", "Requested service", 4),
+      field("message", "Optional message", 5),
+    ],
+    previewNotice: "Preview only. Information entered here is not submitted or saved.",
+    providerState: {
+      canSubmit: false,
+      collectsData: false,
+      destination: null,
+      providerKey: null,
+      submissionState: "disabled_pending_provider_configuration",
+    },
+    submitLabel: "Request estimate",
+    visualState: "idle",
+    ...overrides,
+  };
+}
+
+function governedContact(): PerformanceLocalGovernedContact {
+  return {
+    callDestination: "tel:+15550100200",
+    phoneDisplay: "+1 555 010 0200",
+    websiteId,
+  };
+}
+
+function stickyActions(
+  overrides: Partial<PerformanceLocalStickyActionConfiguration> = {},
+): PerformanceLocalStickyActionConfiguration {
+  return {
+    callLabel: "Call",
+    componentConfigurationId: 45,
+    desktopHeaderActionsEnabled: true,
+    destinationComponentConfigurationId: formConfigurationId,
+    enabled: true,
+    estimateLabel: "Request estimate",
+    mobileStickyActionsEnabled: true,
+    ...overrides,
+  };
+}
+
+function durableDraftPreview(
+  bannerState: "absent" | "disabled",
+): ThemeDraftPreviewRead {
+  const timestamp = "2026-08-14T00:00:00Z";
+  const fingerprint = "d".repeat(64);
+  const component = (
+    id: number,
+    componentKey: string,
+    configurationPayload: Record<string, unknown>,
+    destinationComponentConfigurationId: number | null,
+    enabled = true,
+  ): WebsiteThemeComponentConfigurationRead => {
+    const contract = PERFORMANCE_LOCAL_SERIALIZED_COMPONENT_CONTRACTS.find(
+      (candidate) => candidate.component_key === componentKey,
+    );
+    if (!contract) throw new Error(`Missing durable test contract for ${componentKey}.`);
+    return {
+      id,
+      website_theme_configuration_id: 77,
+      website_id: websiteId,
+      planned_page_id: null,
+      theme_family_version_id: 2,
+      component_instance_key: `performance-local:${componentKey}`,
+      component_key: componentKey,
+      component_contract_version: contract.contract_version,
+      revision: 1,
+      scope_type: "website_default",
+      lifecycle_status: "current",
+      enabled,
+      variant: contract.variant,
+      placement: contract.placement,
+      responsive_visibility: { ...contract.responsive_visibility },
+      configuration_payload: configurationPayload,
+      effective_at: null,
+      expires_at: null,
+      approval_identity: "Shawn Manchette",
+      created_by: "Shawn Manchette",
+      updated_by: "Shawn Manchette",
+      activation_identity: null,
+      activated_at: null,
+      rollback_identity: null,
+      rollback_at: null,
+      destination_component_configuration_id: destinationComponentConfigurationId,
+      overrides_component_configuration_id: null,
+      supersedes_component_configuration_id: null,
+      integrity_fingerprint: fingerprint,
+      created_at: timestamp,
+      updated_at: timestamp,
+    };
+  };
+  const fields = [
+    ["name", "Name", true, "input", "text", 1, 100, "nonempty_text", 1, "half", "name"],
+    ["phone", "Phone", true, "input", "tel", 2, 40, "phone", 6, "half", "phone"],
+    ["postal-code", "ZIP code", true, "input", "text", 3, 12, "postal_code", 5, "half", "postal_code"],
+    ["requested-service", "Requested service", true, "input", "text", 4, 160, "nonempty_text", 1, "half", "requested_service"],
+    ["message", "Optional message", false, "textarea", "text", 5, 2000, "free_text", 0, "full", "message"],
+  ].map(([fieldKey, label, required, control, inputType, order, maximumLength, rule, minimumLength, responsiveLayout, providerMapping]) => ({
+    field_key: fieldKey,
+    label,
+    required,
+    control,
+    input_type: inputType,
+    order,
+    accessibility_label: label,
+    autocomplete_policy: "off",
+    maximum_length: maximumLength,
+    validation_contract: {
+      rule,
+      minimum_length: minimumLength,
+      maximum_length: maximumLength,
+    },
+    responsive_layout: responsiveLayout,
+    provider_mapping: providerMapping,
+  }));
+  const form = component(
+    formConfigurationId,
+    "compact_estimate_form",
+    {
+      submission_state: "disabled_pending_provider_configuration",
+      fields,
+      submit_label: "Request Estimate",
+      preview_notice: "Preview only. Information is not submitted or saved.",
+      provider_key: null,
+      destination: null,
+      privacy_policy_destination: null,
+      consent_language: null,
+      data_retention_policy: null,
+      spam_strategy: null,
+      success_behavior: null,
+      failure_behavior: null,
+      audit_identity: null,
+    },
+    null,
+  );
+  const sticky = component(
+    45,
+    "sticky_mobile_action_bar",
+    {
+      call_source: "governed_website_identity",
+      call_label: "Call",
+      estimate_label: "Request Estimate",
+      desktop_sticky_header: true,
+      mobile_sticky_bottom: true,
+      hide_while_hero_actions_visible: true,
+      hide_while_navigation_open: true,
+      protect_form_focus: true,
+      safe_area_support: true,
+      prevent_content_obstruction: true,
+    },
+    formConfigurationId,
+  );
+  const components = [form, sticky];
+  if (bannerState === "disabled") {
+    components.push(component(
+      46,
+      "campaign_banner",
+      {
+        intent: "evergreen_conversion",
+        message: "Request an Estimate",
+        cta_label: "Request Estimate",
+        approval_identity: "Shawn Manchette",
+      },
+      formConfigurationId,
+      false,
+    ));
+  }
+  return {
+    preview_label: "DRAFT PREVIEW — NOT ACTIVE",
+    theme_family: {
+      id: 1,
+      family_key: "performance-local",
+      display_name: "Performance Local",
+      provider_source_identity: "project-atlas",
+      lifecycle_status: "registered",
+      created_by: "Shawn Manchette",
+      retired_by: null,
+      retired_at: null,
+      integrity_fingerprint: fingerprint,
+      created_at: timestamp,
+      updated_at: timestamp,
+    },
+    theme_version: {
+      id: 2,
+      theme_family_id: 1,
+      version: 2,
+      lifecycle_status: "preview_candidate",
+      production_ready: false,
+      source_commit: PERFORMANCE_LOCAL_V2_SOURCE_COMMIT,
+      compatibility_identity: fingerprint,
+      supported_component_contracts: PERFORMANCE_LOCAL_SERIALIZED_COMPONENT_CONTRACTS.map(
+        (contract) => ({ ...contract }),
+      ),
+      created_by: "Shawn Manchette",
+      retired_by: null,
+      retired_at: null,
+      supersedes_theme_family_version_id: null,
+      integrity_fingerprint: fingerprint,
+      created_at: timestamp,
+      updated_at: timestamp,
+    },
+    website_configuration: {
+      id: 77,
+      website_id: websiteId,
+      business_id: 21,
+      theme_family_version_id: 2,
+      configuration_key: "performance-local-draft",
+      version: 1,
+      lifecycle_status: "draft",
+      created_by: "Shawn Manchette",
+      updated_by: "Shawn Manchette",
+      creation_rationale: "Local inactive draft preview",
+      approved_by: null,
+      approved_at: null,
+      activated_by: null,
+      activated_at: null,
+      rollback_by: null,
+      rollback_at: null,
+      materialized_theme_id: null,
+      website_theme_selection_id: null,
+      supersedes_configuration_id: null,
+      integrity_fingerprint: fingerprint,
+      created_at: timestamp,
+      updated_at: timestamp,
+    },
+    components,
+    audit_history: [],
+    governed_actions: {
+      phone_display: "+1 555 010 0200",
+      call_destination: "tel:+15550100200",
+      call_label: "Call",
+      estimate_label: "Request Estimate",
+      estimate_destination_component_configuration_id: formConfigurationId,
+      desktop_header_actions_enabled: true,
+      mobile_sticky_actions_enabled: true,
+      desktop_header_estimate_destination_component_configuration_id: formConfigurationId,
+      mobile_sticky_estimate_destination_component_configuration_id: formConfigurationId,
+    },
+    provider_state: {
+      submission_state: "disabled_pending_provider_configuration",
+      provider_key: null,
+      destination: null,
+      can_submit: false,
+      collects_data: false,
+    },
+    readiness: {
+      status: "blocked",
+      can_activate: false,
+      can_publish: false,
+      can_deploy: false,
+      production_ready: false,
+      incomplete_items: [],
+    },
+    requested_generated_page_id: 1101,
+    export_eligible: false,
+    privacy_status: "blocked_pending_privacy_configuration",
+    activation_status: "blocked",
+    publication_status: "blocked",
+    deployment_status: "blocked",
   };
 }
 
@@ -394,8 +711,11 @@ function render(
     brandAccent?: string | null;
     campaign?: PerformanceLocalCampaign | null;
     composition?: PageComposition;
+    estimateForm?: PerformanceLocalEstimateFormConfiguration | null;
+    governedContact?: PerformanceLocalGovernedContact | null;
     page?: GeneratedPage;
     previewedAt?: Date;
+    stickyActions?: PerformanceLocalStickyActionConfiguration | null;
   } = {},
 ) {
   return renderToStaticMarkup(
@@ -404,7 +724,10 @@ function render(
         brandAccent={options.brandAccent}
         campaign={options.campaign}
         composition={options.composition ?? composition()}
+        estimateForm={"estimateForm" in options ? options.estimateForm : estimateForm()}
+        governedContact={"governedContact" in options ? options.governedContact : governedContact()}
         page={options.page ?? page()}
+        stickyActions={"stickyActions" in options ? options.stickyActions : stickyActions()}
         toggles={toggles}
         previewedAt={options.previewedAt ?? new Date("2026-08-12T12:00:00Z")}
       />
@@ -429,6 +752,41 @@ test("the performance renderer consumes composition identity without mutating At
   assert.match(markup, /data-generated-page-id="1101"/);
   assert.deepEqual(sourceComposition, beforeComposition);
   assert.deepEqual(sourcePage, beforePage);
+});
+
+test("a disabled or solely expired durable banner leaves the Theme Lab page visible without a wrapper", () => {
+  for (const bannerState of ["disabled", "absent"] as const) {
+    const configuration = performanceLocalDraftConfiguration(
+      durableDraftPreview(bannerState),
+    );
+    assert.ok(configuration);
+    assert.equal(configuration.campaign, null);
+    const markup = render(enabledToggles, {
+      campaign: configuration.campaign,
+      estimateForm: configuration.estimateForm,
+      governedContact: configuration.governedContact,
+      stickyActions: configuration.stickyActions,
+    });
+    assert.match(markup, /<h1[^>]*>Example approved service<\/h1>/);
+    assert.doesNotMatch(markup, /class="performanceLocalCampaign"/);
+  }
+});
+
+test("Theme Lab refuses to fabricate a durable preview from source or component-contract drift", () => {
+  const wrongSource = durableDraftPreview("absent");
+  wrongSource.theme_version.source_commit = "0".repeat(40);
+  assert.equal(performanceLocalDraftConfiguration(wrongSource), null);
+
+  const missingContracts = durableDraftPreview("absent");
+  missingContracts.theme_version.supported_component_contracts = [];
+  assert.equal(performanceLocalDraftConfiguration(missingContracts), null);
+
+  const mismatchedComponent = durableDraftPreview("absent");
+  mismatchedComponent.components[0] = {
+    ...mismatchedComponent.components[0],
+    variant: "unregistered-runtime-fallback",
+  };
+  assert.equal(performanceLocalDraftConfiguration(mismatchedComponent), null);
 });
 
 test("canonical process grouping preserves exact source headings, bodies, order, and bytes", () => {
@@ -526,10 +884,9 @@ test("disabled optional capabilities render no wrapper, placeholder, or dead act
 });
 
 test("missing governed phone hides every Call action and an empty sticky bar", () => {
-  const withoutPhone = composition(fixtureComponents({ phone: "" }));
   const markup = render(
     { ...disabledToggles, stickyActionBar: true },
-    { composition: withoutPhone },
+    { governedContact: null },
   );
   assert.doesNotMatch(markup, /href="tel:/);
   assert.doesNotMatch(markup, />Call(?:\s|<)/);
@@ -541,9 +898,9 @@ test("missing approved estimate destination hides every Estimate action", () => 
     ...disabledToggles,
     finalCta: true,
     stickyActionBar: true,
-  });
+  }, { estimateForm: null, stickyActions: null });
   assert.doesNotMatch(markup, />Request estimate</);
-  assert.doesNotMatch(markup, /href="#estimate"/);
+  assert.doesNotMatch(markup, /href="#performance-local-form-config-/);
   assert.doesNotMatch(markup, /class="performanceLocalStickyActions/);
   assert.match(markup, /href="tel:\+15550100200"/);
 });
@@ -557,6 +914,7 @@ test("campaigns render only for exact Website ownership, approval evidence, safe
     campaign({ approvalIdentity: "" }),
     campaign({ ctaDestination: "https://external.example/estimate" }),
     campaign({ ctaDestination: "tel:------" }),
+    campaign({ destinationComponentConfigurationId: formConfigurationId + 1 }),
     campaign({ websiteId: websiteId + 1 }),
     campaign({ endDate: "2026-08-02T00:00:00Z", startDate: "2026-08-03T00:00:00Z" }),
   ]) {
@@ -569,6 +927,41 @@ test("campaigns render only for exact Website ownership, approval evidence, safe
   });
   assert.doesNotMatch(expired, /class="performanceLocalCampaign"/);
   assert.match(expired, /outside its approved active dates/);
+});
+
+test("an evergreen conversion renders exact durable copy with no promotional fields or fake dates", () => {
+  const exactTarget = `#${performanceLocalFormDomId(formConfigurationId)}`;
+  const evergreen: PerformanceLocalCampaign = {
+    ...performanceLocalOptionalConfiguration(
+      "campaign_banner",
+      websiteId,
+      "Request an Estimate",
+      {
+        approvalIdentity: "draft-approval-identity",
+        campaignLabel: "Request an Estimate",
+        ctaDestination: exactTarget,
+        ctaLabel: "Request Estimate",
+        intent: "evergreen_conversion",
+      },
+    ),
+    approvalIdentity: "draft-approval-identity",
+    campaignLabel: "Request an Estimate",
+    ctaDestination: exactTarget,
+    ctaLabel: "Request Estimate",
+    destinationComponentConfigurationId: formConfigurationId,
+    enabled: true,
+    intent: "evergreen_conversion",
+    websiteId,
+  };
+  const markup = render(enabledToggles, {
+    campaign: evergreen,
+    estimateForm: estimateForm({ ctaLabel: "Request Estimate" }),
+    stickyActions: stickyActions({ estimateLabel: "Request Estimate" }),
+  });
+  assert.match(markup, /data-conversion-intent="evergreen_conversion"/);
+  assert.match(markup, />Request an Estimate</);
+  assert.match(markup, new RegExp(`href="${exactTarget}"`));
+  assert.doesNotMatch(markup, /Special|\$\d|discount|urgency|financing|guarantee|terms|startDate|endDate/i);
 });
 
 test("the Theme Lab accent override accepts opaque hex only and derives readable text contrast", () => {
@@ -586,20 +979,63 @@ test("the preview estimate form is explicit, inert, local, and has no persistenc
   const markup = render(enabledToggles);
   assert.match(markup, /<form[^>]+aria-label="Estimate request preview"/);
   assert.match(markup, /data-preview-only="true"/);
+  assert.match(markup, /data-provider-state="disabled_pending_provider_configuration"/);
+  assert.match(markup, /data-provider-configured="false"/);
+  assert.match(markup, /data-collects-data="false"/);
+  assert.match(markup, /data-controls-read-only="true"/);
+  assert.equal((markup.match(/readonly=""/gi) ?? []).length, 5);
+  assert.match(markup, new RegExp(`<form[^>]+id="${performanceLocalFormDomId(formConfigurationId)}"`));
   assert.match(markup, /autocomplete="off"/i);
   assert.match(markup, /Preview only\. Information entered here is not submitted or saved\./);
   for (const field of [
-    "preview-name",
-    "preview-phone",
-    "preview-postal-code",
-    "preview-requested-service",
-    "preview-message",
+    "name",
+    "phone",
+    "postal-code",
+    "requested-service",
+    "message",
   ]) {
-    assert.match(markup, new RegExp(`name="${field}"`));
+    assert.match(markup, new RegExp(`data-field-key="${field}"`));
   }
+  for (const label of ["Name", "Phone", "ZIP code", "Requested service", "Optional message"]) {
+    assert.match(markup, new RegExp(`aria-label="${label}"`));
+  }
+  for (const order of [1, 2, 3, 4, 5]) {
+    assert.match(markup, new RegExp(`data-field-order="${order}"`));
+  }
+  assert.match(markup, /data-provider-mapping="contact_name"/);
+  assert.match(markup, /maxlength="160"/i);
+  assert.match(markup, /data-field-responsive="half:half:full"/);
   assert.doesNotMatch(markup, /\saction=/);
   assert.doesNotMatch(markup, /\smethod=/);
-  assert.doesNotMatch(markup, /fetch\(|XMLHttpRequest|navigator\.sendBeacon/);
+  assert.doesNotMatch(markup, /\sname=/);
+  assert.doesNotMatch(markup, /fetch\(|XMLHttpRequest|navigator\.sendBeacon|localStorage|sessionStorage|console\./);
+  assert.match(markup, /<button type="submit" disabled=""/);
+});
+
+test("durable provider-disabled fields reject a tampered autocomplete policy", () => {
+  const durableField = {
+    accessibility_label: "Name",
+    autocomplete_policy: "off",
+    control: "input",
+    field_key: "name",
+    input_type: "text",
+    label: "Name",
+    maximum_length: 160,
+    order: 1,
+    provider_mapping: "contact_name",
+    required: true,
+    responsive_layout: "half",
+    validation_contract: {
+      maximum_length: 160,
+      minimum_length: 1,
+      rule: "nonempty_text",
+    },
+  };
+  assert.ok(performanceLocalDurableEstimateField(durableField));
+  assert.equal(
+    performanceLocalDurableEstimateField({ ...durableField, autocomplete_policy: "name" }),
+    null,
+  );
 });
 
 test("desktop dropdown and mobile navigation are collapsed in initial output", () => {
@@ -652,7 +1088,11 @@ test("diagnostics describe only effective enabled capabilities and preserve fail
   assert.ok(!disabled.enabledComponents.includes("compact_estimate_form"));
   assert.deepEqual(disabled.errors, []);
 
-  const enabled = performanceLocalDiagnostics(base, enabledToggles, { campaignVisible: true });
+  const enabled = performanceLocalDiagnostics(base, enabledToggles, {
+    campaignVisible: true,
+    estimateDestination: `#${performanceLocalFormDomId(formConfigurationId)}`,
+    phoneDestination: "tel:+15550100200",
+  });
   for (const key of [
     "trust_proof_strip",
     "visual_cta_band",
@@ -689,6 +1129,8 @@ test("generic renderer source contains no business, Page, requirement, reference
   }
   assert.doesNotMatch(source, /https?:\/\//);
   assert.doesNotMatch(source, /fetch\(|XMLHttpRequest|navigator\.sendBeacon|localStorage|sessionStorage/);
+  assert.doesNotMatch(source, /#\$\{[^}]*componentInstanceKey/);
+  assert.match(source, /performanceLocalFormDomId\(resolvedEstimateForm\.componentConfigurationId\)/);
 });
 
 test("Theme Lab is a top-level local read-only route over the exact current page and composition APIs", () => {
@@ -696,14 +1138,27 @@ test("Theme Lab is a top-level local read-only route over the exact current page
   const labSource = readFileSync(resolve(process.cwd(), "src/pages/ThemeLabPage.tsx"), "utf8");
   assert.match(appSource, /path="\/theme-lab\/generated-pages\/:id"/);
   assert.match(labSource, /data-theme-lab="local-only"/);
-  assert.match(labSource, /Not selected or published/);
+  assert.match(labSource, /DRAFT PREVIEW — NOT ACTIVE/);
   assert.match(labSource, /`\/api\/generated-pages\/\$\{pageId\}`/);
   assert.match(labSource, /`\/api\/site-plans\/generated-pages\/\$\{pageId\}\/composition`/);
+  assert.match(labSource, /theme-configurations\/draft-preview\?family_key=performance-local&family_version=2&page_id=\$\{pageId\}/);
+  assert.doesNotMatch(labSource, /themeConfigurationId|requestedConfigurationId/);
+  assert.match(labSource, /performanceLocalFormDomId\(form\.id\)/);
+  assert.doesNotMatch(labSource, /#\$\{[^}]*componentInstanceKey/);
+  for (const field of [
+    "call_label",
+    "estimate_label",
+    "desktop_header_actions_enabled",
+    "mobile_sticky_actions_enabled",
+    "desktop_header_estimate_destination_component_configuration_id",
+    "mobile_sticky_estimate_destination_component_configuration_id",
+  ]) {
+    assert.match(labSource, new RegExp(`governed_actions\\.${field}`));
+  }
   assert.doesNotMatch(labSource, /method:\s*"(?:POST|PUT|PATCH|DELETE)"/);
   assert.doesNotMatch(labSource, /localStorage|sessionStorage|navigator\.sendBeacon|XMLHttpRequest/);
   assert.doesNotMatch(labSource, /Flo-Zone|Orlando|Page\s*41|pestcontrolinorlandofl/i);
-  assert.equal((labSource.match(/Drywood Termite Tenting/g) ?? []).length, 1);
-  assert.match(labSource, /RUNTIME_PREVIEW_CAMPAIGN_LABEL/);
+  assert.doesNotMatch(labSource, /Drywood Termite Tenting|RUNTIME_PREVIEW_CAMPAIGN_LABEL|#estimate/);
   assert.match(appSource, /lazy\(\(\) => import\("\.\/pages\/ThemeLabPage"\)\)/);
   assert.match(appSource, /path="\/theme-lab\/performance-local\/components"/);
 });

@@ -26,6 +26,7 @@ from app.schemas.page_export import (
     ExportSEO,
     ExportWarning,
     PageExportPackage,
+    ThemeConfiguredPageExportPackage,
 )
 from app.services.draft_generation import FORBIDDEN_PHRASES
 from app.services.media_display_presets import (
@@ -181,6 +182,42 @@ def build_page_export_package(session: Session, page_id: int) -> PageExportPacka
         slug_conflicts=conflicts,
         export_ready=not any(item.severity == "blocker" for item in warnings),
         warnings=warnings,
+    )
+
+
+def build_theme_configured_page_export_package(
+    session: Session,
+    page_id: int,
+    theme_configuration_id: int,
+) -> ThemeConfiguredPageExportPackage:
+    """Build an explicit export only after exact active Theme eligibility passes."""
+
+    page = session.get(GeneratedPage, page_id)
+    if not page:
+        raise HTTPException(status_code=404, detail="Generated page not found")
+    website_id = require_page_website(session, page)
+    from app.services.theme_configurations import (
+        ThemeConfigurationError,
+        require_theme_configuration_export_eligible,
+    )
+
+    try:
+        identity = require_theme_configuration_export_eligible(
+            session,
+            website_id,
+            theme_configuration_id,
+            generated_page_id=page_id,
+        )
+    except ThemeConfigurationError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+    package = build_page_export_package(session, page_id)
+    return ThemeConfiguredPageExportPackage(
+        **package.model_dump(mode="python"),
+        theme_configuration_identity=identity,
     )
 
 
