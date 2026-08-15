@@ -9,6 +9,9 @@ from app.api.routes import api_router
 from app.core.config import get_settings
 from app.db.seed import seed_database
 from app.db.session import create_db_and_tables, engine
+from app.middleware.form_submission_query_scrub import (
+    FormSubmissionQueryScrubMiddleware,
+)
 from app.services.media_uploads import ensure_media_directories
 from sqlmodel import Session
 
@@ -38,6 +41,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
+)
+app.add_middleware(
+    FormSubmissionQueryScrubMiddleware,
+    api_prefix=settings.api_prefix,
 )
 
 app.include_router(api_router, prefix=settings.api_prefix)

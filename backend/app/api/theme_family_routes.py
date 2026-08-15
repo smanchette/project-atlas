@@ -9,6 +9,8 @@ from app.models import (
     WebsiteThemeConfiguration,
 )
 from app.schemas.theme_families import (
+    ConversionComponentGraphRevisionCreate,
+    ConversionComponentGraphRevisionRead,
     ThemeActivationReadinessRead,
     ThemeDraftBundleCreate,
     ThemeDraftPreviewRead,
@@ -35,6 +37,7 @@ from app.services.theme_configurations import (
     register_theme_family,
     register_theme_family_version,
     revise_component_configuration,
+    revise_conversion_component_graph,
     theme_activation_readiness,
 )
 
@@ -213,6 +216,29 @@ def revise_website_theme_component(
             website_id,
             configuration_id,
             component_configuration_id,
+            payload,
+        )
+    except ThemeConfigurationError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/websites/{website_id}/theme-configurations/{configuration_id}/components/"
+    "conversion-graph-revision",
+    response_model=ConversionComponentGraphRevisionRead,
+    status_code=201,
+)
+def revise_website_theme_conversion_graph(
+    website_id: int,
+    configuration_id: int,
+    payload: ConversionComponentGraphRevisionCreate,
+    session: Session = Depends(get_session),
+) -> ConversionComponentGraphRevisionRead:
+    try:
+        return revise_conversion_component_graph(
+            session,
+            website_id,
+            configuration_id,
             payload,
         )
     except ThemeConfigurationError as exc:

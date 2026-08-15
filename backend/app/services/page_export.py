@@ -215,6 +215,18 @@ def build_theme_configured_page_export_package(
         ) from exc
 
     package = build_page_export_package(session, page_id)
+    if (
+        getattr(identity, "family_key", None) == "performance-local"
+        and getattr(identity, "family_version", None) == 3
+        and not package.export_ready
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "page_export_not_ready",
+                "message": "The Generated Page is not ready for export.",
+            },
+        )
     return ThemeConfiguredPageExportPackage(
         **package.model_dump(mode="python"),
         theme_configuration_identity=identity,

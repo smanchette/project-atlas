@@ -6299,12 +6299,23 @@ th {
 }
 
 .performanceLocalCampaignInner a {
-  min-height: 36px;
+  min-height: 44px;
   padding: 6px 12px;
   border: 2px solid currentColor;
   border-radius: 999px;
   font-weight: 850;
   text-decoration: none;
+  transition: background-color 160ms ease, color 160ms ease, transform 100ms ease;
+}
+
+.performanceLocalCampaignInner a:hover,
+.performanceLocalCampaignInner a:focus-visible {
+  background: var(--performance-local-accent-text);
+  color: var(--performance-local-accent);
+}
+
+.performanceLocalCampaignInner a:active {
+  transform: translateY(1px);
 }
 
 .performanceLocalHeader {
@@ -6467,6 +6478,50 @@ th {
   text-align: center;
   text-decoration: none;
   cursor: pointer;
+}
+
+.performanceLocalCampaignSingle {
+  overflow: hidden;
+  background:
+    linear-gradient(110deg, rgb(255 255 255 / 4%), transparent 34%, rgb(255 255 255 / 8%) 72%, transparent),
+    var(--performance-local-accent);
+  box-shadow: inset 0 -1px rgb(0 0 0 / 14%);
+}
+
+.performanceLocalCampaign .performanceLocalCampaignSingleAction {
+  width: 100%;
+  max-width: none;
+  min-height: 56px;
+  box-sizing: border-box;
+  padding: 12px max(20px, calc((100vw - var(--performance-local-max)) / 2));
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  letter-spacing: 0.012em;
+  text-decoration: none;
+  transition:
+    background-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 100ms ease;
+}
+
+.performanceLocalCampaign .performanceLocalCampaignSingleAction:hover {
+  background: rgb(255 255 255 / 12%);
+  box-shadow: inset 0 -3px currentColor;
+}
+
+.performanceLocalCampaign .performanceLocalCampaignSingleAction:focus-visible {
+  background: rgb(255 255 255 / 14%);
+  box-shadow: inset 0 0 0 3px currentColor;
+  outline-color: currentColor;
+  outline-offset: -5px;
+}
+
+.performanceLocalCampaign .performanceLocalCampaignSingleAction:active {
+  transform: translateY(1px);
+  background: rgb(0 0 0 / 12%);
+  box-shadow: inset 0 2px 6px rgb(0 0 0 / 18%);
 }
 
 /* Anchor buttons must override the site's ordinary inherited-link color. */
@@ -7074,6 +7129,211 @@ th {
   resize: vertical;
 }
 
+.performanceLocalFormConsent {
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  min-height: 44px;
+  align-items: center;
+  column-gap: 10px;
+  padding-block: 2px;
+}
+
+.performanceLocalEstimateForm .performanceLocalFormConsent input[type="checkbox"] {
+  width: 22px;
+  min-height: 22px;
+  margin: 0;
+  justify-self: center;
+  accent-color: var(--performance-local-accent);
+}
+
+.performanceLocalFormConsent a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  color: #174c34;
+  font-weight: 800;
+  text-underline-offset: 3px;
+}
+
+.performanceLocalFormReadiness {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #cbd8d0;
+  border-radius: 12px;
+  background: #f5f8f6;
+  color: #203a2c;
+}
+
+.performanceLocalFormReadinessHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.performanceLocalFormReadinessHeading span {
+  padding: 4px 9px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.performanceLocalFormReadiness[data-form-readiness="ready"] {
+  border-color: #8bc5a3;
+  background: #eff9f3;
+  color: #155c38;
+}
+
+.performanceLocalFormReadiness dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 14px;
+  margin: 0;
+}
+
+.performanceLocalFormReadiness dl > div {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 12px;
+  padding-block: 6px;
+  border-bottom: 1px solid #d8e2dc;
+}
+
+.performanceLocalFormReadiness :where(dt, dd) {
+  margin: 0;
+}
+
+.performanceLocalFormReadiness dd {
+  font-weight: 850;
+}
+
+.performanceLocalFormReadiness ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 20px;
+  color: #6f2b25;
+}
+
+.performanceLocalEstimateForm button:not(:disabled) {
+  transition: filter 160ms ease, transform 100ms ease, box-shadow 160ms ease;
+}
+
+.performanceLocalEstimateForm button:not(:disabled):hover {
+  filter: brightness(1.08);
+  box-shadow: 0 8px 20px rgb(0 0 0 / 14%);
+}
+
+.performanceLocalEstimateForm button:not(:disabled):active {
+  transform: translateY(1px);
+  box-shadow: 0 3px 10px rgb(0 0 0 / 12%);
+}
+
+.performanceLocalDelivery {
+  min-width: 0;
+  min-height: 100vh;
+  background: #fff;
+}
+
+.performanceLocalDeliveryCanvas {
+  min-width: 0;
+}
+
+.performanceLocalDeliverySafetyLabel {
+  position: relative;
+  z-index: 70;
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: center;
+  gap: 9px 12px;
+  padding: 8px 20px;
+  border-bottom: 1px solid #574b13;
+  background: #fff2a8;
+  color: #3e350c;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.performanceLocalDeliverySafetyLabel strong {
+  letter-spacing: 0.035em;
+}
+
+.performanceLocalDeliverySafetyLabel span {
+  color: #635817;
+}
+
+.performanceLocalDeliveryState,
+.performanceLocalDeliveryBlocked {
+  display: grid;
+  width: min(720px, calc(100% - 40px));
+  min-height: 70vh;
+  margin-inline: auto;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  padding-block: 60px;
+  color: #263a2e;
+  text-align: center;
+}
+
+.performanceLocalDeliveryState h1,
+.performanceLocalDeliveryBlocked h1,
+.performanceLocalDeliveryState p,
+.performanceLocalDeliveryBlocked p {
+  margin: 0;
+}
+
+.performanceLocalDeliveryBlocked > svg,
+.performanceLocalDeliveryState > svg {
+  color: #96392f;
+}
+
+.performanceLocalDeliveryEyebrow {
+  color: #96392f;
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.performanceLocalDeliveryBlocked code {
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: #f1f4f2;
+  color: #25382e;
+  overflow-wrap: anywhere;
+}
+
+.performanceLocalDeliveryBlocked ul {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  text-align: left;
+}
+
+.performanceLocalDeliveryBlocked li {
+  padding: 12px 14px;
+  border: 1px solid #d7ded9;
+  border-radius: 9px;
+  background: #fafbfa;
+}
+
+.performanceLocalDeliveryBlocked li strong {
+  margin-right: 7px;
+  color: #96392f;
+  text-transform: capitalize;
+}
+
 .performanceLocalFooter {
   padding-block: 56px 86px;
   background: #09120d;
@@ -7340,6 +7600,26 @@ th {
 
   .performanceLocalEstimateForm > * {
     grid-column: auto;
+  }
+
+  .performanceLocalFormReadiness dl {
+    grid-template-columns: 1fr;
+  }
+
+  .performanceLocalFormConsent {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .performanceLocalFormConsent a {
+    grid-column: 2;
+  }
+
+  .performanceLocalDeliverySafetyLabel {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+    padding-inline: 14px;
+    text-align: left;
   }
 
   .performanceLocalSite[data-sticky-actions-visible="true"] .performanceLocalFooter {

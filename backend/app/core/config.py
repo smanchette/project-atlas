@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AnyHttpUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,6 +22,11 @@ class Settings(BaseSettings):
     atlas_expected_release_version: str | None = None
     atlas_expected_release_commit: str | None = None
     atlas_expected_release_tag: str | None = None
+    atlas_runtime_mode: Literal[
+        "active_local",
+        "automated_test",
+        "activation_rehearsal",
+    ] = "active_local"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

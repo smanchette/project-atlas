@@ -41,6 +41,9 @@ import type {
   PageComponentInstance,
   PageComposition,
   PageMediaDisplayPreset,
+  PerformanceLocalDeliveryMode,
+  PerformanceLocalFormReadinessRead,
+  PerformanceLocalSubmissionAcceptedRead,
 } from "../types";
 import { resolvePerformanceLocalStickyVisibility } from "./performanceLocalInteractions";
 
@@ -94,11 +97,20 @@ export type PerformanceLocalEstimateFormConfiguration = Readonly<{
   fields: readonly PerformanceLocalEstimateField[];
   previewNotice: string;
   providerState: Readonly<{
-    canSubmit: false;
-    collectsData: false;
-    destination: null;
-    providerKey: null;
-    submissionState: "disabled_pending_provider_configuration";
+    canSubmit: boolean;
+    collectsData: boolean;
+    destination: string | null;
+    destinationConfigured?: boolean;
+    /** Public delivery intentionally redacts the provider identity. */
+    providerKey?: string | null;
+    submissionState: string;
+    testOnly?: boolean;
+  }>;
+  consent?: Readonly<{
+    mode: "not_required" | "explicit";
+    privacyPolicyDestination: string | null;
+    text: string | null;
+    textVersion: string | null;
   }>;
   submitLabel: string;
   visualState?: "idle" | "disabled" | "error" | "success";
@@ -169,13 +181,59 @@ export type PerformanceLocalDiagnostics = {
   warnings: string[];
 };
 
+export type PerformanceLocalFormSubmissionPayload = Readonly<{
+  name: string;
+  phone: string;
+  postal_code: string;
+  requested_service: string;
+  message: string | null;
+  consent_accepted: boolean | null;
+}>;
+
+export type PerformanceLocalFormSubmission = Readonly<{
+  endpoint: string | null;
+  readiness: PerformanceLocalFormReadinessRead;
+  submit?: (
+    payload: PerformanceLocalFormSubmissionPayload,
+    idempotencyKey: string,
+  ) => Promise<PerformanceLocalSubmissionAcceptedRead>;
+}>;
+
+type ResolvedPerformanceLocalFormSubmission = Readonly<{
+  canSubmit: boolean;
+  endpoint: string | null;
+  readiness: PerformanceLocalFormReadinessRead;
+  submit: PerformanceLocalFormSubmission["submit"];
+}>;
+
+export type PerformanceLocalRendererIdentity = Readonly<{
+  componentVersion: "2" | "3";
+  deliveryMode: "theme_lab" | PerformanceLocalDeliveryMode;
+  exposeDiagnostics: boolean;
+  themeCompatibility: "performance-local@2" | "performance-local@3";
+  themeVersion: 2 | 3;
+  destinationForGeneratedPageId: (generatedPageId: number) => string;
+}>;
+
+export type PerformanceLocalRenderedComponentAttributes = Readonly<Partial<
+  Omit<
+    OptionalComponentDiagnosticAttributes,
+    "data-component-version" | "data-component-theme-compatibility"
+  > & {
+    "data-component-version": "2" | "3";
+    "data-component-theme-compatibility": "performance-local@2" | "performance-local@3";
+  }
+>>;
+
 export type PerformanceLocalRendererProps = {
   /** Local Theme Lab-only visual direction; accepts opaque #RRGGBB and is never persisted. */
   brandAccent?: string | null;
   campaign?: PerformanceLocalCampaign | null;
   composition: PageComposition;
   estimateForm?: PerformanceLocalEstimateFormConfiguration | null;
+  formSubmission?: PerformanceLocalFormSubmission | null;
   governedContact?: PerformanceLocalGovernedContact | null;
+  rendererIdentity?: PerformanceLocalRendererIdentity;
   page: GeneratedPage;
   stickyActions?: PerformanceLocalStickyActionConfiguration | null;
   toggles: PerformanceLocalRuntimeToggles;
@@ -208,6 +266,16 @@ const EMPTY_TOGGLES: PerformanceLocalRuntimeToggles = {
   trustStrip: false,
 };
 
+const THEME_LAB_RENDERER_IDENTITY: PerformanceLocalRendererIdentity = Object.freeze({
+  componentVersion: "2",
+  deliveryMode: "theme_lab",
+  exposeDiagnostics: true,
+  themeCompatibility: "performance-local@2",
+  themeVersion: 2,
+  destinationForGeneratedPageId: (generatedPageId: number) =>
+    `/theme-lab/generated-pages/${generatedPageId}`,
+});
+
 const CANONICAL_PROCESS_SECTION_KEYS = Object.freeze([
   "process_section",
   "prep_section",
@@ -219,10 +287,12 @@ export function PerformanceLocalRenderer({
   campaign = null,
   composition,
   estimateForm = null,
+  formSubmission = null,
   governedContact = null,
   page,
   stickyActions = null,
   toggles = EMPTY_TOGGLES,
+  rendererIdentity = THEME_LAB_RENDERER_IDENTITY,
   previewedAt = new Date(),
 }: PerformanceLocalRendererProps) {
   const components = composition.effective_components;
@@ -238,7 +308,16 @@ export function PerformanceLocalRenderer({
   const footerNavigation = first(byKey, "footer_navigation");
   const headerData = header?.resolved_data ?? {};
   const email = cleanText(headerData.email) || cleanText(hero?.resolved_data.email);
-  const resolvedEstimateForm = validateEstimateFormConfiguration(estimateForm);
+  const resolvedEstimateForm = validateEstimateFormConfiguration(
+    estimateForm,
+    rendererIdentity.deliveryMode,
+  );
+  const resolvedFormSubmission = validateFormSubmission(
+    formSubmission,
+    resolvedEstimateForm,
+    composition.website_id,
+    rendererIdentity.deliveryMode,
+  );
   const resolvedContact = toggles.phoneAction === false
     ? null
     : validateGovernedContact(governedContact, composition.website_id);
@@ -317,6 +396,7 @@ export function PerformanceLocalRenderer({
         { sourceIdentity: trust.instance_key, approvalIdentity: composition.source_hash },
         "desktop",
         page.id,
+        rendererIdentity,
       )
     : null;
   const trustFeatureState = trustState?.resolution.visible
@@ -327,6 +407,7 @@ export function PerformanceLocalRenderer({
         { sourceIdentity: trust?.instance_key, approvalIdentity: composition.source_hash },
         "desktop",
         page.id,
+        rendererIdentity,
       )
     : null;
   const finalAction = estimateDestination
@@ -342,6 +423,7 @@ export function PerformanceLocalRenderer({
         { sourceIdentity: finalCta.instance_key, ...finalAction },
         "desktop",
         page.id,
+        rendererIdentity,
       )
     : null;
   const formState = finalState?.resolution.visible && toggles.compactEstimateForm && resolvedEstimateForm
@@ -352,6 +434,7 @@ export function PerformanceLocalRenderer({
         { previewOnly: true, productionMode: false },
         "desktop",
         page.id,
+        rendererIdentity,
       )
     : null;
   const stickyAction = resolvedStickyActions && (estimateDestination || phoneDestination)
@@ -371,6 +454,7 @@ export function PerformanceLocalRenderer({
         stickyAction,
         "mobile",
         page.id,
+        rendererIdentity,
       )
     : null;
   const trustVisible = Boolean(trustState?.resolution.visible);
@@ -390,6 +474,7 @@ export function PerformanceLocalRenderer({
     page.id,
     previewedAt,
     estimateDestination ? resolvedEstimateForm : null,
+    rendererIdentity,
   );
   const diagnostics = performanceLocalDiagnostics(composition, toggles, {
     campaignError: campaignState.error,
@@ -418,7 +503,8 @@ export function PerformanceLocalRenderer({
     <div
       className="performanceLocalSite"
       data-atlas-adapter="performance-local"
-      data-atlas-adapter-version={PERFORMANCE_LOCAL_THEME_VERSION}
+      data-atlas-adapter-version={rendererIdentity.themeVersion}
+      data-atlas-delivery-mode={rendererIdentity.deliveryMode}
       data-composition-id={composition.id}
       data-composition-version={composition.composition_version}
       data-generated-page-id={page.id}
@@ -448,6 +534,7 @@ export function PerformanceLocalRenderer({
           }
           mobileMenuOpen={mobileMenuOpen}
           onMobileMenuOpenChange={setMobileMenuOpen}
+          destinationForGeneratedPageId={rendererIdentity.destinationForGeneratedPageId}
         />
       )}
       <main id="main-content">
@@ -481,6 +568,7 @@ export function PerformanceLocalRenderer({
             index={index}
             contact={resolvedContact}
             email={email}
+            destinationForGeneratedPageId={rendererIdentity.destinationForGeneratedPageId}
           />
         ))}
         {finalCtaVisible && finalCta && finalState?.attributes && (
@@ -492,6 +580,8 @@ export function PerformanceLocalRenderer({
             attributes={finalState.attributes}
             formAttributes={formState?.attributes ?? null}
             formConfiguration={resolvedEstimateForm}
+            formSubmission={resolvedFormSubmission}
+            exposeDiagnostics={rendererIdentity.exposeDiagnostics}
             onFormFocusRiskChange={setFormFocusRisk}
           />
         )}
@@ -502,6 +592,7 @@ export function PerformanceLocalRenderer({
           navigation={footerNavigation}
           contact={resolvedContact}
           email={email}
+          destinationForGeneratedPageId={rendererIdentity.destinationForGeneratedPageId}
         />
       )}
       <BackToTopControl suppressed={formFocusRisk || mobileMenuOpen} />
@@ -514,9 +605,11 @@ export function PerformanceLocalRenderer({
           attributes={stickyState!.attributes!}
         />
       )}
-      <output className="performanceLocalDiagnostics" hidden data-diagnostic-count={diagnostics.errors.length + diagnostics.warnings.length}>
-        {JSON.stringify(diagnostics)}
-      </output>
+      {rendererIdentity.exposeDiagnostics ? (
+        <output className="performanceLocalDiagnostics" hidden data-diagnostic-count={diagnostics.errors.length + diagnostics.warnings.length}>
+          {JSON.stringify(diagnostics)}
+        </output>
+      ) : null}
     </div>
   );
 }
@@ -631,28 +724,69 @@ export function performanceLocalDiagnostics(
   };
 }
 
+const SEMANTIC_ACTION_ARTICLES = new Set(["a", "an", "the"]);
+
+/**
+ * Conservatively compares public action copy without hard-coding any business
+ * phrase. Unicode compatibility normalization, punctuation folding, and
+ * standalone English articles are the only semantic reductions performed.
+ */
+export function performanceLocalSemanticActionKey(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/&/g, " and ")
+    .replace(/[\p{C}\p{P}\p{S}]+/gu, " ")
+    .trim()
+    .split(/\s+/u)
+    .filter((token) => token && !SEMANTIC_ACTION_ARTICLES.has(token))
+    .join(" ");
+}
+
+export function performanceLocalActionCopyEquivalent(
+  message: unknown,
+  actionLabel: unknown,
+): boolean {
+  const messageKey = performanceLocalSemanticActionKey(message);
+  const actionKey = performanceLocalSemanticActionKey(actionLabel);
+  return Boolean(messageKey && actionKey && messageKey === actionKey);
+}
+
 function CampaignBanner({
   campaign,
   attributes,
 }: {
   campaign: PerformanceLocalCampaign;
-  attributes: OptionalComponentDiagnosticAttributes;
+  attributes: PerformanceLocalRenderedComponentAttributes;
 }) {
+  const singleAction = campaign.intent === "evergreen_conversion" &&
+    performanceLocalActionCopyEquivalent(campaign.campaignLabel, campaign.ctaLabel);
   return (
     <aside
-      className="performanceLocalCampaign"
+      className={`performanceLocalCampaign${singleAction ? " performanceLocalCampaignSingle" : ""}`}
       aria-label={campaign.campaignLabel}
       data-conversion-intent={campaign.intent}
+      data-public-action-copy={singleAction ? "semantic_duplicate_suppressed" : "distinct_copy_and_action"}
       {...attributes}
     >
-      <div className="performanceLocalContainer performanceLocalCampaignInner">
-        <p>
+      {singleAction ? (
+        <a
+          className="performanceLocalContainer performanceLocalCampaignSingleAction"
+          href={campaign.ctaDestination}
+        >
           <strong>{campaign.campaignLabel}</strong>
-          {campaign.price ? <span>{campaign.price}</span> : null}
-          {campaign.qualifier ? <span>{campaign.qualifier}</span> : null}
-        </p>
-        <a href={campaign.ctaDestination}>{campaign.ctaLabel}</a>
-      </div>
+        </a>
+      ) : (
+        <div className="performanceLocalContainer performanceLocalCampaignInner">
+          <p>
+            <strong>{campaign.campaignLabel}</strong>
+            {campaign.price ? <span>{campaign.price}</span> : null}
+            {campaign.qualifier ? <span>{campaign.qualifier}</span> : null}
+          </p>
+          <a href={campaign.ctaDestination}>{campaign.ctaLabel}</a>
+        </div>
+      )}
     </aside>
   );
 }
@@ -666,6 +800,7 @@ function PerformanceHeader({
   onMobileMenuOpenChange,
   primaryNavigation,
   utilityNavigation,
+  destinationForGeneratedPageId,
 }: {
   contact: PerformanceLocalGovernedContact | null;
   component: PageComponentInstance;
@@ -675,6 +810,7 @@ function PerformanceHeader({
   onMobileMenuOpenChange: (open: boolean) => void;
   primaryNavigation?: PageComponentInstance;
   utilityNavigation?: PageComponentInstance;
+  destinationForGeneratedPageId: (generatedPageId: number) => string;
 }) {
   const data = component.resolved_data;
   const identityAssets = asRecord(data.identity_assets);
@@ -695,7 +831,10 @@ function PerformanceHeader({
             {cleanText(data.tagline) ? <small>{cleanText(data.tagline)}</small> : null}
           </span>
         </div>
-        <DesktopNavigation navigation={navigation} />
+        <DesktopNavigation
+          navigation={navigation}
+          destinationForGeneratedPageId={destinationForGeneratedPageId}
+        />
         <div className="performanceLocalHeaderActions">
           {contact ? <PhoneLink contact={contact} compact /> : null}
           {estimateDestination ? (
@@ -710,6 +849,7 @@ function PerformanceHeader({
             estimateLabel={estimateLabel}
             open={mobileMenuOpen}
             onOpenChange={onMobileMenuOpenChange}
+            destinationForGeneratedPageId={destinationForGeneratedPageId}
           />
         </div>
       </div>
@@ -717,7 +857,13 @@ function PerformanceHeader({
   );
 }
 
-function DesktopNavigation({ navigation }: { navigation: NavigationResolution }) {
+function DesktopNavigation({
+  navigation,
+  destinationForGeneratedPageId,
+}: {
+  navigation: NavigationResolution;
+  destinationForGeneratedPageId: (generatedPageId: number) => string;
+}) {
   const [openId, setOpenId] = useState<number | null>(null);
   const triggers = useRef(new Map<number, HTMLButtonElement>());
 
@@ -741,7 +887,10 @@ function DesktopNavigation({ navigation }: { navigation: NavigationResolution })
             const expanded = openId === node.navigationItemId;
             return (
               <li key={node.navigationItemId} data-navigation-item-id={node.navigationItemId}>
-                <ThemeLabDestination node={node} />
+                <PerformanceLocalDestination
+                  node={node}
+                  destinationForGeneratedPageId={destinationForGeneratedPageId}
+                />
                 {node.children.length ? (
                   <>
                     <button
@@ -763,7 +912,11 @@ function DesktopNavigation({ navigation }: { navigation: NavigationResolution })
                       hidden={!expanded}
                     >
                       {node.children.map((child) => (
-                        <NavigationBranch key={child.navigationItemId} node={child} />
+                        <NavigationBranch
+                          key={child.navigationItemId}
+                          node={child}
+                          destinationForGeneratedPageId={destinationForGeneratedPageId}
+                        />
                       ))}
                     </ul>
                   </>
@@ -784,6 +937,7 @@ function MobileNavigation({
   navigation,
   onOpenChange,
   open,
+  destinationForGeneratedPageId,
 }: {
   contact: PerformanceLocalGovernedContact | null;
   estimateDestination: string | null;
@@ -791,6 +945,7 @@ function MobileNavigation({
   navigation: NavigationResolution;
   onOpenChange: (open: boolean) => void;
   open: boolean;
+  destinationForGeneratedPageId: (generatedPageId: number) => string;
 }) {
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(() => new Set());
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -886,7 +1041,10 @@ function MobileNavigation({
                   return (
                     <li key={node.navigationItemId}>
                       <div className="performanceLocalDrawerRow" onClick={close}>
-                        <ThemeLabDestination node={node} />
+                        <PerformanceLocalDestination
+                          node={node}
+                          destinationForGeneratedPageId={destinationForGeneratedPageId}
+                        />
                         {node.children.length ? (
                           <button
                             type="button"
@@ -905,7 +1063,12 @@ function MobileNavigation({
                       {node.children.length ? (
                         <ul id={`performance-local-mobile-group-${node.navigationItemId}`} hidden={!expanded}>
                           {node.children.map((child) => (
-                            <NavigationBranch key={child.navigationItemId} node={child} onNavigate={close} />
+                            <NavigationBranch
+                              key={child.navigationItemId}
+                              node={child}
+                              onNavigate={close}
+                              destinationForGeneratedPageId={destinationForGeneratedPageId}
+                            />
                           ))}
                         </ul>
                       ) : null}
@@ -929,14 +1092,30 @@ function MobileNavigation({
   );
 }
 
-function NavigationBranch({ node, onNavigate }: { node: ResolvedNavigationItem; onNavigate?: () => void }) {
+function NavigationBranch({
+  node,
+  onNavigate,
+  destinationForGeneratedPageId,
+}: {
+  node: ResolvedNavigationItem;
+  onNavigate?: () => void;
+  destinationForGeneratedPageId: (generatedPageId: number) => string;
+}) {
   return (
     <li data-navigation-item-id={node.navigationItemId} onClick={onNavigate}>
-      <ThemeLabDestination node={node} />
+      <PerformanceLocalDestination
+        node={node}
+        destinationForGeneratedPageId={destinationForGeneratedPageId}
+      />
       {node.children.length ? (
         <ul>
           {node.children.map((child) => (
-            <NavigationBranch key={child.navigationItemId} node={child} onNavigate={onNavigate} />
+            <NavigationBranch
+              key={child.navigationItemId}
+              node={child}
+              onNavigate={onNavigate}
+              destinationForGeneratedPageId={destinationForGeneratedPageId}
+            />
           ))}
         </ul>
       ) : null}
@@ -944,13 +1123,19 @@ function NavigationBranch({ node, onNavigate }: { node: ResolvedNavigationItem; 
   );
 }
 
-function ThemeLabDestination({ node }: { node: ResolvedNavigationItem }) {
+function PerformanceLocalDestination({
+  node,
+  destinationForGeneratedPageId,
+}: {
+  node: ResolvedNavigationItem;
+  destinationForGeneratedPageId: (generatedPageId: number) => string;
+}) {
   if (!node.targetGeneratedPageId) {
     return <span aria-disabled="true">{node.label}</span>;
   }
   return (
     <NavLink
-      to={`/theme-lab/generated-pages/${node.targetGeneratedPageId}`}
+      to={destinationForGeneratedPageId(node.targetGeneratedPageId)}
       data-canonical-slug={node.canonicalSlug}
       className={({ isActive }) => isActive ? "performanceLocalActiveDestination" : undefined}
     >
@@ -1002,8 +1187,8 @@ function TrustStrip({
   featureAttributes,
 }: {
   component: PageComponentInstance;
-  attributes: OptionalComponentDiagnosticAttributes;
-  featureAttributes: OptionalComponentDiagnosticAttributes;
+  attributes: PerformanceLocalRenderedComponentAttributes;
+  featureAttributes: PerformanceLocalRenderedComponentAttributes;
 }) {
   const facts = trustFacts(component);
   if (!facts.length) return null;
@@ -1033,12 +1218,14 @@ function PerformanceComponent({
   media,
   index,
   email,
+  destinationForGeneratedPageId,
 }: {
   contact: PerformanceLocalGovernedContact | null;
   component: PageComponentInstance;
   media?: PageComponentInstance;
   index: number;
   email: string;
+  destinationForGeneratedPageId: (generatedPageId: number) => string;
 }) {
   switch (component.component_key) {
     case "content_section":
@@ -1046,7 +1233,12 @@ function PerformanceComponent({
       return <AuthoritySection component={component} media={media} reverse={index % 2 === 1} />;
     case "destination_cards":
     case "related_page_links":
-      return <RelatedCardGrid component={component} />;
+      return (
+        <RelatedCardGrid
+          component={component}
+          destinationForGeneratedPageId={destinationForGeneratedPageId}
+        />
+      );
     case "faq":
       return <FaqAccordion component={component} />;
     case "contact_pathways":
@@ -1202,7 +1394,13 @@ function GovernedMedia({
   );
 }
 
-function RelatedCardGrid({ component }: { component: PageComponentInstance }) {
+function RelatedCardGrid({
+  component,
+  destinationForGeneratedPageId,
+}: {
+  component: PageComponentInstance;
+  destinationForGeneratedPageId: (generatedPageId: number) => string;
+}) {
   const links = asArray(component.resolved_data.links).map(asRecord).filter((link) => cleanText(link.label));
   if (!links.length) return null;
   return (
@@ -1216,7 +1414,7 @@ function RelatedCardGrid({ component }: { component: PageComponentInstance }) {
               <article key={`${positiveInteger(link.target_planned_page_id) ?? cleanText(link.slug)}-${index}`}>
                 <h3>
                   {id ? (
-                    <Link to={`/theme-lab/generated-pages/${id}`} data-canonical-slug={cleanText(link.slug)}>
+                    <Link to={destinationForGeneratedPageId(id)} data-canonical-slug={cleanText(link.slug)}>
                       {cleanText(link.label)}
                     </Link>
                   ) : (
@@ -1283,6 +1481,8 @@ function FinalConversionSection({
   contact,
   component,
   formConfiguration,
+  formSubmission,
+  exposeDiagnostics,
   email,
   onFormFocusRiskChange,
   showForm,
@@ -1292,11 +1492,13 @@ function FinalConversionSection({
   contact: PerformanceLocalGovernedContact | null;
   component: PageComponentInstance;
   formConfiguration: PerformanceLocalEstimateFormConfiguration | null;
+  formSubmission: ResolvedPerformanceLocalFormSubmission | null;
+  exposeDiagnostics: boolean;
   email: string;
   onFormFocusRiskChange: (focused: boolean) => void;
   showForm: boolean;
-  attributes: OptionalComponentDiagnosticAttributes;
-  formAttributes: OptionalComponentDiagnosticAttributes | null;
+  attributes: PerformanceLocalRenderedComponentAttributes;
+  formAttributes: PerformanceLocalRenderedComponentAttributes | null;
 }) {
   const data = component.resolved_data;
   const heading = cleanText(data.heading);
@@ -1317,6 +1519,8 @@ function FinalConversionSection({
           <CompactEstimateForm
             attributes={formAttributes}
             configuration={formConfiguration}
+            submission={formSubmission}
+            exposeDiagnostics={exposeDiagnostics}
             onFocusRiskChange={onFormFocusRiskChange}
           />
         ) : null}
@@ -1328,39 +1532,98 @@ function FinalConversionSection({
 function CompactEstimateForm({
   attributes,
   configuration,
+  submission,
+  exposeDiagnostics,
   onFocusRiskChange,
 }: {
-  attributes: OptionalComponentDiagnosticAttributes;
+  attributes: PerformanceLocalRenderedComponentAttributes;
   configuration: PerformanceLocalEstimateFormConfiguration;
+  submission: ResolvedPerformanceLocalFormSubmission | null;
+  exposeDiagnostics: boolean;
   onFocusRiskChange: (focused: boolean) => void;
 }) {
   const formRef = useRef<HTMLFormElement>(null);
-  function preventSubmission(event: FormEvent<HTMLFormElement>) {
+  const idempotencyKey = useRef<string | null>(null);
+  const [submissionState, setSubmissionState] = useState<
+    "idle" | "submitting" | "success" | "error"
+  >("idle");
+  const [submissionMessage, setSubmissionMessage] = useState("");
+  const canSubmit = Boolean(submission?.canSubmit && submission.submit);
+  const visualDisabled = configuration.visualState === "disabled";
+  const controlsReadOnly = !canSubmit;
+
+  async function handleSubmission(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!canSubmit || !submission?.submit || submissionState === "submitting") return;
+    const key = idempotencyKey.current ?? createFormIdempotencyKey();
+    if (!key) {
+      setSubmissionState("error");
+      setSubmissionMessage("The request could not be sent. Please try again.");
+      return;
+    }
+    idempotencyKey.current = key;
+    const form = event.currentTarget;
+    const values = new FormData(form);
+    const message = formStringValue(values, "message");
+    const payload: PerformanceLocalFormSubmissionPayload = {
+      name: formStringValue(values, "name"),
+      phone: formStringValue(values, "phone"),
+      postal_code: formStringValue(values, "postal-code"),
+      requested_service: formStringValue(values, "requested-service"),
+      message: message.length ? message : null,
+      consent_accepted: configuration.consent?.mode === "explicit"
+        ? values.get("consent-accepted") === "accepted"
+        : null,
+    };
+    setSubmissionState("submitting");
+    setSubmissionMessage("Sending request…");
+    try {
+      const result = await submission.submit(payload, key);
+      if (result.status !== "accepted" || result.code !== "submission_accepted") {
+        throw new Error("Unexpected form gateway result.");
+      }
+      setSubmissionState("success");
+      setSubmissionMessage(safeFormStatusMessage(result.safe_message) || "Request accepted.");
+      form.reset();
+      idempotencyKey.current = null;
+    } catch {
+      setSubmissionState("error");
+      setSubmissionMessage("The request could not be sent. Please try again.");
+    }
   }
-  const disabled = configuration.visualState === "disabled";
+
   const visualState = configuration.visualState ?? "idle";
-  const stateMessage = visualState === "success"
-    ? "Preview success appearance — no request was sent."
-    : visualState === "error"
-      ? "Preview error appearance — review the highlighted fields."
-      : visualState === "disabled"
-        ? "Preview controls are disabled."
-        : "Provider is not configured. Submission is disabled and no data is collected.";
+  const stateMessage = submissionState !== "idle"
+    ? submissionMessage
+    : visualState === "success"
+      ? "Preview success appearance — no request was sent."
+      : visualState === "error"
+        ? "Preview error appearance — review the highlighted fields."
+        : visualState === "disabled"
+          ? "Preview controls are disabled."
+          : canSubmit
+            ? submission?.readiness.provider_state.test_only
+              ? "Synthetic rehearsal gateway ready. Submitted test values are transient and are not retained."
+              : "Submission gateway is ready."
+            : "Provider is not configured. Submission is disabled and no data is collected.";
+
   return (
     <form
       ref={formRef}
       id={performanceLocalFormDomId(configuration.componentConfigurationId)}
       className="performanceLocalEstimateForm"
-      aria-label="Estimate request preview"
-      data-preview-only="true"
-      data-provider-state={configuration.providerState.submissionState}
-      data-provider-configured="false"
-      data-collects-data="false"
-      data-controls-read-only="true"
-      data-visual-state={visualState}
+      aria-label={canSubmit ? "Estimate request" : "Estimate request preview"}
+      aria-busy={submissionState === "submitting"}
+      data-preview-only={canSubmit ? "false" : "true"}
+      data-provider-state={exposeDiagnostics ? configuration.providerState.submissionState : undefined}
+      data-provider-configured={exposeDiagnostics
+        ? submission?.readiness.provider_state.adapter_registered ? "true" : "false"
+        : undefined}
+      data-collects-data={canSubmit ? "true" : "false"}
+      data-controls-read-only={controlsReadOnly ? "true" : "false"}
+      data-visual-state={submissionState === "idle" ? visualState : submissionState}
       autoComplete="off"
-      onSubmit={preventSubmission}
+      onSubmit={handleSubmission}
       onFocusCapture={() => onFocusRiskChange(true)}
       onBlurCapture={() => {
         window.requestAnimationFrame(() => {
@@ -1381,8 +1644,10 @@ function CompactEstimateForm({
           className={field.responsive.desktop === "full" ? "performanceLocalFormWide" : undefined}
           data-field-order={field.order}
           data-field-responsive={`${field.responsive.desktop}:${field.responsive.tablet}:${field.responsive.mobile}`}
-          data-provider-mapping={field.providerMapping}
-          data-validation-contract={`${field.validation.rule}:${field.validation.minimumLength}:${field.validation.maximumLength}`}
+          data-provider-mapping={exposeDiagnostics ? field.providerMapping : undefined}
+          data-validation-contract={exposeDiagnostics
+            ? `${field.validation.rule}:${field.validation.minimumLength}:${field.validation.maximumLength}`
+            : undefined}
         >
           {field.label}
           {field.control === "textarea" ? (
@@ -1392,9 +1657,10 @@ function CompactEstimateForm({
               rows={field.rows ?? 3}
               autoComplete={field.autoComplete ?? "off"}
               maxLength={field.maxLength}
-              readOnly
+              name={canSubmit ? field.key : undefined}
+              readOnly={controlsReadOnly}
               required={field.required}
-              disabled={disabled}
+              disabled={visualDisabled || submissionState === "submitting"}
             />
           ) : (
             <input
@@ -1404,16 +1670,91 @@ function CompactEstimateForm({
               inputMode={field.inputMode}
               autoComplete={field.autoComplete ?? "off"}
               maxLength={field.maxLength}
-              readOnly
+              name={canSubmit ? field.key : undefined}
+              readOnly={controlsReadOnly}
               required={field.required}
-              disabled={disabled}
+              disabled={visualDisabled || submissionState === "submitting"}
             />
           )}
         </label>
       ))}
-      <button type="submit" disabled>{configuration.submitLabel}</button>
+      {canSubmit && configuration.consent?.mode === "explicit" ? (
+        <label className="performanceLocalFormConsent performanceLocalFormWide">
+          <input
+            aria-label={configuration.consent.text ?? "Consent"}
+            name="consent-accepted"
+            type="checkbox"
+            value="accepted"
+            required
+            disabled={submissionState === "submitting"}
+          />
+          <span>{configuration.consent.text}</span>
+          {configuration.consent.privacyPolicyDestination ? (
+            <a href={configuration.consent.privacyPolicyDestination}>Privacy policy</a>
+          ) : null}
+        </label>
+      ) : null}
+      <button type="submit" disabled={!canSubmit || visualDisabled || submissionState === "submitting"}>
+        {submissionState === "submitting" ? "Sending…" : configuration.submitLabel}
+      </button>
+      {exposeDiagnostics && submission?.readiness
+        ? <FormReadinessPanel readiness={submission.readiness} />
+        : null}
     </form>
   );
+}
+
+function FormReadinessPanel({
+  readiness,
+}: {
+  readiness: PerformanceLocalFormReadinessRead;
+}) {
+  return (
+    <aside
+      className="performanceLocalFormReadiness"
+      aria-label="Form submission readiness"
+      data-form-readiness={readiness.status}
+    >
+      <div className="performanceLocalFormReadinessHeading">
+        <strong>Submission readiness</strong>
+        <span>{readiness.status === "ready" ? "Ready" : "Blocked"}</span>
+      </div>
+      <dl>
+        <div><dt>Provider</dt><dd>{readiness.provider_state.adapter_registered ? "Ready" : "Missing"}</dd></div>
+        <div><dt>Privacy / consent</dt><dd>{readiness.privacy.ready ? "Ready" : "Missing"}</dd></div>
+        <div><dt>Retention</dt><dd>{readiness.retention.ready ? "Ready" : "Missing"}</dd></div>
+        <div><dt>Spam protection</dt><dd>{readiness.spam.ready ? "Ready" : "Missing"}</dd></div>
+        <div><dt>Success / failure</dt><dd>{readiness.behavior.ready ? "Ready" : "Missing"}</dd></div>
+        <div><dt>Security / audit</dt><dd>{readiness.security.ready && readiness.audit_identity ? "Ready" : "Missing"}</dd></div>
+      </dl>
+      {readiness.blockers.length ? (
+        <ul>
+          {readiness.blockers.map((blocker) => (
+            <li key={`${blocker.code}:${blocker.field}`}>{blocker.reason}</li>
+          ))}
+        </ul>
+      ) : null}
+    </aside>
+  );
+}
+
+function formStringValue(values: FormData, key: string): string {
+  const value = values.get(key);
+  return typeof value === "string" ? value : "";
+}
+
+function createFormIdempotencyKey(): string | null {
+  if (typeof globalThis.crypto?.getRandomValues !== "function") return null;
+  const bytes = new Uint8Array(24);
+  globalThis.crypto.getRandomValues(bytes);
+  return `atlas-${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function safeFormStatusMessage(value: unknown): string {
+  return typeof value === "string" && value === value.trim() && value.length <= 300 &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+    ? value
+    : "";
 }
 
 function PerformanceFooter({
@@ -1421,11 +1762,13 @@ function PerformanceFooter({
   component,
   navigation,
   email,
+  destinationForGeneratedPageId,
 }: {
   contact: PerformanceLocalGovernedContact | null;
   component: PageComponentInstance;
   navigation?: PageComponentInstance;
   email: string;
+  destinationForGeneratedPageId: (generatedPageId: number) => string;
 }) {
   const data = component.resolved_data;
   const displayName = cleanText(data.company_name) || cleanText(data.display_name);
@@ -1445,7 +1788,13 @@ function PerformanceFooter({
         {!tree.error && tree.nodes.length ? (
           <nav aria-label={cleanText(navigation?.resolved_data.label) || "Footer navigation"}>
             <ul>
-              {tree.nodes.map((node) => <NavigationBranch key={node.navigationItemId} node={node} />)}
+              {tree.nodes.map((node) => (
+                <NavigationBranch
+                  key={node.navigationItemId}
+                  node={node}
+                  destinationForGeneratedPageId={destinationForGeneratedPageId}
+                />
+              ))}
             </ul>
           </nav>
         ) : null}
@@ -1470,7 +1819,7 @@ function StickyMobileActions({
   contact: PerformanceLocalGovernedContact | null;
   estimateDestination: string | null;
   estimateLabel: string;
-  attributes: OptionalComponentDiagnosticAttributes;
+  attributes: PerformanceLocalRenderedComponentAttributes;
 }) {
   if (!contact && !estimateDestination) return null;
   return (
@@ -1627,10 +1976,11 @@ function resolveCampaign(
   pageId: number,
   previewedAt: Date,
   estimateForm: PerformanceLocalEstimateFormConfiguration | null,
+  rendererIdentity: PerformanceLocalRendererIdentity,
 ): {
   campaign: PerformanceLocalCampaign | null;
   error: string | null;
-  attributes: OptionalComponentDiagnosticAttributes | null;
+  attributes: PerformanceLocalRenderedComponentAttributes | null;
 } {
   const resolution = resolveOptionalComponent(
     "campaign_banner",
@@ -1657,7 +2007,10 @@ function resolveCampaign(
   return {
     campaign,
     error: null,
-    attributes: performanceLocalOptionalComponentAttributes("campaign_banner", resolution),
+    attributes: renderedComponentAttributes(
+      performanceLocalOptionalComponentAttributes("campaign_banner", resolution),
+      rendererIdentity,
+    ),
   };
 }
 
@@ -1764,6 +2117,7 @@ function sourceSectionIdentity(component: PageComponentInstance): string {
 
 function validateEstimateFormConfiguration(
   value: PerformanceLocalEstimateFormConfiguration | null | undefined,
+  deliveryMode: PerformanceLocalRendererIdentity["deliveryMode"],
 ): PerformanceLocalEstimateFormConfiguration | null {
   if (
     !value ||
@@ -1773,13 +2127,32 @@ function validateEstimateFormConfiguration(
     !cleanText(value.previewNotice) ||
     !cleanText(value.submitLabel)
   ) return null;
-  if (
+  const providerDisabled =
     value.providerState.submissionState !== "disabled_pending_provider_configuration" ||
-    value.providerState.providerKey !== null ||
+    (value.providerState.providerKey ?? null) !== null ||
     value.providerState.destination !== null ||
+    value.providerState.destinationConfigured === true ||
     value.providerState.canSubmit !== false ||
     value.providerState.collectsData !== false
-  ) return null;
+      ? false
+      : true;
+  const providerConfigured =
+    ["rehearsal_ready", "production_configured"].includes(value.providerState.submissionState) &&
+    value.providerState.destination === null &&
+    (value.providerState.providerKey ?? null) === null &&
+    value.providerState.destinationConfigured === true &&
+    value.providerState.canSubmit === value.providerState.collectsData;
+  if (!providerDisabled && !providerConfigured) return null;
+  if (value.consent) {
+    if (!safePrivacyPolicyDestination(value.consent.privacyPolicyDestination, deliveryMode)) return null;
+    if (value.consent.mode === "explicit") {
+      if (!cleanText(value.consent.text) || !cleanText(value.consent.textVersion)) return null;
+    } else if (
+      value.consent.mode !== "not_required" ||
+      value.consent.text !== null ||
+      value.consent.textVersion !== null
+    ) return null;
+  }
   if (value.visualState && !["idle", "disabled", "error", "success"].includes(value.visualState)) {
     return null;
   }
@@ -1823,6 +2196,99 @@ function validateEstimateFormConfiguration(
     seen.add(field.key);
   }
   return seen.size === expected.size ? value : null;
+}
+
+function validateFormSubmission(
+  value: PerformanceLocalFormSubmission | null | undefined,
+  form: PerformanceLocalEstimateFormConfiguration | null,
+  websiteId: number,
+  deliveryMode: PerformanceLocalRendererIdentity["deliveryMode"],
+): ResolvedPerformanceLocalFormSubmission | null {
+  if (!value || !form) return null;
+  const readiness = value.readiness;
+  if (readiness.component_configuration_id !== form.componentConfigurationId) return null;
+  if (readiness.status === "blocked") {
+    if (readiness.can_submit || value.endpoint !== null || value.submit) return null;
+    return Object.freeze({
+      canSubmit: false,
+      endpoint: null,
+      readiness,
+      submit: undefined,
+    });
+  }
+
+  const expectedEndpoint =
+    `/api/websites/${websiteId}/forms/${form.componentConfigurationId}/submissions`;
+  const consentMatches = readiness.privacy.consent_mode === form.consent?.mode && (
+    readiness.privacy.consent_mode !== "explicit" ||
+    readiness.privacy.consent_text_version === form.consent?.textVersion
+  );
+  const providerModeAllowed = readiness.provider_state.test_only
+    ? deliveryMode === "activation_rehearsal"
+    : deliveryMode === "active";
+  if (
+    readiness.status !== "ready" ||
+    readiness.can_submit !== true ||
+    readiness.blockers.length !== 0 ||
+    !cleanText(readiness.submission_state) ||
+    readiness.provider_state.provider_key !== null ||
+    !readiness.provider_state.destination_configured ||
+    !readiness.provider_state.adapter_registered ||
+    !providerModeAllowed ||
+    !readiness.privacy.ready ||
+    !readiness.privacy.destination_configured ||
+    !consentMatches ||
+    !readiness.retention.ready ||
+    !readiness.spam.ready ||
+    !readiness.behavior.ready ||
+    !readiness.security.ready ||
+    !cleanText(readiness.security.same_origin_policy) ||
+    !cleanText(readiness.security.csrf_policy) ||
+    !safeCsrfToken(readiness.security.csrf_token) ||
+    !positiveInteger(readiness.security.request_size_limit_bytes) ||
+    !cleanText(readiness.security.idempotency_strategy) ||
+    !cleanText(readiness.audit_identity) ||
+    value.endpoint !== expectedEndpoint ||
+    typeof value.submit !== "function"
+  ) return null;
+  return Object.freeze({
+    canSubmit: true,
+    endpoint: value.endpoint,
+    readiness,
+    submit: value.submit,
+  });
+}
+
+function safePrivacyPolicyDestination(
+  value: unknown,
+  deliveryMode: PerformanceLocalRendererIdentity["deliveryMode"],
+): boolean {
+  if (typeof value !== "string" || value !== value.trim() || /[\u0000-\u001f\u007f\\]/.test(value)) {
+    return false;
+  }
+  if (/^\/(?!\/)[^\s\\]*$/.test(value)) {
+    return !value.includes("?") && !value.includes("#");
+  }
+  try {
+    const parsed = new URL(value);
+    const loopbackRehearsal = deliveryMode === "activation_rehearsal" &&
+      parsed.protocol === "http:" &&
+      ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
+    return (parsed.protocol === "https:" || loopbackRehearsal) &&
+      !parsed.username &&
+      !parsed.password &&
+      !parsed.search &&
+      !parsed.hash &&
+      parsed.pathname.startsWith("/") &&
+      Boolean(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function safeCsrfToken(value: unknown): value is string {
+  return typeof value === "string" && value.length >= 16 && value.length <= 512 &&
+    /^[A-Za-z0-9._~+\/-]+$/.test(value);
 }
 
 function validateGovernedContact(
@@ -1921,10 +2387,11 @@ function governedOptionalState(
   configuration: Readonly<Record<string, unknown>>,
   viewport: "desktop" | "tablet" | "mobile" = "desktop",
   pageId?: number | null,
+  rendererIdentity: PerformanceLocalRendererIdentity = THEME_LAB_RENDERER_IDENTITY,
 ): {
   configuration: PerformanceLocalOptionalConfiguration;
   resolution: OptionalComponentResolution;
-  attributes: OptionalComponentDiagnosticAttributes | null;
+  attributes: PerformanceLocalRenderedComponentAttributes | null;
 } {
   const resolvedConfiguration = performanceLocalOptionalConfiguration(
     key,
@@ -1944,9 +2411,27 @@ function governedOptionalState(
     configuration: resolvedConfiguration,
     resolution,
     attributes: resolution.visible
-      ? performanceLocalOptionalComponentAttributes(key, resolution)
+      ? renderedComponentAttributes(
+          performanceLocalOptionalComponentAttributes(key, resolution),
+          rendererIdentity,
+        )
       : null,
   };
+}
+
+function renderedComponentAttributes(
+  attributes: OptionalComponentDiagnosticAttributes,
+  rendererIdentity: PerformanceLocalRendererIdentity,
+): PerformanceLocalRenderedComponentAttributes {
+  // These attributes are intentionally diagnostic-only. Canonical delivery
+  // exposes its V3 identity on the renderer root, never Theme Lab internals on
+  // each public component.
+  if (!rendererIdentity.exposeDiagnostics) return Object.freeze({});
+  return Object.freeze({
+    ...attributes,
+    "data-component-version": rendererIdentity.componentVersion,
+    "data-component-theme-compatibility": rendererIdentity.themeCompatibility,
+  });
 }
 
 export default PerformanceLocalRenderer;

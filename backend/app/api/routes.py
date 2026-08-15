@@ -14,6 +14,8 @@ from app.api.website_context_routes import router as website_context_router
 from app.api.site_plan_routes import router as site_plan_router
 from app.api.theme_routes import router as theme_router
 from app.api.theme_family_routes import router as theme_family_router
+from app.api.form_submission_routes import router as form_submission_router
+from app.api.theme_delivery_routes import router as theme_delivery_router
 from app.api.router_factory import build_crud_router
 from app.models import Brand, Business, City, County, GeneratedPage, ImageMetadata, KnowledgeBlock, Service, Setting, Website, WebsiteIdentity
 from app.schemas.entities import (
@@ -68,6 +70,8 @@ api_router.include_router(website_context_router)
 api_router.include_router(site_plan_router)
 api_router.include_router(theme_router)
 api_router.include_router(theme_family_router)
+api_router.include_router(form_submission_router)
+api_router.include_router(theme_delivery_router)
 
 api_router.include_router(
     build_crud_router(

@@ -50,6 +50,9 @@ const ThemeLabPage = lazy(() => import("./pages/ThemeLabPage"));
 const PerformanceLocalComponentGalleryPage = lazy(
   () => import("./pages/PerformanceLocalComponentGalleryPage"),
 );
+const PerformanceLocalDeliveryPage = lazy(
+  () => import("./pages/PerformanceLocalDeliveryPage"),
+);
 
 const navItems = [
   { to: "/", label: "Dashboard", icon: Home },
@@ -165,6 +168,30 @@ function App() {
     <Routes>
       <Route path="/generated-pages/:id/preview" element={<GeneratedPagePreview />} />
       <Route
+        path="/delivery/generated-pages/:id"
+        element={
+          <DeliveryRoute>
+            <PerformanceLocalDeliveryPage requestedMode="active" />
+          </DeliveryRoute>
+        }
+      />
+      <Route
+        path="/delivery/local-preview/configurations/:configurationId/generated-pages/:id"
+        element={
+          <DeliveryRoute>
+            <PerformanceLocalDeliveryPage requestedMode="inactive_draft_preview" />
+          </DeliveryRoute>
+        }
+      />
+      <Route
+        path="/delivery/rehearsal/configurations/:configurationId/generated-pages/:id"
+        element={
+          <DeliveryRoute>
+            <PerformanceLocalDeliveryPage requestedMode="activation_rehearsal" />
+          </DeliveryRoute>
+        }
+      />
+      <Route
         path="/theme-lab/generated-pages/:id"
         element={<ThemeLabRoute><ThemeLabPage /></ThemeLabRoute>}
       />
@@ -174,6 +201,14 @@ function App() {
       />
       <Route path="*" element={<DashboardShell />} />
     </Routes>
+  );
+}
+
+function DeliveryRoute({ children }: { children: ReactNode }) {
+  return (
+    <Suspense fallback={<main className="performanceLocalDeliveryState"><h1>Loading Performance Local delivery…</h1></main>}>
+      {children}
+    </Suspense>
   );
 }
 

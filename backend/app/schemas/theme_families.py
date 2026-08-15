@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -67,6 +69,14 @@ _SECRET_KEY_MARKERS = (
     "credential",
     "token",
 )
+_ALLOWED_SECRET_REFERENCE_KEYS = frozenset({"provider_secret_reference"})
+_SECRET_REFERENCE_PATTERN = re.compile(r"^secret-ref://[a-z0-9][a-z0-9/_-]{2,239}$")
+_DESTINATION_REFERENCE_PATTERN = re.compile(
+    r"^destination-ref://[a-z0-9][a-z0-9/_-]{2,239}$"
+)
+_SPAM_REFERENCE_PATTERN = re.compile(
+    r"^spam-ref://[a-z0-9][a-z0-9/_-]{2,219}$"
+)
 
 
 def _clean_text(value: str, label: str) -> str:
@@ -95,6 +105,15 @@ def reject_secret_configuration(value: Any, *, path: str = "configuration_payloa
                 str(key).strip(),
             )
             normalized = re.sub(r"[^A-Za-z0-9]+", "_", camel_separated).lower().strip("_")
+            if normalized in _ALLOWED_SECRET_REFERENCE_KEYS:
+                if nested is not None and (
+                    not isinstance(nested, str)
+                    or not _SECRET_REFERENCE_PATTERN.fullmatch(nested)
+                ):
+                    raise ValueError(
+                        f"{path}.{key} must be an opaque secret-manager reference, never a secret value"
+                    )
+                continue
             if any(marker in normalized for marker in _SECRET_KEY_MARKERS):
                 raise ValueError(f"{path}.{key} may not contain credentials or secrets")
             reject_secret_configuration(nested, path=f"{path}.{key}")
@@ -123,7 +142,9 @@ class ThemeFamilyComponentContract(BaseModel):
     placement: str = Field(min_length=1, max_length=120)
     variant: str = Field(min_length=1, max_length=120)
     responsive_visibility: ResponsiveVisibility
-    theme_compatibility: tuple[Literal["performance-local@2"]]
+    theme_compatibility: tuple[
+        Literal["performance-local@2", "performance-local@3"], ...
+    ]
     content_source: Literal[
         "governed_semantic_composition",
         "approved_runtime_configuration",
@@ -195,6 +216,31 @@ def _load_performance_local_v2_component_contracts() -> tuple[dict[str, Any], ..
     return contracts
 
 
+def _load_performance_local_v3_component_contracts() -> tuple[dict[str, Any], ...]:
+    contract_path = Path(__file__).with_name("performance_local_v3_contract.json")
+    raw = json.loads(contract_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise RuntimeError("Performance Local v3 canonical contract must be a JSON array.")
+    contracts = tuple(
+        ThemeFamilyComponentContract.model_validate(item).model_dump(mode="json")
+        for item in raw
+    )
+    expected_keys = tuple(
+        item["component_key"] for item in PERFORMANCE_LOCAL_V2_COMPONENT_CONTRACTS
+    )
+    observed_keys = tuple(item["component_key"] for item in contracts)
+    if (
+        observed_keys != expected_keys
+        or list(contracts) != raw
+        or any(item["contract_version"] != 3 for item in contracts)
+        or any(item["theme_compatibility"] != ["performance-local@3"] for item in contracts)
+    ):
+        raise RuntimeError(
+            "Performance Local v3 canonical contract is incomplete or non-canonical."
+        )
+    return contracts
+
+
 # Single serialized authority used for durable registration/fingerprinting and
 # exact frontend parity verification. Runtime camelCase configuration remains
 # an adapter concern and is not persisted as the durable component contract.
@@ -202,6 +248,17 @@ PERFORMANCE_LOCAL_V2_SOURCE_COMMIT = "1b766664ea99d923195bbf98e8a1e4d833b50084"
 PERFORMANCE_LOCAL_V2_COMPONENT_CONTRACTS = (
     _load_performance_local_v2_component_contracts()
 )
+PERFORMANCE_LOCAL_V3_COMPONENT_CONTRACTS = (
+    _load_performance_local_v3_component_contracts()
+)
+PERFORMANCE_LOCAL_V3_CONTRACT_FINGERPRINT = hashlib.sha256(
+    json.dumps(
+        PERFORMANCE_LOCAL_V3_COMPONENT_CONTRACTS,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+).hexdigest()
 
 class ThemeFamilyCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -471,17 +528,278 @@ class CompactEstimateFormConfiguration(BaseModel):
         return self
 
 
+FormConsentMode = Literal["not_required", "explicit"]
+FormSpamStrategy = Literal[
+    "honeypot",
+    "rate_limit_service",
+    "proof_of_work",
+    "captcha_provider",
+    "synthetic_test",
+]
+
+
+class FormProviderConfigurationV3(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_key: str | None = Field(default=None, max_length=120)
+    destination: str | None = Field(default=None, max_length=1000)
+    provider_secret_reference: str | None = Field(default=None, max_length=260)
+    test_only: bool = False
+
+    @field_validator("provider_key")
+    @classmethod
+    def normalize_provider_key(cls, value: str | None) -> str | None:
+        return _validate_key(value, "Form provider key") if value is not None else None
+
+    @field_validator("destination")
+    @classmethod
+    def validate_destination_reference(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = _clean_text(value, "Form provider destination")
+        if cleaned != "memory://discard" and not _DESTINATION_REFERENCE_PATTERN.fullmatch(
+            cleaned
+        ):
+            raise ValueError(
+                "Provider destination must be a credential-free opaque destination reference"
+            )
+        return cleaned
+
+    @field_validator("provider_secret_reference")
+    @classmethod
+    def validate_secret_reference(cls, value: str | None) -> str | None:
+        if value is not None and not _SECRET_REFERENCE_PATTERN.fullmatch(value):
+            raise ValueError("Provider secret identity must be an opaque secret-manager reference")
+        return value
+
+    @model_validator(mode="after")
+    def contain_test_destination(self) -> "FormProviderConfigurationV3":
+        if self.test_only and self.destination not in {None, "memory://discard"}:
+            raise ValueError("A test-only form provider may target only the discard destination")
+        if not self.test_only and self.destination == "memory://discard":
+            raise ValueError("The synthetic discard destination cannot enter production state")
+        return self
+
+
+class FormPrivacyConfigurationV3(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    policy_destination: str | None = Field(default=None, max_length=1000)
+    consent_mode: FormConsentMode | None = None
+    consent_text: str | None = Field(default=None, max_length=2000)
+    consent_text_version: str | None = Field(default=None, max_length=160)
+
+    @field_validator("consent_text", "consent_text_version")
+    @classmethod
+    def normalize_optional_text(cls, value: str | None) -> str | None:
+        return _clean_text(value, "Form privacy field") if value is not None else None
+
+    @field_validator("policy_destination")
+    @classmethod
+    def validate_policy_destination(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = _clean_text(value, "Privacy-policy destination")
+        if "\\" in cleaned:
+            raise ValueError("Privacy-policy destination contains an unsafe path separator")
+        if cleaned.startswith("/") and not cleaned.startswith("//"):
+            if "?" in cleaned or "#" in cleaned:
+                raise ValueError("Privacy-policy destination cannot contain a query or fragment")
+            return cleaned
+        try:
+            parsed = urlsplit(cleaned)
+            hostname = parsed.hostname
+            port = parsed.port
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Privacy-policy destination is malformed") from exc
+        loopback_http = parsed.scheme == "http" and hostname in {
+            "localhost",
+            "127.0.0.1",
+            "::1",
+        }
+        if (
+            not (parsed.scheme == "https" or loopback_http)
+            or hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or not parsed.path.startswith("/")
+            or port is not None and not 1 <= port <= 65535
+        ):
+            raise ValueError("Privacy-policy destination must be a safe approved URL or path")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_consent(self) -> "FormPrivacyConfigurationV3":
+        if self.consent_mode == "explicit" and (
+            self.consent_text is None or self.consent_text_version is None
+        ):
+            raise ValueError("Explicit consent requires approved text and version")
+        if self.consent_mode != "explicit" and (
+            self.consent_text is not None or self.consent_text_version is not None
+        ):
+            raise ValueError("Consent text may exist only for explicit consent")
+        return self
+
+
+class FormRetentionConfigurationV3(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    duration: str | None = Field(default=None, max_length=240)
+    deletion_expiration_behavior: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("duration", "deletion_expiration_behavior")
+    @classmethod
+    def normalize_optional_text(cls, value: str | None) -> str | None:
+        return _clean_text(value, "Form retention field") if value is not None else None
+
+
+class FormSpamConfigurationV3(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: FormSpamStrategy | None = None
+    configuration_reference: str | None = Field(default=None, max_length=240)
+
+    @field_validator("configuration_reference")
+    @classmethod
+    def normalize_reference(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = _clean_text(value, "Spam configuration reference")
+        if cleaned != "synthetic-noop" and not _SPAM_REFERENCE_PATTERN.fullmatch(
+            cleaned
+        ):
+            raise ValueError(
+                "Spam configuration identity must be a credential-free opaque reference"
+            )
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_strategy_reference(self) -> "FormSpamConfigurationV3":
+        if (self.strategy is None) != (self.configuration_reference is None):
+            raise ValueError("Spam strategy and configuration reference must be configured together")
+        if self.strategy == "synthetic_test" and self.configuration_reference != "synthetic-noop":
+            raise ValueError("The synthetic spam strategy requires its exact no-op reference")
+        if self.strategy not in {None, "synthetic_test"} and self.configuration_reference == "synthetic-noop":
+            raise ValueError("The synthetic no-op reference cannot enter production state")
+        return self
+
+
+class FormSecurityConfigurationV3(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    same_origin_policy: Literal["exact_origin"] | None = None
+    csrf_policy: Literal["origin_and_token"] | None = None
+    request_size_limit_bytes: int | None = Field(default=None, ge=1024, le=65536)
+    idempotency_strategy: Literal["required_header"] | None = None
+
+
+class CompactEstimateFormConfigurationV3(BaseModel):
+    """Provider-neutral V3 configuration; it never contains submitted values."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    submission_state: Literal[
+        "disabled_pending_provider_configuration",
+        "rehearsal_ready",
+        "production_configured",
+    ]
+    fields: list[CompactEstimateFormField] = Field(min_length=5, max_length=5)
+    submit_label: str = Field(min_length=1, max_length=120)
+    preview_notice: str = Field(min_length=1, max_length=500)
+    provider: FormProviderConfigurationV3
+    privacy: FormPrivacyConfigurationV3
+    retention: FormRetentionConfigurationV3
+    spam: FormSpamConfigurationV3
+    success_behavior: str | None = Field(default=None, max_length=1000)
+    failure_behavior: str | None = Field(default=None, max_length=1000)
+    security: FormSecurityConfigurationV3
+    audit_identity: str | None = Field(default=None, max_length=160)
+
+    @field_validator(
+        "submit_label",
+        "preview_notice",
+        "success_behavior",
+        "failure_behavior",
+        "audit_identity",
+    )
+    @classmethod
+    def normalize_text(cls, value: str | None) -> str | None:
+        return _clean_text(value, "V3 estimate form field") if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_exact_fields_and_state(self) -> "CompactEstimateFormConfigurationV3":
+        expected = [
+            ("name", "Name", True, "input", "text", 1),
+            ("phone", "Phone", True, "input", "tel", 2),
+            ("postal-code", "ZIP code", True, "input", "text", 3),
+            ("requested-service", "Requested service", True, "input", "text", 4),
+            ("message", "Optional message", False, "textarea", "text", 5),
+        ]
+        observed = [
+            (
+                item.field_key,
+                item.label,
+                item.required,
+                item.control,
+                item.input_type,
+                item.order,
+            )
+            for item in self.fields
+        ]
+        if observed != expected:
+            raise ValueError("V3 compact estimate form must preserve the exact five-field contract")
+        if any(item.accessibility_label != item.label for item in self.fields):
+            raise ValueError("Every V3 estimate field requires its exact accessible label")
+        if len({item.provider_mapping for item in self.fields}) != len(self.fields):
+            raise ValueError("V3 provider-neutral field mappings must be unique")
+
+        governed_values = (
+            self.provider.provider_key,
+            self.provider.destination,
+            self.provider.provider_secret_reference,
+            self.privacy.policy_destination,
+            self.privacy.consent_mode,
+            self.retention.duration,
+            self.retention.deletion_expiration_behavior,
+            self.spam.strategy,
+            self.success_behavior,
+            self.failure_behavior,
+            self.security.same_origin_policy,
+            self.security.csrf_policy,
+            self.security.request_size_limit_bytes,
+            self.security.idempotency_strategy,
+            self.audit_identity,
+        )
+        if self.submission_state == "disabled_pending_provider_configuration":
+            if any(value is not None for value in governed_values) or self.provider.test_only:
+                raise ValueError("A disabled V3 form cannot contain delivery or readiness values")
+            return self
+
+        if any(value is None for value in governed_values):
+            raise ValueError("A configured V3 form requires every delivery and readiness value")
+        if self.submission_state == "rehearsal_ready":
+            if not self.provider.test_only or self.spam.strategy != "synthetic_test":
+                raise ValueError("Rehearsal-ready forms require the contained synthetic provider strategy")
+        elif self.provider.test_only or self.spam.strategy == "synthetic_test":
+            raise ValueError("Synthetic provider configuration cannot enter production state")
+        return self
+
+
 ComponentConfigurationPayload = (
     EvergreenConversionBannerConfiguration
     | TimeBoundCampaignConfiguration
     | StickyCallEstimateConfiguration
     | CompactEstimateFormConfiguration
+    | CompactEstimateFormConfigurationV3
 )
 
 
 def validate_component_payload(
     component_key: str,
     payload: dict[str, Any],
+    component_contract_version: int = 2,
 ) -> dict[str, Any]:
     reject_secret_configuration(payload)
     model: type[BaseModel]
@@ -496,7 +814,11 @@ def validate_component_payload(
     elif component_key == "sticky_mobile_action_bar":
         model = StickyCallEstimateConfiguration
     elif component_key == "compact_estimate_form":
-        model = CompactEstimateFormConfiguration
+        model = (
+            CompactEstimateFormConfigurationV3
+            if component_contract_version == 3
+            else CompactEstimateFormConfiguration
+        )
     else:
         raise ValueError("This milestone does not authorize an untyped component configuration")
     return model.model_validate(payload).model_dump(mode="json")
@@ -576,6 +898,7 @@ class WebsiteThemeComponentConfigurationCreate(BaseModel):
         self.configuration_payload = validate_component_payload(
             self.component_key,
             self.configuration_payload,
+            self.component_contract_version,
         )
         validate_component_schedule(
             self.component_key,
@@ -613,6 +936,19 @@ class WebsiteThemeComponentConfigurationRevisionCreate(BaseModel):
     @classmethod
     def normalize_text(cls, value: str) -> str:
         return _clean_text(value, "Component revision field")
+
+
+class ConversionComponentGraphRevisionCreate(BaseModel):
+    """One atomic form/banner/sticky revision with no invalid intermediate graph."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    form_component_configuration_id: int = Field(ge=1)
+    banner_component_configuration_id: int = Field(ge=1)
+    sticky_component_configuration_id: int = Field(ge=1)
+    form_revision: WebsiteThemeComponentConfigurationRevisionCreate
+    banner_revision: WebsiteThemeComponentConfigurationRevisionCreate
+    sticky_revision: WebsiteThemeComponentConfigurationRevisionCreate
 
 
 class ThemeDraftWebsiteConfigurationSpec(BaseModel):
@@ -688,6 +1024,7 @@ class ThemeDraftBundleComponentSpec(BaseModel):
         self.configuration_payload = validate_component_payload(
             self.component_key,
             self.configuration_payload,
+            self.component_contract_version,
         )
         validate_component_schedule(
             self.component_key,
@@ -827,6 +1164,14 @@ class WebsiteThemeComponentConfigurationRead(BaseModel):
     integrity_fingerprint: str
     created_at: datetime
     updated_at: datetime
+
+
+class ConversionComponentGraphRevisionRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    form: WebsiteThemeComponentConfigurationRead
+    banner: WebsiteThemeComponentConfigurationRead
+    sticky: WebsiteThemeComponentConfigurationRead
 
 
 class ThemeConfigurationAuditRead(BaseModel):
@@ -992,6 +1337,19 @@ class ThemeConfigurationExportEligibilityRead(BaseModel):
     audit_snapshot_hashes: list[str]
 
 
+class PerformanceLocalV3ExportEligibilityRead(
+    ThemeConfigurationExportEligibilityRead
+):
+    model_config = ConfigDict(extra="forbid")
+
+    activation_audit_identity: list[str]
+    banner_intent: str | None
+    sticky_action_identity: dict[str, Any] | None
+    form_state: str
+    provider_state: dict[str, Any]
+    privacy_consent_readiness: dict[str, Any]
+
+
 class ThemeActivationReadinessItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1031,6 +1389,312 @@ class ThemeDraftPreviewRead(BaseModel):
     activation_status: Literal["blocked"] = "blocked"
     publication_status: Literal["blocked"] = "blocked"
     deployment_status: Literal["blocked"] = "blocked"
+
+
+class FormReadinessItemRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    field: str
+    reason: str
+
+
+class FormProviderReadinessStateRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_key: str | None
+    destination_configured: bool
+    adapter_registered: bool
+    test_only: bool
+
+
+class FormPrivacyReadinessStateRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    destination_configured: bool
+    consent_mode: FormConsentMode | None
+    consent_text_version: str | None
+    ready: bool
+
+
+class FormRetentionReadinessStateRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    duration_configured: bool
+    deletion_behavior_configured: bool
+    ready: bool
+
+
+class FormSpamReadinessStateRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: FormSpamStrategy | None
+    ready: bool
+
+
+class FormBehaviorReadinessStateRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    success_configured: bool
+    failure_configured: bool
+    ready: bool
+
+
+class FormSecurityReadinessStateRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    secret_reference_configured: bool
+    same_origin_policy: str | None
+    csrf_policy: str | None
+    csrf_token: str | None
+    request_size_limit_bytes: int | None
+    idempotency_strategy: str | None
+    ready: bool
+
+
+class PerformanceLocalFormReadinessRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["blocked", "ready"]
+    can_submit: bool
+    submission_state: str
+    component_configuration_id: int | None
+    provider_state: FormProviderReadinessStateRead
+    privacy: FormPrivacyReadinessStateRead
+    retention: FormRetentionReadinessStateRead
+    spam: FormSpamReadinessStateRead
+    behavior: FormBehaviorReadinessStateRead
+    security: FormSecurityReadinessStateRead
+    audit_identity: str | None
+    blockers: list[FormReadinessItemRead]
+
+
+class PerformanceLocalFormSubmissionInput(BaseModel):
+    """The normalized public JSON shape; routes still parse the raw Request manually."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    phone: str
+    postal_code: str
+    requested_service: str
+    message: str | None = None
+    consent_accepted: bool | None = None
+
+
+class PerformanceLocalFormSubmissionRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["accepted"] = "accepted"
+    code: Literal["submission_accepted"] = "submission_accepted"
+    safe_message: str
+    provider_reference: str
+
+
+class ThemeDeliveryExportEligibilityRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    eligible: bool
+    mode: Literal["public", "internal_rehearsal"]
+    identity: dict[str, Any] | None
+    blockers: list[FormReadinessItemRead]
+
+
+class ThemeDeliveryRendererResultRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ready", "blocked"]
+    result_code: str
+    evaluated_page_id: int
+
+
+class ThemeDeliveryBlockerRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    category: Literal[
+        "theme",
+        "configuration",
+        "component",
+        "media",
+        "qa",
+        "form",
+        "privacy",
+        "export",
+        "publication",
+    ]
+    reason: str
+
+
+class PerformanceLocalDeliveryRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    renderer_contract: Literal["performance-local-delivery@1"] = (
+        "performance-local-delivery@1"
+    )
+    mode: Literal["active", "inactive_draft_preview", "activation_rehearsal"]
+    non_active_label: Literal[
+        "DRAFT PREVIEW — NOT ACTIVE",
+        "ACTIVATION REHEARSAL — DISPOSABLE",
+    ] | None
+    page: dict[str, Any]
+    composition: dict[str, Any]
+    theme_family: ThemeFamilyRead
+    theme_version: ThemeFamilyVersionRead
+    website_configuration: WebsiteThemeConfigurationRead
+    components: list[WebsiteThemeComponentConfigurationRead]
+    audit_history: list[ThemeConfigurationAuditRead]
+    governed_actions: GovernedThemeActionsRead
+    form_readiness: PerformanceLocalFormReadinessRead
+    export_eligibility: ThemeDeliveryExportEligibilityRead
+    renderer_result: ThemeDeliveryRendererResultRead
+    blockers: list[ThemeDeliveryBlockerRead]
+
+
+class ThemeActivationMutationRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sequence: int
+    operation: str
+    target_type: str
+    target_id: int | None
+    expected_before: str | None
+    expected_after: str | None
+
+
+class ThemeActivationComponentRevisionRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    component_configuration_id: int
+    component_instance_key: str
+    component_key: str
+    revision: int
+    integrity_fingerprint: str
+    destination_component_configuration_id: int | None
+    overrides_component_configuration_id: int | None
+    planned_page_id: int | None
+
+
+class ThemeActivationPlanRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    website_id: int
+    current_theme_id: int | None
+    current_selection_id: int | None
+    target_theme_family_id: int
+    target_theme_family_version_id: int
+    target_configuration_id: int
+    component_configuration_ids: list[int]
+    component_revision_graph: list[ThemeActivationComponentRevisionRead]
+    affected_composition_ids: list[int]
+    expected_qa_invalidation_count: int
+    expected_refresh_count: int
+    expected_export_state: Literal["blocked", "internal_rehearsal_only"]
+    form_blockers: list[FormReadinessItemRead]
+    privacy_blockers: list[FormReadinessItemRead]
+    publication_blockers: list[FormReadinessItemRead]
+    rollback_theme_id: int | None
+    rollback_selection_id: int | None
+    backup_requirements: list[str]
+    mutation_ledger: list[ThemeActivationMutationRead]
+    audit_events: list[str]
+    write_count: Literal[0] = 0
+
+
+class ThemeActivationRehearsalCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_configuration_fingerprint: str
+    expected_current_selection_id: int = Field(ge=1)
+    actor: str = Field(min_length=1, max_length=160)
+    confirmation: Literal["DISPOSABLE PERFORMANCE LOCAL V3 REHEARSAL"]
+
+    @field_validator("expected_configuration_fingerprint")
+    @classmethod
+    def validate_expected_fingerprint(cls, value: str) -> str:
+        return validate_fingerprint(value, "Expected rehearsal configuration fingerprint")
+
+    @field_validator("actor")
+    @classmethod
+    def normalize_actor(cls, value: str) -> str:
+        return _clean_text(value, "Rehearsal actor")
+
+
+class ThemeActivationRehearsalRollbackCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_configuration_fingerprint: str
+    expected_prior_selection_id: int = Field(ge=1)
+    expected_rehearsal_theme_id: int = Field(ge=1)
+    expected_rehearsal_selection_id: int = Field(ge=1)
+    actor: str = Field(min_length=1, max_length=160)
+    confirmation: Literal["ROLL BACK DISPOSABLE PERFORMANCE LOCAL V3 REHEARSAL"]
+
+    @field_validator("expected_configuration_fingerprint")
+    @classmethod
+    def validate_expected_fingerprint(cls, value: str) -> str:
+        return validate_fingerprint(value, "Expected rehearsal configuration fingerprint")
+
+    @field_validator("actor")
+    @classmethod
+    def normalize_actor(cls, value: str) -> str:
+        return _clean_text(value, "Rehearsal rollback actor")
+
+
+class ThemeActivationRehearsalRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["activated", "rolled_back"]
+    website_id: int
+    configuration_id: int
+    prior_theme_id: int
+    prior_selection_id: int
+    rehearsal_theme_id: int
+    rehearsal_selection_id: int
+    active_selection_count: int
+    v3_active_selection_count: int
+    mutation_ledger: list[ThemeActivationMutationRead]
+    audit_event_types: list[str]
+
+
+class PerformanceLocalFullSitePageRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    generated_page_id: int
+    planned_page_id: int
+    page_type: str
+    theme_family_id: int
+    theme_family_key: str
+    theme_version_id: int
+    theme_version: int
+    configuration_id: int
+    component_graph_identity: str
+    composition_id: int
+    composition_version: int
+    composition_source_hash: str
+    media_reference_ids: list[int]
+    wordpress_media_reference_ids: list[int]
+    local_only_media_reference_ids: list[int]
+    media_fallback_used: bool
+    scope_integrity: Literal["exact", "blocked"] = "exact"
+    required_media_state: str
+    form_state: str
+    banner_state: str
+    sticky_action_state: str
+    renderer_result: str
+    export_eligible: bool
+    qa_readiness_result: str
+    blockers: list[str]
+
+
+class PerformanceLocalFullSiteAuditRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    website_id: int
+    evaluated_page_count: int
+    ready_count: int
+    blocked_count: int
+    pages: list[PerformanceLocalFullSitePageRead]
 
 
 def validate_fingerprint(value: str, label: str) -> str:

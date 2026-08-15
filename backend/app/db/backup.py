@@ -5654,6 +5654,7 @@ def _validate_theme_configuration_graph(
         CompactEstimateFormConfiguration,
         PERFORMANCE_LOCAL_V2_COMPONENT_CONTRACTS,
         PERFORMANCE_LOCAL_V2_SOURCE_COMMIT,
+        PERFORMANCE_LOCAL_V3_COMPONENT_CONTRACTS,
         ThemeConfigurationAuditRead,
         ThemeFamilyCreate,
         ThemeFamilyRead,
@@ -5779,6 +5780,14 @@ def _validate_theme_configuration_graph(
                 raise BackupValidationError(
                     "Performance Local v2 backup source commit or contract is not canonical."
                 )
+            if (
+                family.get("family_key") == "performance-local"
+                and record.get("version") == 3
+                and contracts != list(PERFORMANCE_LOCAL_V3_COMPONENT_CONTRACTS)
+            ):
+                raise BackupValidationError(
+                    "Performance Local v3 backup contract is not canonical."
+                )
             compatibility = _canonical_json_hash(
                 {
                     "family_key": family.get("family_key"),
@@ -5829,6 +5838,14 @@ def _validate_theme_configuration_graph(
                 )
             compatibility_identities.add(compatibility)
             predecessor_id = record.get("supersedes_theme_family_version_id")
+            if (
+                family.get("family_key") == "performance-local"
+                and record.get("version") == 3
+                and predecessor_id is None
+            ):
+                raise BackupValidationError(
+                    "Performance Local v3 backup requires its exact v2 predecessor."
+                )
             if predecessor_id is not None:
                 if predecessor_id in family_version_predecessors:
                     raise BackupValidationError(
@@ -5845,6 +5862,14 @@ def _validate_theme_configuration_graph(
                 ):
                     raise BackupValidationError(
                         "Theme Family Version lineage is inconsistent."
+                    )
+                if (
+                    family.get("family_key") == "performance-local"
+                    and record.get("version") == 3
+                    and predecessor.get("version") != 2
+                ):
+                    raise BackupValidationError(
+                        "Performance Local v3 backup must supersede its exact v2 predecessor."
                     )
                 _require_backup_timestamp_order(
                     predecessor.get("updated_at"),
@@ -6143,6 +6168,7 @@ def _validate_theme_configuration_graph(
             normalized_payload = validate_component_payload(
                 record.get("component_key"),
                 record.get("configuration_payload"),
+                record.get("component_contract_version"),
             )
             if normalized_payload != record.get("configuration_payload"):
                 raise BackupValidationError(
@@ -6216,7 +6242,10 @@ def _validate_theme_configuration_graph(
                 raise BackupValidationError(
                     "Theme campaign approval identity does not match."
                 )
-            if record.get("component_key") == "compact_estimate_form":
+            if (
+                record.get("component_key") == "compact_estimate_form"
+                and record.get("component_contract_version") == 2
+            ):
                 validate_provider_disabled_form(
                     CompactEstimateFormConfiguration.model_validate(
                         normalized_payload

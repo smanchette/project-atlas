@@ -1,0 +1,725 @@
+[
+  {
+    "component_key": "site_header",
+    "contract_version": 3,
+    "optional": false,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "header",
+    "variant": "compact_sticky",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Compact governed site header"
+  },
+  {
+    "component_key": "desktop_dropdown_navigation",
+    "contract_version": 3,
+    "optional": false,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "header_navigation",
+    "variant": "intentional_dropdown",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": false,
+      "mobile": false
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Collapsed desktop navigation groups"
+  },
+  {
+    "component_key": "mobile_navigation_drawer",
+    "contract_version": 3,
+    "optional": false,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "header_navigation",
+    "variant": "modal_drawer",
+    "responsive_visibility": {
+      "desktop": false,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Collapsed mobile navigation drawer"
+  },
+  {
+    "component_key": "campaign_banner",
+    "contract_version": 3,
+    "optional": true,
+    "default_enabled": false,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "before_header",
+    "variant": "single_action_safe_strip",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "approved_runtime_configuration",
+    "required_configuration": [
+      "enabled",
+      "website_id",
+      "theme_compatibility",
+      "placement",
+      "variant",
+      "responsive_visibility",
+      "content_source",
+      "accessibility_label",
+      "intent",
+      "message",
+      "cta_label",
+      "cta_destination",
+      "approval_identity"
+    ],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Approved evergreen or time-bounded single-action conversion banner"
+  },
+  {
+    "component_key": "hero_conversion_section",
+    "contract_version": 3,
+    "optional": false,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "main_start",
+    "variant": "visual_conversion",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Governed visual conversion hero"
+  },
+  {
+    "component_key": "trust_proof_strip",
+    "contract_version": 3,
+    "optional": true,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "after_hero",
+    "variant": "approved_facts_only",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [
+      "enabled",
+      "website_id",
+      "theme_compatibility",
+      "placement",
+      "variant",
+      "responsive_visibility",
+      "content_source",
+      "accessibility_label",
+      "source_identity",
+      "approval_identity"
+    ],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Approved credential proof"
+  },
+  {
+    "component_key": "service_or_related_card_grid",
+    "contract_version": 3,
+    "optional": false,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "main",
+    "variant": "responsive_cards",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Governed related destinations"
+  },
+  {
+    "component_key": "split_media_text_section",
+    "contract_version": 3,
+    "optional": false,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "main",
+    "variant": "alternating_contain",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Exact-target media and approved copy"
+  },
+  {
+    "component_key": "visual_cta_band",
+    "contract_version": 3,
+    "optional": true,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "before_footer",
+    "variant": "high_contrast",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [
+      "enabled",
+      "website_id",
+      "theme_compatibility",
+      "placement",
+      "variant",
+      "responsive_visibility",
+      "content_source",
+      "accessibility_label",
+      "source_identity",
+      "cta_label",
+      "cta_destination"
+    ],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Governed final conversion section"
+  },
+  {
+    "component_key": "compact_estimate_form",
+    "contract_version": 3,
+    "optional": true,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "visual_cta_band",
+    "variant": "provider_independent_gateway",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "approved_runtime_configuration",
+    "required_configuration": [
+      "enabled",
+      "website_id",
+      "theme_compatibility",
+      "placement",
+      "variant",
+      "responsive_visibility",
+      "content_source",
+      "accessibility_label",
+      "submission_state",
+      "fields",
+      "provider",
+      "privacy",
+      "retention",
+      "spam",
+      "success_behavior",
+      "failure_behavior",
+      "security",
+      "audit_identity"
+    ],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Provider-independent governed estimate form gateway"
+  },
+  {
+    "component_key": "trust_feature_cards",
+    "contract_version": 3,
+    "optional": true,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "after_hero",
+    "variant": "approved_facts_only",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [
+      "enabled",
+      "website_id",
+      "theme_compatibility",
+      "placement",
+      "variant",
+      "responsive_visibility",
+      "content_source",
+      "accessibility_label",
+      "source_identity",
+      "approval_identity"
+    ],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Approved trust facts"
+  },
+  {
+    "component_key": "authority_content_section",
+    "contract_version": 3,
+    "optional": false,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "main",
+    "variant": "readable_measure",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Approved authority content"
+  },
+  {
+    "component_key": "numbered_process_steps",
+    "contract_version": 3,
+    "optional": false,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "main",
+    "variant": "source_preserving_sequence",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Approved process content"
+  },
+  {
+    "component_key": "faq_accordion",
+    "contract_version": 3,
+    "optional": false,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "main",
+    "variant": "native_disclosure",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Accessible FAQ disclosures"
+  },
+  {
+    "component_key": "sticky_mobile_action_bar",
+    "contract_version": 3,
+    "optional": true,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "viewport_bottom",
+    "variant": "safe_area_single_layer",
+    "responsive_visibility": {
+      "desktop": false,
+      "tablet": false,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [
+      "enabled",
+      "website_id",
+      "theme_compatibility",
+      "placement",
+      "variant",
+      "responsive_visibility",
+      "content_source",
+      "accessibility_label",
+      "source_identity",
+      "action_label",
+      "phone_or_estimate_destination"
+    ],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Mobile conversion actions"
+  },
+  {
+    "component_key": "site_footer",
+    "contract_version": 3,
+    "optional": false,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "footer",
+    "variant": "structured",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Governed site footer"
+  },
+  {
+    "component_key": "back_to_top_control",
+    "contract_version": 3,
+    "optional": false,
+    "default_enabled": true,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "viewport_edge",
+    "variant": "accessible_control",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "governed_semantic_composition",
+    "required_configuration": [],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Back-to-top control"
+  },
+  {
+    "component_key": "review_badge_group",
+    "contract_version": 3,
+    "optional": true,
+    "default_enabled": false,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "main",
+    "variant": "verified_only",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "approved_runtime_configuration",
+    "required_configuration": [
+      "enabled",
+      "website_id",
+      "theme_compatibility",
+      "placement",
+      "variant",
+      "responsive_visibility",
+      "content_source",
+      "accessibility_label",
+      "provider",
+      "rating",
+      "review_count",
+      "rating_approval_status",
+      "review_count_approval_status",
+      "verification_date",
+      "destination",
+      "trademark_use_authorization",
+      "approval_identity"
+    ],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Verified review or badge evidence"
+  },
+  {
+    "component_key": "statistics_counter_band",
+    "contract_version": 3,
+    "optional": true,
+    "default_enabled": false,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "main",
+    "variant": "sourced_metrics",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "approved_runtime_configuration",
+    "required_configuration": [
+      "enabled",
+      "website_id",
+      "theme_compatibility",
+      "placement",
+      "variant",
+      "responsive_visibility",
+      "content_source",
+      "accessibility_label",
+      "metric_label",
+      "value",
+      "source",
+      "effective_date",
+      "approval_identity"
+    ],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Approved sourced statistics"
+  },
+  {
+    "component_key": "video_embed_section",
+    "contract_version": 3,
+    "optional": true,
+    "default_enabled": false,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "main",
+    "variant": "privacy_gated",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "approved_runtime_configuration",
+    "required_configuration": [
+      "enabled",
+      "website_id",
+      "theme_compatibility",
+      "placement",
+      "variant",
+      "responsive_visibility",
+      "content_source",
+      "accessibility_label",
+      "approved_provider",
+      "approved_url_or_media_identity",
+      "title",
+      "accessibility_text",
+      "privacy_mode",
+      "approval_identity"
+    ],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Approved privacy-aware video"
+  },
+  {
+    "component_key": "map_or_service_area_section",
+    "contract_version": 3,
+    "optional": true,
+    "default_enabled": false,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "main",
+    "variant": "accurate_location",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "approved_runtime_configuration",
+    "required_configuration": [
+      "enabled",
+      "website_id",
+      "theme_compatibility",
+      "placement",
+      "variant",
+      "responsive_visibility",
+      "content_source",
+      "accessibility_label",
+      "approved_location_or_service_area",
+      "approved_provider",
+      "external_request_consent",
+      "location_status",
+      "storefront_status",
+      "approval_identity"
+    ],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Approved location or service area"
+  },
+  {
+    "component_key": "community_program_section",
+    "contract_version": 3,
+    "optional": true,
+    "default_enabled": false,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "main",
+    "variant": "approved_program",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "approved_runtime_configuration",
+    "required_configuration": [
+      "enabled",
+      "website_id",
+      "theme_compatibility",
+      "placement",
+      "variant",
+      "responsive_visibility",
+      "content_source",
+      "accessibility_label",
+      "approved_program_identity",
+      "approved_copy",
+      "destination",
+      "effective_start_date",
+      "effective_end_date",
+      "approval_identity"
+    ],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Approved community program"
+  },
+  {
+    "component_key": "language_selector",
+    "contract_version": 3,
+    "optional": true,
+    "default_enabled": false,
+    "scope": "website_with_optional_page_override",
+    "supports_page_override": true,
+    "placement": "header_utility",
+    "variant": "translated_routes_only",
+    "responsive_visibility": {
+      "desktop": true,
+      "tablet": true,
+      "mobile": true
+    },
+    "theme_compatibility": [
+      "performance-local@3"
+    ],
+    "content_source": "approved_runtime_configuration",
+    "required_configuration": [
+      "enabled",
+      "website_id",
+      "theme_compatibility",
+      "placement",
+      "variant",
+      "responsive_visibility",
+      "content_source",
+      "accessibility_label",
+      "actual_translated_content",
+      "translated_routes",
+      "canonical_hreflang_configuration",
+      "language_labels",
+      "routing_behavior",
+      "approval_identity"
+    ],
+    "supports_cta_label": true,
+    "supports_cta_destination": true,
+    "accessibility_label_required": true,
+    "diagnostic_label": "Approved translated-route selector"
+  }
+]

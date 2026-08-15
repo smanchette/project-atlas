@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 from app.models import (
     Business,
     GeneratedPage,
+    PageComposition,
     PlannedPage,
     Theme,
     ThemeConfigurationAudit,
@@ -24,10 +25,14 @@ from app.models import (
 )
 from app.schemas.theme_families import (
     CompactEstimateFormConfiguration,
+    ConversionComponentGraphRevisionCreate,
+    ConversionComponentGraphRevisionRead,
     FormProviderStateRead,
     GovernedThemeActionsRead,
     PERFORMANCE_LOCAL_V2_COMPONENT_CONTRACTS,
     PERFORMANCE_LOCAL_V2_SOURCE_COMMIT,
+    PERFORMANCE_LOCAL_V3_COMPONENT_CONTRACTS,
+    PerformanceLocalV3ExportEligibilityRead,
     ThemeActivationReadinessItem,
     ThemeActivationReadinessRead,
     ThemeConfigurationAuditRead,
@@ -175,6 +180,15 @@ def register_theme_family_version(
             raise ThemeConfigurationError(
                 "Performance Local v2 registration requires the exact canonical source commit and server contract."
             )
+    if family.family_key == "performance-local" and payload.version == 3:
+        if contracts != list(PERFORMANCE_LOCAL_V3_COMPONENT_CONTRACTS):
+            raise ThemeConfigurationError(
+                "Performance Local v3 registration requires the exact canonical server contract."
+            )
+        if payload.supersedes_theme_family_version_id is None:
+            raise ThemeConfigurationError(
+                "Performance Local v3 registration requires the exact v2 predecessor identity."
+            )
     compatibility_identity = canonical_json_hash(
         {
             "family_key": family.family_key,
@@ -219,6 +233,14 @@ def register_theme_family_version(
         if predecessor.theme_family_id != theme_family_id or predecessor.version >= payload.version:
             raise ThemeConfigurationError(
                 "Theme Family version lineage must remain within one family and increase."
+            )
+        if (
+            family.family_key == "performance-local"
+            and payload.version == 3
+            and predecessor.version != 2
+        ):
+            raise ThemeConfigurationError(
+                "Performance Local v3 must supersede the exact Performance Local v2 version."
             )
 
     version = ThemeFamilyVersion(
@@ -515,13 +537,18 @@ def create_component_configuration(
     normalized_payload = validate_component_payload(
         payload.component_key,
         payload.configuration_payload,
+        payload.component_contract_version,
     )
     _validate_component_approval_identity(
         payload.component_key,
         normalized_payload,
         payload.approval_identity,
     )
-    _validate_provider_state(payload.component_key, normalized_payload)
+    _validate_provider_state(
+        payload.component_key,
+        normalized_payload,
+        payload.component_contract_version,
+    )
 
     fingerprint = _component_fingerprint(
         website_theme_configuration_id=configuration_id,
@@ -698,13 +725,18 @@ def revise_component_configuration(
     normalized_payload = validate_component_payload(
         current.component_key,
         payload.configuration_payload,
+        current.component_contract_version,
     )
     _validate_component_approval_identity(
         current.component_key,
         normalized_payload,
         payload.approval_identity,
     )
-    _validate_provider_state(current.component_key, normalized_payload)
+    _validate_provider_state(
+        current.component_key,
+        normalized_payload,
+        current.component_contract_version,
+    )
 
     next_revision = current.revision + 1
     current.lifecycle_status = "superseded"
@@ -761,6 +793,244 @@ def revise_component_configuration(
     _commit(session)
     session.refresh(replacement)
     return replacement
+
+
+def revise_conversion_component_graph(
+    session: Session,
+    website_id: int,
+    configuration_id: int,
+    payload: ConversionComponentGraphRevisionCreate,
+) -> ConversionComponentGraphRevisionRead:
+    """Atomically supersede the exact form/banner/sticky conversion graph."""
+
+    try:
+        return _revise_conversion_component_graph(
+            session,
+            website_id,
+            configuration_id,
+            payload,
+        )
+    except Exception:
+        session.rollback()
+        raise
+
+
+def _revise_conversion_component_graph(
+    session: Session,
+    website_id: int,
+    configuration_id: int,
+    payload: ConversionComponentGraphRevisionCreate,
+) -> ConversionComponentGraphRevisionRead:
+
+    configuration = _website_configuration(session, configuration_id, for_update=True)
+    _validate_website_configuration(session, configuration)
+    _require_configuration_scope(configuration, website_id)
+    _require_inactive_draft(configuration)
+    by_key = {
+        "compact_estimate_form": _component_configuration(
+            session,
+            payload.form_component_configuration_id,
+            for_update=True,
+        ),
+        "campaign_banner": _component_configuration(
+            session,
+            payload.banner_component_configuration_id,
+            for_update=True,
+        ),
+        "sticky_mobile_action_bar": _component_configuration(
+            session,
+            payload.sticky_component_configuration_id,
+            for_update=True,
+        ),
+    }
+    if len({_required_id(item) for item in by_key.values()}) != 3:
+        raise ThemeConfigurationError("Atomic conversion revision requires three distinct components.")
+    for expected_key, component in by_key.items():
+        _validate_component_configuration(session, component)
+        if (
+            component.website_theme_configuration_id != configuration_id
+            or component.website_id != website_id
+            or component.theme_family_version_id
+            != configuration.theme_family_version_id
+            or component.component_key != expected_key
+            or component.lifecycle_status != "current"
+            or component.scope_type != "website_default"
+        ):
+            raise ThemeConfigurationError(
+                "Atomic conversion revision crosses scope or does not target the exact current graph."
+            )
+
+    form = by_key["compact_estimate_form"]
+    banner = by_key["campaign_banner"]
+    sticky = by_key["sticky_mobile_action_bar"]
+    if (
+        form.destination_component_configuration_id is not None
+        or banner.destination_component_configuration_id != form.id
+        or sticky.destination_component_configuration_id != form.id
+    ):
+        raise ThemeConfigurationError(
+            "Atomic conversion revision requires banner and sticky actions to target the exact form."
+        )
+    graph_ids = {_required_id(form), _required_id(banner), _required_id(sticky)}
+    outside_dependent = session.exec(
+        select(WebsiteThemeComponentConfiguration).where(
+            WebsiteThemeComponentConfiguration.website_theme_configuration_id
+            == configuration_id,
+            WebsiteThemeComponentConfiguration.lifecycle_status == "current",
+            WebsiteThemeComponentConfiguration.id.notin_(graph_ids),
+            or_(
+                WebsiteThemeComponentConfiguration.destination_component_configuration_id.in_(
+                    graph_ids
+                ),
+                WebsiteThemeComponentConfiguration.overrides_component_configuration_id.in_(
+                    graph_ids
+                ),
+            ),
+        )
+    ).first()
+    if outside_dependent is not None:
+        raise ThemeConfigurationError(
+            "Atomic conversion revision cannot strand a current Page override or outside dependency."
+        )
+
+    revisions = {
+        "compact_estimate_form": payload.form_revision,
+        "campaign_banner": payload.banner_revision,
+        "sticky_mobile_action_bar": payload.sticky_revision,
+    }
+    for key, revision in revisions.items():
+        expected_destination = None if key == "compact_estimate_form" else form.id
+        if revision.destination_component_configuration_id != expected_destination:
+            raise ThemeConfigurationError(
+                "Atomic conversion revision must bind action intent to the current exact form; "
+                "the service binds replacements to the new form identity."
+            )
+        current = by_key[key]
+        create_shape = WebsiteThemeComponentConfigurationCreate(
+            component_instance_key=current.component_instance_key,
+            component_key=current.component_key,
+            component_contract_version=current.component_contract_version,
+            scope_type=current.scope_type,
+            planned_page_id=current.planned_page_id,
+            enabled=revision.enabled,
+            variant=revision.variant,
+            placement=revision.placement,
+            responsive_visibility=revision.responsive_visibility,
+            configuration_payload=revision.configuration_payload,
+            effective_at=revision.effective_at,
+            expires_at=revision.expires_at,
+            approval_identity=revision.approval_identity,
+            created_by=revision.updated_by,
+            destination_component_configuration_id=expected_destination,
+            overrides_component_configuration_id=current.overrides_component_configuration_id,
+        )
+        family_version = _theme_family_version(
+            session,
+            configuration.theme_family_version_id,
+        )
+        _validate_component_contract(family_version, create_shape)
+        normalized = validate_component_payload(
+            key,
+            revision.configuration_payload,
+            current.component_contract_version,
+        )
+        _validate_component_approval_identity(
+            key,
+            normalized,
+            revision.approval_identity,
+        )
+        _validate_provider_state(key, normalized, current.component_contract_version)
+
+    transitioned_at = _utc_now()
+    for key, current in by_key.items():
+        current.lifecycle_status = "superseded"
+        current.updated_by = revisions[key].updated_by
+        current.updated_at = transitioned_at
+        current.integrity_fingerprint = _component_fingerprint_from_record(current)
+        session.add(current)
+
+    replacements: dict[str, WebsiteThemeComponentConfiguration] = {}
+    for key in (
+        "compact_estimate_form",
+        "campaign_banner",
+        "sticky_mobile_action_bar",
+    ):
+        current = by_key[key]
+        revision = revisions[key]
+        normalized = validate_component_payload(
+            key,
+            revision.configuration_payload,
+            current.component_contract_version,
+        )
+        destination = (
+            None
+            if key == "compact_estimate_form"
+            else _required_id(replacements["compact_estimate_form"])
+        )
+        replacement = WebsiteThemeComponentConfiguration(
+            website_theme_configuration_id=configuration_id,
+            website_id=website_id,
+            planned_page_id=current.planned_page_id,
+            theme_family_version_id=current.theme_family_version_id,
+            component_instance_key=current.component_instance_key,
+            component_key=current.component_key,
+            component_contract_version=current.component_contract_version,
+            revision=current.revision + 1,
+            scope_type=current.scope_type,
+            lifecycle_status="current",
+            enabled=revision.enabled,
+            variant=revision.variant,
+            placement=revision.placement,
+            responsive_visibility=revision.responsive_visibility.model_dump(mode="json"),
+            configuration_payload=normalized,
+            effective_at=revision.effective_at,
+            expires_at=revision.expires_at,
+            approval_identity=revision.approval_identity,
+            created_by=revision.updated_by,
+            updated_by=revision.updated_by,
+            destination_component_configuration_id=destination,
+            overrides_component_configuration_id=current.overrides_component_configuration_id,
+            supersedes_component_configuration_id=_required_id(current),
+            integrity_fingerprint="0" * 64,
+        )
+        replacement.integrity_fingerprint = _component_fingerprint_from_record(replacement)
+        session.add(replacement)
+        session.flush()
+        replacements[key] = replacement
+
+    for key, current in by_key.items():
+        revision = revisions[key]
+        replacement = replacements[key]
+        _append_audit(
+            session,
+            action_type="component_superseded",
+            actor=revision.updated_by,
+            rationale=revision.revision_rationale,
+            snapshot=_component_fingerprint_payload(current),
+            component_configuration_id=_required_id(current),
+        )
+        _append_audit(
+            session,
+            action_type="component_revision_created",
+            actor=revision.updated_by,
+            rationale=revision.revision_rationale,
+            snapshot=_component_fingerprint_payload(replacement),
+            component_configuration_id=_required_id(replacement),
+        )
+    _commit(session)
+    for replacement in replacements.values():
+        session.refresh(replacement)
+    return ConversionComponentGraphRevisionRead(
+        form=WebsiteThemeComponentConfigurationRead.model_validate(
+            replacements["compact_estimate_form"]
+        ),
+        banner=WebsiteThemeComponentConfigurationRead.model_validate(
+            replacements["campaign_banner"]
+        ),
+        sticky=WebsiteThemeComponentConfigurationRead.model_validate(
+            replacements["sticky_mobile_action_bar"]
+        ),
+    )
 
 
 def list_theme_families(session: Session) -> list[ThemeFamily]:
@@ -936,6 +1206,7 @@ def read_theme_draft_preview(
         validate_component_payload(
             sticky_action.component_key,
             sticky_action.configuration_payload,
+            sticky_action.component_contract_version,
         )
         if sticky_action is not None
         else None
@@ -1079,7 +1350,7 @@ def require_theme_configuration_export_eligible(
     configuration_id: int,
     *,
     generated_page_id: int,
-) -> ThemeConfigurationExportEligibilityRead:
+) -> ThemeConfigurationExportEligibilityRead | PerformanceLocalV3ExportEligibilityRead:
     """Return the exact active Page-scoped export graph or fail closed."""
 
     configuration = _website_configuration(session, configuration_id)
@@ -1174,7 +1445,80 @@ def require_theme_configuration_export_eligible(
         website_configuration=configuration,
         component_ids={_required_id(item) for item in effective_components},
     )
-    return ThemeConfigurationExportEligibilityRead(
+    form_readiness = None
+    if family.family_key == "performance-local" and version.version == 3:
+        from app.services import page_composition as composition_service
+        from app.services.form_submission_gateway import evaluate_form_readiness
+        from app.services.page_qa import effective_page_qa_state
+
+        page = session.get(GeneratedPage, generated_page_id)
+        compositions = list(
+            session.exec(
+                select(PageComposition).where(
+                    PageComposition.generated_page_id == generated_page_id
+                )
+            ).all()
+        )
+        if (
+            page is None
+            or page.website_id != website_id
+            or len(compositions) != 1
+            or compositions[0].status != "current"
+        ):
+            raise ThemeConfigurationError(
+                "Public V3 export requires one persisted current Page Composition.",
+                code="theme_configuration_export_blocked",
+            )
+        try:
+            composition_service._read(
+                session,
+                compositions[0],
+                require_current=True,
+            )
+        except composition_service.PageCompositionError as exc:
+            raise ThemeConfigurationError(
+                "Public V3 export requires a recomputed current Page Composition.",
+                code="theme_configuration_export_blocked",
+            ) from exc
+        if not effective_page_qa_state(session, page).ready:
+            raise ThemeConfigurationError(
+                "Public V3 export requires exact current ready Page QA evidence.",
+                code="theme_configuration_export_blocked",
+            )
+
+        forms = [
+            item
+            for item in effective_components
+            if item.component_key == "compact_estimate_form"
+        ]
+        if len(forms) != 1:
+            raise ThemeConfigurationError(
+                "Public export requires one exact governed V3 form.",
+                code="theme_configuration_export_blocked",
+            )
+        form_readiness = evaluate_form_readiness(forms[0], mode="active")
+        if not form_readiness.can_submit:
+            raise ThemeConfigurationError(
+                "Public export requires complete provider, privacy, consent, retention, spam, security, and audit readiness.",
+                code="theme_configuration_export_blocked",
+            )
+    banner = next(
+        (
+            item
+            for item in effective_components
+            if item.component_key == "campaign_banner"
+        ),
+        None,
+    )
+    sticky = next(
+        (
+            item
+            for item in effective_components
+            if item.component_key == "sticky_mobile_action_bar"
+        ),
+        None,
+    )
+    identity_values = dict(
         website_id=website_id,
         business_id=configuration.business_id,
         theme_family_id=_required_id(family),
@@ -1212,6 +1556,40 @@ def require_theme_configuration_export_eligible(
             for item in effective_components
         ],
         audit_snapshot_hashes=sorted(item.snapshot_hash for item in audits),
+    )
+    if form_readiness is None:
+        return ThemeConfigurationExportEligibilityRead(**identity_values)
+    return PerformanceLocalV3ExportEligibilityRead(
+        **identity_values,
+        activation_audit_identity=sorted(
+            item.snapshot_hash
+            for item in audits
+            if item.action_type
+            in {"website_configuration_activated", "component_activated"}
+        ),
+        banner_intent=(
+            banner.configuration_payload.get("intent") if banner is not None else None
+        ),
+        sticky_action_identity=(
+            {
+                "component_configuration_id": sticky.id,
+                "integrity_fingerprint": sticky.integrity_fingerprint,
+                "destination_component_configuration_id": (
+                    sticky.destination_component_configuration_id
+                ),
+            }
+            if sticky is not None
+            else None
+        ),
+        form_state=form_readiness.submission_state,
+        provider_state={
+            "destination_configured": (
+                form_readiness.provider_state.destination_configured
+            ),
+            "adapter_registered": form_readiness.provider_state.adapter_registered,
+            "test_only": form_readiness.provider_state.test_only,
+        },
+        privacy_consent_readiness=form_readiness.privacy.model_dump(mode="json"),
     )
 
 
@@ -1426,6 +1804,13 @@ def _validate_family_version(session: Session, record: ThemeFamilyVersion) -> No
     ):
         raise ThemeConfigurationError(
             "Performance Local v2 Theme Version does not match the exact canonical source commit and server contract."
+        )
+    if family.family_key == "performance-local" and record.version == 3 and (
+        record.supported_component_contracts
+        != list(PERFORMANCE_LOCAL_V3_COMPONENT_CONTRACTS)
+    ):
+        raise ThemeConfigurationError(
+            "Performance Local v3 Theme Version does not match the exact canonical server contract."
         )
     if record.integrity_fingerprint != _family_version_fingerprint_from_record(record):
         raise ThemeConfigurationError("Theme Version integrity fingerprint does not match.")
@@ -1694,6 +2079,7 @@ def _validate_component_configuration(
     normalized = validate_component_payload(
         record.component_key,
         record.configuration_payload,
+        record.component_contract_version,
     )
     if normalized != record.configuration_payload:
         raise ThemeConfigurationError("Component configuration payload is not canonical.")
@@ -1726,7 +2112,11 @@ def _validate_component_configuration(
         record.configuration_payload,
         record.approval_identity,
     )
-    _validate_provider_state(record.component_key, record.configuration_payload)
+    _validate_provider_state(
+        record.component_key,
+        record.configuration_payload,
+        record.component_contract_version,
+    )
     _validate_destination(
         session,
         configuration=configuration,
@@ -1918,10 +2308,18 @@ def _validate_component_configuration_without_destination(
 ) -> None:
     if record.destination_component_configuration_id is not None:
         raise ThemeConfigurationError("Compact form may not target another component.")
-    normalized = validate_component_payload(record.component_key, record.configuration_payload)
+    normalized = validate_component_payload(
+        record.component_key,
+        record.configuration_payload,
+        record.component_contract_version,
+    )
     if normalized != record.configuration_payload:
         raise ThemeConfigurationError("Destination compact-form payload is not canonical.")
-    _validate_provider_state(record.component_key, normalized)
+    _validate_provider_state(
+        record.component_key,
+        normalized,
+        record.component_contract_version,
+    )
     if record.integrity_fingerprint != _component_fingerprint_from_record(record):
         raise ThemeConfigurationError("Destination compact-form fingerprint does not match.")
 
@@ -1942,8 +2340,14 @@ def _validate_component_approval_identity(
         )
 
 
-def _validate_provider_state(component_key: str, payload: dict[str, Any]) -> None:
+def _validate_provider_state(
+    component_key: str,
+    payload: dict[str, Any],
+    component_contract_version: int = 2,
+) -> None:
     if component_key != "compact_estimate_form":
+        return
+    if component_contract_version == 3:
         return
     configuration = CompactEstimateFormConfiguration.model_validate(payload)
     validate_provider_disabled_form(configuration)
@@ -2043,6 +2447,7 @@ def _component_is_effective_at(
     payload = validate_component_payload(
         component.component_key,
         component.configuration_payload,
+        component.component_contract_version,
     )
     if payload.get("intent") != "time_bound_campaign":
         return True

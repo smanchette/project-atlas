@@ -517,6 +517,33 @@ customer-data operation occurred.
 
 ---
 
+## Performance Local v3 Delivery and Form Gateway
+
+Added a distinct source-defined Performance Local version-3 preview candidate
+without changing the durable version-2 contract or activating a Theme. The V3
+delivery contract resolves active, explicit local-preview, and disposable
+rehearsal modes server-side; validates current composition, QA, media, scope,
+component, audit, and selection evidence; and renders the evergreen estimate
+banner as one accessible action when its configured message and call to action
+are semantically equivalent.
+
+Added a provider-independent, fail-closed form gateway with bounded raw JSON
+handling and explicit privacy, consent, retention, spam, security, audit,
+success, and failure readiness. Production provider, spam, and idempotency
+registries remain empty. Test delivery is isolated to guarded disposable
+rehearsals, and no form value is stored, logged, reflected, or sent externally
+when the production boundary is unavailable.
+
+Added zero-write activation planning plus disposable activation, full-site
+rendering audit, internal export, and exact rollback rehearsal. A clean-install
+migration audit proved the safe identifier-only repair candidates for historical
+PostgreSQL index names and contained a separate historical constraint-expression
+compatibility blocker; no historical migration was changed. Active Atlas retains
+its existing Theme selection and durable V2 draft, contains no V3 durable row,
+and received no customer data, WordPress, publication, or deployment action.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.

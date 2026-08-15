@@ -1735,6 +1735,131 @@ export type ThemeConfigurationAuditIdentityRead = {
   created_at: string;
 };
 
+export type GovernedThemeActionsRead = {
+  phone_display: string | null;
+  call_destination: string | null;
+  call_label: string | null;
+  estimate_label: string | null;
+  estimate_destination_component_configuration_id: number | null;
+  desktop_header_actions_enabled: boolean;
+  mobile_sticky_actions_enabled: boolean;
+  desktop_header_estimate_destination_component_configuration_id: number | null;
+  mobile_sticky_estimate_destination_component_configuration_id: number | null;
+};
+
+export type PerformanceLocalReadinessBlocker = {
+  code: string;
+  field: string;
+  reason: string;
+};
+
+export type PerformanceLocalFormReadinessRead = {
+  status: "blocked" | "ready";
+  can_submit: boolean;
+  submission_state: string;
+  component_configuration_id: number | null;
+  provider_state: {
+    provider_key: string | null;
+    destination_configured: boolean;
+    adapter_registered: boolean;
+    test_only: boolean;
+  };
+  privacy: {
+    destination_configured: boolean;
+    consent_mode: null | "not_required" | "explicit";
+    consent_text_version: string | null;
+    ready: boolean;
+  };
+  retention: {
+    duration_configured: boolean;
+    deletion_behavior_configured: boolean;
+    ready: boolean;
+  };
+  spam: {
+    strategy:
+      | null
+      | "honeypot"
+      | "rate_limit_service"
+      | "proof_of_work"
+      | "captcha_provider"
+      | "synthetic_test";
+    ready: boolean;
+  };
+  behavior: {
+    success_configured: boolean;
+    failure_configured: boolean;
+    ready: boolean;
+  };
+  security: {
+    secret_reference_configured: boolean;
+    same_origin_policy: string | null;
+    csrf_policy: string | null;
+    csrf_token: string | null;
+    request_size_limit_bytes: number | null;
+    idempotency_strategy: string | null;
+    ready: boolean;
+  };
+  audit_identity: string | null;
+  blockers: PerformanceLocalReadinessBlocker[];
+};
+
+export type PerformanceLocalDeliveryMode =
+  | "active"
+  | "inactive_draft_preview"
+  | "activation_rehearsal";
+
+export type PerformanceLocalDeliveryBlocker = {
+  code: string;
+  category:
+    | "theme"
+    | "configuration"
+    | "component"
+    | "media"
+    | "qa"
+    | "form"
+    | "privacy"
+    | "export"
+    | "publication";
+  reason: string;
+};
+
+export type PerformanceLocalDeliveryRead = {
+  renderer_contract: "performance-local-delivery@1";
+  mode: PerformanceLocalDeliveryMode;
+  non_active_label:
+    | null
+    | "DRAFT PREVIEW — NOT ACTIVE"
+    | "ACTIVATION REHEARSAL — DISPOSABLE";
+  page: GeneratedPage;
+  composition: PageComposition;
+  theme_family: ThemeFamilyRead;
+  theme_version: ThemeFamilyVersionRead;
+  website_configuration: WebsiteThemeConfigurationRead;
+  components: WebsiteThemeComponentConfigurationRead[];
+  audit_history: ThemeConfigurationAuditIdentityRead[];
+  governed_actions: GovernedThemeActionsRead;
+  form_readiness: PerformanceLocalFormReadinessRead;
+  export_eligibility: {
+    eligible: boolean;
+    mode: "public" | "internal_rehearsal";
+    identity: Record<string, unknown> | null;
+    blockers: PerformanceLocalReadinessBlocker[];
+  };
+  renderer_result: {
+    status: "ready" | "blocked";
+    result_code: string;
+    evaluated_page_id: number;
+  };
+  blockers: PerformanceLocalDeliveryBlocker[];
+};
+
+export type PerformanceLocalSubmissionAcceptedRead = {
+  status: "accepted";
+  code: "submission_accepted";
+  safe_message: string;
+  provider_reference: string | null;
+};
+
 export type ThemeDraftPreviewReadiness = {
   status: "blocked";
   can_activate: false;
@@ -1751,17 +1876,7 @@ export type ThemeDraftPreviewRead = {
   website_configuration: WebsiteThemeConfigurationRead;
   components: WebsiteThemeComponentConfigurationRead[];
   audit_history: ThemeConfigurationAuditIdentityRead[];
-  governed_actions: {
-    phone_display: string | null;
-    call_destination: string | null;
-    call_label: string | null;
-    estimate_label: string | null;
-    estimate_destination_component_configuration_id: number | null;
-    desktop_header_actions_enabled: boolean;
-    mobile_sticky_actions_enabled: boolean;
-    desktop_header_estimate_destination_component_configuration_id: number | null;
-    mobile_sticky_estimate_destination_component_configuration_id: number | null;
-  };
+  governed_actions: GovernedThemeActionsRead;
   provider_state: {
     submission_state: "disabled_pending_provider_configuration";
     provider_key: null;
