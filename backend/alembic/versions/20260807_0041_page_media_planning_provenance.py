@@ -181,6 +181,20 @@ ASSIGNMENT_CHECKS = {
     ),
 }
 
+# Migration 0041 can adopt a table created from current SQLModel metadata. In
+# that narrow case, the only permitted forward CHECK is the exact additive
+# contract introduced by 0042. Unknown or semantically different checks remain
+# incompatible with the 0041-owned table contract.
+ALLOWED_FORWARD_CHECKS_BY_TABLE = {
+    "plannedpagemediarequirement": {
+        "ck_plannedpagemediarequirement_v2_target": (
+            "contract_version < 2 OR "
+            "(target_component_instance_key IS NOT NULL "
+            "AND length(trim(target_component_instance_key)) > 0)"
+        )
+    }
+}
+
 
 def _inspector():
     return sa.inspect(op.get_bind())
@@ -202,12 +216,22 @@ def _indexes(table: str) -> set[str]:
     }
 
 
-def _checks(table: str) -> dict[str, str]:
-    return {
-        item["name"]: item.get("sqltext") or ""
-        for item in _inspector().get_check_constraints(table)
-        if item.get("name")
-    }
+def _checks(table: str, *, strict_names: bool = False) -> dict[str, str]:
+    checks: dict[str, str] = {}
+    for item in _inspector().get_check_constraints(table):
+        name = item.get("name")
+        if not name:
+            if strict_names:
+                raise RuntimeError(
+                    f"Existing {table} table is incompatible: unnamed CHECK constraint."
+                )
+            continue
+        if name in checks:
+            raise RuntimeError(
+                f"Existing {table} table is incompatible: duplicate CHECK constraint {name}."
+            )
+        checks[name] = item.get("sqltext") or ""
+    return checks
 
 
 def _uniques(table: str) -> dict[str, tuple[str, ...]]:
@@ -230,9 +254,21 @@ def _foreign_keys(table: str) -> set[tuple[tuple[str, ...], str, tuple[str, ...]
 
 
 def _canonical(expression: str) -> str:
-    normalized = " ".join(
-        expression.lower().replace('"', "").replace("`", "").split()
+    # PostgreSQL identifiers and keywords are case-insensitive only when they
+    # are unquoted. String literals and quoted identifiers are case-sensitive,
+    # so protect them before normalizing case and insignificant whitespace.
+    quoted: list[str] = []
+
+    def protect(match: re.Match[str]) -> str:
+        quoted.append(match.group(0))
+        return f"__atlas_quoted_{len(quoted) - 1}__"
+
+    normalized = re.sub(
+        r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`",
+        protect,
+        expression,
     )
+    normalized = " ".join(normalized.lower().split())
     if normalized.startswith("check "):
         normalized = normalized[6:].strip()
     # PostgreSQL rewrites text membership checks to = ANY / <> ALL array
@@ -243,15 +279,22 @@ def _canonical(expression: str) -> str:
         "",
         normalized,
     )
+    for pattern in (
+        r"trim\s*\(\s*both\s+from\s+\(\s*([a-z_][a-z0-9_]*)\s*\)\s*\)",
+        r"trim\s*\(\s*both\s+from\s+([a-z_][a-z0-9_]*)\s*\)",
+        r"btrim\s*\(\s*\(\s*([a-z_][a-z0-9_]*)\s*\)\s*\)",
+        r"btrim\s*\(\s*([a-z_][a-z0-9_]*)\s*\)",
+    ):
+        normalized = re.sub(pattern, r"trim(\1)", normalized)
     normalized = re.sub(
-        r"\(([a-z_][a-z0-9_]*)\)\s*=\s*any\s*"
-        r"\(\s*\(\s*array\[([^\]]*)\]\s*\)\s*\)",
+        r"\(?\s*([a-z_][a-z0-9_]*)\s*\)?\s*=\s*any\s*"
+        r"\(\s*(?:\(\s*)?array\[([^\]]*)\](?:\s*\))?\s*\)",
         r"\1 in (\2)",
         normalized,
     )
     normalized = re.sub(
-        r"\(([a-z_][a-z0-9_]*)\)\s*(?:<>|!=)\s*all\s*"
-        r"\(\s*\(\s*array\[([^\]]*)\]\s*\)\s*\)",
+        r"\(?\s*([a-z_][a-z0-9_]*)\s*\)?\s*(?:<>|!=)\s*all\s*"
+        r"\(\s*(?:\(\s*)?array\[([^\]]*)\](?:\s*\))?\s*\)",
         r"\1 not in (\2)",
         normalized,
     )
@@ -314,7 +357,10 @@ def _canonical(expression: str) -> str:
                 )
         return "".join(strip_outer(value).split())
 
-    return canonical_boolean(normalized)
+    canonical = canonical_boolean(normalized)
+    for index, value in enumerate(quoted):
+        canonical = canonical.replace(f"__atlas_quoted_{index}__", value)
+    return canonical
 
 
 def _ensure_indexes(table: str, columns: tuple[str, ...]) -> None:
@@ -344,19 +390,45 @@ def _ensure_checks(table: str, required: dict[str, str]) -> None:
             for name in missing:
                 batch_op.create_check_constraint(name, required[name])
         existing = _checks(table)
-    for name, expression in required.items():
-        observed = existing.get(name)
-        if observed is None or _canonical(observed) != _canonical(expression):
-            raise RuntimeError(
-                f"Existing {table} table is incompatible: {name} differs."
-            )
+    _validate_check_contracts(table, existing, required)
 
 
 def _require_checks(table: str, required: dict[str, str]) -> None:
-    existing = _checks(table)
+    existing = _checks(table, strict_names=True)
+    _validate_check_contracts(
+        table,
+        existing,
+        required,
+        allowed_additional=ALLOWED_FORWARD_CHECKS_BY_TABLE.get(table),
+        reject_unexpected=True,
+    )
+
+
+def _validate_check_contracts(
+    table: str,
+    observed: dict[str, str],
+    required: dict[str, str],
+    *,
+    allowed_additional: dict[str, str] | None = None,
+    reject_unexpected: bool = False,
+) -> None:
     for name, expression in required.items():
-        observed = existing.get(name)
-        if observed is None or _canonical(observed) != _canonical(expression):
+        actual = observed.get(name)
+        if actual is None or _canonical(actual) != _canonical(expression):
+            raise RuntimeError(
+                f"Existing {table} table is incompatible: {name} differs."
+            )
+    allowed = allowed_additional or {}
+    if reject_unexpected:
+        unexpected = set(observed) - set(required) - set(allowed)
+        if unexpected:
+            name = sorted(unexpected)[0]
+            raise RuntimeError(
+                f"Existing {table} table is incompatible: unexpected CHECK constraint {name}."
+            )
+    for name, expression in allowed.items():
+        actual = observed.get(name)
+        if actual is not None and _canonical(actual) != _canonical(expression):
             raise RuntimeError(
                 f"Existing {table} table is incompatible: {name} differs."
             )
@@ -729,6 +801,23 @@ def _drop_foreign_key_for_column(table: str, column: str) -> None:
             batch_op.drop_constraint(match["name"], type_="foreignkey")
 
 
+def _downgrade_owns_index(
+    index: dict,
+    *,
+    partial_indexes: tuple[str, ...],
+    removed_columns: set[str],
+) -> bool:
+    """Select standalone 0041 indexes, never UNIQUE-constraint backing indexes."""
+
+    name = index.get("name")
+    columns = set(index.get("column_names") or ())
+    return bool(
+        name
+        and not index.get("duplicates_constraint")
+        and (name in partial_indexes or bool(columns & removed_columns))
+    )
+
+
 def downgrade() -> None:
     connection = op.get_bind()
     for table, label in (
@@ -779,10 +868,10 @@ def downgrade() -> None:
         removed_columns = set(columns)
         for index in _inspector().get_indexes(table):
             index_name = index.get("name")
-            index_columns = set(index.get("column_names") or ())
-            if index_name and (
-                index_name in partial_indexes
-                or bool(index_columns & removed_columns)
+            if _downgrade_owns_index(
+                index,
+                partial_indexes=partial_indexes,
+                removed_columns=removed_columns,
             ):
                 op.drop_index(index_name, table_name=table)
         with op.batch_alter_table(table) as batch_op:

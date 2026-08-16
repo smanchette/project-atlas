@@ -70,7 +70,9 @@ def upgrade() -> None:
         sa.UniqueConstraint("activation_handle_fingerprint", name="uq_bootstrapestablishment_activation_handle"),
     )
     for name in ("generated_page_id", "wordpress_post_id", "installation_audit_id", "activation_audit_id", "action_type", "status", "manual_handle_fingerprint", "activation_handle_fingerprint", "manual_binding_hash", "activation_binding_hash", "attempted_at"):
-        op.create_index(f"ix_{table}_{name}", table, [name])
+        # Mark convention-derived names so PostgreSQL compilation applies
+        # SQLAlchemy's deterministic 63-byte identifier shortening.
+        op.create_index(op.f(f"ix_{table}_{name}"), table, [name])
 
 
 def downgrade() -> None:

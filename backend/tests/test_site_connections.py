@@ -961,6 +961,122 @@ def test_backup_052_rejects_parallel_typed_internal_link_edges(tmp_path):
         load_backup(path)
 
 
+@pytest.mark.parametrize(
+    "snapshot_field",
+    ("navigation_sets", "navigation_items", "internal_links"),
+)
+def test_backup_057_rejects_incomplete_current_connection_snapshot(
+    tmp_path: Path,
+    snapshot_field: str,
+) -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        website, plan, pages = _scope(session)
+        navigation_items = [
+            _add_nav(
+                session,
+                website,
+                plan,
+                pages["home"],
+                set_type,
+                0,
+            )
+            for set_type in ("primary", "utility", "footer")
+        ]
+        link = _add_link(
+            session,
+            website,
+            plan,
+            pages["home"],
+            pages["contact"],
+        )
+        _activate_sets(session, plan)
+        generated = GeneratedPage(
+            business_id=website.business_id,
+            website_id=website.id,
+            page_type="home",
+            page_title="Home",
+            page_slug=f"home-{uuid4().hex[:8]}",
+            draft_content={"title": "Home", "h1": "Home"},
+            generation_status="generated",
+        )
+        session.add(generated)
+        session.flush()
+        pages["home"].generated_page_id = generated.id
+        session.add(pages["home"])
+        navigation_sets = list(
+            session.exec(
+                select(NavigationSet)
+                .where(NavigationSet.site_plan_id == plan.id)
+                .order_by(NavigationSet.id)
+            ).all()
+        )
+        source_snapshot = {
+            "website_id": website.id,
+            "site_plan_id": plan.id,
+            "planned_page_id": pages["home"].id,
+            "generated_page_id": generated.id,
+            "navigation_sets": [{"id": item.id} for item in navigation_sets],
+            "navigation_items": [
+                {
+                    "id": navigation_item.id,
+                    "target": {"planned_page_id": pages["home"].id},
+                }
+                for navigation_item in navigation_items
+            ],
+            "internal_links": [
+                {
+                    "id": link.id,
+                    "target": {"planned_page_id": pages["contact"].id},
+                }
+            ],
+        }
+        source_hash = hashlib.sha256(
+            json.dumps(
+                source_snapshot,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        session.add(
+            PageComposition(
+                website_id=website.id,
+                site_plan_id=plan.id,
+                planned_page_id=pages["home"].id,
+                generated_page_id=generated.id,
+                generated_components=[],
+                operator_decisions=[],
+                source_snapshot=source_snapshot,
+                source_hash=source_hash,
+                status="current",
+            )
+        )
+        session.commit()
+        exported = export_backup(session, backup_dir=tmp_path)
+
+    payload = json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
+    composition = payload["data"]["page_compositions"][0]
+    composition["source_snapshot"][snapshot_field] = []
+    composition["source_hash"] = hashlib.sha256(
+        json.dumps(
+            composition["source_snapshot"],
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    path = tmp_path / f"incomplete-current-{snapshot_field}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        BackupValidationError,
+        match=rf"{snapshot_field} snapshot is incomplete",
+    ):
+        load_backup(path)
+
+
 def test_backup_052_allows_legacy_composition_snapshot_for_draft_graph_and_restores_stale(
     tmp_path,
 ):

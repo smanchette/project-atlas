@@ -14,6 +14,21 @@ class TimestampMixin(SQLModel):
     updated_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
+class TimezoneTimestampMixin(SQLModel):
+    """UTC-aware timestamps for contracts whose migrations require TIMESTAMPTZ."""
+
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_type=DateTime(timezone=True),
+        nullable=False,
+    )
+    updated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_type=DateTime(timezone=True),
+        nullable=False,
+    )
+
+
 class Business(TimestampMixin, table=True):
     id: int | None = Field(default=None, primary_key=True)
     company_name: str = Field(index=True)
@@ -101,6 +116,10 @@ class BrandAsset(TimestampMixin, table=True):
             "status IN ('draft','pending_review','approved','rejected','retired')",
             name="ck_brandasset_status",
         ),
+        CheckConstraint("version >= 1", name="ck_brandasset_version"),
+        CheckConstraint("file_size >= 1", name="ck_brandasset_file_size"),
+        CheckConstraint("width >= 1", name="ck_brandasset_width"),
+        CheckConstraint("height >= 1", name="ck_brandasset_height"),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -168,6 +187,7 @@ class WebsiteIdentityAssetAssignment(TimestampMixin, table=True):
             "status IN ('active','replaced','retired')",
             name="ck_identityassetassignment_status",
         ),
+        CheckConstraint("version >= 1", name="ck_identityassetassignment_version"),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -949,7 +969,7 @@ class PlannedPageMediaRequirement(TimestampMixin, table=True):
     )
 
 
-class SiteConnectionPlanningRecord(TimestampMixin, table=True):
+class SiteConnectionPlanningRecord(TimezoneTimestampMixin, table=True):
     __table_args__ = (
         UniqueConstraint(
             "site_plan_id",
@@ -972,10 +992,13 @@ class SiteConnectionPlanningRecord(TimestampMixin, table=True):
         default_factory=dict,
         sa_column=Column(JSON, nullable=False),
     )
-    generated_at: datetime = Field(default_factory=utc_now, nullable=False)
+    generated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
 
-class NavigationSet(TimestampMixin, table=True):
+class NavigationSet(TimezoneTimestampMixin, table=True):
     __table_args__ = (
         CheckConstraint(
             "(decision_version IS NULL AND decided_by IS NULL AND rationale IS NULL "
@@ -1009,7 +1032,7 @@ class NavigationSet(TimestampMixin, table=True):
     source_suggestion_key: str | None = Field(default=None, max_length=200)
 
 
-class NavigationItem(TimestampMixin, table=True):
+class NavigationItem(TimezoneTimestampMixin, table=True):
     __table_args__ = (
         CheckConstraint(
             "(decision_version IS NULL AND decided_by IS NULL AND rationale IS NULL "
@@ -1049,7 +1072,7 @@ class NavigationItem(TimestampMixin, table=True):
     source_suggestion_key: str | None = Field(default=None, max_length=200)
 
 
-class InternalLinkIntent(TimestampMixin, table=True):
+class InternalLinkIntent(TimezoneTimestampMixin, table=True):
     __table_args__ = (
         CheckConstraint(
             "(decision_version IS NULL AND decided_by IS NULL AND rationale IS NULL "
@@ -1096,6 +1119,10 @@ class SemanticComponentDefinition(TimestampMixin, table=True):
             "contract_version",
             name="uq_semanticcomponentdefinition_key_version",
         ),
+        CheckConstraint(
+            "contract_version >= 1",
+            name="ck_semanticcomponentdefinition_version",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -1134,6 +1161,10 @@ class PageComposition(TimestampMixin, table=True):
             "generated_page_id",
             name="uq_pagecomposition_generated_page",
         ),
+        CheckConstraint(
+            "composition_version >= 1",
+            name="ck_pagecomposition_version",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -1161,7 +1192,7 @@ class PageComposition(TimestampMixin, table=True):
     decided_at: datetime | None = None
 
 
-class WebsiteCoveragePlanningRecord(TimestampMixin, table=True):
+class WebsiteCoveragePlanningRecord(TimezoneTimestampMixin, table=True):
     __table_args__ = (
         UniqueConstraint(
             "site_plan_id",
@@ -1200,10 +1231,13 @@ class WebsiteCoveragePlanningRecord(TimestampMixin, table=True):
         default_factory=dict,
         sa_column=Column(JSON, nullable=False),
     )
-    generated_at: datetime = Field(default_factory=utc_now, nullable=False)
+    generated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
 
-class WebsiteServiceCoverageDecision(TimestampMixin, table=True):
+class WebsiteServiceCoverageDecision(TimezoneTimestampMixin, table=True):
     __table_args__ = (
         CheckConstraint(
             "status IN ('included','excluded','deferred')",
@@ -1227,10 +1261,13 @@ class WebsiteServiceCoverageDecision(TimestampMixin, table=True):
     rationale: str | None = None
     decided_by: str
     decision_version: int = Field(default=1, ge=1)
-    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+    decided_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
 
-class WebsiteCountyCoverageDecision(TimestampMixin, table=True):
+class WebsiteCountyCoverageDecision(TimezoneTimestampMixin, table=True):
     __table_args__ = (
         CheckConstraint(
             "status IN ('included','excluded','deferred')",
@@ -1255,10 +1292,13 @@ class WebsiteCountyCoverageDecision(TimestampMixin, table=True):
     rationale: str | None = None
     decided_by: str
     decision_version: int = Field(default=1, ge=1)
-    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+    decided_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
 
-class WebsiteCityCoverageDecision(TimestampMixin, table=True):
+class WebsiteCityCoverageDecision(TimezoneTimestampMixin, table=True):
     __table_args__ = (
         CheckConstraint(
             "status IN ('included','excluded','deferred')",
@@ -1282,10 +1322,13 @@ class WebsiteCityCoverageDecision(TimestampMixin, table=True):
     rationale: str | None = None
     decided_by: str
     decision_version: int = Field(default=1, ge=1)
-    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+    decided_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
 
-class WebsiteServiceCityCoverageDecision(TimestampMixin, table=True):
+class WebsiteServiceCityCoverageDecision(TimezoneTimestampMixin, table=True):
     __table_args__ = (
         CheckConstraint(
             "status IN ('included','excluded','deferred')",
@@ -1311,7 +1354,10 @@ class WebsiteServiceCityCoverageDecision(TimestampMixin, table=True):
     rationale: str | None = None
     decided_by: str
     decision_version: int = Field(default=1, ge=1)
-    decided_at: datetime = Field(default_factory=utc_now, nullable=False)
+    decided_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
 
 class WebsiteServiceCountyCoverageDecision(TimestampMixin, table=True):
@@ -1502,6 +1548,19 @@ class WebsiteDraftGenerationRun(TimestampMixin, table=True):
             "'completed_with_errors')",
             name="ck_websitedraftgenerationrun_status",
         ),
+        CheckConstraint(
+            "expected_count >= 0 AND eligible_count >= 0 "
+            "AND generated_count >= 0 AND already_drafted_count >= 0 "
+            "AND skipped_count >= 0 AND blocked_count >= 0 "
+            "AND deferred_count >= 0 AND excluded_count >= 0 "
+            "AND stale_count >= 0 AND consolidation_count >= 0 "
+            "AND error_count >= 0 AND processed_count >= 0",
+            name="ck_websitedraftgenerationrun_counts",
+        ),
+        CheckConstraint(
+            "duration_ms IS NULL OR duration_ms >= 0",
+            name="ck_websitedraftgenerationrun_duration",
+        ),
         UniqueConstraint(
             "site_plan_id",
             "manifest_hash",
@@ -1548,6 +1607,10 @@ class WebsiteDraftGenerationItem(TimestampMixin, table=True):
             "outcome IN ('pending','generated','already_drafted','blocked','deferred',"
             "'excluded','stale','consolidation_recommended','unsupported','error')",
             name="ck_websitedraftgenerationitem_outcome",
+        ),
+        CheckConstraint(
+            "ordinal >= 1 AND attempt_count >= 0",
+            name="ck_websitedraftgenerationitem_counts",
         ),
         UniqueConstraint(
             "run_id",

@@ -27,6 +27,7 @@ BACKEND = Path(__file__).parents[1]
 REVISION_0042 = "20260809_0042"
 REVISION_0043 = "20260809_0043"
 REVISION_0044 = "20260810_0044"
+REVISION_0045 = "20260813_0045"
 TABLE = "generatedpageqaresult"
 CURRENT_INDEX = "uq_generatedpageqaresult_current_page"
 
@@ -175,7 +176,7 @@ def test_0043_clean_upgrade_creates_empty_durable_qa_table(
         )
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260813_0045"
+        ).scalar_one() == "20260815_0046"
     engine.dispose()
     get_settings.cache_clear()
 
@@ -209,7 +210,7 @@ def test_0043_adopts_exact_empty_model_created_table(
         ).scalar_one() == "historical_unbound"
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260813_0045"
+        ).scalar_one() == "20260815_0046"
     inspector = inspect(engine)
     assert "uq_generatedpageqaresult_current_page" in {
         item["name"] for item in inspector.get_indexes(TABLE)
@@ -559,7 +560,7 @@ def test_0043_downgrade_succeeds_when_only_unbound_history_exists(
     legacy_payload = {"page_id": 1, "readiness_status": "blocked"}
     _seed_0042_page(engine, qa_result=legacy_payload)
     engine.dispose()
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION_0045)
 
     command.downgrade(config, REVISION_0042)
 
@@ -592,7 +593,7 @@ def test_0043_downgrade_refuses_to_drop_bound_results(
         qa_result=None,
     )
     engine.dispose()
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION_0045)
     engine = create_engine(f"sqlite:///{database.as_posix()}")
     now = datetime(2026, 8, 9, 12, 0)
     with engine.begin() as connection:

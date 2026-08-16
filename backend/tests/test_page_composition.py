@@ -11,7 +11,12 @@ from fastapi import HTTPException
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.db.backup import export_backup, load_backup, restore_backup
+from app.db.backup import (
+    BackupValidationError,
+    export_backup,
+    load_backup,
+    restore_backup,
+)
 from app.models import (
     Brand,
     BrandAsset,
@@ -228,6 +233,35 @@ def _scope(session: Session, *, suffix: str | None = None, phone: str | None = "
     return website, plan, pages
 
 
+def _canonical_json_hash(value) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _export_ready_composition_backup(tmp_path: Path, *, suffix: str) -> dict:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session)
+        _, plan, _ = _scope(session, suffix=suffix)
+        result = refresh_site_plan_compositions(session, plan.id)
+        assert result.blocked == [] and result.created == 2
+        exported = export_backup(session, backup_dir=tmp_path)
+    return json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
+
+
+def _write_backup_payload(tmp_path: Path, name: str, payload: dict) -> Path:
+    path = tmp_path / name
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
 def test_registry_contracts_define_purpose_inputs_outcome_and_accessibility():
     engine = _engine(); SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
@@ -281,6 +315,100 @@ def test_live_composition_source_drift_invalidates_bound_qa_without_stale_marker
         with pytest.raises(HTTPException) as save_error:
             save_page_qa(session, page.id)
         assert save_error.value.status_code == 409
+
+
+def test_current_composition_hash_is_stable_when_0045_utc_naive_values_become_aware():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session)
+        _, plan, pages = _scope(session, suffix="utc-aware-current")
+        result = refresh_site_plan_compositions(session, plan.id)
+        assert result.blocked == []
+        composition = session.exec(
+            select(PageComposition).where(
+                PageComposition.generated_page_id == pages[0][1].id
+            )
+        ).one()
+        source_snapshot = json.loads(json.dumps(composition.source_snapshot))
+        source_hash = composition.source_hash
+        assert source_snapshot["navigation_sets"][0]["updated_at"].endswith(
+            "+00:00"
+        ) is False
+
+        for model in (NavigationSet, NavigationItem, InternalLinkIntent):
+            for record in session.exec(select(model)).all():
+                for field in ("created_at", "updated_at"):
+                    value = getattr(record, field)
+                    if value.tzinfo is None:
+                        setattr(record, field, value.replace(tzinfo=UTC))
+                session.add(record)
+        session.flush()
+
+        current = read_composition_for_generated_page(session, pages[0][1].id)
+
+        assert current.status == "current"
+        assert current.validation_errors == []
+        assert current.source_hash == source_hash
+        assert current.source_snapshot == source_snapshot
+        naive = datetime(2026, 8, 1, 12, 30, 45)
+        assert composition_service.canonical_utc_timestamp(naive) == (
+            composition_service.canonical_utc_timestamp(
+                datetime.fromisoformat("2026-08-01T08:30:45-04:00")
+            )
+        )
+
+
+def test_all_0046_converged_backup_timestamps_compare_and_bind_as_utc():
+    from app.db import backup as backup_service
+
+    legacy = {}
+    aware = {}
+    field_count = 0
+    for group, fields in backup_service._CONVERGED_UTC_TIMESTAMP_FIELDS.items():
+        legacy[group] = [{field: "2026-08-01T12:30:45" for field in fields}]
+        aware[group] = [{field: "2026-08-01T08:30:45-04:00" for field in fields}]
+        field_count += len(fields)
+    assert field_count == 24
+
+    backup_service._canonicalize_converged_utc_timestamps(legacy)
+    backup_service._canonicalize_converged_utc_timestamps(aware)
+    assert legacy == aware
+
+    for model, fields in backup_service._CONVERGED_UTC_MODEL_FIELDS.items():
+        normalized = backup_service._normalize_converged_utc_restore_values(
+            model,
+            {field: "2026-08-01T12:30:45" for field in fields},
+        )
+        assert all(
+            normalized[field].tzinfo is UTC
+            and normalized[field].utcoffset().total_seconds() == 0
+            for field in fields
+        )
+
+
+def test_read_rejects_incomplete_generated_component_projection():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session)
+        _, plan, pages = _scope(session, suffix="component-completeness")
+        result = refresh_site_plan_compositions(session, plan.id)
+        assert result.blocked == []
+        composition = session.exec(
+            select(PageComposition).where(
+                PageComposition.generated_page_id == pages[0][1].id
+            )
+        ).one()
+        composition.generated_components = composition.generated_components[:-1]
+        session.add(composition)
+        session.flush()
+
+        with pytest.raises(
+            PageCompositionError,
+            match="generated component projection changed",
+        ):
+            read_composition_for_generated_page(session, pages[0][1].id)
 
 
 def test_refresh_builds_fact_free_suggestions_and_resolves_approved_inputs():
@@ -1265,6 +1393,22 @@ def test_backup_051_round_trip_preserves_assets_theme_and_scoped_compositions(tm
         )
         assert restored_composition.source_snapshot["theme"]["theme_id"] == restored_theme.id
         assert restored_composition.source_snapshot["theme"]["selection_id"] == restored_selection.id
+        assert backup_service._restore_managed_tables_match_backup(
+            session,
+            source_data,
+        )
+        for model, fields in backup_service._CONVERGED_UTC_MODEL_FIELDS.items():
+            for record in session.exec(select(model)).all():
+                for field in fields:
+                    value = getattr(record, field)
+                    if value is not None and value.tzinfo is None:
+                        setattr(record, field, value.replace(tzinfo=UTC))
+                session.add(record)
+        session.flush()
+        assert backup_service._restore_managed_tables_match_backup(
+            session,
+            source_data,
+        )
         first_reexport = export_backup(session, backup_dir=tmp_path)
         first_data = load_backup(Path(first_reexport["path"]))["data"]
         assert {
@@ -1315,6 +1459,170 @@ def test_backup_051_round_trip_preserves_assets_theme_and_scoped_compositions(tm
         } == {
             group: legacy_source_data[group] for group in deterministic_groups
         }
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ("changed_snapshot_field", "missing_snapshot_field", "missing_component"),
+)
+def test_backup_057_identity_shortcut_rebuilds_divergent_projection(
+    tmp_path: Path,
+    corruption: str,
+):
+    payload = _export_ready_composition_backup(
+        tmp_path,
+        suffix=f"projection-{corruption}",
+    )
+    source = payload["data"]["page_compositions"][0]
+    expected_snapshot = json.loads(json.dumps(source["source_snapshot"]))
+    expected_components = json.loads(json.dumps(source["generated_components"]))
+    expected_hash = source["source_hash"]
+    expected_version = source["composition_version"]
+    if corruption == "changed_snapshot_field":
+        source["source_snapshot"]["navigation_sets"][0]["label"] = "Tampered"
+        source["source_hash"] = _canonical_json_hash(source["source_snapshot"])
+    elif corruption == "missing_snapshot_field":
+        source["source_snapshot"]["navigation_sets"][0].pop("label")
+        source["source_hash"] = _canonical_json_hash(source["source_snapshot"])
+    else:
+        source["generated_components"].pop()
+    path = _write_backup_payload(
+        tmp_path,
+        f"divergent-{corruption}.json",
+        payload,
+    )
+    load_backup(path)
+
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        restore_backup(session, path)
+        restored = session.get(PageComposition, source["id"])
+        assert restored is not None
+        assert restored.source_snapshot == expected_snapshot
+        assert restored.source_hash == expected_hash
+        assert restored.generated_components == expected_components
+        assert restored.composition_version == expected_version + 1
+        assert read_composition_for_generated_page(
+            session,
+            restored.generated_page_id,
+        ).status == "current"
+
+
+def test_backup_057_identity_shortcut_rebuilds_after_draft_source_tamper(
+    tmp_path: Path,
+):
+    payload = _export_ready_composition_backup(tmp_path, suffix="draft-tamper")
+    source = payload["data"]["page_compositions"][0]
+    generated = next(
+        record
+        for record in payload["data"]["generated_pages"]
+        if record["id"] == source["generated_page_id"]
+    )
+    prior_draft_hash = source["source_snapshot"]["draft_hash"]
+    generated["draft_content"]["h1"] = "Changed authoritative heading"
+    path = _write_backup_payload(tmp_path, "draft-source-tamper.json", payload)
+    load_backup(path)
+
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        restore_backup(session, path)
+        restored = session.get(PageComposition, source["id"])
+        assert restored is not None
+        assert restored.source_snapshot["draft_hash"] == _canonical_json_hash(
+            generated["draft_content"]
+        )
+        assert restored.source_snapshot["draft_hash"] != prior_draft_hash
+        assert read_composition_for_generated_page(
+            session,
+            restored.generated_page_id,
+        ).status == "current"
+
+
+def test_backup_057_partial_composition_set_is_completed_authoritatively(
+    tmp_path: Path,
+):
+    payload = _export_ready_composition_backup(tmp_path, suffix="partial-set")
+    payload["data"]["page_compositions"].pop()
+    payload["metadata"]["table_counts"]["page_compositions"] -= 1
+    path = _write_backup_payload(tmp_path, "partial-composition-set.json", payload)
+    load_backup(path)
+
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        restore_backup(session, path)
+        compositions = session.exec(select(PageComposition)).all()
+        generated_page_ids = {
+            record["generated_page_id"]
+            for record in payload["data"]["planned_pages"]
+            if record.get("generated_page_id") is not None
+        }
+        assert {record.generated_page_id for record in compositions} == generated_page_ids
+        assert all(
+            read_composition_for_generated_page(
+                session,
+                record.generated_page_id,
+            ).status
+            == "current"
+            for record in compositions
+        )
+
+
+def test_backup_057_missing_connection_planning_record_is_restored_before_currentness(
+    tmp_path: Path,
+):
+    payload = _export_ready_composition_backup(tmp_path, suffix="missing-planning")
+    payload["data"]["site_connection_planning_records"] = []
+    payload["metadata"]["table_counts"]["site_connection_planning_records"] = 0
+    path = _write_backup_payload(tmp_path, "missing-planning-record.json", payload)
+    load_backup(path)
+
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        restored = restore_backup(session, path)
+        assert restored["status"] == "restored"
+        planning_records = session.exec(select(SiteConnectionPlanningRecord)).all()
+        assert len(planning_records) == 1
+        compositions = session.exec(select(PageComposition)).all()
+        assert compositions
+        assert all(composition.status == "current" for composition in compositions)
+        for composition in compositions:
+            current = read_composition_for_generated_page(
+                session,
+                composition.generated_page_id,
+            )
+            assert current.status == "current"
+            assert current.validation_errors == []
+
+
+def test_backup_057_invalid_operator_decision_cannot_preserve_current(
+    tmp_path: Path,
+):
+    payload = _export_ready_composition_backup(tmp_path, suffix="invalid-decision")
+    payload["data"]["page_compositions"][0]["operator_decisions"] = [
+        {
+            "instance_key": "hero",
+            "action": "suppress",
+            "provenance": "operator",
+            "decided_by": "Tampered backup",
+            "decided_at": "2026-08-01T00:00:00+00:00",
+        }
+    ]
+    path = _write_backup_payload(tmp_path, "invalid-operator-decision.json", payload)
+    load_backup(path)
+
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        with pytest.raises(
+            BackupValidationError,
+            match="invalid suppression decision",
+        ):
+            restore_backup(session, path)
+        assert session.exec(select(PageComposition)).all() == []
 
 
 def test_real_050_backup_without_theme_groups_restores_with_neutral_fallback(tmp_path):

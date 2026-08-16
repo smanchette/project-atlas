@@ -232,6 +232,49 @@ _UTC_NAVIGATION_DECISION_GROUPS = (
     "internal_link_intents",
 )
 
+# Exact Backup-model projection of revision 0046's TIMESTAMPTZ_COLUMNS.  These
+# fields represented UTC instants before 0046 and differ only in whether the
+# PostgreSQL driver returns a naive value or an explicit UTC offset afterward.
+_CONVERGED_UTC_TIMESTAMP_FIELDS = {
+    "site_connection_planning_records": (
+        "created_at",
+        "updated_at",
+        "generated_at",
+    ),
+    "navigation_sets": ("created_at", "updated_at"),
+    "navigation_items": ("created_at", "updated_at"),
+    "internal_link_intents": ("created_at", "updated_at"),
+    "website_coverage_planning_records": (
+        "created_at",
+        "updated_at",
+        "generated_at",
+    ),
+    "website_service_coverage_decisions": (
+        "created_at",
+        "updated_at",
+        "decided_at",
+    ),
+    "website_county_coverage_decisions": (
+        "created_at",
+        "updated_at",
+        "decided_at",
+    ),
+    "website_city_coverage_decisions": (
+        "created_at",
+        "updated_at",
+        "decided_at",
+    ),
+    "website_service_city_coverage_decisions": (
+        "created_at",
+        "updated_at",
+        "decided_at",
+    ),
+}
+_CONVERGED_UTC_MODEL_FIELDS = {
+    BACKUP_MODELS[group]: fields
+    for group, fields in _CONVERGED_UTC_TIMESTAMP_FIELDS.items()
+}
+
 
 class BackupValidationError(ValueError):
     pass
@@ -297,6 +340,7 @@ def export_backup(
             ]
         data[group] = [record.model_dump(mode="json") for record in records]
     _canonicalize_navigation_decision_timestamps(data)
+    _canonicalize_converged_utc_timestamps(data)
     table_counts = {group: len(records) for group, records in data.items()}
     payload = {
         "metadata": {
@@ -380,7 +424,12 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
     data = payload["data"]
 
     try:
-        preserve_source_ids = _restore_managed_tables_are_empty(session)
+        preserve_source_ids = _restore_managed_tables_are_empty(
+            session, data
+        ) or _restore_managed_tables_match_backup(session, data)
+        preserve_current_composition_identity = bool(
+            preserve_source_ids and payload["metadata"]["version"] == "0.57"
+        )
     except Exception as exc:
         raise BackupValidationError(
             "Restore could not prove whether every managed target table is empty."
@@ -1381,6 +1430,15 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 theme_ids=theme_ids,
                 selection_ids=website_theme_selection_ids,
             )
+            restored_source_hash = _canonical_json_hash(restored_snapshot)
+            if preserve_source_ids:
+                # A clean exact-ID restore must preserve the durable composition
+                # identity from the accepted backup.  Re-hashing an unchanged
+                # historical snapshot with newer canonicalization code would
+                # manufacture a different source identity and force an
+                # unnecessary composition/QA refresh.
+                restored_snapshot = deepcopy(record.get("source_snapshot", {}))
+                restored_source_hash = record["source_hash"]
             restored_composition = _upsert(
                 session,
                 PageComposition,
@@ -1390,7 +1448,7 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 {
                     **record,
                     "source_snapshot": restored_snapshot,
-                    "source_hash": _canonical_json_hash(restored_snapshot),
+                    "source_hash": restored_source_hash,
                     "website_id": _mapped_id(
                         website_ids, record["website_id"], "page_compositions.website_id"
                     ),
@@ -2218,6 +2276,33 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
         # Page Compositions are created before media assignments so their primary
         # ownership graph can be restored in dependency order. Remap every durable
         # Page Media identity now that the complete governed media graph exists.
+        composition_bindings_preserve_source_ids = preserve_source_ids and all(
+            source_id == restored_id
+            for mapping in (
+                website_ids,
+                business_ids,
+                website_identity_ids,
+                site_plan_ids,
+                planned_page_ids,
+                generated_page_ids,
+                service_ids,
+                city_ids,
+                county_ids,
+                navigation_set_ids,
+                navigation_item_ids,
+                internal_link_intent_ids,
+                brand_asset_ids,
+                website_media_planning_record_ids,
+                planned_page_media_requirement_ids,
+                page_image_assignment_ids,
+                image_metadata_ids,
+                scoped_media_authorization_ids,
+                theme_ids,
+                website_theme_selection_ids,
+                page_composition_ids,
+            )
+            for source_id, restored_id in mapping.items()
+        )
         for record in data.get("page_compositions", []):
             planned_page_id = _mapped_id(
                 planned_page_ids,
@@ -2229,54 +2314,55 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                     PageComposition.planned_page_id == planned_page_id
                 )
             ).one()
-            composition.generated_components = _restore_composition_component_bindings(
-                composition.generated_components,
-                website_ids=website_ids,
-                navigation_set_ids=navigation_set_ids,
-                generated_page_ids=generated_page_ids,
-                planned_page_ids=planned_page_ids,
-                internal_link_intent_ids=internal_link_intent_ids,
-                requirement_ids=planned_page_media_requirement_ids,
-                assignment_ids=page_image_assignment_ids,
-            )
-            composition.operator_decisions = _restore_composition_component_bindings(
-                composition.operator_decisions,
-                website_ids=website_ids,
-                navigation_set_ids=navigation_set_ids,
-                generated_page_ids=generated_page_ids,
-                planned_page_ids=planned_page_ids,
-                internal_link_intent_ids=internal_link_intent_ids,
-                requirement_ids=planned_page_media_requirement_ids,
-                assignment_ids=page_image_assignment_ids,
-            )
-            composition.source_snapshot = _restore_composition_source_binding(
-                session,
-                composition.source_snapshot,
-                website_ids=website_ids,
-                business_ids=business_ids,
-                website_identity_ids=website_identity_ids,
-                site_plan_ids=site_plan_ids,
-                planned_page_ids=planned_page_ids,
-                generated_page_ids=generated_page_ids,
-                service_ids=service_ids,
-                city_ids=city_ids,
-                county_ids=county_ids,
-                navigation_set_ids=navigation_set_ids,
-                navigation_item_ids=navigation_item_ids,
-                internal_link_intent_ids=internal_link_intent_ids,
-                brand_asset_ids=brand_asset_ids,
-                planning_record_ids=website_media_planning_record_ids,
-                requirement_ids=planned_page_media_requirement_ids,
-                assignment_ids=page_image_assignment_ids,
-                image_ids=image_metadata_ids,
-                authorization_ids=scoped_media_authorization_ids,
-                authorization_fingerprints=(
-                    scoped_media_authorization_fingerprints
-                ),
-            )
-            composition.source_hash = _canonical_json_hash(
-                composition.source_snapshot
-            )
+            if not composition_bindings_preserve_source_ids:
+                composition.generated_components = _restore_composition_component_bindings(
+                    composition.generated_components,
+                    website_ids=website_ids,
+                    navigation_set_ids=navigation_set_ids,
+                    generated_page_ids=generated_page_ids,
+                    planned_page_ids=planned_page_ids,
+                    internal_link_intent_ids=internal_link_intent_ids,
+                    requirement_ids=planned_page_media_requirement_ids,
+                    assignment_ids=page_image_assignment_ids,
+                )
+                composition.operator_decisions = _restore_composition_component_bindings(
+                    composition.operator_decisions,
+                    website_ids=website_ids,
+                    navigation_set_ids=navigation_set_ids,
+                    generated_page_ids=generated_page_ids,
+                    planned_page_ids=planned_page_ids,
+                    internal_link_intent_ids=internal_link_intent_ids,
+                    requirement_ids=planned_page_media_requirement_ids,
+                    assignment_ids=page_image_assignment_ids,
+                )
+                composition.source_snapshot = _restore_composition_source_binding(
+                    session,
+                    composition.source_snapshot,
+                    website_ids=website_ids,
+                    business_ids=business_ids,
+                    website_identity_ids=website_identity_ids,
+                    site_plan_ids=site_plan_ids,
+                    planned_page_ids=planned_page_ids,
+                    generated_page_ids=generated_page_ids,
+                    service_ids=service_ids,
+                    city_ids=city_ids,
+                    county_ids=county_ids,
+                    navigation_set_ids=navigation_set_ids,
+                    navigation_item_ids=navigation_item_ids,
+                    internal_link_intent_ids=internal_link_intent_ids,
+                    brand_asset_ids=brand_asset_ids,
+                    planning_record_ids=website_media_planning_record_ids,
+                    requirement_ids=planned_page_media_requirement_ids,
+                    assignment_ids=page_image_assignment_ids,
+                    image_ids=image_metadata_ids,
+                    authorization_ids=scoped_media_authorization_ids,
+                    authorization_fingerprints=(
+                        scoped_media_authorization_fingerprints
+                    ),
+                )
+                composition.source_hash = _canonical_json_hash(
+                    composition.source_snapshot
+                )
             session.add(composition)
 
         # Rebuild every composition that the backup claimed was current before
@@ -2289,6 +2375,8 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             session,
             payload=payload,
             site_plan_ids=site_plan_ids,
+            page_composition_ids=page_composition_ids,
+            preserve_current_identity=preserve_current_composition_identity,
         )
         session.flush()
 
@@ -2880,6 +2968,8 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             session,
             payload=payload,
             site_plan_ids=site_plan_ids,
+            page_composition_ids=page_composition_ids,
+            preserve_current_identity=preserve_current_composition_identity,
         )
 
         if preserve_source_ids:
@@ -2907,11 +2997,55 @@ def _refresh_restored_current_compositions(
     *,
     payload: dict[str, Any],
     site_plan_ids: dict[int, int],
+    page_composition_ids: dict[int, int],
+    preserve_current_identity: bool,
 ) -> None:
     """Materialize the authoritative remapped composition graph during restore."""
 
     data = payload["data"]
     if not data.get("page_compositions"):
+        return
+
+    if preserve_current_identity:
+        preserve_current_identity = (
+            _restored_current_compositions_match_authoritative_sources(
+                session,
+                data=data,
+                site_plan_ids=site_plan_ids,
+                page_composition_ids=page_composition_ids,
+            )
+        )
+
+    # An exact identity-preserving restore already carries the authoritative
+    # current composition graph.  Rebuilding it would manufacture a new
+    # version/hash (and therefore new QA identity) even though every bound ID
+    # and governed payload is unchanged.  Remapped or divergent restores still
+    # take the full refresh path below.
+    exact_current_identity = True
+    for source in data["page_compositions"]:
+        if source.get("status") != "current":
+            exact_current_identity = False
+            break
+        source_id = _record_id(source, "page_compositions")
+        restored_id = page_composition_ids.get(source_id)
+        restored = session.get(PageComposition, restored_id) if restored_id else None
+        if (
+            restored_id != source_id
+            or restored is None
+            or restored.website_id != source.get("website_id")
+            or restored.site_plan_id != source.get("site_plan_id")
+            or restored.planned_page_id != source.get("planned_page_id")
+            or restored.generated_page_id != source.get("generated_page_id")
+            or restored.composition_version != source.get("composition_version")
+            or restored.status != source.get("status")
+            or restored.source_snapshot != source.get("source_snapshot")
+            or restored.source_hash != source.get("source_hash")
+            or restored.generated_components != source.get("generated_components")
+            or restored.operator_decisions != source.get("operator_decisions")
+        ):
+            exact_current_identity = False
+            break
+    if preserve_current_identity and exact_current_identity:
         return
 
     from app.services.page_composition import refresh_site_plan_compositions
@@ -2977,6 +3111,134 @@ def _refresh_restored_current_compositions(
                 composition.status = "stale"
                 composition.updated_at = datetime.now(UTC)
                 session.add(composition)
+
+
+def _restored_current_compositions_match_authoritative_sources(
+    session: Session,
+    *,
+    data: dict[str, list[dict[str, Any]]],
+    site_plan_ids: dict[int, int],
+    page_composition_ids: dict[int, int],
+) -> bool:
+    """Prove a Backup 0.57 current graph can retain its exact identity.
+
+    The shortcut is deliberately based on the same live source projection and
+    Site Connection readiness contract used by composition refresh.  A backup
+    that is internally self-consistent but stale, incomplete, or missing a
+    dependency therefore takes the authoritative refresh path instead.
+    """
+
+    source_compositions = data.get("page_compositions", [])
+    if not source_compositions or any(
+        record.get("status") != "current" for record in source_compositions
+    ):
+        return False
+
+    expected_composition_bindings = sorted(
+        (
+            record["site_plan_id"],
+            record["id"],
+            record["generated_page_id"],
+        )
+        for record in data.get("planned_pages", [])
+        if type(record.get("site_plan_id")) is int
+        and type(record.get("id")) is int
+        and type(record.get("generated_page_id")) is int
+    )
+    backed_composition_bindings = sorted(
+        (
+            record["site_plan_id"],
+            record["planned_page_id"],
+            record["generated_page_id"],
+        )
+        for record in source_compositions
+    )
+    if backed_composition_bindings != expected_composition_bindings:
+        return False
+
+    from app.services.page_composition import (
+        PageCompositionError,
+        _authoritative_projection,
+        _validate,
+    )
+    from app.services.site_connections import (
+        SiteConnectionError,
+        read_site_connection_plan,
+    )
+
+    source_plan_ids = sorted({record["site_plan_id"] for record in source_compositions})
+    for source_plan_id in source_plan_ids:
+        restored_plan_id = site_plan_ids.get(source_plan_id)
+        if restored_plan_id != source_plan_id:
+            return False
+        try:
+            if not read_site_connection_plan(session, restored_plan_id).ready:
+                return False
+        except SiteConnectionError:
+            return False
+
+        expected_plan_bindings = [
+            binding
+            for binding in expected_composition_bindings
+            if binding[0] == source_plan_id
+        ]
+        restored_plan_bindings = sorted(
+            (
+                composition.site_plan_id,
+                composition.planned_page_id,
+                composition.generated_page_id,
+            )
+            for composition in session.exec(
+                select(PageComposition).where(
+                    PageComposition.site_plan_id == restored_plan_id
+                )
+            ).all()
+        )
+        if restored_plan_bindings != expected_plan_bindings:
+            return False
+
+    for source in source_compositions:
+        source_id = _record_id(source, "page_compositions")
+        restored_id = page_composition_ids.get(source_id)
+        restored = session.get(PageComposition, restored_id) if restored_id else None
+        if restored_id != source_id or restored is None:
+            return False
+        plan = session.get(SitePlan, source["site_plan_id"])
+        planned = session.get(PlannedPage, source["planned_page_id"])
+        generated = session.get(GeneratedPage, source["generated_page_id"])
+        if (
+            plan is None
+            or planned is None
+            or generated is None
+            or planned.site_plan_id != plan.id
+            or planned.generated_page_id != generated.id
+        ):
+            return False
+        try:
+            authoritative_snapshot, authoritative_components = _authoritative_projection(
+                session,
+                plan,
+                planned,
+                generated,
+                operator_decisions=source.get("operator_decisions", []),
+            )
+            _validate(
+                session,
+                restored,
+                plan,
+                planned,
+                generated,
+            )
+        except PageCompositionError:
+            return False
+        if (
+            authoritative_snapshot != source.get("source_snapshot")
+            or _canonical_json_hash(authoritative_snapshot)
+            != source.get("source_hash")
+            or authoritative_components != source.get("generated_components")
+        ):
+            return False
+    return True
 
 
 def is_sensitive_setting_key(setting_key: str) -> bool:
@@ -3516,18 +3778,103 @@ def _reserve_backup_path(destination: Path, timestamp: datetime) -> Path:
         candidate_time += timedelta(seconds=1)
 
 
-def _restore_managed_tables_are_empty(session: Session) -> bool:
-    """Prove the restore target has no rows in any backup-managed table."""
+def _restore_managed_tables_are_empty(
+    session: Session,
+    data: dict[str, list[dict[str, Any]]],
+) -> bool:
+    """Prove the target is empty apart from exact migration-owned seed rows."""
 
     checked_tables: set[str] = set()
-    for model in BACKUP_MODELS.values():
+    for group, model in BACKUP_MODELS.items():
         table_key = model.__table__.key
         if table_key in checked_tables:
             continue
         checked_tables.add(table_key)
-        if session.exec(select(model).limit(1)).first() is not None:
+        if session.exec(select(model).limit(1)).first() is None:
+            continue
+        if group != "semantic_component_definitions":
             return False
+
+        # Migration 0037 deliberately seeds the canonical semantic component
+        # registry on an otherwise clean migrated database.  Treat those rows
+        # as clean-target infrastructure only when their durable identity and
+        # complete contract payload exactly match the accepted backup; seed
+        # timestamps are intentionally excluded because each clean migration
+        # run assigns its own creation instant.
+        fields = (
+            "id",
+            "component_key",
+            "contract_version",
+            "purpose",
+            "required_inputs",
+            "customer_outcome",
+            "compatible_page_types",
+            "supported_variants",
+            "accessibility_requirements",
+            "status",
+        )
+        observed = {
+            (record.component_key, record.contract_version): {
+                field: (
+                    tuple(value) if isinstance(value, list) else value
+                )
+                for field in fields
+                for value in (getattr(record, field),)
+            }
+            for record in session.exec(select(SemanticComponentDefinition)).all()
+        }
+        expected = {
+            (record["component_key"], record["contract_version"]): {
+                field: (
+                    tuple(record[field])
+                    if isinstance(record[field], list)
+                    else record[field]
+                )
+                for field in fields
+            }
+            for record in data.get(group, [])
+        }
+        if observed.keys() != expected.keys():
+            return False
+        for identity, observed_contract in observed.items():
+            expected_contract = expected[identity]
+            if (
+                identity == ("related_page_links", 1)
+                and observed_contract["purpose"]
+                == "Present approved contextual page relationships."
+                and expected_contract["purpose"]
+                == "Present operator-approved contextual page relationships."
+            ):
+                observed_contract = {
+                    **observed_contract,
+                    "purpose": expected_contract["purpose"],
+                }
+            if observed_contract != expected_contract:
+                return False
     return True
+
+
+def _restore_managed_tables_match_backup(
+    session: Session,
+    data: dict[str, list[dict[str, Any]]],
+) -> bool:
+    """Return true only when the complete managed target exactly matches data."""
+
+    observed: dict[str, list[dict[str, Any]]] = {}
+    for group, model in BACKUP_MODELS.items():
+        records = session.exec(select(model).order_by(model.id)).all()
+        if group == "settings":
+            records = [
+                record
+                for record in records
+                if not is_sensitive_setting_key(record.setting_key)
+            ]
+        observed[group] = [record.model_dump(mode="json") for record in records]
+    expected = deepcopy(data)
+    for comparable in (observed, expected):
+        _canonicalize_navigation_decision_timestamps(comparable)
+        _canonicalize_converged_utc_timestamps(comparable)
+    return observed == expected
 
 
 def _restore_insert_values(
@@ -3609,7 +3956,9 @@ def _upsert(
     statement: Any,
     payload: dict[str, Any],
 ) -> SQLModel:
-    normalized = model.model_validate(payload)
+    normalized = model.model_validate(
+        _normalize_converged_utc_restore_values(model, payload)
+    )
     existing = session.exec(statement).first()
     if existing:
         values = normalized.model_dump(exclude={"id"})
@@ -3622,6 +3971,29 @@ def _upsert(
     session.add(record)
     session.flush()
     return record
+
+
+def _normalize_converged_utc_restore_values(
+    model: type[SQLModel],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind legacy UTC-naive values to TIMESTAMPTZ without session dependence."""
+
+    fields = _CONVERGED_UTC_MODEL_FIELDS.get(model)
+    if fields is None:
+        return payload
+    normalized = dict(payload)
+    for field in fields:
+        value = normalized.get(field)
+        if value is None:
+            continue
+        parsed = _datetime_value(value, f"{model.__table__.key}.{field}")
+        normalized[field] = (
+            parsed.replace(tzinfo=UTC)
+            if parsed.tzinfo is None
+            else parsed.astimezone(UTC)
+        )
+    return normalized
 
 
 def _restore_immutable_record(
@@ -4579,6 +4951,24 @@ def _canonicalize_navigation_decision_timestamps(
             )
 
 
+def _canonicalize_converged_utc_timestamps(
+    data: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Normalize only the 24 UTC timestamp fields converged by revision 0046."""
+
+    from app.services.page_composition import canonical_utc_timestamp
+
+    for group, fields in _CONVERGED_UTC_TIMESTAMP_FIELDS.items():
+        for record in data.get(group, []):
+            for field in fields:
+                value = record.get(field)
+                if value is None:
+                    continue
+                record[field] = canonical_utc_timestamp(
+                    _datetime_value(value, f"{group}.{field}")
+                )
+
+
 def _canonical_theme_datetime(value: Any, field: str) -> str | None:
     if value is None:
         return None
@@ -5330,6 +5720,53 @@ def _validate_052_composition_connection_bindings(
             raise BackupValidationError(
                 "Backup Page Composition source identity is out of scope."
             )
+        snapshot_contracts = (
+            (
+                "navigation_sets",
+                sorted(
+                    record_id
+                    for record_id, record in sets_by_id.items()
+                    if record.get("website_id") == website_id
+                    and record.get("site_plan_id") == site_plan_id
+                ),
+            ),
+            (
+                "navigation_items",
+                sorted(
+                    record_id
+                    for record_id, record in items_by_id.items()
+                    if record.get("website_id") == website_id
+                    and record.get("site_plan_id") == site_plan_id
+                    and record.get("status") == "active"
+                ),
+            ),
+            (
+                "internal_links",
+                sorted(
+                    record_id
+                    for record_id, record in links_by_id.items()
+                    if record.get("website_id") == website_id
+                    and record.get("site_plan_id") == site_plan_id
+                    and record.get("source_planned_page_id") == planned.get("id")
+                    and record.get("approval_state") == "approved"
+                ),
+            ),
+        )
+        for field, expected_ids in snapshot_contracts:
+            values = snapshot.get(field)
+            if not isinstance(values, list) or any(
+                not isinstance(value, dict)
+                or type(value.get("id")) is not int
+                for value in values
+            ):
+                raise BackupValidationError(
+                    f"Backup Page Composition {field} snapshot is malformed."
+                )
+            observed_ids = [value["id"] for value in values]
+            if observed_ids != expected_ids:
+                raise BackupValidationError(
+                    f"Backup Page Composition {field} snapshot is incomplete, duplicated, or out of order."
+                )
         for value in snapshot.get("navigation_sets", []):
             navigation_set = sets_by_id.get(value.get("id")) if isinstance(value, dict) else None
             if (

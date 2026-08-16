@@ -22,6 +22,8 @@ from app.models import (
     County,
     GeneratedPage,
     ImageMetadata,
+    NavigationItem,
+    NavigationSet,
     PageComposition,
     PageImageAssignment,
     PlannedPage,
@@ -40,6 +42,10 @@ from app.schemas.page_media_planning import (
 )
 from app.schemas.scoped_media_authorizations import (
     ScopedMediaAuthorizationRequest,
+)
+from app.schemas.site_connections import (
+    NavigationItemCreate,
+    NavigationSetDecisionUpdate,
 )
 from app.schemas.entities import ImageMetadataUpdate
 from app.schemas.media import (
@@ -79,6 +85,11 @@ from app.services.scoped_media_authorizations import (
     create_scoped_media_authorization,
     current_scoped_media_authorization,
 )
+from app.services.site_connections import (
+    create_navigation_item,
+    ensure_site_connection_foundation,
+    update_navigation_set,
+)
 from app.services.website_readiness import evaluate_website_readiness
 from app.services.approval_queue import build_approval_queue
 from app.services.page_export import build_page_export_package
@@ -98,6 +109,15 @@ COMPOSITION_COMPONENT_KEYS_BY_CONTRACT: dict[str, tuple[str, ...]] = {
 }
 
 COMPOSITION_REQUIRED_INPUTS: dict[str, list[str]] = {
+    "website_header": [
+        "business_identity",
+        "brand",
+        "website_identity",
+        "contact_information",
+    ],
+    "primary_navigation": ["navigation:primary"],
+    "utility_navigation": ["navigation:utility"],
+    "footer_navigation": ["navigation:footer"],
     "hero": ["draft:h1", "draft:intro", "contact_information"],
     "trust_license": ["trust_information"],
     "content_section": ["draft:section"],
@@ -105,6 +125,8 @@ COMPOSITION_REQUIRED_INPUTS: dict[str, list[str]] = {
     "contact_pathways": ["website_identity", "contact_information"],
     "faq": ["draft:faq_items"],
     "media_placement": [],
+    "final_cta": ["draft:title", "draft:call_to_action", "contact_information"],
+    "website_footer": ["business_identity", "website_identity"],
     # The isolated Home fixture has no second Planned Page to authorize as a
     # destination. Related-page behavior is covered by the composition suite.
     "related_page_links": [],
@@ -258,7 +280,7 @@ def _scope(
         component_key
         for contract_keys in COMPOSITION_COMPONENT_KEYS_BY_CONTRACT.values()
         for component_key in contract_keys
-    } | {"media_placement"}
+    } | set(COMPOSITION_REQUIRED_INPUTS)
     for component_key in sorted(
         (
             {
@@ -278,7 +300,13 @@ def _scope(
                 required_inputs=COMPOSITION_REQUIRED_INPUTS[component_key],
                 customer_outcome=f"Understand the approved {component_key} information.",
                 compatible_page_types=["all"],
-                supported_variants=["default", "placeholder", "approved_media"],
+                supported_variants=[
+                    "default",
+                    "placeholder",
+                    "approved_media",
+                    "local",
+                    "muted",
+                ],
                 accessibility_requirements=["Provide an accessible media alternative."],
                 status="active",
             )
@@ -402,6 +430,95 @@ def _refresh_test_compositions(
         )
         composition.source_snapshot = snapshot
         composition.source_hash = media_planning._hash(snapshot)
+        composition.status = "current"
+        session.add(composition)
+    session.commit()
+
+
+def _refresh_authoritative_test_compositions(
+    session: Session,
+    website: Website,
+    plan: SitePlan,
+    pages: list[tuple[PlannedPage, GeneratedPage]],
+) -> None:
+    """Establish complete navigation decisions before authoritative reads."""
+
+    decided_at = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+    ensure_site_connection_foundation(session, plan, commit=False)
+    navigation_sets = {
+        item.set_type: item
+        for item in session.exec(
+            select(NavigationSet).where(NavigationSet.site_plan_id == plan.id)
+        ).all()
+    }
+    assert set(navigation_sets) == {"primary", "utility", "footer"}
+    for set_type in ("primary", "utility", "footer"):
+        navigation_set = navigation_sets[set_type]
+        if navigation_set.status != "active":
+            update_navigation_set(
+                session,
+                navigation_set.id,
+                NavigationSetDecisionUpdate(
+                    status="active",
+                    decided_by="Page Media Composition Operator",
+                    rationale=f"Approve {set_type} navigation for authoritative reads.",
+                ),
+            )
+        navigation_set = session.get(NavigationSet, navigation_set.id)
+        assert navigation_set is not None
+        navigation_set.decided_at = decided_at
+        navigation_set.updated_at = decided_at
+        session.add(navigation_set)
+    session.commit()
+
+    for set_type in ("primary", "utility", "footer"):
+        navigation_set = navigation_sets[set_type]
+        navigation_item = session.exec(
+            select(NavigationItem).where(
+                NavigationItem.navigation_set_id == navigation_set.id,
+                NavigationItem.status == "active",
+            )
+        ).first()
+        if navigation_item is None:
+            created = create_navigation_item(
+                session,
+                NavigationItemCreate(
+                    website_id=website.id,
+                    site_plan_id=plan.id,
+                    navigation_set_id=navigation_set.id,
+                    target_planned_page_id=pages[0][0].id,
+                    label=pages[0][0].working_name,
+                    position=0,
+                    status="active",
+                    decided_by="Page Media Composition Operator",
+                    rationale=(
+                        f"Expose the approved test page in {set_type} navigation."
+                    ),
+                ),
+            )
+            navigation_item = session.get(NavigationItem, created.id)
+        assert navigation_item is not None
+        navigation_item.decided_at = decided_at
+        navigation_item.updated_at = decided_at
+        session.add(navigation_item)
+    session.commit()
+
+    for planned, generated in pages:
+        composition = session.exec(
+            select(PageComposition).where(
+                PageComposition.planned_page_id == planned.id
+            )
+        ).one()
+        snapshot, components = composition_service._authoritative_projection(
+            session,
+            plan,
+            planned,
+            generated,
+            operator_decisions=composition.operator_decisions,
+        )
+        composition.source_snapshot = snapshot
+        composition.source_hash = composition_service._hash(snapshot)
+        composition.generated_components = components
         composition.status = "current"
         session.add(composition)
     session.commit()
@@ -858,7 +975,12 @@ def test_existing_flo_zone_media_32_assignment_blocks_all_read_fallbacks() -> No
             )
         )
         session.commit()
-        _refresh_test_compositions(session, plan, pages)
+        _refresh_authoritative_test_compositions(
+            session,
+            website,
+            plan,
+            pages,
+        )
 
         workspace = read_page_media_workspace(session, plan.id)
         assert any(
@@ -907,7 +1029,12 @@ def test_persisted_page_qa_is_not_reused_when_excluded_media_is_active() -> None
     with Session(engine) as session:
         business, website, plan, pages = _scope(session, "excluded-persisted-qa")
         _bind_flo_zone_identity(session, website)
-        _refresh_test_compositions(session, plan, pages)
+        _refresh_authoritative_test_compositions(
+            session,
+            website,
+            plan,
+            pages,
+        )
         page = pages[0][1]
         baseline = evaluate_page_qa(session, page.id)
         page.qa_result = baseline.model_dump(mode="json", exclude={"persisted"})
@@ -2277,7 +2404,12 @@ def test_governed_semantic_role_reaches_every_page_and_wordpress_consumer(
         ]
         session.add(composition_row)
         session.commit()
-        _refresh_test_compositions(session, plan, pages)
+        _refresh_authoritative_test_compositions(
+            session,
+            website,
+            plan,
+            pages,
+        )
         workspace = read_page_media_workspace(session, plan.id)
         placement = next(
             item

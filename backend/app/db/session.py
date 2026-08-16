@@ -18,6 +18,16 @@ ALEMBIC_OWNED_DURABLE_THEME_TABLES = frozenset(
         "themeconfigurationaudit",
     }
 )
+ALEMBIC_OWNED_RUNTIME_TABLES = frozenset(
+    {
+        "wordpressmetadatastate",
+        "wordpressmetadatasyncaudit",
+        "wordpressqualityreview",
+    }
+)
+ALEMBIC_OWNED_TABLES = (
+    ALEMBIC_OWNED_DURABLE_THEME_TABLES | ALEMBIC_OWNED_RUNTIME_TABLES
+)
 
 
 def create_db_and_tables(*, include_alembic_owned: bool = False) -> None:
@@ -25,21 +35,22 @@ def create_db_and_tables(*, include_alembic_owned: bool = False) -> None:
 
     The explicit opt-in exists only for a canonical empty restore target whose
     caller validates the backup schema before mutation. Normal application
-    startup must retain the default and let Alembic revision 0045 create the
-    complete durable Theme contract.
+    startup must retain the default and let Alembic create every durable schema
+    contract that migration history owns.
     """
 
     runtime_tables = [
         table
         for name, table in SQLModel.metadata.tables.items()
-        if include_alembic_owned or name not in ALEMBIC_OWNED_DURABLE_THEME_TABLES
+        if include_alembic_owned or name not in ALEMBIC_OWNED_TABLES
     ]
     SQLModel.metadata.create_all(engine, tables=runtime_tables)
     ensure_city_schema()
     ensure_generated_page_schema()
     ensure_image_metadata_schema()
     ensure_page_image_assignment_schema()
-    ensure_wordpress_quality_review_schema()
+    if include_alembic_owned:
+        ensure_wordpress_quality_review_schema()
 
 
 def ensure_city_schema() -> None:

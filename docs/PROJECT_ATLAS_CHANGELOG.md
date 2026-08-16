@@ -544,6 +544,33 @@ and received no customer data, WordPress, publication, or deployment action.
 
 ---
 
+## PostgreSQL Canonical Schema Convergence
+
+Implemented fail-closed Alembic revision `20260815_0046` to converge the two
+accepted PostgreSQL 16 revision-0045 schema variants—a repaired clean install
+and the active-style Atlas schema—onto one frozen semantic manifest. The
+revision makes the three formerly runtime-created WordPress metadata and
+quality-review tables and their sequences Alembic-owned; converges canonical
+types, UTC timestamp semantics, server defaults, CHECK constraints, indexes,
+and sequence ownership; preserves the `deferred` drafting-disposition
+vocabulary; rejects unknown source variants before mutation; and intentionally
+refuses downgrade before mutation.
+
+Preserved the deterministic identifier-only corrections in migrations `0020`,
+`0022`, and `0023` and the narrow PostgreSQL CHECK-expression compatibility
+repair in migration `0041`. Application startup now respects Alembic ownership,
+while Backup 0.57 restore and Page Composition currentness use stable UTC source
+identity and require complete authoritative source and generated-component
+equality before preserving composition identity.
+
+Focused migration and model tests and guarded PostgreSQL 16 catalog evidence
+established frozen clean-0045, active-0045, and canonical-0046 identities with
+no declared row transformation. Revision 0046 has not been applied to active
+local Atlas; active-local migrations and application-row mutations remain
+zero.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.

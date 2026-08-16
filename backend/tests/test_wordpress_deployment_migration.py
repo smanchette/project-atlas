@@ -1,16 +1,102 @@
 from pathlib import Path
 import importlib.util
+import re
 
 import pytest
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect, text
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from sqlalchemy import Column, Index, MetaData, String, Table, create_engine, inspect, text
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.schema import CreateIndex
 
 from app.core.config import get_settings
 
 
 BACKEND = Path(__file__).parents[1]
+
+
+POSTGRESQL_INDEX_IDENTITIES = {
+    (
+        "20260716_0020_wordpress_bootstrap_cleanup_audits.py",
+        "wordpressbootstrapcleanupaudit",
+        "deactivation_handle_fingerprint",
+    ): "ix_wordpressbootstrapcleanupaudit_deactivation_handle_f_fc62",
+    (
+        "20260717_0022_cache_aware_rendering_audits.py",
+        "wordpresscacheawarerenderingaudit",
+        "rendering_handle_fingerprint",
+    ): "ix_wordpresscacheawarerenderingaudit_rendering_handle_f_e1fc",
+    (
+        "20260719_0023_wordpress_bootstrap_establishment_audits.py",
+        "wordpressbootstrapestablishmentaudit",
+        "manual_handle_fingerprint",
+    ): "ix_wordpressbootstrapestablishmentaudit_manual_handle_f_6138",
+    (
+        "20260719_0023_wordpress_bootstrap_establishment_audits.py",
+        "wordpressbootstrapestablishmentaudit",
+        "activation_handle_fingerprint",
+    ): "ix_wordpressbootstrapestablishmentaudit_activation_hand_a9b8",
+}
+
+
+def _migration_module(file_name: str):
+    path = BACKEND / "alembic" / "versions" / file_name
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _captured_postgresql_indexes(monkeypatch, file_name: str):
+    module = _migration_module(file_name)
+    captured = []
+    operations = Operations(MigrationContext.configure(dialect_name="postgresql"))
+
+    class Inspector:
+        @staticmethod
+        def get_table_names():
+            return []
+
+    class CaptureOperations:
+        @staticmethod
+        def get_bind():
+            return object()
+
+        @staticmethod
+        def create_table(*_args, **_kwargs):
+            return None
+
+        @staticmethod
+        def f(name):
+            return operations.f(name)
+
+        @staticmethod
+        def create_index(name, table_name, columns, *, unique=False, **kwargs):
+            captured.append((name, table_name, tuple(columns), unique, kwargs))
+
+    monkeypatch.setattr(module.sa, "inspect", lambda _bind: Inspector())
+    monkeypatch.setattr(module, "op", CaptureOperations())
+    module.upgrade()
+    return captured
+
+
+def _postgresql_index_name(captured_index) -> str:
+    name, table_name, columns, unique, kwargs = captured_index
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        *[Column(column_name, String()) for column_name in columns],
+    )
+    index = Index(name, *[table.c[column_name] for column_name in columns], unique=unique, **kwargs)
+    sql = str(CreateIndex(index).compile(dialect=postgresql.dialect()))
+    match = re.match(r"CREATE(?: UNIQUE)? INDEX ([^ ]+) ON ", sql)
+    assert match is not None
+    return match.group(1).strip('"')
 
 
 def config_for(monkeypatch, database: Path) -> Config:
@@ -19,6 +105,134 @@ def config_for(monkeypatch, database: Path) -> Config:
     config = Config(str(BACKEND / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND / "alembic"))
     return config
+
+
+def test_0020_0022_0023_indexes_compile_to_stable_postgresql_identities(
+    monkeypatch,
+):
+    files = (
+        "20260716_0020_wordpress_bootstrap_cleanup_audits.py",
+        "20260717_0022_cache_aware_rendering_audits.py",
+        "20260719_0023_wordpress_bootstrap_establishment_audits.py",
+    )
+    emitted = {}
+    for file_name in files:
+        for captured in _captured_postgresql_indexes(monkeypatch, file_name):
+            name, table_name, columns, unique, kwargs = captured
+            physical_name = _postgresql_index_name(captured)
+            assert len(physical_name.encode("utf-8")) <= 63
+            assert unique is False
+            assert len(columns) == 1
+            assert kwargs == {}
+            emitted[(file_name, table_name, columns[0])] = physical_name
+            logical_name = str(name)
+            if len(logical_name.encode("utf-8")) <= 63:
+                assert physical_name == logical_name
+
+    assert len(emitted.values()) == len(set(emitted.values()))
+    for identity, expected_name in POSTGRESQL_INDEX_IDENTITIES.items():
+        assert emitted[identity] == expected_name
+
+
+def test_0020_0022_0023_reject_raw_prefix_and_near_match_as_emitted_identity(
+    monkeypatch,
+):
+    emitted = {
+        (file_name, table_name, columns[0]): _postgresql_index_name(captured)
+        for file_name in {
+            identity[0] for identity in POSTGRESQL_INDEX_IDENTITIES
+        }
+        for captured in _captured_postgresql_indexes(monkeypatch, file_name)
+        for _name, table_name, columns, _unique, _kwargs in [captured]
+    }
+    for identity, expected_name in POSTGRESQL_INDEX_IDENTITIES.items():
+        file_name, table_name, column_name = identity
+        logical_name = (
+            f"ix_{table_name}_{column_name}"
+            if file_name != "20260716_0020_wordpress_bootstrap_cleanup_audits.py"
+            else f"ix_wordpressbootstrapcleanupaudit_{column_name}"
+        )
+        raw_prefix = logical_name.encode("utf-8")[:63].decode("utf-8")
+        near_match = f"{expected_name[:-1]}0"
+        assert emitted[identity] == expected_name
+        assert raw_prefix != expected_name
+        assert near_match != expected_name
+        assert raw_prefix not in emitted.values()
+        assert near_match not in emitted.values()
+
+
+def test_0022_0023_upgrade_downgrade_reupgrade_preserves_exact_indexes(
+    monkeypatch,
+    tmp_path,
+):
+    database = tmp_path / "rendering-establishment-matrix.sqlite3"
+    config = config_for(monkeypatch, database)
+    command.upgrade(config, "20260717_0021")
+    engine = create_engine(f"sqlite:///{database.as_posix()}")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO setting "
+                "(setting_key, setting_value, description, created_at, updated_at) "
+                "VALUES ('index-repair-sentinel','kept','unrelated',"
+                "'2026-07-19','2026-07-19')"
+            )
+        )
+
+    command.upgrade(config, "20260719_0023")
+    expected = {
+        "wordpresscacheawarerenderingaudit": {
+            "ix_wordpresscacheawarerenderingaudit_rendering_handle_fingerprint",
+        },
+        "wordpressbootstrapestablishmentaudit": {
+            "ix_wordpressbootstrapestablishmentaudit_manual_handle_fingerprint",
+            "ix_wordpressbootstrapestablishmentaudit_activation_handle_fingerprint",
+        },
+    }
+    for table_name, names in expected.items():
+        with engine.connect() as connection:
+            observed = list(
+                connection.execute(
+                    text(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type='index' AND tbl_name=:table_name "
+                        "AND sql IS NOT NULL ORDER BY name"
+                    ),
+                    {"table_name": table_name},
+                ).scalars()
+            )
+        assert names <= set(observed)
+        assert len(observed) == len(set(observed))
+
+    command.downgrade(config, "20260717_0021")
+    assert not {
+        "wordpresscacheawarerenderingaudit",
+        "wordpressbootstrapestablishmentaudit",
+    } & set(inspect(engine).get_table_names())
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT setting_value FROM setting "
+                "WHERE setting_key='index-repair-sentinel'"
+            )
+        ).scalar_one() == "kept"
+
+    command.upgrade(config, "20260719_0023")
+    for table_name, names in expected.items():
+        with engine.connect() as connection:
+            observed = list(
+                connection.execute(
+                    text(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type='index' AND tbl_name=:table_name "
+                        "AND sql IS NOT NULL ORDER BY name"
+                    ),
+                    {"table_name": table_name},
+                ).scalars()
+            )
+        assert names <= set(observed)
+        assert len(observed) == len(set(observed))
+    get_settings.cache_clear()
 
 
 def test_clean_database_upgrade_through_0015(monkeypatch, tmp_path):

@@ -26,6 +26,7 @@ from app.schemas.page_media_planning import PageMediaPlacementDecisionRequest
 
 
 BACKEND = Path(__file__).parents[1]
+REVISION_0045 = "20260813_0045"
 TABLE = "plannedpagemediarequirement"
 TARGET_COLUMN = "target_component_instance_key"
 TARGET_CHECK = "ck_plannedpagemediarequirement_v2_target"
@@ -226,7 +227,7 @@ def test_0042_adds_nullable_exact_target_contract_and_indexes(
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260813_0045"
+        ).scalar_one() == "20260815_0046"
     get_settings.cache_clear()
 
 
@@ -422,7 +423,7 @@ def test_0042_guarded_downgrade_blocks_exact_instance_contract_loss(
 ) -> None:
     database = tmp_path / "media-target-guarded-downgrade.sqlite3"
     config = _config(monkeypatch, database)
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION_0045)
     engine = create_engine(f"sqlite:///{database.as_posix()}")
     business_id, website_id, plan_id, page_id, planning_id = _seed_scope(engine)
     with Session(engine) as session:
@@ -465,7 +466,7 @@ def test_0042_empty_schema_downgrades_and_reupgrades_cleanly(
 ) -> None:
     database = tmp_path / "media-target-reversible.sqlite3"
     config = _config(monkeypatch, database)
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION_0045)
 
     command.downgrade(config, "20260807_0041")
 
@@ -489,7 +490,7 @@ def test_0042_empty_schema_downgrades_and_reupgrades_cleanly(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one() == "20260807_0041"
 
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION_0045)
 
     inspector = inspect(engine)
     assert TARGET_COLUMN in {

@@ -289,22 +289,14 @@ def _compose(session: Session, plan: SitePlan, planned: PlannedPage) -> tuple[Pa
     )
     if media_errors:
         raise PageCompositionError(" ".join(media_errors))
-    snapshot = _source_snapshot(session, plan, planned, generated)
-    source_hash = _hash(snapshot)
-    suppressed_instance_keys = {
-        str(value.get("instance_key") or "").strip()
-        for value in (existing.operator_decisions if existing else [])
-        if isinstance(value, dict)
-        and value.get("action") == "suppress"
-        and str(value.get("instance_key") or "").strip()
-    }
-    components = _generate_components(
+    snapshot, components = _authoritative_projection(
         session,
         plan,
         planned,
         generated,
-        suppressed_instance_keys=suppressed_instance_keys,
+        operator_decisions=existing.operator_decisions if existing else [],
     )
+    source_hash = _hash(snapshot)
     if existing and existing.source_hash == source_hash and existing.generated_components == components:
         return existing, "unchanged"
     if existing:
@@ -484,6 +476,35 @@ def _generate_components(
     )
 
 
+def _authoritative_projection(
+    session: Session,
+    plan: SitePlan,
+    planned: PlannedPage,
+    generated: GeneratedPage,
+    *,
+    operator_decisions: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Return the complete side-effect-free source and component projection."""
+
+    suppressed_instance_keys = {
+        str(value.get("instance_key") or "").strip()
+        for value in operator_decisions
+        if isinstance(value, dict)
+        and value.get("action") == "suppress"
+        and str(value.get("instance_key") or "").strip()
+    }
+    return (
+        _source_snapshot(session, plan, planned, generated),
+        _generate_components(
+            session,
+            plan,
+            planned,
+            generated,
+            suppressed_instance_keys=suppressed_instance_keys,
+        ),
+    )
+
+
 def _bind_governed_media_regions(
     items: list[dict[str, Any]],
     *,
@@ -582,12 +603,22 @@ def _read(session: Session, composition: PageComposition, *, require_current: bo
         raise PageCompositionError("Composition source records are missing.")
     errors = _validate(session, composition, plan, planned, generated, raise_on_error=False)
     try:
-        current_hash = _hash(_source_snapshot(session, plan, planned, generated))
+        current_snapshot, current_components = _authoritative_projection(
+            session,
+            plan,
+            planned,
+            generated,
+            operator_decisions=composition.operator_decisions,
+        )
     except PageCompositionError as exc:
         errors.append(str(exc))
     else:
-        if current_hash != composition.source_hash:
+        if _hash(current_snapshot) != composition.source_hash:
             errors.append("Composition is stale because an authoritative source changed.")
+        if current_components != composition.generated_components:
+            errors.append(
+                "Composition is stale because its generated component projection changed."
+            )
     if require_current and errors:
         raise PageCompositionError(" ".join(errors))
     effective = _effective(composition)
@@ -1122,7 +1153,7 @@ def _target_source_identity(
         "generated_page_id": target.generated_page_id,
         "working_name": target.working_name,
         "intended_slug": target.intended_slug,
-        "updated_at": target.updated_at.isoformat(),
+        "updated_at": canonical_utc_timestamp(target.updated_at),
     }
 
 
@@ -1442,9 +1473,9 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
         "site_plan_id": plan.id,
         "site_plan_version": plan.version,
         "planned_page_id": planned.id,
-        "planned_page_updated_at": planned.updated_at.isoformat(),
+        "planned_page_updated_at": canonical_utc_timestamp(planned.updated_at),
         "generated_page_id": generated.id,
-        "generated_page_updated_at": generated.updated_at.isoformat(),
+        "generated_page_updated_at": canonical_utc_timestamp(generated.updated_at),
         "draft_hash": _hash(generated.draft_content),
         "website_identity_id": context.identity.id,
         "website_context_hash": _hash(context.model_dump(mode="json")),
@@ -1456,7 +1487,7 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
                 "label": item.label,
                 "status": item.status,
                 "version": item.version,
-                "updated_at": item.updated_at.isoformat(),
+                "updated_at": canonical_utc_timestamp(item.updated_at),
             }
             for item in nav_sets
         ],
@@ -1469,7 +1500,7 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
                 "label": item.label,
                 "position": item.position,
                 "status": item.status,
-                "updated_at": item.updated_at.isoformat(),
+                "updated_at": canonical_utc_timestamp(item.updated_at),
             }
             for item in nav_items
         ],
@@ -1481,7 +1512,7 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
                 "relationship_type": item.relationship_type,
                 "anchor_guidance": item.anchor_guidance,
                 "approval_state": item.approval_state,
-                "updated_at": item.updated_at.isoformat(),
+                "updated_at": canonical_utc_timestamp(item.updated_at),
             }
             for item in links
         ],
@@ -1504,7 +1535,7 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
                 "asset_version": asset.version,
                 "checksum_sha256": asset.checksum_sha256,
                 "status": asset.status,
-                "updated_at": asset.updated_at.isoformat(),
+                "updated_at": canonical_utc_timestamp(asset.updated_at),
             }
             for slot, asset in sorted(identity_assets.items())
         ]
@@ -1551,8 +1582,8 @@ def _media_assignment_source_identity(
         "image_metadata_id": assignment.image_metadata_id,
         "role": semantic_role,
         "status": assignment.status,
-        "updated_at": assignment.updated_at.isoformat(),
-        "image_updated_at": image.updated_at.isoformat() if image else None,
+        "updated_at": canonical_utc_timestamp(assignment.updated_at),
+        "image_updated_at": canonical_utc_timestamp(image.updated_at) if image else None,
     }
     if assignment.media_requirement_id is not None:
         requirement = session.get(
@@ -1700,6 +1731,22 @@ def _plan(session: Session, plan_id: int) -> SitePlan:
     if not plan:
         raise PageCompositionError("Site Plan not found.")
     return plan
+
+
+def canonical_utc_timestamp(value: datetime) -> str:
+    """Serialize an instant in the legacy UTC-naive source-identity format.
+
+    Revision 0046 promotes selected PostgreSQL columns from UTC-naive
+    ``timestamp`` to ``timestamptz``.  Dropping the normalized UTC marker keeps
+    source snapshots byte-for-byte compatible with their accepted 0045 hashes
+    while still making offset-aware values independent of the session timezone.
+    """
+
+    if value.tzinfo is None:
+        normalized = value.replace(tzinfo=UTC)
+    else:
+        normalized = value.astimezone(UTC)
+    return normalized.replace(tzinfo=None).isoformat()
 
 
 def _hash(value: Any) -> str:

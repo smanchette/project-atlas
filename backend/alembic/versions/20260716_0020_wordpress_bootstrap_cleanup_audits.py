@@ -73,7 +73,13 @@ def upgrade() -> None:
         "deactivation_handle_fingerprint", "deletion_handle_fingerprint",
         "deactivation_binding_hash", "deletion_binding_hash", "attempted_at",
     ):
-        op.create_index(f"ix_wordpressbootstrapcleanupaudit_{name}", "wordpressbootstrapcleanupaudit", [name])
+        # Mark convention-derived names so PostgreSQL compilation applies
+        # SQLAlchemy's deterministic 63-byte identifier shortening.
+        op.create_index(
+            op.f(f"ix_wordpressbootstrapcleanupaudit_{name}"),
+            "wordpressbootstrapcleanupaudit",
+            [name],
+        )
 
 
 def downgrade() -> None:

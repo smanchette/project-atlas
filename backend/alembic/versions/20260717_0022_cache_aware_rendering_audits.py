@@ -70,7 +70,9 @@ def upgrade() -> None:
         "status", "rendering_handle_fingerprint", "cache_handle_fingerprint", "rendering_binding_hash",
         "cache_binding_hash", "payload_hash", "attempted_at",
     ):
-        op.create_index(f"ix_{table}_{name}", table, [name])
+        # Mark convention-derived names so PostgreSQL compilation applies
+        # SQLAlchemy's deterministic 63-byte identifier shortening.
+        op.create_index(op.f(f"ix_{table}_{name}"), table, [name])
 
 
 def downgrade() -> None:

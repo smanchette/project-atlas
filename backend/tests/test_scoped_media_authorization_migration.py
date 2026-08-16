@@ -16,6 +16,7 @@ from app.models import ScopedMediaAuthorization
 BACKEND = Path(__file__).parents[1]
 REVISION_0043 = "20260809_0043"
 REVISION_0044 = "20260810_0044"
+REVISION_0045 = "20260813_0045"
 TABLE = "scopedmediaauthorization"
 CURRENT_INDEX = "uq_scopedmediaauth_current_requirement"
 REQUIREMENT_ONLY_INDEX = "uq_scopedmediaauth_current_requirement_only_asset"
@@ -332,7 +333,7 @@ def test_0044_clean_upgrade_backfills_asset_mode_and_creates_exact_contract(
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260813_0045"
+        ).scalar_one() == "20260815_0046"
         assert connection.execute(
             text(
                 "SELECT usage_authorization_mode, required_authorization_terms "
@@ -361,7 +362,7 @@ def test_0044_adopts_only_the_exact_empty_model_created_table(
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260813_0045"
+        ).scalar_one() == "20260815_0046"
         assert connection.execute(
             text(f"SELECT COUNT(*) FROM {TABLE}")
         ).scalar_one() == 0
@@ -420,7 +421,7 @@ def test_0044_upgrades_the_exact_empty_task_local_scaffold_in_place(
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260813_0045"
+        ).scalar_one() == "20260815_0046"
         assert connection.execute(
             text(f"SELECT COUNT(*) FROM {TABLE}")
         ).scalar_one() == 0
@@ -649,7 +650,7 @@ def test_0044_downgrade_is_reversible_only_for_default_asset_modes(
     engine = create_engine(f"sqlite:///{database.as_posix()}")
     image_id = _seed_legacy_image(engine)
     engine.dispose()
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION_0045)
 
     engine = create_engine(f"sqlite:///{database.as_posix()}")
     with engine.begin() as connection:

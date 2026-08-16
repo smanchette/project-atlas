@@ -212,8 +212,8 @@ def test_legacy_source_identity_remains_byte_shape_compatible():
         "image_metadata_id": 701,
         "role": "hero",
         "status": "active",
-        "updated_at": NOW.isoformat(),
-        "image_updated_at": NOW.isoformat(),
+        "updated_at": "2026-08-11T15:00:00",
+        "image_updated_at": "2026-08-11T15:00:00",
     }
 
 
