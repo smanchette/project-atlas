@@ -2777,6 +2777,105 @@ th {
 .universalFormModesReviewTimeline svg { width: 21px; }
 .universalFormModesReviewTimeline span { font-size: 0.8rem; line-height: 1.45; }
 
+.universalFormModesReviewFieldStatus {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border-left: 4px solid currentColor;
+  border-radius: 10px;
+}
+
+.universalFormModesReviewFieldStatus strong { font-size: 0.94rem; }
+.universalFormModesReviewFieldStatus span { font-size: 0.84rem; line-height: 1.5; }
+.universalFormModesReviewFieldStatus--valid { color: #255c44; background: #e8f5ec; }
+.universalFormModesReviewFieldStatus--rejected { color: #7d352a; background: #fff0ed; }
+
+.universalFormModesReviewFieldList {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.universalFormModesReviewFieldList > li {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 58px;
+  padding: 9px 12px;
+  border: 1px solid var(--ufm-line);
+  border-radius: 11px;
+  background: #fbfcfb;
+}
+
+.universalFormModesReviewFieldOrder {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: #3f7059;
+  font-size: 0.76rem;
+  font-weight: 850;
+}
+
+.universalFormModesReviewFieldIdentity { display: grid; gap: 3px; min-width: 0; }
+.universalFormModesReviewFieldIdentity strong { font-size: 0.9rem; }
+.universalFormModesReviewFieldIdentity code,
+.universalFormModesReviewFieldRevision code,
+.universalFormModesReviewKeyCollision code { color: #43544b; font-size: 0.72rem; overflow-wrap: anywhere; }
+.universalFormModesReviewFieldType { padding: 5px 8px; border-radius: 999px; color: #315542; background: #e7f0ea; font-size: 0.7rem; font-weight: 800; }
+.universalFormModesReviewFieldRevision { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--ufm-line); font-size: 0.8rem; }
+
+.universalFormModesReviewKeyCollision {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid #ecc8bd;
+  border-radius: 13px;
+  background: #ecc8bd;
+}
+
+.universalFormModesReviewKeyCollision > div { display: grid; gap: 7px; padding: 16px; background: #fff7f4; }
+.universalFormModesReviewKeyCollision span { color: #735b53; font-size: 0.7rem; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; }
+.universalFormModesReviewKeyCollision strong { color: #7d352a; font-size: 0.86rem; }
+
+.universalFormModesReviewChoiceExamples {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.universalFormModesReviewChoiceExamples article { overflow: hidden; border: 1px solid #cbd9d1; border-radius: 15px; background: #f8fbf9; }
+.universalFormModesReviewChoiceExamples header { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 16px 18px; background: #e7f1eb; }
+.universalFormModesReviewChoiceExamples header span { color: #315542; font-size: 0.76rem; font-weight: 800; }
+.universalFormModesReviewChoiceExamples ul { display: grid; gap: 1px; margin: 0; padding: 0; background: #dbe4df; list-style: none; }
+.universalFormModesReviewChoiceExamples li { min-height: 44px; padding: 12px 18px; background: white; font-size: 0.86rem; }
+
+.universalFormModesReviewMobileFrame {
+  width: min(390px, 100%);
+  margin-inline: auto;
+  padding: 14px;
+  border: 8px solid #25342d;
+  border-radius: 28px;
+  background: #f7faf8;
+  box-shadow: 0 18px 45px rgba(30, 59, 46, 0.16);
+}
+
+.universalFormModesReviewMobileFrame > header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; padding: 9px 10px 13px; border-bottom: 1px solid var(--ufm-line); }
+.universalFormModesReviewMobileFrame > header svg { width: 20px; color: #37634d; }
+.universalFormModesReviewMobileFrame > header div { display: grid; gap: 2px; }
+.universalFormModesReviewMobileFrame > header span { color: var(--ufm-muted); font-size: 0.74rem; }
+.universalFormModesReviewMobileFrame .universalFormModesReviewFieldList { grid-template-columns: 1fr; }
+.universalFormModesReviewMobileFrame .universalFormModesReviewFieldList > li { grid-template-columns: 30px minmax(0, 1fr); }
+.universalFormModesReviewMobileFrame .universalFormModesReviewFieldType { grid-column: 2; justify-self: start; }
+
 .universalFormModesReviewContactSheet { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
 .universalFormModesReviewContactSheet .universalFormModesReviewMode > header { grid-template-columns: auto minmax(0, 1fr); }
 .universalFormModesReviewContactSheet .universalFormModesReviewReadiness { grid-column: 1 / -1; justify-self: start; }
@@ -2812,8 +2911,12 @@ th {
   .universalFormModesReviewRecipientFlow,
   .universalFormModesReviewPolicyGrid,
   .universalFormModesReviewTimeline,
+  .universalFormModesReviewKeyCollision,
+  .universalFormModesReviewChoiceExamples,
   .universalFormModesReviewContactSheet,
   .universalFormModesReviewMasterGrid { grid-template-columns: 1fr; }
+  .universalFormModesReviewFieldList > li { grid-template-columns: 30px minmax(0, 1fr); }
+  .universalFormModesReviewFieldType { grid-column: 2; justify-self: start; }
   .universalFormModesReviewContactSheet .universalFormModesReviewMode:last-child { grid-column: auto; }
   .universalFormModesReviewMode > header { grid-template-columns: auto minmax(0, 1fr); }
   .universalFormModesReviewReadiness { grid-column: 1 / -1; justify-self: start; }

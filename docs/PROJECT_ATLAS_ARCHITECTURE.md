@@ -1,6 +1,6 @@
 # Project Atlas Architecture
 
-**Version:** 1.1
+**Version:** 1.2
 
 **Status:** Living Technical Blueprint
 
@@ -118,6 +118,10 @@ The same core supports both the complete standalone Atlas Website Builder produc
 Form presentation and form delivery are separate responsibilities. Themes own presentation and component compatibility. Website configuration owns one explicit delivery-mode revision and, where required, its destination for each form component. Revision records are immutable, and each Website/form chain has exactly one current head. Providers own their provider-specific delivery or embedded-form behavior.
 
 The supported Website/form-scoped modes are exactly `disabled`, `atlas_email`, `provider_owned`, `atlasops360_native`, and `external_adapter`. A mode must never be inferred from a Theme, customer-portal setting, provider presence, or another mode, and no mode may silently fall back to another. Missing configuration fails closed.
+
+Atlas-rendered forms using `atlas_email`, `atlasops360_native`, or `external_adapter` have five fixed, ordered default customer-entry fields: Name, Phone, ZIP code, Requested Service, and Optional Message. They may add zero or one governed optional field after those defaults, for a maximum of six active customer-entry fields. A seventh field or more than one additional field fails closed rather than being dropped, selected, or reclassified. Provider-owned forms own their field counts. Privacy and terms acknowledgments, honeypots, CAPTCHA and anti-spam controls, hidden security identifiers, idempotency values, audit metadata, and system-generated routing fields are controls rather than customer-entry questions and do not count toward the maximum.
+
+The optional sixth field has an immutable definition revision and is normalized and validated through the shared Website Builder Core. The provider-neutral envelope accepts the exact five standard fields plus zero or one value bound to that exact definition revision, never arbitrary extra keys. Provider adapters receive that normalized optional value through the existing mapping contract without adding provider behavior to the core.
 
 Atlas-owned delivery modes use one normalized submission-envelope contract and provider adapters. Website/form-scoped recipient revisions and the minimum safe outbox and immutable attempt evidence support reliable Atlas email delivery without turning Atlas into a CRM, lead pipeline, customer system, scheduling system, or AtlasOps360 substitute. Each delivery-mode revision owns the exact current heads of its immutable recipient chains. Initial recipient roots and same-mode address, enabled-state, role, or verification successors may be appended only while that email-mode revision is current and has no submission evidence. A first submission or delivery-mode successor freezes that snapshot; recipient heads may then be carried forward only to the directly superseding email-mode revision. Production customer values must not be retained in plaintext; production persistence remains unavailable until approved encryption and key management exist.
 

@@ -7669,7 +7669,10 @@ def _validate_form_delivery_graph(
 
     from pydantic import EmailStr, TypeAdapter
 
-    from app.schemas.form_delivery import validate_mode_configuration
+    from app.schemas.form_delivery import (
+        optional_field_definitions_from_configuration,
+        validate_mode_configuration,
+    )
     from app.services.form_delivery_modes import (
         form_delivery_configuration_audit_hash,
         form_delivery_mode_fingerprint,
@@ -7679,6 +7682,10 @@ def _validate_form_delivery_graph(
     from app.services.form_delivery_outbox import (
         form_delivery_attempt_fingerprint,
         form_submission_envelope_fingerprint,
+    )
+    from app.website_builder_core.contracts import (
+        ATLAS_OWNED_FORM_MODES,
+        optional_form_field_definition_payload,
     )
 
     models = {
@@ -7741,6 +7748,7 @@ def _validate_form_delivery_graph(
             )
 
         mode_groups: dict[tuple[int, str], list[dict[str, Any]]] = {}
+        normalized_mode_configurations: dict[int, dict[str, Any]] = {}
         for record in modes.values():
             website = websites.get(record["website_id"])
             component = components.get(record["form_component_configuration_id"])
@@ -7837,7 +7845,15 @@ def _validate_form_delivery_graph(
                 raise BackupValidationError(
                     "Backup form-delivery configuration must be an object."
                 )
-            validate_mode_configuration(record["mode"], configuration)
+            normalized_configuration = validate_mode_configuration(
+                record["mode"],
+                configuration,
+            )
+            if normalized_configuration != configuration:
+                raise BackupValidationError(
+                    "Backup form-delivery configuration is not canonical."
+                )
+            normalized_mode_configurations[record["id"]] = normalized_configuration
             governed_fields = (
                 "provider_key",
                 "adapter_version",
@@ -7899,6 +7915,26 @@ def _validate_form_delivery_graph(
                 raise BackupValidationError(
                     "Backup form-delivery mode revisions are not contiguous."
                 )
+            optional_definitions_by_identity: dict[str, dict[str, object]] = {}
+            for record in ordered:
+                if record["mode"] not in ATLAS_OWNED_FORM_MODES:
+                    continue
+                definitions = optional_field_definitions_from_configuration(
+                    normalized_mode_configurations[record["id"]]
+                )
+                if not definitions:
+                    continue
+                snapshot = optional_form_field_definition_payload(
+                    definitions[0]
+                )
+                identity = str(snapshot["definition_revision_identity"])
+                prior = optional_definitions_by_identity.get(identity)
+                if prior is not None and prior != snapshot:
+                    raise BackupValidationError(
+                        "Backup form-delivery lineage reuses an optional field "
+                        "definition identity for changed content."
+                    )
+                optional_definitions_by_identity[identity] = snapshot
             predecessor_ids: set[int] = set()
             for index, record in enumerate(ordered):
                 expected_predecessor = ordered[index - 1]["id"] if index else None

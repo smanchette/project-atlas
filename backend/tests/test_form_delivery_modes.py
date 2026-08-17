@@ -28,6 +28,7 @@ from app.models import (
 from app.schemas.form_delivery import (
     WebsiteFormDeliveryModeRevisionCreate,
     WebsiteFormRecipientRevisionCreate,
+    validate_mode_configuration,
 )
 from app.services.form_delivery_modes import (
     FormDeliveryConfigurationError,
@@ -35,9 +36,11 @@ from app.services.form_delivery_modes import (
     create_form_delivery_mode_revision,
     create_form_recipient_revision,
     form_delivery_readiness,
+    form_delivery_mode_fingerprint,
     form_recipient_fingerprint,
     read_form_delivery_mode_history,
     resolve_delivery_adapter_context,
+    resolve_atlas_rendered_form_definition,
     resolve_current_form_delivery_mode,
     resolve_provider_owned_presentation,
     validate_form_delivery_records,
@@ -62,7 +65,9 @@ from app.services.form_payload_store import (
 )
 from app.website_builder_core.contracts import (
     DeliveryAttemptResult,
+    NormalizedOptionalFieldValue,
     NormalizedSubmissionEnvelope,
+    normalize_optional_field_value,
 )
 from app.website_builder_core.registry import ProviderDescriptor, ProviderRegistration
 
@@ -193,7 +198,17 @@ def _disabled_payload(component: WebsiteThemeComponentConfiguration):
 def _email_payload(
     component: WebsiteThemeComponentConfiguration,
     predecessor_id: int,
+    *,
+    optional_fields: list[dict[str, object]] | None = None,
 ):
+    configuration_payload: dict[str, object] = {
+        "transport_key_reference": "synthetic-mail",
+        "transport_secret_reference": "secret-ref://synthetic/mail-transport",
+        "notification_preference": "all_verified",
+        "consent_required": False,
+    }
+    if optional_fields is not None:
+        configuration_payload["optional_fields"] = optional_fields
     return WebsiteFormDeliveryModeRevisionCreate(
         form_component_configuration_id=component.id,
         form_instance_key=component.component_instance_key,
@@ -203,12 +218,7 @@ def _email_payload(
         provider_key=SYNTHETIC_EMAIL_PROVIDER_KEY,
         adapter_version="test-v1",
         destination_identity="recipient-set-ref://synthetic/test-recipients",
-        configuration_payload={
-            "transport_key_reference": "synthetic-mail",
-            "transport_secret_reference": "secret-ref://synthetic/mail-transport",
-            "notification_preference": "all_verified",
-            "consent_required": False,
-        },
+        configuration_payload=configuration_payload,
         privacy_policy_reference="/privacy",
         retention_policy_reference="policy-ref://synthetic/retention",
         abuse_policy_reference="policy-ref://synthetic/abuse",
@@ -221,6 +231,33 @@ def _email_payload(
         rationale="Test Atlas email decision.",
         **_active_evidence(),
     )
+
+
+def _optional_field_configuration(
+    **overrides: object,
+) -> dict[str, object]:
+    values: dict[str, object] = {
+        "field_key": "project_type",
+        "public_label": "Project type",
+        "accessibility_label": "Select the project type",
+        "field_type": "dropdown",
+        "required": False,
+        "display_order": 6,
+        "maximum_length": None,
+        "validation_contract": {
+            "rule": "listed_choice",
+            "minimum_length": None,
+        },
+        "choices": [
+            {"choice_key": "repair", "public_label": "Repair"},
+            {"choice_key": "replacement", "public_label": "Replacement"},
+        ],
+        "provider_mapping_key": "project_type",
+        "help_text": "Choose one synthetic project type.",
+        "definition_revision_identity": "project_type_revision_1",
+    }
+    values.update(overrides)
+    return values
 
 
 def _provider_owned_payload(
@@ -266,7 +303,11 @@ def _provider_owned_payload(
     )
 
 
-def _seed_ready_email_mode(session: Session):
+def _seed_ready_email_mode(
+    session: Session,
+    *,
+    optional_fields: list[dict[str, object]] | None = None,
+):
     website, component = _seed_form_component(session)
     disabled = create_form_delivery_mode_revision(
         session,
@@ -277,7 +318,11 @@ def _seed_ready_email_mode(session: Session):
     email = create_form_delivery_mode_revision(
         session,
         website.id,
-        _email_payload(component, disabled.id),
+        _email_payload(
+            component,
+            disabled.id,
+            optional_fields=optional_fields,
+        ),
     )
     persisted_disabled = session.get(WebsiteFormDeliveryModeRevision, disabled.id)
     assert persisted_disabled is not None
@@ -312,7 +357,23 @@ def _normalized_submission(
     idempotency_key: str = "synthetic-idempotency-key-00000001",
     request_identity: str = "a" * 64,
     received_at: datetime | None = None,
+    optional_field: NormalizedOptionalFieldValue | None = None,
 ) -> NormalizedSubmissionEnvelope:
+    configured_optional_fields = email.configuration_payload.get(
+        "optional_fields",
+        [],
+    )
+    optional_definition_revision_identity = (
+        optional_field.definition_revision_identity
+        if optional_field is not None
+        else (
+            configured_optional_fields[0]["definition_revision_identity"]
+            if isinstance(configured_optional_fields, list)
+            and len(configured_optional_fields) == 1
+            and isinstance(configured_optional_fields[0], dict)
+            else None
+        )
+    )
     return NormalizedSubmissionEnvelope(
         website_id=website.id,
         component_configuration_id=component.id,
@@ -334,6 +395,10 @@ def _normalized_submission(
         request_identity=request_identity,
         destination_adapter_key=email.provider_key,
         received_at=received_at or datetime.now(UTC),
+        optional_field_definition_revision_identity=(
+            optional_definition_revision_identity
+        ),
+        optional_field=optional_field,
     )
 
 
@@ -344,6 +409,318 @@ def _test_delivery_adapter():
     )
     assert registration is not None and registration.delivery_adapter is not None
     return registration.delivery_adapter
+
+
+def test_atlas_rendered_mode_contract_accepts_one_sixth_and_rejects_seven() -> None:
+    optional = _optional_field_configuration(
+        field_key=" Project-Type ",
+        provider_mapping_key="Project-Type",
+        definition_revision_identity="Project Type Revision 1",
+    )
+    configurations: dict[str, dict[str, object]] = {
+        "atlas_email": {
+            "transport_key_reference": "synthetic-mail",
+            "transport_secret_reference": "secret-ref://synthetic/mail-transport",
+            "notification_preference": "all_verified",
+            "consent_required": False,
+        },
+        "atlasops360_native": {
+            "workspace_binding_reference": "binding-ref://synthetic/workspace",
+            "adapter_configuration_reference": "binding-ref://synthetic/adapter",
+            "consent_required": False,
+        },
+        "external_adapter": {
+            "adapter_configuration_reference": "destination-ref://synthetic/adapter",
+            "adapter_secret_reference": "secret-ref://synthetic/external-adapter",
+            "consent_required": False,
+        },
+    }
+    for mode, base in configurations.items():
+        assert "optional_fields" not in validate_mode_configuration(mode, base)  # type: ignore[arg-type]
+        normalized = validate_mode_configuration(  # type: ignore[arg-type]
+            mode,
+            {**base, "optional_fields": [optional]},
+        )
+        assert normalized["optional_fields"][0]["field_key"] == "project_type"
+        assert (
+            normalized["optional_fields"][0]["definition_revision_identity"]
+            == "project_type_revision_1"
+        )
+        with pytest.raises(ValueError):
+            validate_mode_configuration(  # type: ignore[arg-type]
+                mode,
+                {
+                    **base,
+                    "optional_fields": [
+                        optional,
+                        _optional_field_configuration(field_key="property_type"),
+                    ],
+                },
+            )
+
+
+def test_disabled_and_provider_owned_cannot_smuggle_atlas_optional_fields() -> None:
+    optional = [_optional_field_configuration()]
+    with pytest.raises(ValueError):
+        validate_mode_configuration("disabled", {"optional_fields": optional})
+    provider_configuration = {
+        "presentation_strategy": "hosted_route",
+        "approved_https_destination": "https://forms.example.test/estimate",
+        "approved_origin": "https://forms.example.test",
+        "accessibility_title": "Request an estimate",
+        "ownership_disclosure": "Synthetic Provider operates this form.",
+        "destination_verified_by": "test-operator",
+        "destination_verified_at": "2026-08-17T12:00:00Z",
+    }
+    validate_mode_configuration("provider_owned", provider_configuration)
+    with pytest.raises(ValueError):
+        validate_mode_configuration(
+            "provider_owned",
+            {**provider_configuration, "optional_fields": optional},
+        )
+    # Provider-owned questions are not rendered or counted by Atlas.
+    assert (
+        resolve_atlas_rendered_form_definition(
+            "provider_owned",
+            {"provider_owned_field_count": 99},
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("property_name", "forbidden_value"),
+    (
+        ("field_key", "social_security_number"),
+        ("provider_mapping_key", "provider_payload"),
+        ("public_label", "Payment card number"),
+        ("accessibility_label", "Enter a password"),
+        ("help_text", "Upload medical information"),
+    ),
+)
+def test_mode_payload_rejects_forbidden_optional_field_purposes(
+    property_name: str,
+    forbidden_value: str,
+) -> None:
+    with pytest.raises(ValueError, match="forbidden sensitive or payload"):
+        validate_mode_configuration(
+            "atlas_email",
+            {
+                "transport_key_reference": "synthetic-mail",
+                "transport_secret_reference": "secret-ref://synthetic/mail-transport",
+                "notification_preference": "all_verified",
+                "consent_required": False,
+                "optional_fields": [
+                    _optional_field_configuration(
+                        **{property_name: forbidden_value}
+                    )
+                ],
+            },
+        )
+
+
+def test_mode_revision_revalidates_mutated_optional_field_dto_before_persistence(
+    isolated_session: Session,
+) -> None:
+    website, component = _seed_form_component(isolated_session)
+    disabled = create_form_delivery_mode_revision(
+        isolated_session,
+        website.id,
+        _disabled_payload(component),
+    )
+    payload = _email_payload(
+        component,
+        disabled.id,
+        optional_fields=[_optional_field_configuration()],
+    )
+    payload.configuration_payload["optional_fields"].append(  # type: ignore[union-attr]
+        _optional_field_configuration(field_key="property_type")
+    )
+    with pytest.raises(FormDeliveryConfigurationError):
+        create_form_delivery_mode_revision(
+            isolated_session,
+            website.id,
+            payload,
+        )
+    assert (
+        isolated_session.exec(select(WebsiteFormDeliveryModeRevision)).all()
+        == [disabled]
+    )
+
+
+@pytest.mark.parametrize(
+    ("original_overrides", "changed_overrides"),
+    (
+        ({}, {"public_label": "Different project type"}),
+        ({}, {"accessibility_label": "Different accessible project type"}),
+        ({}, {"required": True}),
+        ({}, {"provider_mapping_key": "different_project_type"}),
+        (
+            {},
+            {
+                "choices": [
+                    {"choice_key": "repair", "public_label": "Repair"},
+                    {"choice_key": "inspection", "public_label": "Inspection"},
+                ]
+            },
+        ),
+        ({}, {"field_type": "radio"}),
+        (
+            {
+                "field_type": "short_text",
+                "maximum_length": 80,
+                "validation_contract": {
+                    "rule": "trimmed_text",
+                    "minimum_length": 0,
+                },
+                "choices": [],
+            },
+            {
+                "field_type": "short_text",
+                "maximum_length": 80,
+                "validation_contract": {
+                    "rule": "trimmed_text",
+                    "minimum_length": 2,
+                },
+                "choices": [],
+            },
+        ),
+    ),
+)
+def test_successor_cannot_reuse_definition_identity_for_changed_content(
+    isolated_session: Session,
+    original_overrides: dict[str, object],
+    changed_overrides: dict[str, object],
+) -> None:
+    website, component = _seed_form_component(isolated_session)
+    disabled = create_form_delivery_mode_revision(
+        isolated_session,
+        website.id,
+        _disabled_payload(component),
+    )
+    original = create_form_delivery_mode_revision(
+        isolated_session,
+        website.id,
+        _email_payload(
+            component,
+            disabled.id,
+            optional_fields=[
+                _optional_field_configuration(**original_overrides)
+            ],
+        ),
+    )
+    with pytest.raises(FormDeliveryConfigurationError) as failure:
+        create_form_delivery_mode_revision(
+            isolated_session,
+            website.id,
+            _email_payload(
+                component,
+                original.id,
+                optional_fields=[
+                    _optional_field_configuration(**changed_overrides)
+                ],
+            ),
+        )
+    assert failure.value.code == "optional_field_definition_identity_reused"
+
+
+def test_durable_graph_rejects_reused_optional_definition_identity_tamper(
+    isolated_session: Session,
+) -> None:
+    website, component = _seed_form_component(isolated_session)
+    disabled = create_form_delivery_mode_revision(
+        isolated_session,
+        website.id,
+        _disabled_payload(component),
+    )
+    original = create_form_delivery_mode_revision(
+        isolated_session,
+        website.id,
+        _email_payload(
+            component,
+            disabled.id,
+            optional_fields=[_optional_field_configuration()],
+        ),
+    )
+    successor = create_form_delivery_mode_revision(
+        isolated_session,
+        website.id,
+        _email_payload(
+            component,
+            original.id,
+            optional_fields=[_optional_field_configuration()],
+        ),
+    )
+    changed = _optional_field_configuration(public_label="Changed project type")
+    successor.configuration_payload = {
+        **successor.configuration_payload,
+        "optional_fields": [changed],
+    }
+    successor.integrity_fingerprint = form_delivery_mode_fingerprint(successor)
+    isolated_session.add(successor)
+    isolated_session.commit()
+    with pytest.raises(
+        FormDeliveryConfigurationError,
+        match="identity was reused",
+    ):
+        validate_form_delivery_records(isolated_session)
+
+
+def test_public_render_readiness_rejects_seven_field_and_fingerprint_tamper(
+    isolated_session: Session,
+) -> None:
+    _website, _component, _disabled, mode, _recipient = _seed_ready_email_mode(
+        isolated_session,
+        optional_fields=[_optional_field_configuration()],
+    )
+    definition = resolve_atlas_rendered_form_definition(
+        mode.mode,
+        mode.configuration_payload,
+    )
+    assert definition is not None and definition.customer_entry_field_count == 6
+
+    original_fingerprint = mode.integrity_fingerprint
+    mode.configuration_payload = {
+        **mode.configuration_payload,
+        "optional_fields": [
+            _optional_field_configuration(),
+            _optional_field_configuration(field_key="property_type"),
+        ],
+    }
+    mode.integrity_fingerprint = form_delivery_mode_fingerprint(mode)
+    isolated_session.add(mode)
+    isolated_session.commit()
+    seven_field_readiness = form_delivery_readiness(
+        isolated_session,
+        mode,
+        allow_test_only=True,
+        secure_payload_store_available=True,
+    )
+    assert seven_field_readiness.can_present is False
+    assert seven_field_readiness.can_submit is False
+    assert "invalid_customer_entry_field_contract" in {
+        blocker.code for blocker in seven_field_readiness.blockers
+    }
+    with pytest.raises(
+        FormDeliveryConfigurationError,
+        match="customer-entry field contract",
+    ):
+        resolve_atlas_rendered_form_definition(
+            mode.mode,
+            mode.configuration_payload,
+        )
+
+    mode.integrity_fingerprint = original_fingerprint
+    fingerprint_readiness = form_delivery_readiness(
+        isolated_session,
+        mode,
+        allow_test_only=True,
+        secure_payload_store_available=True,
+    )
+    assert fingerprint_readiness.can_present is False
+    assert "invalid_mode_fingerprint" in {
+        blocker.code for blocker in fingerprint_readiness.blockers
+    }
 
 
 def test_operator_history_response_redacts_secret_references(
@@ -1115,6 +1492,235 @@ def test_transactional_outbox_is_idempotent_and_stores_no_plaintext_columns(
     assert validate_form_delivery_records(isolated_session)[
         "form_delivery_attempts"
     ] == 1
+
+
+def test_sixth_field_delivery_retains_only_mapping_identity_not_customer_value(
+    isolated_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    website, component, _, email, _ = _seed_ready_email_mode(
+        isolated_session,
+        optional_fields=[_optional_field_configuration()],
+    )
+    definition = resolve_atlas_rendered_form_definition(
+        email.mode,
+        email.configuration_payload,
+    )
+    assert definition is not None
+    optional_value = normalize_optional_field_value(
+        definition.optional_fields[0],
+        "replacement",
+    )
+    assert optional_value is not None
+    readiness = form_delivery_readiness(
+        isolated_session,
+        email,
+        allow_test_only=True,
+        secure_payload_store_available=True,
+    )
+    assert readiness.can_submit is True
+    store = InMemoryTestPayloadStore(test_environment_allowed=True)
+    outbox = enqueue_form_delivery(
+        isolated_session,
+        mode_revision=email,
+        readiness=readiness,
+        envelope=_normalized_submission(
+            website,
+            component,
+            email,
+            optional_field=optional_value,
+        ),
+        payload_store=store,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    adapter = _test_delivery_adapter()
+    original_deliver = adapter.deliver
+    observed_optional_value = False
+
+    def forbid_network(*_args, **_kwargs):
+        raise AssertionError("The contained delivery attempted a network request")
+
+    def inspect_optional_mapping(context, envelope):
+        nonlocal observed_optional_value
+        observed_optional_value = True
+        assert envelope.optional_field is not None
+        assert envelope.optional_field.value == "replacement"
+        assert envelope.optional_field.field_key == "project_type"
+        assert (
+            envelope.optional_field.definition_revision_identity
+            == "project_type_revision_1"
+        )
+        assert envelope.optional_field.provider_mapping_key == "project_type"
+        return original_deliver(context, envelope)
+
+    monkeypatch.setattr(socket.socket, "connect", forbid_network)
+    monkeypatch.setattr(adapter, "deliver", inspect_optional_mapping)
+    attempt = process_form_delivery_outbox(
+        isolated_session,
+        outbox.id,
+        payload_store=store,
+        allow_test_only=True,
+        transient_retry_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    assert attempt.outcome == "delivered"
+    assert observed_optional_value is True
+    assert adapter.last_optional_field_mapping == (
+        "project_type",
+        "project_type_revision_1",
+        "project_type",
+    )
+    assert (
+        adapter.last_optional_field_definition_revision_identity
+        == "project_type_revision_1"
+    )
+    assert not hasattr(adapter, "last_optional_field_value")
+    assert store.payload_count == 0
+    durable_rows = [
+        *isolated_session.exec(select(FormSubmissionEnvelope)).all(),
+        *isolated_session.exec(select(FormDeliveryOutbox)).all(),
+        *isolated_session.exec(select(FormDeliveryAttempt)).all(),
+    ]
+    durable_text = "\n".join(
+        str(row.model_dump(mode="json")) for row in durable_rows
+    )
+    assert "replacement" not in durable_text
+    assert "replacement" not in caplog.text
+    assert FORM_DELIVERY_PROVIDER_REGISTRY.production == {}
+
+
+def test_enqueue_rejects_forged_optional_value_before_payload_storage(
+    isolated_session: Session,
+) -> None:
+    website, component, _, email, _ = _seed_ready_email_mode(
+        isolated_session,
+        optional_fields=[_optional_field_configuration(required=True)],
+    )
+    definition = resolve_atlas_rendered_form_definition(
+        email.mode,
+        email.configuration_payload,
+    )
+    assert definition is not None
+    valid = normalize_optional_field_value(
+        definition.optional_fields[0],
+        "repair",
+    )
+    assert valid is not None
+    readiness = form_delivery_readiness(
+        isolated_session,
+        email,
+        allow_test_only=True,
+        secure_payload_store_available=True,
+    )
+    store = InMemoryTestPayloadStore(test_environment_allowed=True)
+    forged_values = (
+        None,
+        NormalizedOptionalFieldValue(
+            field_key=valid.field_key,
+            definition_revision_identity="forged_revision",
+            provider_mapping_key=valid.provider_mapping_key,
+            value=valid.value,
+        ),
+        NormalizedOptionalFieldValue(
+            field_key=valid.field_key,
+            definition_revision_identity=valid.definition_revision_identity,
+            provider_mapping_key="forged_mapping",
+            value=valid.value,
+        ),
+        NormalizedOptionalFieldValue(
+            field_key=valid.field_key,
+            definition_revision_identity=valid.definition_revision_identity,
+            provider_mapping_key=valid.provider_mapping_key,
+            value="unconfigured_choice",
+        ),
+    )
+    for index, forged in enumerate(forged_values):
+        envelope = _normalized_submission(
+            website,
+            component,
+            email,
+            idempotency_key=f"synthetic-forged-key-{index:032d}",
+            optional_field=forged,
+        )
+        with pytest.raises(FormDeliveryOutboxError, match="field definition"):
+            enqueue_form_delivery(
+                isolated_session,
+                mode_revision=email,
+                readiness=readiness,
+                envelope=envelope,
+                payload_store=store,
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+            )
+    assert store.payload_count == 0
+    assert isolated_session.exec(select(FormSubmissionEnvelope)).all() == []
+    assert isolated_session.exec(select(FormDeliveryOutbox)).all() == []
+    assert isolated_session.exec(select(FormDeliveryAttempt)).all() == []
+
+
+def test_delivery_revalidates_secure_optional_mapping_before_adapter_use(
+    isolated_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    website, component, _, email, _ = _seed_ready_email_mode(
+        isolated_session,
+        optional_fields=[_optional_field_configuration()],
+    )
+    definition = resolve_atlas_rendered_form_definition(
+        email.mode,
+        email.configuration_payload,
+    )
+    assert definition is not None
+    optional_value = normalize_optional_field_value(
+        definition.optional_fields[0],
+        "repair",
+    )
+    assert optional_value is not None
+    original_envelope = _normalized_submission(
+        website,
+        component,
+        email,
+        optional_field=optional_value,
+    )
+    store = InMemoryTestPayloadStore(test_environment_allowed=True)
+    outbox = enqueue_form_delivery(
+        isolated_session,
+        mode_revision=email,
+        readiness=form_delivery_readiness(
+            isolated_session,
+            email,
+            allow_test_only=True,
+            secure_payload_store_available=True,
+        ),
+        envelope=original_envelope,
+        payload_store=store,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    forged_value = NormalizedOptionalFieldValue(
+        field_key=optional_value.field_key,
+        definition_revision_identity=optional_value.definition_revision_identity,
+        provider_mapping_key="forged_mapping",
+        value=optional_value.value,
+    )
+    forged_envelope = NormalizedSubmissionEnvelope(
+        **{
+            **original_envelope.__dict__,
+            "optional_field": forged_value,
+        }
+    )
+    monkeypatch.setattr(store, "get", lambda _reference: forged_envelope)
+    adapter = _test_delivery_adapter()
+    deliveries_before = adapter.delivery_count
+    with pytest.raises(FormDeliveryOutboxError, match="field definition"):
+        process_form_delivery_outbox(
+            isolated_session,
+            outbox.id,
+            payload_store=store,
+            allow_test_only=True,
+            transient_retry_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+    assert adapter.delivery_count == deliveries_before
+    assert isolated_session.exec(select(FormDeliveryAttempt)).all() == []
+    store.clear()
 
 
 def test_atlasops_adapter_receives_shared_normalized_contract_and_scoped_context(

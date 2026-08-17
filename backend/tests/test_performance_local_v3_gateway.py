@@ -58,7 +58,10 @@ from app.schemas.theme_families import (
     WebsiteThemeConfigurationCreate,
     validate_component_payload,
 )
-from app.schemas.form_delivery import WebsiteFormDeliveryModeRevisionCreate
+from app.schemas.form_delivery import (
+    OptionalFormFieldConfiguration,
+    WebsiteFormDeliveryModeRevisionCreate,
+)
 from app.services import form_submission_gateway as gateway
 from app.services.form_delivery_modes import create_form_delivery_mode_revision
 from app.services import page_export
@@ -68,6 +71,7 @@ from app.services import theme_configurations as theme_service
 from app.services import theme_delivery
 from app.services.page_export import build_theme_configured_page_export_package
 from app.services.themes import DEFAULT_THEME_TOKENS, canonical_token_hash
+from app.website_builder_core.contracts import UNIVERSAL_ESTIMATE_FORM_DEFINITION
 
 
 @pytest.fixture()
@@ -123,6 +127,33 @@ def _fields() -> list[dict]:
             mapping,
         ) in definitions
     ]
+
+
+def _gateway_definition_with_sixth(
+    *,
+    required: bool = False,
+    maximum_length: int = 80,
+):
+    optional = OptionalFormFieldConfiguration.model_validate(
+        {
+            "field_key": "project_reference",
+            "public_label": "Project reference",
+            "accessibility_label": "Enter the project reference",
+            "field_type": "short_text",
+            "required": required,
+            "display_order": 6,
+            "maximum_length": maximum_length,
+            "validation_contract": {
+                "rule": "trimmed_text",
+                "minimum_length": 1 if required else 0,
+            },
+            "choices": [],
+            "provider_mapping_key": "project_reference",
+            "help_text": "Use synthetic information only.",
+            "definition_revision_identity": "project_reference_revision_1",
+        }
+    ).to_core()
+    return UNIVERSAL_ESTIMATE_FORM_DEFINITION.with_optional_fields((optional,))
 
 
 def _form_payload(state: str = "disabled_pending_provider_configuration") -> dict:
@@ -1191,7 +1222,127 @@ def test_normalization_is_unicode_safe_and_provider_neutral() -> None:
         "requested_service",
         "message",
         "consent_accepted",
+        "optional_field",
     }
+    assert normalized.optional_field is None
+
+
+def test_gateway_accepts_one_governed_sixth_value_and_optional_omission() -> None:
+    contract = _gateway_definition_with_sixth()
+    base = {
+        "name": "Synthetic Person",
+        "phone": "+1 (407) 555-0100",
+        "postal_code": "32801",
+        "requested_service": "Synthetic Service",
+        "message": None,
+        "consent_accepted": None,
+    }
+    omitted = gateway._normalize_submission(base, contract)
+    assert omitted.optional_field is None
+    assert omitted.to_optional_envelope_binding(contract) == (
+        "project_reference_revision_1",
+        None,
+    )
+
+    normalized = gateway._normalize_submission(
+        {
+            **base,
+            "optional_field": {
+                "field_key": "Project Reference",
+                "definition_revision_identity": "Project Reference Revision 1",
+                "value": "  Synthetic reference  ",
+            },
+        },
+        contract,
+    )
+    assert normalized.optional_field is not None
+    assert normalized.optional_field.model_dump() == {
+        "field_key": "project_reference",
+        "definition_revision_identity": "project_reference_revision_1",
+        "value": "Synthetic reference",
+    }
+    envelope_value = normalized.optional_field.to_envelope_value(
+        contract.optional_fields[0]
+    )
+    assert envelope_value.provider_mapping_key == "project_reference"
+    assert envelope_value.value == "Synthetic reference"
+    assert normalized.to_optional_envelope_binding(contract) == (
+        "project_reference_revision_1",
+        envelope_value,
+    )
+
+
+@pytest.mark.parametrize(
+    "optional_field",
+    (
+        {
+            "field_key": "unknown_field",
+            "definition_revision_identity": "project_reference_revision_1",
+            "value": "Synthetic reference",
+        },
+        {
+            "field_key": "project_reference",
+            "definition_revision_identity": "wrong_revision",
+            "value": "Synthetic reference",
+        },
+        {
+            "field_key": "project_reference",
+            "definition_revision_identity": "project_reference_revision_1",
+            "value": "Synthetic reference",
+            "provider_payload": "forbidden",
+        },
+    ),
+)
+def test_gateway_rejects_unknown_mismatched_or_extra_sixth_fields(
+    optional_field: dict[str, object],
+) -> None:
+    body = {
+        "name": "Synthetic Person",
+        "phone": "+1 (407) 555-0100",
+        "postal_code": "32801",
+        "requested_service": "Synthetic Service",
+        "message": None,
+        "consent_accepted": None,
+        "optional_field": optional_field,
+    }
+    with pytest.raises(gateway.FormGatewayError) as failure:
+        gateway._normalize_submission(body, _gateway_definition_with_sixth())
+    assert failure.value.code == "submission_invalid"
+    assert failure.value.safe_message == "The submitted fields are invalid."
+
+
+def test_gateway_rejects_required_omission_overlength_and_unconfigured_sixth() -> None:
+    base = {
+        "name": "Synthetic Person",
+        "phone": "+1 (407) 555-0100",
+        "postal_code": "32801",
+        "requested_service": "Synthetic Service",
+        "message": None,
+        "consent_accepted": None,
+    }
+    with pytest.raises(gateway.FormGatewayError, match="submitted fields"):
+        gateway._normalize_submission(
+            base,
+            _gateway_definition_with_sixth(required=True),
+        )
+    submitted = {
+        **base,
+        "optional_field": {
+            "field_key": "project_reference",
+            "definition_revision_identity": "project_reference_revision_1",
+            "value": "x" * 11,
+        },
+    }
+    with pytest.raises(gateway.FormGatewayError, match="submitted fields"):
+        gateway._normalize_submission(
+            submitted,
+            _gateway_definition_with_sixth(maximum_length=10),
+        )
+    with pytest.raises(gateway.FormGatewayError, match="submitted fields"):
+        gateway._normalize_submission(
+            submitted,
+            UNIVERSAL_ESTIMATE_FORM_DEFINITION,
+        )
 
 
 @pytest.mark.parametrize(

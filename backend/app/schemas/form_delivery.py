@@ -4,7 +4,16 @@ from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    StrictBool,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 from app.website_builder_core.configuration_safety import (
     DESTINATION_REFERENCE_PATTERN,
@@ -14,17 +23,135 @@ from app.website_builder_core.configuration_safety import (
     reject_secret_configuration,
     validate_key,
 )
-from app.website_builder_core.contracts import FormDeliveryMode
+from app.website_builder_core.contracts import (
+    FormDeliveryMode,
+    NormalizedFormDefinition,
+    NormalizedOptionalFieldValue,
+    OptionalFormFieldChoice,
+    OptionalFormFieldDefinition,
+    OptionalFormFieldType,
+    OptionalFormFieldValidationContract,
+    OptionalFormFieldValidationRule,
+    normalize_form_field_key,
+    normalize_optional_field_value,
+)
 
 
 ModeLifecycle = Literal["draft", "approved", "active", "retired"]
+
+
+class OptionalFormFieldValidationConfiguration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule: OptionalFormFieldValidationRule
+    minimum_length: int | None = Field(default=None, ge=0, le=10_000)
+
+    def to_core(self) -> OptionalFormFieldValidationContract:
+        return OptionalFormFieldValidationContract(
+            rule=self.rule,
+            minimum_length=self.minimum_length,
+        )
+
+
+class OptionalFormFieldChoiceConfiguration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    choice_key: str = Field(min_length=1, max_length=120)
+    public_label: str = Field(min_length=1, max_length=160)
+
+    @field_validator("choice_key")
+    @classmethod
+    def normalize_choice_key(cls, value: str) -> str:
+        return normalize_form_field_key(value)
+
+    @model_validator(mode="after")
+    def normalize_core_choice(self) -> "OptionalFormFieldChoiceConfiguration":
+        normalized = self.to_core()
+        self.choice_key = normalized.choice_key
+        self.public_label = normalized.public_label
+        return self
+
+    def to_core(self) -> OptionalFormFieldChoice:
+        return OptionalFormFieldChoice(
+            choice_key=self.choice_key,
+            public_label=self.public_label,
+        )
+
+
+class OptionalFormFieldConfiguration(BaseModel):
+    """The single governed sixth question carried by an immutable mode revision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field_key: str = Field(min_length=1, max_length=120)
+    public_label: str = Field(min_length=1, max_length=160)
+    accessibility_label: str = Field(min_length=1, max_length=160)
+    field_type: OptionalFormFieldType
+    required: bool
+    display_order: Literal[6]
+    maximum_length: int | None = Field(default=None, ge=1, le=5_000)
+    validation_contract: OptionalFormFieldValidationConfiguration
+    choices: list[OptionalFormFieldChoiceConfiguration] = Field(
+        default_factory=list,
+        max_length=50,
+    )
+    provider_mapping_key: str = Field(min_length=1, max_length=120)
+    help_text: str | None = Field(default=None, max_length=500)
+    definition_revision_identity: str = Field(min_length=1, max_length=120)
+
+    @field_validator(
+        "field_key",
+        "provider_mapping_key",
+        "definition_revision_identity",
+    )
+    @classmethod
+    def normalize_stable_key(cls, value: str) -> str:
+        return normalize_form_field_key(value)
+
+    @model_validator(mode="after")
+    def validate_core_contract(self) -> "OptionalFormFieldConfiguration":
+        normalized = self.to_core()
+        self.field_key = normalized.field_key
+        self.public_label = normalized.public_label
+        self.accessibility_label = normalized.accessibility_label
+        self.provider_mapping_key = normalized.provider_mapping_key
+        self.help_text = normalized.help_text
+        self.definition_revision_identity = (
+            normalized.definition_revision_identity
+        )
+        return self
+
+    def to_core(self) -> OptionalFormFieldDefinition:
+        return OptionalFormFieldDefinition(
+            field_key=self.field_key,
+            public_label=self.public_label,
+            accessibility_label=self.accessibility_label,
+            field_type=self.field_type,
+            required=self.required,
+            display_order=self.display_order,
+            maximum_length=self.maximum_length,
+            validation_contract=self.validation_contract.to_core(),
+            choices=tuple(choice.to_core() for choice in self.choices),
+            provider_mapping_key=self.provider_mapping_key,
+            help_text=self.help_text,
+            definition_revision_identity=self.definition_revision_identity,
+        )
+
+
+class AtlasRenderedModeConfiguration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    optional_fields: list[OptionalFormFieldConfiguration] = Field(
+        default_factory=list,
+        max_length=1,
+    )
 
 
 class DisabledModeConfiguration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class AtlasEmailModeConfiguration(BaseModel):
+class AtlasEmailModeConfiguration(AtlasRenderedModeConfiguration):
     model_config = ConfigDict(extra="forbid")
 
     transport_key_reference: str = Field(min_length=1, max_length=160)
@@ -100,7 +227,7 @@ class ProviderOwnedModeConfiguration(BaseModel):
         return self
 
 
-class AtlasOps360NativeModeConfiguration(BaseModel):
+class AtlasOps360NativeModeConfiguration(AtlasRenderedModeConfiguration):
     model_config = ConfigDict(extra="forbid")
 
     workspace_binding_reference: str = Field(min_length=1, max_length=240)
@@ -115,7 +242,7 @@ class AtlasOps360NativeModeConfiguration(BaseModel):
         return value
 
 
-class ExternalAdapterModeConfiguration(BaseModel):
+class ExternalAdapterModeConfiguration(AtlasRenderedModeConfiguration):
     model_config = ConfigDict(extra="forbid")
 
     adapter_configuration_reference: str = Field(min_length=1, max_length=240)
@@ -156,7 +283,28 @@ def validate_mode_configuration(
 ) -> dict[str, Any]:
     reject_secret_configuration(payload)
     model = MODE_CONFIGURATION_MODELS[mode].model_validate(payload)
-    return model.model_dump(mode="json", exclude_none=False)
+    normalized = model.model_dump(mode="json", exclude_none=False)
+    # Preserve the exact legacy five-field payload shape when no sixth field is
+    # configured. This keeps existing immutable revisions byte/fingerprint safe.
+    if mode in {"atlas_email", "atlasops360_native", "external_adapter"} and not normalized.get(
+        "optional_fields"
+    ):
+        normalized.pop("optional_fields", None)
+    return normalized
+
+
+def optional_field_definitions_from_configuration(
+    payload: dict[str, Any],
+) -> tuple[OptionalFormFieldDefinition, ...]:
+    raw_fields = payload.get("optional_fields", [])
+    if not isinstance(raw_fields, list) or len(raw_fields) > 1:
+        raise ValueError(
+            "Atlas-rendered forms allow at most one optional customer-entry field."
+        )
+    return tuple(
+        OptionalFormFieldConfiguration.model_validate(item).to_core()
+        for item in raw_fields
+    )
 
 
 class WebsiteFormDeliveryModeRevisionCreate(BaseModel):
@@ -461,8 +609,38 @@ class FormSubmissionAcceptanceRead(BaseModel):
     provider_reference: str = Field(min_length=1, max_length=240)
 
 
+class OptionalFormSubmissionInput(BaseModel):
+    """One value bound to its exact governed definition; no provider payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field_key: str = Field(min_length=1, max_length=120)
+    definition_revision_identity: str = Field(min_length=1, max_length=120)
+    value: StrictStr | StrictBool
+
+    @field_validator("field_key", "definition_revision_identity")
+    @classmethod
+    def normalize_identity(cls, value: str) -> str:
+        return normalize_form_field_key(value)
+
+    def to_envelope_value(
+        self,
+        definition: OptionalFormFieldDefinition,
+    ) -> NormalizedOptionalFieldValue:
+        if (
+            self.field_key != definition.field_key
+            or self.definition_revision_identity
+            != definition.definition_revision_identity
+        ):
+            raise ValueError("The submitted optional field does not match its definition.")
+        normalized = normalize_optional_field_value(definition, self.value)
+        if normalized is None:
+            raise ValueError("The submitted optional field value is absent.")
+        return normalized
+
+
 class NormalizedFormSubmissionInput(BaseModel):
-    """The single provider-neutral five-field JSON request shape."""
+    """The provider-neutral five-default/one-optional JSON request shape."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -472,6 +650,22 @@ class NormalizedFormSubmissionInput(BaseModel):
     requested_service: str
     message: str | None = None
     consent_accepted: bool | None = None
+    optional_field: OptionalFormSubmissionInput | None = None
+
+    def to_optional_envelope_binding(
+        self,
+        definition: NormalizedFormDefinition,
+    ) -> tuple[str | None, NormalizedOptionalFieldValue | None]:
+        if not definition.optional_fields:
+            if self.optional_field is not None:
+                raise ValueError("No governed optional field definition exists.")
+            return None, None
+        optional_definition = definition.optional_fields[0]
+        if self.optional_field is None:
+            normalized = normalize_optional_field_value(optional_definition, None)
+        else:
+            normalized = self.optional_field.to_envelope_value(optional_definition)
+        return optional_definition.definition_revision_identity, normalized
 
 
 class FormDeliveryOperatorReviewRead(BaseModel):

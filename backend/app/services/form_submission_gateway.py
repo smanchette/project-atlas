@@ -37,6 +37,7 @@ from app.website_builder_core.contracts import (
     NormalizedFormDefinition,
     NormalizedSubmissionEnvelope,
     ProviderDeliveryContext,
+    normalize_optional_field_value,
 )
 
 
@@ -169,10 +170,11 @@ def preflight_form_gateway(
 
     # Website-scoped delivery is selected before Theme-family or provider
     # details. The component key/version establish only the shared normalized
-    # five-field contract; they do not choose a delivery mode.
+    # five-default/one-optional contract; they do not choose a delivery mode.
     from app.services.form_delivery_modes import (
         FormDeliveryConfigurationError,
         form_delivery_readiness,
+        resolve_atlas_rendered_form_definition,
         resolve_current_form_delivery_mode,
     )
 
@@ -191,6 +193,17 @@ def preflight_form_gateway(
             "Form submission is not available.",
         ) from None
     else:
+        resolved_definition = None
+        if explicit_mode.mode not in {"disabled", "provider_owned"}:
+            try:
+                resolved_definition = resolve_atlas_rendered_form_definition(
+                    explicit_mode.mode,
+                    explicit_mode.configuration_payload,
+                )
+            except FormDeliveryConfigurationError:
+                raise _unavailable() from None
+            if resolved_definition is None:
+                raise _unavailable()
         explicit_readiness = form_delivery_readiness(
             session,
             explicit_mode,
@@ -407,7 +420,7 @@ def _normalize_submission(
         "message": parsed.message,
     }
     field_contracts = {item.field_key: item for item in contract.fields}
-    normalized: dict[str, str | bool | None] = {}
+    normalized: dict[str, object] = {}
     public_keys = {
         "name": "name",
         "phone": "phone",
@@ -442,7 +455,60 @@ def _normalize_submission(
         raise FormGatewayError(422, "submission_invalid", "The submitted fields are invalid.")
     normalized["postal_code"] = normalized_postal
 
-    if contract.privacy.consent_mode == "explicit" and parsed.consent_accepted is not True:
+    optional_definitions = tuple(getattr(contract, "optional_fields", ()) or ())
+    if len(optional_definitions) > 1:
+        raise FormGatewayError(
+            422,
+            "submission_invalid",
+            "The submitted fields are invalid.",
+        )
+    submitted_optional = parsed.optional_field
+    normalized_optional: dict[str, object] | None = None
+    if optional_definitions:
+        definition = optional_definitions[0]
+        if submitted_optional is not None and (
+            submitted_optional.field_key != definition.field_key
+            or submitted_optional.definition_revision_identity
+            != definition.definition_revision_identity
+        ):
+            raise FormGatewayError(
+                422,
+                "submission_invalid",
+                "The submitted fields are invalid.",
+            )
+        try:
+            optional_value = normalize_optional_field_value(
+                definition,
+                submitted_optional.value if submitted_optional is not None else None,
+            )
+        except (TypeError, ValueError):
+            raise FormGatewayError(
+                422,
+                "submission_invalid",
+                "The submitted fields are invalid.",
+            ) from None
+        if optional_value is not None:
+            normalized_optional = {
+                "field_key": optional_value.field_key,
+                "definition_revision_identity": (
+                    optional_value.definition_revision_identity
+                ),
+                "value": optional_value.value,
+            }
+    elif submitted_optional is not None:
+        raise FormGatewayError(
+            422,
+            "submission_invalid",
+            "The submitted fields are invalid.",
+        )
+    normalized["optional_field"] = normalized_optional
+
+    privacy = getattr(contract, "privacy", None)
+    if (
+        privacy is not None
+        and privacy.consent_mode == "explicit"
+        and parsed.consent_accepted is not True
+    ):
         raise FormGatewayError(422, "consent_required", "Required consent was not accepted.")
     normalized["consent_accepted"] = parsed.consent_accepted
     return NormalizedFormSubmissionInput.model_validate(normalized)

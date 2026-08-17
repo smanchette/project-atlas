@@ -70,6 +70,14 @@ class SyntheticDiscardProvider:
                 "postal_code": envelope.postal_code,
                 "requested_service": envelope.requested_service,
                 "message": envelope.message,
+                "optional_field": (
+                    asdict(envelope.optional_field)
+                    if envelope.optional_field is not None
+                    else None
+                ),
+                "optional_field_definition_revision_identity": (
+                    envelope.optional_field_definition_revision_identity
+                ),
                 "consent_accepted": envelope.consent_accepted,
                 "audit_identity": envelope.audit_identity,
                 "idempotency_key": envelope.idempotency_key,
@@ -162,6 +170,8 @@ class SyntheticDeliveryAdapter:
         self.last_configuration_reference_keys: tuple[str, ...] = ()
         self.last_envelope_contract: str | None = None
         self.last_envelope_scope: tuple[int, int, int | None] | None = None
+        self.last_optional_field_mapping: tuple[str, str, str] | None = None
+        self.last_optional_field_definition_revision_identity: str | None = None
         self._lock = Lock()
         self._completed: OrderedDict[
             str, tuple[str, DeliveryAttemptResult]
@@ -197,6 +207,18 @@ class SyntheticDeliveryAdapter:
                 envelope.website_id,
                 envelope.component_configuration_id,
                 envelope.delivery_mode_revision_id,
+            )
+            self.last_optional_field_mapping = (
+                (
+                    envelope.optional_field.field_key,
+                    envelope.optional_field.definition_revision_identity,
+                    envelope.optional_field.provider_mapping_key,
+                )
+                if envelope.optional_field is not None
+                else None
+            )
+            self.last_optional_field_definition_revision_identity = (
+                envelope.optional_field_definition_revision_identity
             )
             prior = self._completed.get(delivery_identity)
             if prior is not None:

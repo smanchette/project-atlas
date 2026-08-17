@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.website_builder_core.contracts import FormDeliveryMode
+from app.website_builder_core.contracts import ATLAS_OWNED_FORM_MODES, FormDeliveryMode
 from app.website_builder_core.registry import ProviderDescriptor
 
 
@@ -42,6 +42,7 @@ class FormDeliveryReadinessInput:
     secret_reference_configured: bool = False
     secure_payload_store_available: bool = False
     provider_owned_presentation_ready: bool = False
+    atlas_rendered_field_contract_valid: bool = False
     form_contract_version: int = 1
     website_identity: str = "*"
 
@@ -100,6 +101,13 @@ def evaluate_form_delivery_readiness(
     require(bool(value.adapter_version), "missing_adapter_version", "adapter_version", "An adapter version is required.")
     require(bool(value.destination_identity), "missing_destination", "destination_identity", "A governed destination identity is required.")
     require(bool(value.audit_identity), "missing_audit_identity", "audit_identity", "An audit identity is required.")
+    if value.mode in ATLAS_OWNED_FORM_MODES:
+        require(
+            value.atlas_rendered_field_contract_valid,
+            "invalid_customer_entry_field_contract",
+            "configuration_payload.optional_fields",
+            "Atlas-rendered forms must preserve five default fields and may add at most one governed sixth field.",
+        )
 
     compatible = bool(
         provider

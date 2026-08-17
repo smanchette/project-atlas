@@ -1,6 +1,6 @@
 # Project Atlas Complete Website Blueprint
 
-**Version:** 1.1
+**Version:** 1.2
 
 **Status:** Governing Website-Design Blueprint
 
@@ -212,7 +212,11 @@ Form delivery is a separate Website Builder subsystem, not a Theme behavior, cus
 
 The effective mode is scoped to the exact Website and form component. Its revision records are immutable, and the chain has exactly one current head. The mode must not be inferred from a Theme, portal configuration, provider presence, or another mode. No mode silently falls back to another, and incomplete configuration fails closed.
 
-Atlas-owned modes preserve one provider-neutral envelope for the approved five-field form contract: name, phone, ZIP code, requested service, and optional message. Provider adapters perform destination mapping without adding provider-specific fields to the core envelope. Durable recipient revisions are Website/form-scoped, normalized, deduplicated, verification-aware, and separate from transport credentials. Every delivery-mode revision owns the exact current heads of its immutable recipient chains. Initial roots and same-mode address, role, enabled-state, or verification successors may be appended only while that email-mode revision is current and has no submission evidence. A first submission or delivery-mode successor freezes that snapshot; recipient heads may then be carried forward only to the directly superseding email-mode revision.
+Atlas-rendered forms using `atlas_email`, `atlasops360_native`, or `external_adapter` preserve five fixed, ordered default customer-entry fields: Name, Phone, ZIP code, Requested Service, and Optional Message. A form may add zero or one governed optional sixth field after those defaults, for a maximum of six active customer-entry fields. The optional definition is immutable and may use only the controlled `email`, `short_text`, `dropdown`, `radio`, `checkbox`, `date`, or `textarea` types. A seventh field, more than one additional field, a duplicate or reserved key, or an incompatible value fails closed without silent dropping, selection, or conversion to metadata. The provider-neutral envelope carries the exact five standard fields plus zero or one normalized optional value bound to its exact definition revision, and provider adapters map that value without adding provider-specific fields to the core contract.
+
+Provider-owned forms are exempt because the selected provider owns their field definitions and counts. Privacy consent controls, terms acknowledgments, honeypots, CAPTCHA and anti-spam controls, hidden security identifiers, idempotency values, audit metadata, and system-generated routing fields are not customer-entry questions and do not count toward the Atlas-rendered maximum.
+
+Durable recipient revisions are Website/form-scoped, normalized, deduplicated, verification-aware, and separate from transport credentials. Every delivery-mode revision owns the exact current heads of its immutable recipient chains. Initial roots and same-mode address, role, enabled-state, or verification successors may be appended only while that email-mode revision is current and has no submission evidence. A first submission or delivery-mode successor freezes that snapshot; recipient heads may then be carried forward only to the directly superseding email-mode revision.
 
 Atlas may keep only the minimum safe outbox and immutable delivery-attempt evidence required to prevent silent loss and support troubleshooting. Delivery evidence must not duplicate full customer payloads or recipient lists, and it must not grow into lead assignment, sales stages, scheduling, estimating, customer accounts, or a standalone CRM. Production customer values may be persisted only through an approved encryption and key-management boundary; absent that boundary, production submission persistence and delivery remain unavailable.
 
@@ -463,7 +467,7 @@ This model supports manual operation today and progressively automated operation
 
 ## 19. Document Governance and Versioning
 
-This Blueprint began at version 1.0 and remains a governing design document subordinate to the Project Atlas Constitution. Version 1.1 establishes the single shared Website Builder Core and the provider-neutral, Website/form-scoped delivery-mode boundary.
+This Blueprint began at version 1.0 and remains a governing design document subordinate to the Project Atlas Constitution. Version 1.1 established the single shared Website Builder Core and the provider-neutral, Website/form-scoped delivery-mode boundary. Version 1.2 establishes five fixed default customer-entry fields and a maximum of one governed optional sixth field for Atlas-rendered forms.
 
 Material changes require:
 

@@ -20,6 +20,7 @@ from app.services.form_delivery_modes import (
     form_delivery_readiness,
     form_delivery_mode_fingerprint,
     resolve_delivery_adapter_context,
+    resolve_atlas_rendered_form_definition,
     resolve_current_form_delivery_mode,
 )
 from app.services.form_delivery_registry import FORM_DELIVERY_PROVIDER_REGISTRY
@@ -34,6 +35,7 @@ from app.website_builder_core.contracts import (
     DeliveryAdapter,
     IdempotencyConflict,
     NormalizedSubmissionEnvelope,
+    validate_submission_optional_field_binding,
 )
 
 
@@ -196,6 +198,26 @@ def enqueue_form_delivery(
         or envelope.abuse_policy_identity != mode_revision.abuse_policy_reference
     ):
         raise FormDeliveryOutboxError("The normalized envelope crosses its governed scope.")
+    try:
+        form_definition = resolve_atlas_rendered_form_definition(
+            mode_revision.mode,
+            mode_revision.configuration_payload,
+        )
+        if (
+            form_definition is None
+            or envelope.submission_contract_version
+            != form_definition.contract_version
+        ):
+            raise ValueError("The form definition identity is unavailable.")
+        validate_submission_optional_field_binding(
+            form_definition,
+            envelope.optional_field,
+            envelope.optional_field_definition_revision_identity,
+        )
+    except (TypeError, ValueError) as exc:
+        raise FormDeliveryOutboxError(
+            "The normalized envelope does not match its exact field definition."
+        ) from exc
     if not payload_store.available or not payload_store.encryption_key_reference:
         raise FormDeliveryOutboxError(
             "Secure payload storage and key management are unavailable."
@@ -463,6 +485,26 @@ def process_form_delivery_outbox(
         != envelope_record.idempotency_digest
     ):
         raise FormDeliveryOutboxError("The secure envelope payload crosses durable scope.")
+    try:
+        form_definition = resolve_atlas_rendered_form_definition(
+            mode_revision.mode,
+            mode_revision.configuration_payload,
+        )
+        if (
+            form_definition is None
+            or normalized.submission_contract_version
+            != form_definition.contract_version
+        ):
+            raise ValueError("The form definition identity is unavailable.")
+        validate_submission_optional_field_binding(
+            form_definition,
+            normalized.optional_field,
+            normalized.optional_field_definition_revision_identity,
+        )
+    except (TypeError, ValueError) as exc:
+        raise FormDeliveryOutboxError(
+            "The secure envelope payload does not match its exact field definition."
+        ) from exc
     try:
         delivery_context = resolve_delivery_adapter_context(
             session,

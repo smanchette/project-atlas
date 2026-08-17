@@ -12,6 +12,7 @@ import {
   Network,
   RotateCcw,
   ShieldCheck,
+  Smartphone,
 } from "lucide-react";
 
 export const UNIVERSAL_FORM_DELIVERY_MODES = [
@@ -23,6 +24,55 @@ export const UNIVERSAL_FORM_DELIVERY_MODES = [
 ] as const;
 
 export type UniversalFormDeliveryMode = (typeof UNIVERSAL_FORM_DELIVERY_MODES)[number];
+
+type StaticReviewField = {
+  key: string;
+  label: string;
+  type: string;
+};
+
+// Synthetic Theme Lab fixtures only. The Python Website Builder Core remains
+// authoritative for form definition, rendering, submission, and persistence.
+export const THEME_LAB_DEMO_STANDARD_FIELDS: readonly StaticReviewField[] = [
+  { key: "name", label: "Name", type: "standard" },
+  { key: "phone", label: "Phone", type: "standard" },
+  { key: "postal_code", label: "ZIP code", type: "standard" },
+  { key: "requested_service", label: "Requested Service", type: "standard" },
+  { key: "message", label: "Optional Message", type: "standard" },
+] as const;
+
+export const THEME_LAB_DEMO_DEFAULT_FIELD_COUNT = THEME_LAB_DEMO_STANDARD_FIELDS.length;
+export const THEME_LAB_DEMO_MAX_FIELD_COUNT = THEME_LAB_DEMO_DEFAULT_FIELD_COUNT + 1;
+
+export const THEME_LAB_DEMO_FIELD_REVIEW_STATE_IDS = [
+  "atlas-fields-default-five",
+  "atlas-fields-valid-six",
+  "atlas-fields-rejected-seven",
+  "atlas-fields-reserved-key",
+  "atlas-fields-choice-types",
+  "atlas-fields-mobile-six",
+] as const;
+
+const dropdownSixthField: StaticReviewField = {
+  key: "project_timeline",
+  label: "Project timeline",
+  type: "dropdown",
+};
+
+const radioSixthField: StaticReviewField = {
+  key: "contact_preference",
+  label: "Contact preference",
+  type: "radio",
+};
+
+const secondAdditionalField: StaticReviewField = {
+  key: "preferred_date",
+  label: "Preferred date",
+  type: "date",
+};
+
+const validSixFields = [...THEME_LAB_DEMO_STANDARD_FIELDS, dropdownSixthField];
+const rejectedSevenFields = [...validSixFields, secondAdditionalField];
 
 type ModeReview = {
   mode: UniversalFormDeliveryMode;
@@ -122,6 +172,29 @@ function ReviewPanel({ id, eyebrow, title, children, wide = false }: { id: strin
   );
 }
 
+function StaticFieldList({ fields, label }: { fields: readonly StaticReviewField[]; label: string }) {
+  return (
+    <ol className="universalFormModesReviewFieldList" aria-label={label}>
+      {fields.map((field, index) => (
+        <li key={`${field.key}-${index}`} data-field-key={field.key}>
+          <span className="universalFormModesReviewFieldOrder" aria-hidden="true">{index + 1}</span>
+          <span className="universalFormModesReviewFieldIdentity"><strong>{field.label}</strong><code>{field.key}</code></span>
+          <span className="universalFormModesReviewFieldType">{field.type}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function FieldCountStatus({ count, valid, children }: { count: number; valid: boolean; children: React.ReactNode }) {
+  return (
+    <div className={`universalFormModesReviewFieldStatus universalFormModesReviewFieldStatus--${valid ? "valid" : "rejected"}`} data-field-count={count} data-field-valid={valid ? "true" : "false"}>
+      <strong>{count} / {THEME_LAB_DEMO_MAX_FIELD_COUNT} customer-entry fields</strong>
+      <span>{children}</span>
+    </div>
+  );
+}
+
 const reviewByMode = Object.fromEntries(UNIVERSAL_FORM_MODE_REVIEWS.map((review) => [review.mode, review])) as Record<UniversalFormDeliveryMode, ModeReview>;
 
 const atlasEmailTestReview: ModeReview = {
@@ -150,10 +223,10 @@ export default function UniversalFormModesReview() {
     <main className="universalFormModesReview" data-universal-form-modes-review="local-only">
       <header className="universalFormModesReviewHero">
         <div><p className="universalFormModesReviewEyebrow">Operator-only evidence surface</p><h1>Universal form delivery modes</h1><p>A static review of the Website-scoped delivery boundary. Every state below is synthetic, inactive, and disconnected from customer data and external services.</p></div>
-        <div className="universalFormModesReviewDemoFlag"><ShieldCheck aria-hidden="true" /><span><strong>DEMO CONFIGURATION</strong>NOT ACTIVE</span></div>
+        <div className="universalFormModesReviewDemoFlag"><ShieldCheck aria-hidden="true" /><span><strong>DEMO CONFIGURATION — NOT ACTIVE</strong>Static operator review only</span></div>
       </header>
       <nav className="universalFormModesReviewJump" aria-label="Universal form modes review sections">
-        <a href="#universal-form-mode-contact-sheet">Review the five modes</a><a href="#universal-form-master-contact-sheet">Review the safety matrix</a>
+        <a href="#atlas-fields-default-five">Review the field limit</a><a href="#universal-form-mode-contact-sheet">Review the five modes</a><a href="#universal-form-master-contact-sheet">Review the safety matrix</a>
       </nav>
       <div className="universalFormModesReviewGrid">
         <ReviewPanel id="architecture-summary" eyebrow="01 / Boundary" title="One core, three product surfaces" wide>
@@ -203,10 +276,44 @@ export default function UniversalFormModesReview() {
         <ReviewPanel id="permanent-failure" eyebrow="14 / Attempt" title="Terminal failure">
           <ModeSummary review={reviewByMode.external_adapter} /><div className="universalFormModesReviewState universalFormModesReviewState--blocked"><Ban aria-hidden="true" /><div><strong>Safe code: destination_rejected</strong><span>Delivery stops. The ledger retains no plaintext fields, body, recipient list, or credential.</span></div></div>
         </ReviewPanel>
-        <ReviewPanel id="universal-form-mode-contact-sheet" eyebrow="17 / Contact sheet" title="Five-mode contact sheet" wide>
+        <ReviewPanel id="atlas-fields-default-five" eyebrow="15 / Field limit" title="Default five-field form">
+          <FieldCountStatus count={THEME_LAB_DEMO_DEFAULT_FIELD_COUNT} valid>Valid standard configuration. The five fields remain fixed and ordered.</FieldCountStatus>
+          <StaticFieldList fields={THEME_LAB_DEMO_STANDARD_FIELDS} label="Five standard customer-entry fields" />
+        </ReviewPanel>
+        <ReviewPanel id="atlas-fields-valid-six" eyebrow="16 / Field limit" title="Valid six-field form">
+          <FieldCountStatus count={THEME_LAB_DEMO_MAX_FIELD_COUNT} valid>One governed optional field is accepted after the five defaults.</FieldCountStatus>
+          <StaticFieldList fields={validSixFields} label="Five standard fields plus one optional sixth field" />
+          <p className="universalFormModesReviewFieldRevision">Synthetic revision <code>demo-field-revision-006</code> · immutable review identity</p>
+        </ReviewPanel>
+        <ReviewPanel id="atlas-fields-rejected-seven" eyebrow="17 / Fail closed" title="Rejected seven-field configuration">
+          <FieldCountStatus count={rejectedSevenFields.length} valid={false}>Rejected: more than one additional field exceeds the six-field maximum. Nothing is silently dropped or reclassified.</FieldCountStatus>
+          <StaticFieldList fields={rejectedSevenFields} label="Rejected seven-field configuration" />
+        </ReviewPanel>
+        <ReviewPanel id="atlas-fields-reserved-key" eyebrow="18 / Fail closed" title="Reserved-key rejection">
+          <div className="universalFormModesReviewKeyCollision" data-field-valid="false">
+            <div><span>Candidate key</span><code> Request-ID </code></div>
+            <div><span>Normalized key</span><code>request_id</code></div>
+            <div><span>Decision</span><strong>Rejected · reserved system key</strong></div>
+          </div>
+          <p>Normalization happens before collision review, so spacing and punctuation cannot impersonate a system-owned key.</p>
+        </ReviewPanel>
+        <ReviewPanel id="atlas-fields-choice-types" eyebrow="19 / Controlled choices" title="Dropdown and radio examples" wide>
+          <p>These are two alternative synthetic sixth-field revisions, never two fields in one form. Each choice group counts as one customer-entry field.</p>
+          <div className="universalFormModesReviewChoiceExamples">
+            <article data-choice-field-type={dropdownSixthField.type}><header><strong>{dropdownSixthField.label}</strong><span>{dropdownSixthField.type} · one field</span></header><ul aria-label="Synthetic dropdown choices"><li>As soon as possible</li><li>Within 30 days</li><li>Planning ahead</li></ul></article>
+            <article data-choice-field-type={radioSixthField.type}><header><strong>{radioSixthField.label}</strong><span>{radioSixthField.type} · one field</span></header><ul aria-label="Synthetic radio choices"><li>Phone</li><li>Email</li><li>No preference</li></ul></article>
+          </div>
+        </ReviewPanel>
+        <ReviewPanel id="atlas-fields-mobile-six" eyebrow="20 / Responsive review" title="Mobile six-field layout" wide>
+          <div className="universalFormModesReviewMobileFrame" data-mobile-field-count="6" aria-label="Static mobile six-field layout">
+            <header><Smartphone aria-hidden="true" /><div><strong>390 px review frame</strong><span>Single column · no submit control</span></div></header>
+            <StaticFieldList fields={validSixFields} label="Mobile layout with six customer-entry fields" />
+          </div>
+        </ReviewPanel>
+        <ReviewPanel id="universal-form-mode-contact-sheet" eyebrow="21 / Contact sheet" title="Five-mode contact sheet" wide>
           <div className="universalFormModesReviewContactSheet">{UNIVERSAL_FORM_MODE_REVIEWS.map((review) => <ModeSummary key={review.mode} review={review} />)}</div>
         </ReviewPanel>
-        <ReviewPanel id="universal-form-master-contact-sheet" eyebrow="18 / Master evidence" title="Ownership and safety matrix" wide>
+        <ReviewPanel id="universal-form-master-contact-sheet" eyebrow="22 / Master evidence" title="Ownership and safety matrix" wide>
           <div className="universalFormModesReviewMasterGrid" role="list" aria-label="Universal form mode ownership and safety evidence">
             {UNIVERSAL_FORM_MODE_REVIEWS.map((review) => (
               <article key={review.mode} className={`universalFormModesReviewMasterCard universalFormModesReviewMode--${review.mode}`} role="listitem">

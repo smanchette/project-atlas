@@ -34,6 +34,7 @@ from app.models import (
 from app.schemas.form_delivery import (
     WebsiteFormDeliveryModeRevisionCreate,
     WebsiteFormRecipientRevisionCreate,
+    validate_mode_configuration,
 )
 from app.schemas.theme_families import (
     PERFORMANCE_LOCAL_V3_COMPONENT_CONTRACTS,
@@ -142,6 +143,35 @@ def _form_fields() -> list[dict]:
             mapping,
         ) in definitions
     ]
+
+
+def _optional_sixth_field_definition() -> dict:
+    return {
+        "field_key": "property_type",
+        "public_label": "What kind of property needs service?",
+        "accessibility_label": "Select the property type",
+        "field_type": "dropdown",
+        "required": False,
+        "display_order": 6,
+        "maximum_length": None,
+        "validation_contract": {
+            "rule": "listed_choice",
+            "minimum_length": None,
+        },
+        "choices": [
+            {
+                "choice_key": "single_family",
+                "public_label": "Single-family home",
+            },
+            {
+                "choice_key": "multi_family",
+                "public_label": "Multi-family property",
+            },
+        ],
+        "provider_mapping_key": "property_type",
+        "help_text": "Choose the closest available property type.",
+        "definition_revision_identity": "property_type_v1",
+    }
 
 
 def _disabled_component_payload() -> dict:
@@ -269,7 +299,12 @@ def _active_evidence() -> dict[str, object]:
     }
 
 
-def _seed_complete_form_delivery_graph(session: Session) -> dict[str, int]:
+def _seed_complete_form_delivery_graph(
+    session: Session,
+    *,
+    include_optional_field: bool = True,
+    include_same_definition_successor: bool = False,
+) -> dict[str, int]:
     website, component = _seed_form_component(session, label="Form Backup Source")
     disabled = create_form_delivery_mode_revision(
         session,
@@ -287,6 +322,16 @@ def _seed_complete_form_delivery_graph(session: Session) -> dict[str, int]:
             **_active_evidence(),
         ),
     )
+    email_configuration = {
+        "transport_key_reference": "synthetic-mail",
+        "transport_secret_reference": "secret-ref://synthetic/mail-transport",
+        "notification_preference": "all_verified",
+        "consent_required": False,
+    }
+    if include_optional_field:
+        email_configuration["optional_fields"] = [
+            _optional_sixth_field_definition()
+        ]
     email = create_form_delivery_mode_revision(
         session,
         website.id,
@@ -299,12 +344,7 @@ def _seed_complete_form_delivery_graph(session: Session) -> dict[str, int]:
             provider_key=SYNTHETIC_EMAIL_PROVIDER_KEY,
             adapter_version="test-v1",
             destination_identity="recipient-set-ref://synthetic/form-backup",
-            configuration_payload={
-                "transport_key_reference": "synthetic-mail",
-                "transport_secret_reference": "secret-ref://synthetic/mail-transport",
-                "notification_preference": "all_verified",
-                "consent_required": False,
-            },
+            configuration_payload=email_configuration,
             privacy_policy_reference="/privacy",
             retention_policy_reference="policy-ref://synthetic/retention",
             abuse_policy_reference="policy-ref://synthetic/abuse",
@@ -388,6 +428,14 @@ def _seed_complete_form_delivery_graph(session: Session) -> dict[str, int]:
             request_identity="1" * 64,
             destination_adapter_key=email.provider_key,
             received_at=received_at,
+            optional_field_definition_revision_identity=(
+                email.configuration_payload["optional_fields"][0][
+                    "definition_revision_identity"
+                ]
+                if include_optional_field
+                else None
+            ),
+            optional_field=None,
         ),
         payload_store=store,
         expires_at=received_at + timedelta(hours=1),
@@ -401,7 +449,7 @@ def _seed_complete_form_delivery_graph(session: Session) -> dict[str, int]:
     )
     assert attempt.outcome == "delivered"
     assert store.payload_count == 0
-    return {
+    identities = {
         "website_id": website.id,
         "component_id": component.id,
         "disabled_id": disabled.id,
@@ -409,6 +457,39 @@ def _seed_complete_form_delivery_graph(session: Session) -> dict[str, int]:
         "recipient_id": recipient.id,
         "outbox_id": outbox.id,
     }
+    if include_same_definition_successor:
+        successor = create_form_delivery_mode_revision(
+            session,
+            website.id,
+            WebsiteFormDeliveryModeRevisionCreate(
+                form_component_configuration_id=component.id,
+                form_instance_key=component.component_instance_key,
+                supersedes_delivery_mode_revision_id=email.id,
+                mode="atlas_email",
+                enabled=True,
+                provider_key=SYNTHETIC_EMAIL_PROVIDER_KEY,
+                adapter_version="test-v1",
+                destination_identity="recipient-set-ref://synthetic/form-backup",
+                configuration_payload=deepcopy(email.configuration_payload),
+                privacy_policy_reference="/privacy",
+                retention_policy_reference="policy-ref://synthetic/retention",
+                abuse_policy_reference="policy-ref://synthetic/abuse",
+                success_behavior="Show a generic success message.",
+                failure_behavior="Show a generic failure message.",
+                idempotency_policy_reference=(
+                    "policy-ref://synthetic/idempotency"
+                ),
+                audit_identity="form-backup-email-successor-audit",
+                created_by="Form Backup Test Operator",
+                updated_by="Form Backup Test Operator",
+                rationale=(
+                    "Create a same-definition successor for Backup lineage tests."
+                ),
+                **_active_evidence(),
+            ),
+        )
+        identities["successor_id"] = successor.id
+    return identities
 
 
 def _write_payload(tmp_path: Path, payload: dict, name: str) -> Path:
@@ -420,11 +501,22 @@ def _write_payload(tmp_path: Path, payload: dict, name: str) -> Path:
     return path
 
 
-def _export_complete_payload(tmp_path: Path) -> tuple[Path, dict, dict[str, int]]:
+def _export_complete_payload(
+    tmp_path: Path,
+    *,
+    include_optional_field: bool = True,
+    include_same_definition_successor: bool = False,
+) -> tuple[Path, dict, dict[str, int]]:
     engine = _engine()
     SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
-        identities = _seed_complete_form_delivery_graph(session)
+        identities = _seed_complete_form_delivery_graph(
+            session,
+            include_optional_field=include_optional_field,
+            include_same_definition_successor=(
+                include_same_definition_successor
+            ),
+        )
         exported = export_backup(session, backup_dir=tmp_path)
         payload = load_backup(Path(exported["path"]))
     engine.dispose()
@@ -468,8 +560,31 @@ def test_backup_058_round_trip_preserves_complete_form_delivery_graph(
             group: source_payload["metadata"]["table_counts"][group]
             for group in FORM_DELIVERY_BACKUP_GROUPS
         }
+        first_email_mode = session.exec(
+            select(WebsiteFormDeliveryModeRevision).where(
+                WebsiteFormDeliveryModeRevision.mode == "atlas_email"
+            )
+        ).one()
+        first_email_identity = (
+            first_email_mode.id,
+            first_email_mode.revision,
+            deepcopy(first_email_mode.configuration_payload),
+            first_email_mode.integrity_fingerprint,
+        )
         second = restore_backup(session, source_path)
         assert second["status"] == "restored"
+        session.expire_all()
+        second_email_mode = session.exec(
+            select(WebsiteFormDeliveryModeRevision).where(
+                WebsiteFormDeliveryModeRevision.mode == "atlas_email"
+            )
+        ).one()
+        assert (
+            second_email_mode.id,
+            second_email_mode.revision,
+            second_email_mode.configuration_payload,
+            second_email_mode.integrity_fingerprint,
+        ) == first_email_identity
         target_export = export_backup(session, backup_dir=tmp_path / "reexport")
         target_payload = load_backup(Path(target_export["path"]))
     target_engine.dispose()
@@ -487,6 +602,16 @@ def test_backup_058_round_trip_preserves_complete_form_delivery_graph(
         record["mode"] == "disabled" and record["enabled"] is False
         for record in restored_modes
     )
+    restored_email_mode = next(
+        record for record in restored_modes if record["mode"] == "atlas_email"
+    )
+    assert restored_email_mode["revision"] == 2
+    assert restored_email_mode["configuration_payload"]["optional_fields"] == [
+        _optional_sixth_field_definition()
+    ]
+    assert restored_email_mode["integrity_fingerprint"] == (
+        form_delivery_mode_fingerprint(restored_email_mode)
+    )
     assert [record["verification_status"] for record in restored_recipients] == [
         "unverified",
         "verified",
@@ -500,6 +625,235 @@ def test_backup_058_round_trip_preserves_complete_form_delivery_graph(
     assert "+14075550100" not in serialized
     assert "Synthetic message" not in serialized
     assert not PRODUCTION_PROVIDER_REGISTRY.production
+
+
+def test_backup_058_preserves_legacy_five_field_mode_payload_byte_shape(
+    tmp_path: Path,
+) -> None:
+    source_path, source_payload, _ = _export_complete_payload(
+        tmp_path,
+        include_optional_field=False,
+    )
+    source_mode = next(
+        record
+        for record in source_payload["data"]["website_form_delivery_mode_revisions"]
+        if record["mode"] == "atlas_email"
+    )
+    expected_configuration = {
+        "transport_key_reference": "synthetic-mail",
+        "transport_secret_reference": "secret-ref://synthetic/mail-transport",
+        "notification_preference": "all_verified",
+        "consent_required": False,
+    }
+    assert source_mode["configuration_payload"] == expected_configuration
+    assert list(source_mode["configuration_payload"]) == list(
+        expected_configuration
+    )
+    assert "optional_fields" not in source_mode["configuration_payload"]
+
+    target_engine = _engine()
+    SQLModel.metadata.create_all(target_engine)
+    with Session(target_engine) as session:
+        restore_backup(session, source_path)
+        target_export = export_backup(
+            session,
+            backup_dir=tmp_path / "five-field-reexport",
+        )
+        target_payload = load_backup(Path(target_export["path"]))
+    target_engine.dispose()
+
+    target_mode = next(
+        record
+        for record in target_payload["data"]["website_form_delivery_mode_revisions"]
+        if record["mode"] == "atlas_email"
+    )
+    assert target_mode["configuration_payload"] == expected_configuration
+    assert list(target_mode["configuration_payload"]) == list(
+        expected_configuration
+    )
+    assert "optional_fields" not in target_mode["configuration_payload"]
+    assert target_mode["integrity_fingerprint"] == form_delivery_mode_fingerprint(
+        target_mode
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "public_definition",
+        "choice_order",
+        "required_state",
+        "provider_mapping",
+        "definition_revision",
+    ),
+)
+def test_backup_058_optional_sixth_field_exact_values_are_fingerprinted(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    _, payload, _ = _export_complete_payload(tmp_path)
+    candidate = deepcopy(payload)
+    mode = next(
+        record
+        for record in candidate["data"]["website_form_delivery_mode_revisions"]
+        if record["mode"] == "atlas_email"
+    )
+    field = mode["configuration_payload"]["optional_fields"][0]
+
+    if mutation == "public_definition":
+        field["public_label"] = "Which property needs service?"
+    elif mutation == "choice_order":
+        field["choices"].reverse()
+    elif mutation == "required_state":
+        field["required"] = True
+    elif mutation == "provider_mapping":
+        field["provider_mapping_key"] = "property_type_v2"
+    else:
+        field["definition_revision_identity"] = "property_type_v2"
+
+    path = _write_payload(
+        tmp_path,
+        candidate,
+        f"invalid-optional-field-{mutation}.json",
+    )
+    with pytest.raises(BackupValidationError, match="fingerprint"):
+        load_backup(path)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "field_type",
+        "display_order",
+        "validation_contract",
+        "duplicate_choice",
+        "reserved_provider_mapping",
+        "seventh_field",
+    ),
+)
+def test_backup_058_rejects_refingerprinted_invalid_optional_sixth_field(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    _, payload, _ = _export_complete_payload(tmp_path)
+    candidate = deepcopy(payload)
+    mode = next(
+        record
+        for record in candidate["data"]["website_form_delivery_mode_revisions"]
+        if record["mode"] == "atlas_email"
+    )
+    optional_fields = mode["configuration_payload"]["optional_fields"]
+    field = optional_fields[0]
+
+    if mutation == "field_type":
+        field["field_type"] = "checkbox"
+    elif mutation == "display_order":
+        field["display_order"] = 5
+    elif mutation == "validation_contract":
+        field["validation_contract"]["rule"] = "boolean"
+    elif mutation == "duplicate_choice":
+        field["choices"][1]["choice_key"] = field["choices"][0]["choice_key"]
+    elif mutation == "reserved_provider_mapping":
+        field["provider_mapping_key"] = "name"
+    else:
+        optional_fields.append(deepcopy(field))
+    mode["integrity_fingerprint"] = form_delivery_mode_fingerprint(mode)
+
+    path = _write_payload(
+        tmp_path,
+        candidate,
+        f"invalid-refingerprinted-optional-field-{mutation}.json",
+    )
+    with pytest.raises(BackupValidationError):
+        load_backup(path)
+
+
+def test_backup_058_rejects_refingerprinted_noncanonical_optional_sixth_field(
+    tmp_path: Path,
+) -> None:
+    _, payload, _ = _export_complete_payload(tmp_path)
+    candidate = deepcopy(payload)
+    mode = next(
+        record
+        for record in candidate["data"]["website_form_delivery_mode_revisions"]
+        if record["mode"] == "atlas_email"
+    )
+    field = mode["configuration_payload"]["optional_fields"][0]
+    field["field_key"] = "Property Type"
+    mode["integrity_fingerprint"] = form_delivery_mode_fingerprint(mode)
+
+    path = _write_payload(
+        tmp_path,
+        candidate,
+        "invalid-refingerprinted-noncanonical-optional-field.json",
+    )
+    with pytest.raises(BackupValidationError, match="not canonical"):
+        load_backup(path)
+
+
+def test_backup_058_rejects_changed_definition_reusing_identity_before_restore(
+    tmp_path: Path,
+) -> None:
+    _, payload, identities = _export_complete_payload(
+        tmp_path,
+        include_same_definition_successor=True,
+    )
+    candidate = deepcopy(payload)
+    modes = candidate["data"]["website_form_delivery_mode_revisions"]
+    predecessor = next(record for record in modes if record["revision"] == 2)
+    successor = next(
+        record for record in modes if record["id"] == identities["successor_id"]
+    )
+    predecessor_definition = predecessor["configuration_payload"][
+        "optional_fields"
+    ][0]
+    successor_definition = successor["configuration_payload"][
+        "optional_fields"
+    ][0]
+    assert successor["revision"] == 3
+    assert successor_definition == predecessor_definition
+
+    successor_definition["public_label"] = "Which property needs service?"
+    assert successor_definition["definition_revision_identity"] == (
+        predecessor_definition["definition_revision_identity"]
+    )
+    assert validate_mode_configuration(
+        "atlas_email",
+        successor["configuration_payload"],
+    ) == successor["configuration_payload"]
+    successor["integrity_fingerprint"] = form_delivery_mode_fingerprint(
+        successor
+    )
+    successor_audit = next(
+        record
+        for record in candidate["data"]["form_delivery_configuration_audits"]
+        if record["delivery_mode_revision_id"] == successor["id"]
+    )
+    successor_audit["snapshot"]["integrity_fingerprint"] = successor[
+        "integrity_fingerprint"
+    ]
+    successor_audit["snapshot_hash"] = form_delivery_configuration_audit_hash(
+        successor_audit
+    )
+    path = _write_payload(
+        tmp_path,
+        candidate,
+        "invalid-reused-optional-definition-identity.json",
+    )
+
+    target_engine = _engine()
+    SQLModel.metadata.create_all(target_engine)
+    with Session(target_engine) as session:
+        assert not session.exec(select(Website)).all()
+        assert not session.exec(select(WebsiteFormDeliveryModeRevision)).all()
+        with pytest.raises(
+            BackupValidationError,
+            match="reuses an optional field definition identity",
+        ):
+            restore_backup(session, path)
+        assert not session.exec(select(Website)).all()
+        assert not session.exec(select(WebsiteFormDeliveryModeRevision)).all()
+    target_engine.dispose()
 
 
 def test_backup_058_remaps_all_form_delivery_references_and_recomputes_integrity(
@@ -550,6 +904,9 @@ def test_backup_058_remaps_all_form_delivery_references_and_recomputes_integrity
         assert email.supersedes_delivery_mode_revision_id == disabled.id
         assert email.id != source_ids["email_id"]
         assert email.form_component_configuration_id != source_ids["component_id"]
+        assert email.configuration_payload["optional_fields"] == [
+            _optional_sixth_field_definition()
+        ]
         assert email.integrity_fingerprint == form_delivery_mode_fingerprint(email)
 
         recipients = list(

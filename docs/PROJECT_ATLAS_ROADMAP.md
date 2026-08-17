@@ -1,6 +1,6 @@
 # Project Atlas Roadmap
 
-**Version:** 1.1
+**Version:** 1.2
 
 **Status:** Active Planning Document
 
@@ -153,14 +153,22 @@ path; provider-owned forms, future AtlasOps360-native delivery, and approved
 external adapters remain explicit alternatives.
 
 The foundation includes immutable mode revisions with one current chain head
-per Website/form, revisioned recipient configuration, one normalized
-five-field submission envelope, fail-closed provider readiness, and only the
-safe outbox and immutable attempt evidence needed for reliable delivery. It is
-not a lead inbox, sales pipeline, scheduling system, customer system, or CRM.
+per Website/form, revisioned recipient configuration, one normalized envelope
+with five fixed defaults and at most one governed optional sixth field,
+fail-closed provider readiness, and only the safe outbox and immutable attempt
+evidence needed for reliable delivery. It is not a lead inbox, sales pipeline,
+scheduling system, customer system, or CRM.
 Production provider registrations, transports, and customer-payload storage
 remain unavailable until their independent recipient, policy, anti-abuse,
 idempotency, encryption, key-management, secret, adapter, and activation gates
 are satisfied. No active Website/form mode is selected by this foundation.
+
+Atlas-rendered `atlas_email`, `atlasops360_native`, and `external_adapter`
+forms retain the exact ordered Name, Phone, ZIP code, Requested Service, and
+Optional Message defaults and may add no more than one governed optional
+customer-entry field. A seventh field fails closed. Provider-owned field counts
+remain with the provider, while privacy, consent, anti-abuse, security,
+idempotency, audit, and routing controls do not count as customer-entry fields.
 
 ### Inputs
 

@@ -613,6 +613,38 @@ occurred.
 
 ---
 
+## Atlas-Managed Form Field Limit
+
+Updated the Architecture, Complete Website Blueprint, Product Specification,
+and Roadmap to version 1.2. Atlas-rendered `atlas_email`,
+`atlasops360_native`, and `external_adapter` forms now retain five fixed,
+ordered default customer-entry fields—Name, Phone, ZIP code, Requested
+Service, and Optional Message—and may add no more than one governed optional
+sixth field. A seventh field, more than one additional field, duplicate or
+reserved keys, and incompatible definitions or values fail closed without
+silent dropping, selection, or conversion to metadata.
+
+The optional sixth-field contract is immutable, provider-neutral, and limited
+to controlled `email`, `short_text`, `dropdown`, `radio`, `checkbox`, `date`,
+and `textarea` types. Its normalized value and exact definition revision extend
+the existing submission envelope and adapter mapping without allowing arbitrary
+extra keys.
+Provider-owned forms remain exempt, and privacy, consent, anti-abuse, security,
+idempotency, audit, and routing controls do not count as customer-entry fields.
+
+Backup and restore preserve the exact optional-field definition, choices,
+ordering, validation, mapping, identity, and fingerprint and reject seven-field
+or integrity tampering. Theme Lab provides a synthetic operator-only review of
+the five-field default, valid sixth field, rejected seventh field, reserved-key
+rejection, controlled choices, and responsive layout under
+`DEMO CONFIGURATION — NOT ACTIVE`; it has no submission, persistence, storage,
+network, provider, or activation control. No migration or backup-format advance
+was required. Active local Atlas remained at revision `20260815_0046` with no
+application-row mutation. No active form mode was seeded, no customer data was
+collected, and no email or provider request was sent.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.

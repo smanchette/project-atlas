@@ -29,6 +29,7 @@ from app.schemas.form_delivery import (
     WebsiteFormDeliveryModeRevisionRead,
     WebsiteFormRecipientRevisionCreate,
     validate_mode_configuration,
+    optional_field_definitions_from_configuration,
 )
 from app.services.form_delivery_registry import FORM_DELIVERY_PROVIDER_REGISTRY
 from app.website_builder_core.configuration_safety import (
@@ -39,10 +40,14 @@ from app.website_builder_core.configuration_safety import (
     reject_secret_configuration,
 )
 from app.website_builder_core.contracts import (
+    ATLAS_OWNED_FORM_MODES,
     DeliveryAdapterContext,
     DeliveryRecipientSnapshot,
     FormDeliveryPresentation,
+    NormalizedFormDefinition,
     PresentationAdapter,
+    UNIVERSAL_ESTIMATE_FORM_DEFINITION,
+    optional_form_field_definition_payload,
 )
 from app.website_builder_core.readiness import (
     FormDeliveryReadinessInput,
@@ -71,6 +76,76 @@ FORM_DELIVERY_TABLES = (
     "formdeliveryattempt",
     "formdeliveryconfigurationaudit",
 )
+
+
+def resolve_atlas_rendered_form_definition(
+    mode: str,
+    configuration_payload: dict[str, Any],
+) -> NormalizedFormDefinition | None:
+    """Resolve an immutable field contract only when Atlas renders the form."""
+
+    if mode not in ATLAS_OWNED_FORM_MODES:
+        return None
+    try:
+        normalized = validate_mode_configuration(  # type: ignore[arg-type]
+            mode,
+            configuration_payload,
+        )
+        optional_fields = optional_field_definitions_from_configuration(normalized)
+        return UNIVERSAL_ESTIMATE_FORM_DEFINITION.with_optional_fields(
+            optional_fields
+        )
+    except (KeyError, TypeError, ValidationError, ValueError) as exc:
+        raise FormDeliveryConfigurationError(
+            "The Atlas-rendered customer-entry field contract is invalid.",
+            code="invalid_customer_entry_field_contract",
+        ) from exc
+
+
+def _optional_definition_snapshot(
+    mode: str,
+    configuration_payload: dict[str, Any],
+) -> dict[str, object] | None:
+    if mode not in ATLAS_OWNED_FORM_MODES:
+        return None
+    normalized = validate_mode_configuration(  # type: ignore[arg-type]
+        mode,
+        configuration_payload,
+    )
+    definitions = optional_field_definitions_from_configuration(normalized)
+    return (
+        optional_form_field_definition_payload(definitions[0])
+        if definitions
+        else None
+    )
+
+
+def _validate_optional_definition_identity_history(
+    entries: list[tuple[str, dict[str, Any]]],
+) -> None:
+    """Require one canonical definition per identity in one Website/form lineage."""
+
+    by_identity: dict[str, dict[str, object]] = {}
+    try:
+        for mode, configuration_payload in entries:
+            snapshot = _optional_definition_snapshot(mode, configuration_payload)
+            if snapshot is None:
+                continue
+            identity = str(snapshot["definition_revision_identity"])
+            prior = by_identity.get(identity)
+            if prior is not None and prior != snapshot:
+                raise FormDeliveryConfigurationError(
+                    "An optional field definition identity was reused for changed content.",
+                    code="optional_field_definition_identity_reused",
+                )
+            by_identity[identity] = snapshot
+    except FormDeliveryConfigurationError:
+        raise
+    except (KeyError, TypeError, ValidationError, ValueError) as exc:
+        raise FormDeliveryConfigurationError(
+            "The optional field definition history is invalid.",
+            code="invalid_customer_entry_field_contract",
+        ) from exc
 
 
 def resolve_provider_owned_presentation(
@@ -424,6 +499,25 @@ def create_form_delivery_mode_revision(
         raise FormDeliveryConfigurationError(
             "Form delivery mode does not match the exact component instance."
         )
+
+    existing_lineage = list(
+        session.exec(
+            select(WebsiteFormDeliveryModeRevision).where(
+                WebsiteFormDeliveryModeRevision.website_id == website_id,
+                WebsiteFormDeliveryModeRevision.form_instance_key
+                == payload.form_instance_key,
+            )
+        ).all()
+    )
+    _validate_optional_definition_identity_history(
+        [
+            *[
+                (record.mode, record.configuration_payload)
+                for record in existing_lineage
+            ],
+            (payload.mode, payload.configuration_payload),
+        ]
+    )
 
     predecessor: WebsiteFormDeliveryModeRevision | None = None
     if payload.supersedes_delivery_mode_revision_id is not None:
@@ -786,6 +880,15 @@ def form_delivery_readiness(
         configuration_valid = True
     except (KeyError, ValidationError, ValueError):
         configuration_valid = False
+    atlas_rendered_field_contract_valid = True
+    if record.mode in ATLAS_OWNED_FORM_MODES:
+        try:
+            resolve_atlas_rendered_form_definition(
+                record.mode,
+                record.configuration_payload,
+            )
+        except FormDeliveryConfigurationError:
+            atlas_rendered_field_contract_valid = False
     provider_presentation_ready = False
     if record.mode == "provider_owned" and configuration_valid:
         try:
@@ -857,6 +960,7 @@ def form_delivery_readiness(
             secret_reference_configured=secret_reference_configured,
             secure_payload_store_available=secure_payload_store_available,
             provider_owned_presentation_ready=provider_presentation_ready,
+            atlas_rendered_field_contract_valid=atlas_rendered_field_contract_valid,
             form_contract_version=(
                 component.component_contract_version if component is not None else 1
             ),
@@ -1325,6 +1429,9 @@ def _validate_mode_chain(records: list[WebsiteFormDeliveryModeRevision]) -> None
     by_id = {record.id: record for record in records}
     if len(by_id) != len(records):
         raise FormDeliveryConfigurationError("The form-delivery mode chain has duplicate identities.")
+    _validate_optional_definition_identity_history(
+        [(record.mode, record.configuration_payload) for record in records]
+    )
     successors: set[int] = set()
     for record in records:
         if record.integrity_fingerprint != form_delivery_mode_fingerprint(record):

@@ -17,12 +17,27 @@ from app.schemas.form_delivery import (
 )
 from app.services import form_submission_contracts
 from app.website_builder_core.contracts import (
+    DEFAULT_CUSTOMER_ENTRY_FIELD_COUNT,
     FORM_DELIVERY_MODES,
+    MAXIMUM_CUSTOMER_ENTRY_FIELD_COUNT,
+    RESERVED_OPTIONAL_FIELD_KEYS,
+    STANDARD_CUSTOMER_ENTRY_FIELD_LABELS,
+    SYSTEM_FORM_CONTROL_KEYS,
     UNIVERSAL_ESTIMATE_FORM_DEFINITION,
+    NormalizedOptionalFieldValue,
     NormalizedSubmissionEnvelope,
+    OptionalFormFieldChoice,
+    OptionalFormFieldDefinition,
+    OptionalFormFieldValidationContract,
     SubmissionProvider,
+    normalize_optional_field_value,
+    validate_submission_optional_field_binding,
 )
 from app.website_builder_core.contracts import FormDeliveryPresentation
+from app.website_builder_core.readiness import (
+    FormDeliveryReadinessInput,
+    evaluate_form_delivery_readiness,
+)
 
 
 BACKEND = Path(__file__).parents[1]
@@ -76,6 +91,32 @@ def test_legacy_submission_contract_names_alias_the_single_core_contract() -> No
     assert form_submission_contracts.FormSubmissionProvider is SubmissionProvider
 
 
+def _optional_definition(
+    **overrides: object,
+) -> OptionalFormFieldDefinition:
+    values: dict[str, object] = {
+        "field_key": "project_type",
+        "public_label": "Project type",
+        "accessibility_label": "Select the project type",
+        "field_type": "dropdown",
+        "required": False,
+        "display_order": 6,
+        "maximum_length": None,
+        "validation_contract": OptionalFormFieldValidationContract(
+            rule="listed_choice"
+        ),
+        "choices": (
+            OptionalFormFieldChoice("repair", "Repair"),
+            OptionalFormFieldChoice("replacement", "Replacement"),
+        ),
+        "provider_mapping_key": "project_type",
+        "help_text": "Choose one synthetic project type.",
+        "definition_revision_identity": "project_type_revision_1",
+    }
+    values.update(overrides)
+    return OptionalFormFieldDefinition(**values)  # type: ignore[arg-type]
+
+
 def test_shared_form_definition_is_immutable_provider_neutral_and_five_field() -> None:
     definition = UNIVERSAL_ESTIMATE_FORM_DEFINITION
     assert (definition.component_key, definition.contract_version) == (
@@ -103,8 +144,299 @@ def test_shared_form_definition_is_immutable_provider_neutral_and_five_field() -
         True,
         False,
     )
+    assert STANDARD_CUSTOMER_ENTRY_FIELD_LABELS == (
+        "Name",
+        "Phone",
+        "ZIP code",
+        "Requested Service",
+        "Optional Message",
+    )
+    assert DEFAULT_CUSTOMER_ENTRY_FIELD_COUNT == 5
+    assert MAXIMUM_CUSTOMER_ENTRY_FIELD_COUNT == 6
+    assert definition.customer_entry_field_count == 5
+    assert definition.optional_fields == ()
+    assert {
+        "consent",
+        "privacy",
+        "honeypot",
+        "captcha",
+        "idempotency",
+        "request_id",
+    }.issubset(SYSTEM_FORM_CONTROL_KEYS)
     with pytest.raises(FrozenInstanceError):
         definition.contract_version = 4  # type: ignore[misc]
+
+
+def test_one_optional_sixth_field_is_valid_but_two_and_seven_are_rejected() -> None:
+    sixth = _optional_definition()
+    definition = UNIVERSAL_ESTIMATE_FORM_DEFINITION.with_optional_fields((sixth,))
+    assert definition.customer_entry_field_count == 6
+    assert definition.optional_fields == (sixth,)
+    assert len(sixth.choices) == 2  # A choice group is one customer-entry field.
+
+    with pytest.raises(ValueError, match="at most one"):
+        UNIVERSAL_ESTIMATE_FORM_DEFINITION.with_optional_fields(
+            (sixth, _optional_definition(field_key="property_type"))
+        )
+
+
+@pytest.mark.parametrize("field_key", sorted(RESERVED_OPTIONAL_FIELD_KEYS))
+def test_optional_field_rejects_every_reserved_key_after_normalization(
+    field_key: str,
+) -> None:
+    disguised = field_key.replace("_", " - ").upper()
+    with pytest.raises(ValueError, match="reserved"):
+        _optional_definition(field_key=disguised)
+
+
+def test_optional_field_rejects_blank_labels_and_invalid_choice_contracts() -> None:
+    with pytest.raises(ValueError, match="public label"):
+        _optional_definition(public_label="   ")
+    with pytest.raises(ValueError, match="require bounded choices"):
+        _optional_definition(choices=())
+    with pytest.raises(ValueError, match="Choices apply only"):
+        _optional_definition(
+            field_type="short_text",
+            maximum_length=80,
+            validation_contract=OptionalFormFieldValidationContract(
+                rule="trimmed_text",
+                minimum_length=0,
+            ),
+        )
+    with pytest.raises(ValueError, match="validation rule"):
+        _optional_definition(
+            field_type="radio",
+            validation_contract=OptionalFormFieldValidationContract(rule="boolean"),
+        )
+    with pytest.raises(ValueError, match="type is not supported"):
+        _optional_definition(field_type="file_upload")
+
+
+@pytest.mark.parametrize(
+    ("property_name", "forbidden_value"),
+    (
+        ("field_key", "social_security_number"),
+        ("provider_mapping_key", "raw_provider_payload"),
+        ("public_label", "Upload a file"),
+        ("accessibility_label", "Enter payment card information"),
+        ("help_text", "Provide a bank account or routing number"),
+        ("field_key", "smtp_password"),
+        ("provider_mapping_key", "api_credential"),
+        ("public_label", "Medical information"),
+    ),
+)
+def test_optional_field_rejects_sensitive_or_raw_payload_purposes(
+    property_name: str,
+    forbidden_value: str,
+) -> None:
+    with pytest.raises(ValueError, match="forbidden sensitive or payload"):
+        _optional_definition(**{property_name: forbidden_value})
+
+
+def test_optional_choice_cannot_hide_a_sensitive_customer_question() -> None:
+    with pytest.raises(ValueError, match="forbidden sensitive or payload"):
+        _optional_definition(
+            choices=(
+                OptionalFormFieldChoice("repair", "Repair"),
+                OptionalFormFieldChoice("medical_information", "Medical information"),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_type", "raw_value", "normalized_value", "maximum_length", "rule", "choices"),
+    (
+        ("email", " Person@Example.TEST ", "Person@example.test", 254, "email_address", ()),
+        ("short_text", " Synthetic text ", "Synthetic text", 80, "trimmed_text", ()),
+        (
+            "dropdown",
+            " Replacement ",
+            "replacement",
+            None,
+            "listed_choice",
+            (
+                OptionalFormFieldChoice("repair", "Repair"),
+                OptionalFormFieldChoice("replacement", "Replacement"),
+            ),
+        ),
+        (
+            "radio",
+            "Repair",
+            "repair",
+            None,
+            "listed_choice",
+            (
+                OptionalFormFieldChoice("repair", "Repair"),
+                OptionalFormFieldChoice("replacement", "Replacement"),
+            ),
+        ),
+        ("checkbox", False, False, None, "boolean", ()),
+        ("date", "2026-08-17", "2026-08-17", None, "iso_date", ()),
+        ("textarea", "Line one\nLine two", "Line one\nLine two", 500, "trimmed_text", ()),
+    ),
+)
+def test_optional_field_value_normalization_matches_every_controlled_type(
+    field_type: str,
+    raw_value: object,
+    normalized_value: object,
+    maximum_length: int | None,
+    rule: str,
+    choices: tuple[OptionalFormFieldChoice, ...],
+) -> None:
+    minimum_length = 0 if maximum_length is not None else None
+    definition = _optional_definition(
+        field_type=field_type,
+        maximum_length=maximum_length,
+        validation_contract=OptionalFormFieldValidationContract(
+            rule=rule,  # type: ignore[arg-type]
+            minimum_length=minimum_length,
+        ),
+        choices=choices,
+    )
+    normalized = normalize_optional_field_value(definition, raw_value)
+    assert normalized is not None
+    assert normalized.value == normalized_value
+    assert normalized.provider_mapping_key == "project_type"
+
+
+def test_optional_and_required_sixth_values_and_internal_binding_fail_closed() -> None:
+    optional = _optional_definition()
+    definition = UNIVERSAL_ESTIMATE_FORM_DEFINITION.with_optional_fields((optional,))
+    assert normalize_optional_field_value(optional, None) is None
+    validate_submission_optional_field_binding(
+        definition,
+        None,
+        optional.definition_revision_identity,
+    )
+
+    required = _optional_definition(required=True)
+    required_definition = UNIVERSAL_ESTIMATE_FORM_DEFINITION.with_optional_fields(
+        (required,)
+    )
+    with pytest.raises(ValueError, match="required"):
+        validate_submission_optional_field_binding(
+            required_definition,
+            None,
+            required.definition_revision_identity,
+        )
+
+    valid = normalize_optional_field_value(required, "repair")
+    assert valid is not None
+    validate_submission_optional_field_binding(
+        required_definition,
+        valid,
+        required.definition_revision_identity,
+    )
+    for forged in (
+        NormalizedOptionalFieldValue(
+            field_key=valid.field_key,
+            definition_revision_identity="forged_revision",
+            provider_mapping_key=valid.provider_mapping_key,
+            value=valid.value,
+        ),
+        NormalizedOptionalFieldValue(
+            field_key=valid.field_key,
+            definition_revision_identity=valid.definition_revision_identity,
+            provider_mapping_key="forged_mapping",
+            value=valid.value,
+        ),
+        NormalizedOptionalFieldValue(
+            field_key=valid.field_key,
+            definition_revision_identity=valid.definition_revision_identity,
+            provider_mapping_key=valid.provider_mapping_key,
+            value="unknown_choice",
+        ),
+    ):
+        with pytest.raises(ValueError, match="exact governed definition|configured"):
+            validate_submission_optional_field_binding(
+                required_definition,
+                forged,
+                required.definition_revision_identity,
+            )
+
+    with pytest.raises(ValueError, match="exact optional field definition revision"):
+        validate_submission_optional_field_binding(
+            required_definition,
+            valid,
+            "forged_revision",
+        )
+
+    with pytest.raises(ValueError, match="no governed definition"):
+        validate_submission_optional_field_binding(
+            UNIVERSAL_ESTIMATE_FORM_DEFINITION,
+            valid,
+            valid.definition_revision_identity,
+        )
+
+    bounded_text = _optional_definition(
+        field_type="short_text",
+        maximum_length=5,
+        validation_contract=OptionalFormFieldValidationContract(
+            rule="trimmed_text",
+            minimum_length=0,
+        ),
+        choices=(),
+    )
+    bounded_definition = UNIVERSAL_ESTIMATE_FORM_DEFINITION.with_optional_fields(
+        (bounded_text,)
+    )
+    with pytest.raises(ValueError, match="configured length"):
+        validate_submission_optional_field_binding(
+            bounded_definition,
+            NormalizedOptionalFieldValue(
+                field_key=bounded_text.field_key,
+                definition_revision_identity=(
+                    bounded_text.definition_revision_identity
+                ),
+                provider_mapping_key=bounded_text.provider_mapping_key,
+                value="sixsix",
+            ),
+            bounded_text.definition_revision_identity,
+        )
+
+
+def test_atlas_rendered_readiness_defaults_field_contract_to_fail_closed() -> None:
+    common = {
+        "lifecycle_status": "active",
+        "enabled": True,
+        "scope_valid": True,
+        "fingerprint_valid": True,
+        "website_enabled": True,
+        "component_enabled": True,
+        "approval_identity": "synthetic_approval",
+        "activation_identity": "synthetic_activation",
+        "provider_key": "synthetic_provider",
+        "adapter_version": "test-v1",
+        "destination_identity": "destination-ref://synthetic/forms",
+        "privacy_policy_reference": "policy-ref://synthetic/privacy",
+        "consent_required": False,
+        "consent_policy_reference": None,
+        "retention_policy_reference": "policy-ref://synthetic/retention",
+        "abuse_policy_reference": "policy-ref://synthetic/abuse",
+        "success_behavior": "Show a success state.",
+        "failure_behavior": "Show a failure state.",
+        "idempotency_policy_reference": "policy-ref://synthetic/idempotency",
+        "audit_identity": "synthetic_audit",
+    }
+    atlas = evaluate_form_delivery_readiness(
+        FormDeliveryReadinessInput(mode="atlas_email", **common),  # type: ignore[arg-type]
+        None,
+    )
+    assert "invalid_customer_entry_field_contract" in {
+        blocker.code for blocker in atlas.blockers
+    }
+
+    provider_owned = evaluate_form_delivery_readiness(
+        FormDeliveryReadinessInput(
+            mode="provider_owned",
+            provider_owned_presentation_ready=False,
+            **common,  # type: ignore[arg-type]
+        ),
+        None,
+    )
+    assert "invalid_customer_entry_field_contract" not in {
+        blocker.code for blocker in provider_owned.blockers
+    }
 
 
 def test_production_registry_import_does_not_load_test_adapters() -> None:
