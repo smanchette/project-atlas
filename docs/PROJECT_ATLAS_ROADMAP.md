@@ -1,6 +1,6 @@
 # Project Atlas Roadmap
 
-**Version:** 1.0
+**Version:** 1.1
 
 **Status:** Active Planning Document
 
@@ -25,6 +25,12 @@ The immediate product milestone is:
 > **Atlas can take a company's information, branding, services, and service areas and generate a complete, review-ready WordPress website with high-quality content, media, local SEO structure, deployment verification, and quality assurance.**
 
 The architecture must remain compatible with multi-company, multi-site, multi-user, multi-industry, role-based, secure, auditable, and future SaaS operation.
+
+Atlas Website Builder remains a complete standalone product and is also an
+included, optionally integrated AtlasOps360 module. Both paths use one
+non-forked Website Builder Core. AtlasOps360 and external operational software
+remain optional, and deeper integrations must use stable adapters, service
+boundaries, or APIs rather than shared database access.
 
 ---
 
@@ -130,9 +136,31 @@ and nonblocking.
 Existing Flo-Zone generated pages are backfilled without changing their
 content or lifecycle history. Page slugs, queueing, batch generation, QA,
 approval, WordPress-draft review, and bulk export now enforce Website
-boundaries. Content generation for the new page types, navigation
-construction, component and theme systems, media provenance, and provider
-abstraction remain future milestones.
+boundaries. Content generation for the new page types and second-company
+deployment remain future milestones. Subsequent local foundations now cover
+navigation, semantic components, Themes, media governance, and the
+provider-neutral form-delivery contracts described below.
+
+### Universal form-delivery foundation implemented locally
+
+The shared Website Builder Core now defines one provider-neutral,
+Website/form-scoped delivery subsystem for both standalone Atlas and the
+optional AtlasOps360 Website Builder module. Its immutable configuration
+supports exactly `disabled`, `atlas_email`, `provider_owned`,
+`atlasops360_native`, and `external_adapter`, with no Theme inference, portal
+conflation, or fallback between modes. Atlas email is the universal standalone
+path; provider-owned forms, future AtlasOps360-native delivery, and approved
+external adapters remain explicit alternatives.
+
+The foundation includes immutable mode revisions with one current chain head
+per Website/form, revisioned recipient configuration, one normalized
+five-field submission envelope, fail-closed provider readiness, and only the
+safe outbox and immutable attempt evidence needed for reliable delivery. It is
+not a lead inbox, sales pipeline, scheduling system, customer system, or CRM.
+Production provider registrations, transports, and customer-payload storage
+remain unavailable until their independent recipient, policy, anti-abuse,
+idempotency, encryption, key-management, secret, adapter, and activation gates
+are satisfied. No active Website/form mode is selected by this foundation.
 
 ### Inputs
 
@@ -149,6 +177,7 @@ abstraction remain future milestones.
 - Research needs
 - Media preferences
 - Publishing destination
+- Form-delivery choice, recipients, policies, and provider or adapter references
 
 ### Outputs
 
@@ -163,6 +192,7 @@ abstraction remain future milestones.
 - QA results
 - Approval workflow
 - Publishing and verification plan
+- Form-delivery readiness plan
 
 ### Completion conditions
 
@@ -170,6 +200,7 @@ abstraction remain future milestones.
 - Company, site, service, and location data remain separate
 - Work can resume from a saved state
 - Missing information and blocked steps are clear
+- Each form component has one explicit Website-scoped mode with no implicit fallback
 - The result is a complete website, not unrelated pages
 
 ---
@@ -182,7 +213,7 @@ Build a complete website for a second company to prove Atlas is reusable across 
 
 ## Phase 5: Operator Dashboard
 
-Add a clear interface for company management, site management, research review, site planning, content and media review, QA, approvals, deployment, recovery, saved progress, and user roles.
+Add a clear interface for company management, site management, research review, site planning, content and media review, form-mode and delivery-readiness review, QA, approvals, deployment, recovery, saved progress, and user roles.
 
 ---
 
@@ -216,9 +247,21 @@ Potential collaboration includes supporting articles, topic expansion, shared ap
 
 ### AtlasOps360
 
-Potential collaboration includes company identity, service definitions, locations, operational knowledge, customer questions, review data, authentication, storage, backups, auditing, and infrastructure.
+AtlasOps360 includes the Website Builder as an optional first-party module
+backed by the same Website Builder Core as standalone Atlas. The dependency is
+one-way: AtlasOps360 may integrate the core, but the core must not require an
+AtlasOps360 account, database, authentication system, deployment, or
+subscription. Neither product is a prerequisite for the other, the core must
+not fork, and a standalone Atlas Website must be connectable later without
+rebuilding the Website.
 
-Integrations should preserve clear product boundaries.
+Future deeper collaboration may include company identity, service definitions,
+locations, operational knowledge, customer questions, review data, native form
+notifications, lead creation and assignment, follow-up, scheduling, estimating,
+reporting, and attribution. These capabilities belong around the core and must
+cross stable adapter, service, or API boundaries rather than shared tables.
+GorillaDesk and other CRM or field-service systems remain optional external
+providers, not Atlas or AtlasOps360 prerequisites.
 
 ---
 
@@ -240,7 +283,7 @@ These remain part of the long-term vision but should not delay the first useful 
 - Automated competitor monitoring
 - Complex recommendation systems
 - Large reporting dashboards
-- Full AtlasOps360 integration
+- Deeper AtlasOps360 operational integration
 - Advanced maintenance automation
 - Large-scale intelligence-network expansion
 

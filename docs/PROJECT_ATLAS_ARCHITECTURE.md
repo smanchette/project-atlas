@@ -1,6 +1,6 @@
 # Project Atlas Architecture
 
-**Version:** 1.0
+**Version:** 1.1
 
 **Status:** Living Technical Blueprint
 
@@ -44,6 +44,12 @@ Atlas should treat these as distinct, related concepts:
 - Page
 - Page type
 - Page relationship
+- Form component
+- Form-delivery-mode revision
+- Form-recipient revision
+- Submission envelope
+- Delivery outbox record
+- Delivery attempt
 - Keyword
 - Search intent
 - Research source
@@ -101,6 +107,22 @@ Image requirements, prompts, generated and uploaded media, featured and inline i
 
 Site-wide design rules, page templates, components, layout variants, brand application, reusable blocks, and controlled variation.
 
+### Website Builder Core
+
+One shared Website Builder Core owns the reusable complete-site engine: Websites, Pages, content, Theme Families and Theme Versions, component configuration, media governance, SEO, navigation, form presentation and field contracts, provider-neutral submission envelopes, publishing and deployment adapters, and Website-scoped integration configuration.
+
+The same core supports both the complete standalone Atlas Website Builder product and the optional Website Builder module included with AtlasOps360. Neither product is a prerequisite for the other. The core must not fork, and a standalone Atlas Website must be connectable to AtlasOps360 later without rebuilding the Website.
+
+### Form Presentation and Delivery
+
+Form presentation and form delivery are separate responsibilities. Themes own presentation and component compatibility. Website configuration owns one explicit delivery-mode revision and, where required, its destination for each form component. Revision records are immutable, and each Website/form chain has exactly one current head. Providers own their provider-specific delivery or embedded-form behavior.
+
+The supported Website/form-scoped modes are exactly `disabled`, `atlas_email`, `provider_owned`, `atlasops360_native`, and `external_adapter`. A mode must never be inferred from a Theme, customer-portal setting, provider presence, or another mode, and no mode may silently fall back to another. Missing configuration fails closed.
+
+Atlas-owned delivery modes use one normalized submission-envelope contract and provider adapters. Website/form-scoped recipient revisions and the minimum safe outbox and immutable attempt evidence support reliable Atlas email delivery without turning Atlas into a CRM, lead pipeline, customer system, scheduling system, or AtlasOps360 substitute. Each delivery-mode revision owns the exact current heads of its immutable recipient chains. Initial recipient roots and same-mode address, enabled-state, role, or verification successors may be appended only while that email-mode revision is current and has no submission evidence. A first submission or delivery-mode successor freezes that snapshot; recipient heads may then be carried forward only to the directly superseding email-mode revision. Production customer values must not be retained in plaintext; production persistence remains unavailable until approved encryption and key management exist.
+
+`atlas_email` is the universal standalone delivery option. `provider_owned` permits an approved provider to own submission receipt, delivery, retention, and provider-side notifications while Atlas owns only safe presentation, configuration, readiness, audit, and fail-closed behavior. `atlasops360_native` is a future optional first-party adapter. `external_adapter` requires an installed approved adapter. GorillaDesk is one possible provider-owned-form example, not a core dependency.
+
 ### Quality Assurance System
 
 Fact validation, claim validation, content structure, word count, duplicate and cannibalization checks, brand and contact verification, service-area validation, media, metadata, schema, internal links, visual checks, and human approvals.
@@ -149,7 +171,7 @@ User authentication, company membership, site access, role-based permissions, hi
 
 ### Security
 
-Secret isolation, credential-memory boundaries, exact-origin enforcement, least privilege, input validation, output sanitization, auditability, and secure backups.
+Secret isolation, credential-memory boundaries, exact-origin enforcement, least privilege, input validation, output sanitization, auditability, secure customer-submission handling, and secure backups. Website configuration may reference protected credentials but must never contain their secret values.
 
 ### Storage
 
@@ -179,6 +201,7 @@ Unit, integration, migration, backup/restore, network-isolated, WordPress contra
 - Backups and restores must preserve tenant boundaries.
 - Audits must identify the affected company and site.
 - Templates may be shared, but content and company facts must remain isolated.
+- Form-delivery modes, recipients, policy references, and destinations must be scoped to the exact Website and form component.
 
 ---
 
@@ -198,7 +221,11 @@ Potential shared services include AI providers, media generation, approved knowl
 
 ### AtlasOps360
 
-Potential shared services include company identity, authentication, services, locations, customer questions, operational knowledge, reviews, storage, backups, auditing, and infrastructure. Operational and website responsibilities should remain clearly separated.
+AtlasOps360 includes an optional Website Builder module backed by the same Website Builder Core used by standalone Atlas. AtlasOps360 may add native lead creation, notifications, assignment, follow-up, customer records, communications history, scheduling, estimating, reporting, and attribution around that core, but it does not own, absorb, replace, or fork it.
+
+The integration is optional and first-party. The Website Builder Core must have no hard runtime dependency on an AtlasOps360 account, database, authentication system, deployment, or subscription, and the products must not assume shared database access. Stable contracts, service boundaries, adapters, or APIs carry approved information between them; cross-product table access is prohibited. External operational systems, including GorillaDesk and other CRM or field-service providers, remain optional.
+
+Form delivery is distinct from customer-portal routing. Future AtlasOps360-native form delivery receives the provider-neutral submission envelope through its adapter boundary only when explicitly selected and configured for that Website and form.
 
 ---
 
@@ -212,7 +239,7 @@ It must not be retrofitted through uncontrolled sharing of company data.
 
 ## Current Technical Direction
 
-Atlas currently uses a backend application, frontend application, PostgreSQL, Docker Compose, runtime release manifests, versioned migrations, WordPress REST integration, Atlas WordPress plugins, Program/Data/Media backups, guarded lifecycle operations, and evidence and verification workflows.
+Atlas currently uses a backend application, frontend application, PostgreSQL, Docker Compose, runtime release manifests, versioned migrations, WordPress REST integration, Atlas WordPress plugins, Program/Data/Media backups, guarded lifecycle operations, and evidence and verification workflows. Its Website Builder and form-delivery foundation remains provider-neutral and keeps all production form providers and customer-submission paths disabled until their independent readiness requirements are satisfied.
 
 Exact implementation details should remain in technical references and code rather than overloading this high-level document.
 

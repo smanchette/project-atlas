@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 import hashlib
 import importlib.util
 import json
@@ -10,7 +12,9 @@ import os
 from pathlib import Path
 import re
 import sys
+from threading import Event
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from alembic import command
@@ -19,19 +23,52 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, URL, make_url
 from sqlalchemy.pool import NullPool
+from sqlmodel import Session, select
 
 from app.core.config import get_settings
+from app.models import (
+    Business,
+    ThemeFamily,
+    ThemeFamilyVersion,
+    Website,
+    WebsiteThemeComponentConfiguration,
+    WebsiteThemeConfiguration,
+    WebsiteFormDeliveryModeRevision,
+)
+from app.schemas.form_delivery import (
+    WebsiteFormDeliveryModeRevisionCreate,
+    WebsiteFormRecipientRevisionCreate,
+)
+from app.services.form_delivery_modes import (
+    FormDeliveryConfigurationError,
+    create_form_delivery_mode_revision,
+    create_form_recipient_revision,
+    form_delivery_readiness,
+    validate_form_delivery_records,
+)
+from app.services.form_delivery_outbox import enqueue_form_delivery
+from app.services.form_delivery_registry import SYNTHETIC_EMAIL_PROVIDER_KEY
+from app.services.form_payload_store import InMemoryTestPayloadStore
+from app.website_builder_core.contracts import NormalizedSubmissionEnvelope
 
 
 BACKEND = Path(__file__).parents[1]
 POSTGRES_ADMIN_URL_ENV = "ATLAS_DISPOSABLE_POSTGRES_ADMIN_URL"
 POSTGRES_DATABASE_NAMES_ENV = "ATLAS_DISPOSABLE_POSTGRES_DATABASE_NAMES"
 LEDGER_PATH_ENV = "ATLAS_POSTGRES_REPAIR_PROGRESS_PATH"
-DISPOSABLE_DATABASE_PREFIX = "atlas_pg_migration_chain_test_0046_"
+DISPOSABLE_DATABASE_PREFIX = "atlas_pg_migration_chain_test_0047_"
 LOCAL_POSTGRES_HOSTS = {"127.0.0.1", "::1", "localhost", "postgres"}
-HEAD_REVISION = "20260815_0046"
-EXPECTED_TABLE_COUNT = 65
-EXPECTED_SEQUENCE_COUNT = 64
+HEAD_REVISION = "20260817_0047"
+EXPECTED_TABLE_COUNT = 71
+EXPECTED_SEQUENCE_COUNT = 70
+FORM_DELIVERY_TABLES = {
+    "websiteformdeliverymoderevision",
+    "websiteformrecipientrevision",
+    "formsubmissionenvelope",
+    "formdeliveryoutbox",
+    "formdeliveryattempt",
+    "formdeliveryconfigurationaudit",
+}
 
 
 @dataclass(frozen=True)
@@ -669,7 +706,7 @@ def _assert_clean_seed_safety(engine: Engine) -> None:
                     )
                 ).scalars()
             )
-            assert tuple(
+            sensitive_matches = tuple(
                 name
                 for name in table_names
                 if re.search(
@@ -677,7 +714,24 @@ def _assert_clean_seed_safety(engine: Engine) -> None:
                     r"lead.*submission)",
                     name,
                 )
-            ) == ()
+            )
+            assert sensitive_matches == ("formsubmissionenvelope",)
+            for table in FORM_DELIVERY_TABLES:
+                assert connection.execute(
+                    text(f"SELECT COUNT(*) FROM {table}")
+                ).scalar_one() == 0
+            envelope_columns = set(
+                connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = 'public' "
+                        "AND table_name = 'formsubmissionenvelope'"
+                    )
+                ).scalars()
+            )
+            assert envelope_columns.isdisjoint(
+                {"name", "phone", "postal_code", "zip", "requested_service", "message", "raw_body", "recipient", "payload"}
+            )
 
     from app.services import form_submission_contracts, form_submission_gateway
 
@@ -702,7 +756,7 @@ def _assert_two_seed_enabled_starts_are_safe(
     with TestClient(app_main.app) as client:
         assert client.get("/health").json()["status"] == "ok"
     assert _catalog_snapshot(database.engine) == before_schema
-    _assert_canonical_0046_surface(database.engine)
+    _assert_form_delivery_0047_surface(database.engine)
     after_first_data = _application_data_fingerprints(database.engine)
     after_first_sequences = _sequence_state(database.engine)
     _assert_clean_seed_safety(database.engine)
@@ -710,7 +764,7 @@ def _assert_two_seed_enabled_starts_are_safe(
     with TestClient(app_main.app) as client:
         assert client.get("/health").json()["status"] == "ok"
     assert _catalog_snapshot(database.engine) == before_schema
-    _assert_canonical_0046_surface(database.engine)
+    _assert_form_delivery_0047_surface(database.engine)
     assert _application_data_fingerprints(database.engine) == after_first_data
     assert _sequence_state(database.engine) == after_first_sequences
     _assert_clean_seed_safety(database.engine)
@@ -946,6 +1000,7 @@ def _assert_head_contract(engine: Engine) -> None:
     assert len(EXPECTED_REPAIRED_INDEXES) == 4
     assert len(EXPECTED_REPAIRED_INDEXES) == len(set(EXPECTED_REPAIRED_INDEXES))
     _assert_exact_repaired_indexes(engine)
+    _assert_form_delivery_0047_surface(engine)
 
 
 def _migration_0041_module():
@@ -977,6 +1032,21 @@ def _migration_0046_module():
     return module
 
 
+def _migration_0047_module():
+    path = (
+        BACKEND
+        / "alembic"
+        / "versions"
+        / "20260817_0047_universal_form_delivery_modes.py"
+    )
+    spec = importlib.util.spec_from_file_location("atlas_migration_0047_pg", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _assert_canonical_0046_surface(engine: Engine) -> None:
     migration = _migration_0046_module()
     with engine.connect().execution_options(
@@ -989,6 +1059,24 @@ def _assert_canonical_0046_surface(engine: Engine) -> None:
                 post_upgrade=True,
             )
     assert observed == migration._expected_postgres_surface("canonical")
+
+
+def _assert_form_delivery_0047_surface(engine: Engine) -> None:
+    migration = _migration_0047_module()
+    with engine.connect() as connection:
+        tables = set(
+            connection.execute(
+                text(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public'"
+                )
+            ).scalars()
+        )
+        assert FORM_DELIVERY_TABLES <= tables
+        assert connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one() == HEAD_REVISION
+        migration._assert_exact_owned_shape(connection)
 
 
 def _assert_0045_source_contract(engine: Engine, expected: str) -> None:
@@ -1031,6 +1119,187 @@ def _assert_0041_postgresql_deparse(engine: Engine) -> None:
     assert "ARRAY[" in observed.upper()
     migration = _migration_0041_module()
     assert migration._canonical(observed) == migration._canonical(expected)
+
+
+def _seed_postgresql_form_delivery_scope(
+    database: _DisposableDatabase,
+) -> tuple[int, int, int]:
+    token = uuid4().hex
+    with Session(database.engine) as session:
+        business = Business(
+            company_name=f"0047 race {token}",
+            business_type="test",
+            state="FL",
+        )
+        session.add(business)
+        session.flush()
+        website = Website(
+            business_id=business.id,
+            website_name="0047 race",
+            domain=f"{token}.example.test",
+            public_url=f"https://{token}.example.test",
+            status="active",
+        )
+        session.add(website)
+        session.flush()
+        family = ThemeFamily(
+            family_key=f"pg-race-{token}",
+            display_name="PG 0047 race",
+            description="Disposable PostgreSQL form-delivery race.",
+            provider_source_identity="test-source",
+            lifecycle_status="registered",
+            created_by="test",
+            integrity_fingerprint="a" * 64,
+        )
+        session.add(family)
+        session.flush()
+        version = ThemeFamilyVersion(
+            theme_family_id=family.id,
+            version=3,
+            lifecycle_status="preview_candidate",
+            production_ready=False,
+            source_commit="b" * 40,
+            compatibility_identity=token.ljust(64, "0")[:64],
+            supported_component_contracts=[],
+            created_by="test",
+            integrity_fingerprint="c" * 64,
+        )
+        session.add(version)
+        session.flush()
+        configuration = WebsiteThemeConfiguration(
+            website_id=website.id,
+            business_id=business.id,
+            theme_family_version_id=version.id,
+            configuration_key="pg-0047-race",
+            version=1,
+            lifecycle_status="draft",
+            created_by="test",
+            updated_by="test",
+            creation_rationale="Disposable PostgreSQL race.",
+            integrity_fingerprint="d" * 64,
+        )
+        session.add(configuration)
+        session.flush()
+        component = WebsiteThemeComponentConfiguration(
+            website_theme_configuration_id=configuration.id,
+            website_id=website.id,
+            theme_family_version_id=version.id,
+            component_instance_key="compact-estimate-form:website",
+            component_key="compact_estimate_form",
+            component_contract_version=3,
+            revision=1,
+            scope_type="website_default",
+            lifecycle_status="current",
+            enabled=True,
+            variant="compact-estimate-form",
+            placement="final-cta",
+            responsive_visibility={"desktop": True, "tablet": True, "mobile": True},
+            configuration_payload={},
+            created_by="test",
+            updated_by="test",
+            integrity_fingerprint="e" * 64,
+        )
+        session.add(component)
+        session.commit()
+        now = datetime.now(UTC)
+        disabled = create_form_delivery_mode_revision(
+            session,
+            website.id,
+            WebsiteFormDeliveryModeRevisionCreate(
+                form_component_configuration_id=component.id,
+                form_instance_key=component.component_instance_key,
+                lifecycle_status="active",
+                mode="disabled",
+                enabled=False,
+                configuration_payload={},
+                audit_identity="pg-0047-disabled-audit",
+                approval_identity="pg-0047-disabled-approval",
+                approved_at=now,
+                activation_identity="pg-0047-disabled-activation",
+                activated_at=now,
+                created_by="test",
+                updated_by="test",
+                rationale="Establish the explicit disabled root.",
+            ),
+        )
+        email = create_form_delivery_mode_revision(
+            session,
+            website.id,
+            WebsiteFormDeliveryModeRevisionCreate(
+                form_component_configuration_id=component.id,
+                form_instance_key=component.component_instance_key,
+                supersedes_delivery_mode_revision_id=disabled.id,
+                lifecycle_status="active",
+                mode="atlas_email",
+                enabled=True,
+                provider_key=SYNTHETIC_EMAIL_PROVIDER_KEY,
+                adapter_version="test-v1",
+                destination_identity="recipient-set-ref://synthetic/pg-race",
+                configuration_payload={
+                    "transport_key_reference": "synthetic-mail",
+                    "transport_secret_reference": "secret-ref://synthetic/mail-transport",
+                    "notification_preference": "all_verified",
+                    "consent_required": False,
+                },
+                privacy_policy_reference="/privacy",
+                retention_policy_reference="policy-ref://synthetic/retention",
+                abuse_policy_reference="policy-ref://synthetic/abuse",
+                success_behavior="Show a generic success state.",
+                failure_behavior="Show a generic failure state.",
+                idempotency_policy_reference="policy-ref://synthetic/idempotency",
+                audit_identity="pg-0047-email-audit",
+                approval_identity="pg-0047-email-approval",
+                approved_at=now,
+                activation_identity="pg-0047-email-activation",
+                activated_at=now,
+                created_by="test",
+                updated_by="test",
+                rationale="Create the disposable race email mode.",
+            ),
+        )
+        create_form_recipient_revision(
+            session,
+            website.id,
+            WebsiteFormRecipientRevisionCreate(
+                delivery_mode_revision_id=email.id,
+                recipient_key="primary-office",
+                email="synthetic.recipient@example.com",
+                recipient_role="primary",
+                enabled=True,
+                verification_status="verified",
+                verified_at=now,
+                verified_by="test",
+                verification_method="synthetic_test",
+                created_by="test",
+                updated_by="test",
+                rationale="Create the disposable verified recipient.",
+            ),
+        )
+        return website.id, component.id, email.id
+
+
+def _postgresql_disabled_successor_payload(
+    component: WebsiteThemeComponentConfiguration,
+    predecessor_id: int,
+) -> WebsiteFormDeliveryModeRevisionCreate:
+    now = datetime.now(UTC)
+    return WebsiteFormDeliveryModeRevisionCreate(
+        form_component_configuration_id=component.id,
+        form_instance_key=component.component_instance_key,
+        supersedes_delivery_mode_revision_id=predecessor_id,
+        lifecycle_status="active",
+        mode="disabled",
+        enabled=False,
+        configuration_payload={},
+        audit_identity="pg-0047-successor-audit",
+        approval_identity="pg-0047-successor-approval",
+        approved_at=now,
+        activation_identity="pg-0047-successor-activation",
+        activated_at=now,
+        created_by="test",
+        updated_by="test",
+        rationale="Win the serialized successor race.",
+    )
 
 
 def test_two_clean_base_to_head_postgresql_installs_are_equivalent_and_repeatable(
@@ -1133,4 +1402,369 @@ def test_segmented_postgresql_migrations_downgrade_and_reupgrade_safely(
     _assert_0045_source_contract(database.engine, "clean")
 
     _upgrade(database, "20260815_0046")
+    assert _current_revision(database.engine) == "20260815_0046"
+    _assert_canonical_0046_surface(database.engine)
+    convergence_snapshot = _catalog_snapshot(database.engine)
+    convergence_data = _application_data_fingerprints(database.engine)
+    convergence_sequences = _sequence_state(database.engine)
+    _upgrade(database, HEAD_REVISION)
     _assert_head_contract(database.engine)
+    head_data = _application_data_fingerprints(database.engine)
+    head_sequences = _sequence_state(database.engine)
+    assert {
+        key: head_data[key] for key in convergence_data
+    } == convergence_data
+    assert {
+        key: head_sequences[key] for key in convergence_sequences
+    } == convergence_sequences
+    with database.engine.connect() as connection:
+        for table in FORM_DELIVERY_TABLES:
+            assert connection.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one() == 0
+    head_snapshot = _catalog_snapshot(database.engine)
+    _upgrade(database, HEAD_REVISION)
+    assert _catalog_snapshot(database.engine) == head_snapshot
+    _downgrade(database, "20260815_0046")
+    assert _catalog_snapshot(database.engine) == convergence_snapshot
+    assert _application_data_fingerprints(database.engine) == convergence_data
+    assert _sequence_state(database.engine) == convergence_sequences
+    _assert_canonical_0046_surface(database.engine)
+    for table in FORM_DELIVERY_TABLES:
+        _assert_table_absent(database.engine, table)
+    _upgrade(database, HEAD_REVISION)
+    _assert_form_delivery_0047_surface(database.engine)
+    assert _catalog_snapshot(database.engine) == head_snapshot
+    assert _application_data_fingerprints(database.engine) == head_data
+    assert _sequence_state(database.engine) == head_sequences
+
+
+@pytest.mark.parametrize(
+    "mutation_sql",
+    (
+        "ALTER TABLE formdeliveryattempt SET (fillfactor=70)",
+        "ALTER TABLE formdeliveryattempt ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE formdeliveryattempt ALTER COLUMN safe_provider_reference SET STORAGE EXTERNAL",
+        "ALTER INDEX formdeliveryattempt_pkey SET (fillfactor=70)",
+        "CREATE POLICY unexpected ON formdeliveryattempt USING (true)",
+        "CREATE SEQUENCE unexpected_owned_seq OWNED BY formdeliveryattempt.id",
+        "CREATE RULE unexpected AS ON UPDATE TO formdeliveryattempt DO NOTHING",
+        "ALTER TABLE formdeliveryoutbox RENAME CONSTRAINT fk_fdo_mode TO fk_fdo_mode_changed",
+        "DROP INDEX ix_fdo_status; CREATE INDEX ix_fdo_status ON formdeliveryoutbox(status COLLATE \"C\")",
+        "ALTER TABLE formdeliveryoutbox DISABLE TRIGGER ALL",
+    ),
+)
+def test_postgresql_0047_unknown_shape_refuses_downgrade_without_mutation(
+    disposable_postgres_database_factory: Callable[[], _DisposableDatabase],
+    mutation_sql: str,
+) -> None:
+    database = disposable_postgres_database_factory()
+    _upgrade(database, HEAD_REVISION)
+    with database.engine.begin() as connection:
+        for statement in mutation_sql.split("; "):
+            connection.exec_driver_sql(statement)
+    before = _catalog_snapshot(database.engine)
+    with pytest.raises(RuntimeError, match="exact 0047 contract"):
+        _downgrade(database, "20260815_0046")
+    assert _current_revision(database.engine) == HEAD_REVISION
+    assert _catalog_snapshot(database.engine) == before
+
+
+def test_postgresql_0047_populated_refusal_is_fail_before_mutation(
+    disposable_postgres_database_factory: Callable[[], _DisposableDatabase],
+) -> None:
+    database = disposable_postgres_database_factory()
+    _upgrade(database, HEAD_REVISION)
+    token = uuid4().hex
+    with Session(database.engine) as session:
+        business = Business(
+            company_name=f"0047 populated guard {token}",
+            business_type="test",
+            state="FL",
+        )
+        session.add(business)
+        session.flush()
+        website = Website(
+            business_id=business.id,
+            website_name="0047 populated guard",
+            domain=f"{token}.example.test",
+            public_url=f"https://{token}.example.test",
+            status="active",
+        )
+        session.add(website)
+        session.flush()
+        family = ThemeFamily(
+            family_key=f"pg-0047-{token}",
+            display_name="PG 0047 guard",
+            description="Disposable PostgreSQL form-delivery guard.",
+            provider_source_identity="test-source",
+            lifecycle_status="registered",
+            created_by="test",
+            integrity_fingerprint="a" * 64,
+        )
+        session.add(family)
+        session.flush()
+        version = ThemeFamilyVersion(
+            theme_family_id=family.id,
+            version=3,
+            lifecycle_status="preview_candidate",
+            production_ready=False,
+            source_commit="b" * 40,
+            compatibility_identity=token.ljust(64, "0")[:64],
+            supported_component_contracts=[],
+            created_by="test",
+            integrity_fingerprint="c" * 64,
+        )
+        session.add(version)
+        session.flush()
+        configuration = WebsiteThemeConfiguration(
+            website_id=website.id,
+            business_id=business.id,
+            theme_family_version_id=version.id,
+            configuration_key="pg-0047-guard",
+            version=1,
+            lifecycle_status="draft",
+            created_by="test",
+            updated_by="test",
+            creation_rationale="Disposable PostgreSQL guard.",
+            integrity_fingerprint="d" * 64,
+        )
+        session.add(configuration)
+        session.flush()
+        component = WebsiteThemeComponentConfiguration(
+            website_theme_configuration_id=configuration.id,
+            website_id=website.id,
+            theme_family_version_id=version.id,
+            component_instance_key="compact-estimate-form:website",
+            component_key="compact_estimate_form",
+            component_contract_version=3,
+            revision=1,
+            scope_type="website_default",
+            lifecycle_status="current",
+            enabled=True,
+            variant="compact-estimate-form",
+            placement="final-cta",
+            responsive_visibility={"desktop": True, "tablet": True, "mobile": True},
+            configuration_payload={},
+            created_by="test",
+            updated_by="test",
+            integrity_fingerprint="e" * 64,
+        )
+        session.add(component)
+        session.commit()
+        now = datetime.now(UTC)
+        create_form_delivery_mode_revision(
+            session,
+            website.id,
+            WebsiteFormDeliveryModeRevisionCreate(
+                form_component_configuration_id=component.id,
+                form_instance_key=component.component_instance_key,
+                lifecycle_status="active",
+                mode="disabled",
+                enabled=False,
+                configuration_payload={},
+                audit_identity="pg-0047-populated-guard",
+                approval_identity="pg-0047-approval",
+                approved_at=now,
+                activation_identity="pg-0047-activation",
+                activated_at=now,
+                created_by="test",
+                updated_by="test",
+                rationale="Prove populated downgrade refusal.",
+            ),
+        )
+    before_catalog = _catalog_snapshot(database.engine)
+    before_data = _application_data_fingerprints(database.engine)
+    before_sequences = _sequence_state(database.engine)
+    with database.engine.connect() as connection:
+        before_counts = {
+            table: connection.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one()
+            for table in FORM_DELIVERY_TABLES
+        }
+    with pytest.raises(RuntimeError, match="governed records exist"):
+        _downgrade(database, "20260815_0046")
+    assert _current_revision(database.engine) == HEAD_REVISION
+    assert _catalog_snapshot(database.engine) == before_catalog
+    assert _application_data_fingerprints(database.engine) == before_data
+    assert _sequence_state(database.engine) == before_sequences
+    with database.engine.connect() as connection:
+        assert {
+            table: connection.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one()
+            for table in FORM_DELIVERY_TABLES
+        } == before_counts
+
+
+def test_postgresql_0047_mode_successor_serializes_against_recipient_append(
+    disposable_postgres_database_factory: Callable[[], _DisposableDatabase],
+) -> None:
+    database = disposable_postgres_database_factory()
+    _upgrade(database, HEAD_REVISION)
+    with _alembic_database_url(database.url):
+        website_id, component_id, email_id = _seed_postgresql_form_delivery_scope(
+            database
+        )
+        successor_locked = Event()
+        recipient_started = Event()
+        finish_successor = Event()
+
+        def create_successor() -> int:
+            with Session(database.engine) as session:
+                locked = session.exec(
+                    select(WebsiteFormDeliveryModeRevision)
+                    .where(WebsiteFormDeliveryModeRevision.id == email_id)
+                    .with_for_update()
+                ).one()
+                component = session.get(
+                    WebsiteThemeComponentConfiguration,
+                    component_id,
+                )
+                assert component is not None
+                successor_locked.set()
+                assert finish_successor.wait(timeout=20)
+                successor = create_form_delivery_mode_revision(
+                    session,
+                    website_id,
+                    _postgresql_disabled_successor_payload(component, locked.id),
+                )
+                assert successor.id is not None
+                return successor.id
+
+        def append_recipient() -> str:
+            assert successor_locked.wait(timeout=20)
+            with Session(database.engine) as session:
+                recipient_started.set()
+                try:
+                    create_form_recipient_revision(
+                        session,
+                        website_id,
+                        WebsiteFormRecipientRevisionCreate(
+                            delivery_mode_revision_id=email_id,
+                            recipient_key="racing-secondary",
+                            email="racing.secondary@example.com",
+                            recipient_role="secondary",
+                            enabled=True,
+                            verification_status="unverified",
+                            created_by="test",
+                            updated_by="test",
+                            rationale="Attempt a serialized recipient append.",
+                        ),
+                    )
+                except FormDeliveryConfigurationError as exc:
+                    return str(exc)
+                return "unexpected-success"
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            successor_future = executor.submit(create_successor)
+            assert successor_locked.wait(timeout=20)
+            recipient_future = executor.submit(append_recipient)
+            assert recipient_started.wait(timeout=20)
+            finish_successor.set()
+            assert successor_future.result(timeout=20) > email_id
+            assert "frozen recipient snapshot" in recipient_future.result(timeout=20)
+
+        with Session(database.engine) as session:
+            assert validate_form_delivery_records(session)[
+                "website_form_delivery_mode_revisions"
+            ] == 3
+
+
+def test_postgresql_0047_enqueue_serializes_against_recipient_append(
+    disposable_postgres_database_factory: Callable[[], _DisposableDatabase],
+) -> None:
+    database = disposable_postgres_database_factory()
+    _upgrade(database, HEAD_REVISION)
+    with _alembic_database_url(database.url):
+        website_id, component_id, email_id = _seed_postgresql_form_delivery_scope(
+            database
+        )
+        enqueue_locked = Event()
+        recipient_started = Event()
+        finish_enqueue = Event()
+        payload_store = InMemoryTestPayloadStore(test_environment_allowed=True)
+        received_at = datetime.now(UTC)
+
+        def enqueue_submission() -> int:
+            with Session(database.engine) as session:
+                email = session.exec(
+                    select(WebsiteFormDeliveryModeRevision)
+                    .where(WebsiteFormDeliveryModeRevision.id == email_id)
+                    .with_for_update()
+                ).one()
+                enqueue_locked.set()
+                assert finish_enqueue.wait(timeout=20)
+                readiness = form_delivery_readiness(
+                    session,
+                    email,
+                    allow_test_only=True,
+                    secure_payload_store_available=True,
+                )
+                outbox = enqueue_form_delivery(
+                    session,
+                    mode_revision=email,
+                    readiness=readiness,
+                    envelope=NormalizedSubmissionEnvelope(
+                        website_id=website_id,
+                        component_configuration_id=component_id,
+                        component_revision=1,
+                        delivery_mode_revision_id=email_id,
+                        submission_contract_version=3,
+                        name="Synthetic Person",
+                        phone="+14075550100",
+                        postal_code="32801",
+                        requested_service="Synthetic service",
+                        message="Synthetic message",
+                        consent_accepted=None,
+                        audit_identity=email.audit_identity,
+                        idempotency_key="pg-race-idempotency-key-00000001",
+                        privacy_policy_identity=email.privacy_policy_reference,
+                        retention_policy_identity=email.retention_policy_reference,
+                        abuse_policy_identity=email.abuse_policy_reference,
+                        anti_spam_decision="synthetic_allow",
+                        request_identity="f" * 64,
+                        destination_adapter_key=email.provider_key,
+                        received_at=received_at,
+                    ),
+                    payload_store=payload_store,
+                    expires_at=received_at + timedelta(hours=1),
+                )
+                assert outbox.id is not None
+                return outbox.id
+
+        def append_recipient() -> str:
+            assert enqueue_locked.wait(timeout=20)
+            with Session(database.engine) as session:
+                recipient_started.set()
+                try:
+                    create_form_recipient_revision(
+                        session,
+                        website_id,
+                        WebsiteFormRecipientRevisionCreate(
+                            delivery_mode_revision_id=email_id,
+                            recipient_key="too-late-secondary",
+                            email="too.late@example.com",
+                            recipient_role="secondary",
+                            enabled=True,
+                            verification_status="unverified",
+                            created_by="test",
+                            updated_by="test",
+                            rationale="Attempt an append after first submission.",
+                        ),
+                    )
+                except FormDeliveryConfigurationError as exc:
+                    return str(exc)
+                return "unexpected-success"
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                enqueue_future = executor.submit(enqueue_submission)
+                assert enqueue_locked.wait(timeout=20)
+                recipient_future = executor.submit(append_recipient)
+                assert recipient_started.wait(timeout=20)
+                finish_enqueue.set()
+                assert enqueue_future.result(timeout=20) > 0
+                assert "submission evidence" in recipient_future.result(timeout=20)
+            with Session(database.engine) as session:
+                graph = validate_form_delivery_records(session)
+                assert graph["form_submission_envelopes"] == 1
+                assert graph["form_delivery_outbox_records"] == 1
+        finally:
+            payload_store.clear()
+        assert payload_store.payload_count == 0

@@ -3,14 +3,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import unicodedata
-from collections import OrderedDict
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from threading import Lock
-from types import MappingProxyType
-from typing import Callable, Literal, Protocol
+from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import Request
@@ -18,31 +17,29 @@ from pydantic import ValidationError
 from sqlmodel import Session
 
 from app.core.config import get_settings
-from app.models import (
-    ThemeFamily,
-    ThemeFamilyVersion,
-    Website,
-    WebsiteThemeComponentConfiguration,
-    WebsiteThemeConfiguration,
+from app.models import WebsiteFormDeliveryModeRevision
+from app.schemas.form_delivery import (
+    FormDeliveryReadinessRead,
+    NormalizedFormSubmissionInput,
 )
-from app.schemas.theme_families import (
-    CompactEstimateFormConfigurationV3,
-    FormBehaviorReadinessStateRead,
-    FormPrivacyReadinessStateRead,
-    FormProviderReadinessStateRead,
-    FormReadinessItemRead,
-    FormRetentionReadinessStateRead,
-    FormSecurityReadinessStateRead,
-    FormSpamReadinessStateRead,
-    PerformanceLocalFormReadinessRead,
-    PerformanceLocalFormSubmissionInput,
-    PerformanceLocalFormSubmissionRead,
+from app.services.form_delivery_registry import (
+    PRODUCTION_IDEMPOTENCY_BOUNDARIES,
+    PRODUCTION_SPAM_CONTROLS,
+    PRODUCTION_SUBMISSION_PROVIDERS,
+    SYNTHETIC_PROVIDER_DESTINATION,
+    SYNTHETIC_PROVIDER_KEY,
+    test_only_idempotency_boundaries,
+    test_only_spam_controls,
+    test_only_submission_providers,
 )
-from app.services import theme_configurations as theme_service
+from app.website_builder_core.contracts import (
+    FormRequestSecurityPolicy,
+    NormalizedFormDefinition,
+    NormalizedSubmissionEnvelope,
+    ProviderDeliveryContext,
+)
 
 
-SYNTHETIC_PROVIDER_KEY = "atlas-synthetic-memory"
-SYNTHETIC_PROVIDER_DESTINATION = "memory://discard"
 _IDEMPOTENCY_PATTERN = re.compile(r"^[A-Za-z0-9._~:/+=-]{32,128}$")
 _PHONE_INPUT_PATTERN = re.compile(r"^[+0-9().\-\s]+$")
 _POSTAL_PATTERN = re.compile(r"^[A-Z0-9 -]+$")
@@ -59,536 +56,97 @@ class FormGatewayError(ValueError):
         self.safe_message = message
 
 
-class _IdempotencyConflict(Exception):
-    """Internal signal translated to one Atlas-owned, value-free response."""
+def _test_registry_access_allowed() -> bool:
+    return "PYTEST_CURRENT_TEST" in os.environ or disposable_rehearsal_environment_allowed()
 
 
-@dataclass(frozen=True)
-class NormalizedSubmissionEnvelope:
-    website_id: int
-    component_configuration_id: int
-    name: str
-    phone: str
-    postal_code: str
-    requested_service: str
-    message: str | None
-    consent_accepted: bool | None
-    audit_identity: str
-    idempotency_key: str
+class _ContainedTestRegistryView(Mapping[str, object]):
+    def __init__(self, capability: str) -> None:
+        self.capability = capability
+
+    def _records(self) -> Mapping[str, object]:
+        allowed = _test_registry_access_allowed()
+        if self.capability == "submission":
+            return test_only_submission_providers(allowed=allowed)
+        if self.capability == "spam":
+            return test_only_spam_controls(allowed=allowed)
+        return test_only_idempotency_boundaries(allowed=allowed)
+
+    def __getitem__(self, key: str) -> object:
+        return self._records()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._records())
+
+    def __len__(self) -> int:
+        return len(self._records())
 
 
-@dataclass(frozen=True)
-class ProviderDeliveryContext:
-    """Governed provider metadata; references are opaque and never resolved here."""
-
-    provider_key: str
-    destination_reference: str
-    secret_reference: str
-    audit_identity: str
-    privacy_policy_destination: str
-    consent_mode: str
-    consent_text_version: str | None
-    retention_duration: str
-    deletion_expiration_behavior: str
-    spam_strategy: str
-    spam_configuration_reference: str
-    success_behavior: str
-    failure_behavior: str
-
-
-class SubmissionProvider(Protocol):
-    provider_key: str
-
-    def submit(
-        self,
-        context: ProviderDeliveryContext,
-        envelope: NormalizedSubmissionEnvelope,
-    ) -> PerformanceLocalFormSubmissionRead: ...
-
-
-class SpamControlAdapter(Protocol):
-    strategy: str
-
-    def supports_reference(self, configuration_reference: str) -> bool: ...
-
-    def verify(
-        self,
-        context: ProviderDeliveryContext,
-        envelope: NormalizedSubmissionEnvelope,
-    ) -> None: ...
-
-
-class IdempotencyBoundary(Protocol):
-    strategy: str
-
-    def deliver(
-        self,
-        *,
-        namespace: str,
-        request_identity: str,
-        operation: Callable[[], PerformanceLocalFormSubmissionRead],
-    ) -> PerformanceLocalFormSubmissionRead: ...
+TEST_ONLY_SUBMISSION_PROVIDERS = _ContainedTestRegistryView("submission")
+TEST_ONLY_SPAM_CONTROLS = _ContainedTestRegistryView("spam")
+TEST_ONLY_IDEMPOTENCY_BOUNDARIES = _ContainedTestRegistryView("idempotency")
 
 
 class _SyntheticDiscardProvider:
-    """Stateless test adapter: deterministic, network-free, storage-free."""
+    def __new__(cls):
+        if not _test_registry_access_allowed():
+            raise _unavailable()
+        from app.services.contained_form_delivery_adapters import SyntheticDiscardProvider
 
-    provider_key = SYNTHETIC_PROVIDER_KEY
-
-    def submit(
-        self,
-        context: ProviderDeliveryContext,
-        envelope: NormalizedSubmissionEnvelope,
-    ) -> PerformanceLocalFormSubmissionRead:
-        identity = json.dumps(
-            {
-                "provider_key": context.provider_key,
-                "destination_reference": context.destination_reference,
-                "secret_reference": context.secret_reference,
-                "retention_duration": context.retention_duration,
-                "deletion_expiration_behavior": (
-                    context.deletion_expiration_behavior
-                ),
-                "spam_strategy": context.spam_strategy,
-                "spam_configuration_reference": (
-                    context.spam_configuration_reference
-                ),
-                "website_id": envelope.website_id,
-                "component_configuration_id": envelope.component_configuration_id,
-                "name": envelope.name,
-                "phone": envelope.phone,
-                "postal_code": envelope.postal_code,
-                "requested_service": envelope.requested_service,
-                "message": envelope.message,
-                "consent_accepted": envelope.consent_accepted,
-                "audit_identity": envelope.audit_identity,
-                "idempotency_key": envelope.idempotency_key,
-            },
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        reference = "synthetic-" + hashlib.sha256(identity).hexdigest()[:24]
-        return PerformanceLocalFormSubmissionRead(
-            safe_message="Your synthetic rehearsal request was accepted.",
-            provider_reference=reference,
-        )
+        return SyntheticDiscardProvider()
 
 
 class _SyntheticNoopSpamControl:
-    """Contained rehearsal control; validates the exact synthetic strategy only."""
-
-    strategy = "synthetic_test"
-
-    def supports_reference(self, configuration_reference: str) -> bool:
-        return configuration_reference == "synthetic-noop"
-
-    def verify(
-        self,
-        context: ProviderDeliveryContext,
-        envelope: NormalizedSubmissionEnvelope,
-    ) -> None:
-        if (
-            context.spam_strategy != self.strategy
-            or not self.supports_reference(context.spam_configuration_reference)
-            or envelope.website_id < 1
-        ):
+    def __new__(cls):
+        if not _test_registry_access_allowed():
             raise _unavailable()
+        from app.services.contained_form_delivery_adapters import SyntheticNoopSpamControl
+
+        return SyntheticNoopSpamControl()
 
 
 class _SyntheticIdempotencyBoundary:
-    """Process-local replay control storing only keyed hashes and safe results."""
+    """Backward-compatible lazy constructor for focused V3 gateway tests."""
 
-    strategy = "required_header"
-    _maximum_entries = 4096
+    def __new__(cls):
+        if not _test_registry_access_allowed():
+            raise _unavailable()
+        from app.services.contained_form_delivery_adapters import (
+            SyntheticIdempotencyBoundary,
+        )
 
-    def __init__(self) -> None:
-        self._lock = Lock()
-        self._results: OrderedDict[
-            str,
-            tuple[str, PerformanceLocalFormSubmissionRead],
-        ] = OrderedDict()
-
-    def deliver(
-        self,
-        *,
-        namespace: str,
-        request_identity: str,
-        operation: Callable[[], PerformanceLocalFormSubmissionRead],
-    ) -> PerformanceLocalFormSubmissionRead:
-        namespace_hash = hmac.new(
-            _CSRF_PROCESS_KEY,
-            namespace.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        with self._lock:
-            prior = self._results.get(namespace_hash)
-            if prior is not None:
-                prior_identity, result = prior
-                if not hmac.compare_digest(prior_identity, request_identity):
-                    raise _IdempotencyConflict
-                self._results.move_to_end(namespace_hash)
-                return result
-            result = operation()
-            self._results[namespace_hash] = (request_identity, result)
-            while len(self._results) > self._maximum_entries:
-                self._results.popitem(last=False)
-            return result
-
-
-# Production discovery remains intentionally empty. The synthetic adapter lives
-# in a separate immutable registry and is reachable only through all rehearsal
-# guards below.
-PRODUCTION_SUBMISSION_PROVIDERS: MappingProxyType[str, SubmissionProvider] = (
-    MappingProxyType({})
-)
-TEST_ONLY_SUBMISSION_PROVIDERS: MappingProxyType[str, SubmissionProvider] = (
-    MappingProxyType({SYNTHETIC_PROVIDER_KEY: _SyntheticDiscardProvider()})
-)
-PRODUCTION_SPAM_CONTROLS: MappingProxyType[str, SpamControlAdapter] = MappingProxyType(
-    {}
-)
-TEST_ONLY_SPAM_CONTROLS: MappingProxyType[str, SpamControlAdapter] = MappingProxyType(
-    {"synthetic_test": _SyntheticNoopSpamControl()}
-)
-PRODUCTION_IDEMPOTENCY_BOUNDARIES: MappingProxyType[str, IdempotencyBoundary] = (
-    MappingProxyType({})
-)
-TEST_ONLY_IDEMPOTENCY_BOUNDARIES: MappingProxyType[str, IdempotencyBoundary] = (
-    MappingProxyType({"required_header": _SyntheticIdempotencyBoundary()})
-)
+        return SyntheticIdempotencyBoundary(_CSRF_PROCESS_KEY)
 
 
 @dataclass(frozen=True)
 class FormGatewayPreflight:
-    website: Website
-    configuration: WebsiteThemeConfiguration
-    component: WebsiteThemeComponentConfiguration
-    contract: CompactEstimateFormConfigurationV3
-    readiness: PerformanceLocalFormReadinessRead
-    mode: Literal["active", "activation_rehearsal"]
+    website_public_url: str
+    component_configuration_id: int
+    component_integrity_fingerprint: str
+    delivery_mode_revision: WebsiteFormDeliveryModeRevision
+    readiness: FormDeliveryReadinessRead
+    definition: NormalizedFormDefinition
+    security: FormRequestSecurityPolicy
+    csrf_token: str
+    runtime_scope: Literal["public", "contained_test"]
 
 
 def evaluate_form_readiness(
-    component: WebsiteThemeComponentConfiguration | None,
+    component: object | None,
     *,
-    mode: Literal["active", "inactive_draft_preview", "activation_rehearsal"],
+    mode: str,
     test_environment_allowed: bool | None = None,
-) -> PerformanceLocalFormReadinessRead:
-    if component is None:
-        return _missing_form_readiness()
+) -> object:
+    """Compatibility adapter; Theme/V3 evaluation lives outside this gateway."""
 
-    try:
-        contract = CompactEstimateFormConfigurationV3.model_validate(
-            component.configuration_payload
-        )
-    except ValidationError:
-        return _missing_form_readiness(
-            component_configuration_id=component.id,
-            submission_state="invalid",
-            initial=[
-                _blocker(
-                    "invalid_form_contract",
-                    "configuration_payload",
-                    "The governed V3 form contract is invalid.",
-                )
-            ],
-        )
-
-    if test_environment_allowed is None:
-        test_environment_allowed = disposable_rehearsal_environment_allowed()
-    rehearsal_adapter = (
-        mode == "activation_rehearsal"
-        and contract.provider.test_only
-        and test_environment_allowed
-        and contract.provider.provider_key in TEST_ONLY_SUBMISSION_PROVIDERS
-    )
-    production_adapter = (
-        mode == "active"
-        and not contract.provider.test_only
-        and contract.provider.provider_key in PRODUCTION_SUBMISSION_PROVIDERS
-    )
-    adapter_registered = rehearsal_adapter or production_adapter
-    rehearsal_spam_adapter = TEST_ONLY_SPAM_CONTROLS.get(
-        contract.spam.strategy or ""
-    )
-    production_spam_adapter = PRODUCTION_SPAM_CONTROLS.get(
-        contract.spam.strategy or ""
-    )
-    rehearsal_spam_control = (
-        mode == "activation_rehearsal"
-        and contract.provider.test_only
-        and test_environment_allowed
-        and _spam_adapter_supports(
-            rehearsal_spam_adapter,
-            contract.spam.configuration_reference,
-        )
-    )
-    production_spam_control = (
-        mode == "active"
-        and not contract.provider.test_only
-        and _spam_adapter_supports(
-            production_spam_adapter,
-            contract.spam.configuration_reference,
-        )
-    )
-    spam_control_registered = rehearsal_spam_control or production_spam_control
-    idempotency_strategy = contract.security.idempotency_strategy
-    rehearsal_idempotency_boundary = (
-        mode == "activation_rehearsal"
-        and contract.provider.test_only
-        and test_environment_allowed
-        and idempotency_strategy in TEST_ONLY_IDEMPOTENCY_BOUNDARIES
-    )
-    production_idempotency_boundary = (
-        mode == "active"
-        and not contract.provider.test_only
-        and idempotency_strategy in PRODUCTION_IDEMPOTENCY_BOUNDARIES
-    )
-    idempotency_boundary_registered = (
-        rehearsal_idempotency_boundary or production_idempotency_boundary
+    from app.services.form_submission_contracts import (
+        evaluate_performance_local_form_readiness,
     )
 
-    blockers: list[FormReadinessItemRead] = []
-
-    def require(field: str, value: object, code: str, reason: str) -> None:
-        if value is None or value is False or value == "":
-            blockers.append(_blocker(code, field, reason))
-
-    require(
-        "provider.provider_key",
-        contract.provider.provider_key,
-        "missing_provider",
-        "A governed submission-provider identity is required.",
-    )
-    require(
-        "provider.destination",
-        contract.provider.destination,
-        "missing_provider_destination",
-        "A governed provider destination is required.",
-    )
-    if not adapter_registered:
-        blockers.append(
-            _blocker(
-                "provider_adapter_unavailable",
-                "provider.provider_key",
-                "No adapter is registered for this form in the current runtime mode.",
-            )
-        )
-    require(
-        "privacy.policy_destination",
-        contract.privacy.policy_destination,
-        "missing_privacy_destination",
-        "An approved privacy-policy destination is required.",
-    )
-    active_loopback_privacy = (
-        mode == "active"
-        and _is_loopback_http_policy_destination(
-            contract.privacy.policy_destination
-        )
-    )
-    if active_loopback_privacy:
-        blockers.append(
-            _blocker(
-                "loopback_privacy_destination_forbidden",
-                "privacy.policy_destination",
-                "Active delivery requires a relative or HTTPS privacy-policy destination.",
-            )
-        )
-    require(
-        "privacy.consent_mode",
-        contract.privacy.consent_mode,
-        "missing_consent_mode",
-        "An approved consent mode is required.",
-    )
-    if contract.privacy.consent_mode == "explicit":
-        require(
-            "privacy.consent_text_version",
-            contract.privacy.consent_text_version,
-            "missing_consent_text_version",
-            "Explicit consent requires an approved text version.",
-        )
-    require(
-        "retention.duration",
-        contract.retention.duration,
-        "missing_retention_duration",
-        "An approved retention duration is required.",
-    )
-    require(
-        "retention.deletion_expiration_behavior",
-        contract.retention.deletion_expiration_behavior,
-        "missing_deletion_behavior",
-        "An approved deletion or expiration behavior is required.",
-    )
-    require(
-        "spam.strategy",
-        contract.spam.strategy,
-        "missing_spam_strategy",
-        "An approved spam-control strategy is required.",
-    )
-    if not spam_control_registered:
-        blockers.append(
-            _blocker(
-                "spam_adapter_unavailable",
-                "spam.strategy",
-                "No Atlas-owned spam-control adapter is registered for this strategy.",
-            )
-        )
-    require(
-        "success_behavior",
-        contract.success_behavior,
-        "missing_success_behavior",
-        "An approved success behavior is required.",
-    )
-    require(
-        "failure_behavior",
-        contract.failure_behavior,
-        "missing_failure_behavior",
-        "An approved failure behavior is required.",
-    )
-    require(
-        "provider.provider_secret_reference",
-        contract.provider.provider_secret_reference,
-        "missing_secret_reference",
-        "An opaque provider secret reference is required.",
-    )
-    require(
-        "security.same_origin_policy",
-        contract.security.same_origin_policy,
-        "missing_same_origin_policy",
-        "An exact same-origin policy is required.",
-    )
-    require(
-        "security.csrf_policy",
-        contract.security.csrf_policy,
-        "missing_csrf_policy",
-        "An origin-and-token CSRF policy is required.",
-    )
-    require(
-        "security.request_size_limit_bytes",
-        contract.security.request_size_limit_bytes,
-        "missing_request_size_policy",
-        "A bounded request-size policy is required.",
-    )
-    require(
-        "security.idempotency_strategy",
-        contract.security.idempotency_strategy,
-        "missing_idempotency_strategy",
-        "A required-header idempotency strategy is required.",
-    )
-    if not idempotency_boundary_registered:
-        blockers.append(
-            _blocker(
-                "idempotency_boundary_unavailable",
-                "security.idempotency_strategy",
-                "No Atlas-owned idempotency boundary is registered for this strategy.",
-            )
-        )
-    require(
-        "audit_identity",
-        contract.audit_identity,
-        "missing_audit_identity",
-        "An exact form-governance audit identity is required.",
-    )
-    if contract.submission_state == "disabled_pending_provider_configuration":
-        blockers.insert(
-            0,
-            _blocker(
-                "submission_disabled",
-                "submission_state",
-                "Form submission is disabled pending governed configuration.",
-            ),
-        )
-    if mode == "activation_rehearsal" and not test_environment_allowed:
-        blockers.append(
-            _blocker(
-                "rehearsal_environment_refused",
-                "provider.test_only",
-                "The synthetic adapter is restricted to an explicit disposable loopback runtime.",
-            )
-        )
-    if mode != "activation_rehearsal" and contract.provider.test_only:
-        blockers.append(
-            _blocker(
-                "test_provider_containment",
-                "provider.test_only",
-                "A test-only provider cannot enter active delivery.",
-            )
-        )
-
-    ready = not blockers
-    privacy_ready = bool(
-        contract.privacy.policy_destination
-        and not active_loopback_privacy
-        and contract.privacy.consent_mode
-        and (
-            contract.privacy.consent_mode != "explicit"
-            or contract.privacy.consent_text_version
-        )
-    )
-    retention_ready = bool(
-        contract.retention.duration
-        and contract.retention.deletion_expiration_behavior
-    )
-    behavior_ready = bool(contract.success_behavior and contract.failure_behavior)
-    security_ready = bool(
-        contract.provider.provider_secret_reference
-        and contract.security.same_origin_policy
-        and contract.security.csrf_policy
-        and contract.security.request_size_limit_bytes
-        and contract.security.idempotency_strategy
-        and idempotency_boundary_registered
-    )
-    return PerformanceLocalFormReadinessRead(
-        status="ready" if ready else "blocked",
-        can_submit=ready,
-        submission_state=contract.submission_state,
-        component_configuration_id=component.id,
-        provider_state=FormProviderReadinessStateRead(
-            provider_key=contract.provider.provider_key,
-            destination_configured=contract.provider.destination is not None,
-            adapter_registered=adapter_registered,
-            test_only=contract.provider.test_only,
-        ),
-        privacy=FormPrivacyReadinessStateRead(
-            destination_configured=contract.privacy.policy_destination is not None,
-            consent_mode=contract.privacy.consent_mode,
-            consent_text_version=contract.privacy.consent_text_version,
-            ready=privacy_ready,
-        ),
-        retention=FormRetentionReadinessStateRead(
-            duration_configured=contract.retention.duration is not None,
-            deletion_behavior_configured=(
-                contract.retention.deletion_expiration_behavior is not None
-            ),
-            ready=retention_ready,
-        ),
-        spam=FormSpamReadinessStateRead(
-            strategy=contract.spam.strategy,
-            ready=bool(contract.spam.strategy and spam_control_registered),
-        ),
-        behavior=FormBehaviorReadinessStateRead(
-            success_configured=contract.success_behavior is not None,
-            failure_configured=contract.failure_behavior is not None,
-            ready=behavior_ready,
-        ),
-        security=FormSecurityReadinessStateRead(
-            secret_reference_configured=(
-                contract.provider.provider_secret_reference is not None
-            ),
-            same_origin_policy=contract.security.same_origin_policy,
-            csrf_policy=contract.security.csrf_policy,
-            csrf_token=(
-                _csrf_token(component, contract.audit_identity)
-                if security_ready and ready
-                else None
-            ),
-            request_size_limit_bytes=contract.security.request_size_limit_bytes,
-            idempotency_strategy=contract.security.idempotency_strategy,
-            ready=security_ready,
-        ),
-        audit_identity=contract.audit_identity,
-        blockers=blockers,
+    return evaluate_performance_local_form_readiness(
+        component,  # type: ignore[arg-type]
+        mode=mode,  # type: ignore[arg-type]
+        test_environment_allowed=test_environment_allowed,
     )
 
 
@@ -597,202 +155,77 @@ def preflight_form_gateway(
     website_id: int,
     component_configuration_id: int,
 ) -> FormGatewayPreflight:
-    website = session.get(Website, website_id)
-    component = session.get(
-        WebsiteThemeComponentConfiguration,
+    from app.services.form_submission_contracts import (
+        resolve_universal_form_gateway_scope,
+    )
+
+    scope = resolve_universal_form_gateway_scope(
+        session,
+        website_id,
         component_configuration_id,
     )
-    if website is None or component is None:
+    if scope is None:
         raise _unavailable()
-    if (
-        component.website_id != website_id
-        or component.component_key != "compact_estimate_form"
-        or component.component_contract_version != 3
-        or component.lifecycle_status != "current"
-        or not component.enabled
-        or component.scope_type != "website_default"
-        or component.planned_page_id is not None
-        or component.overrides_component_configuration_id is not None
-    ):
-        raise _unavailable()
-    configuration = session.get(
-        WebsiteThemeConfiguration,
-        component.website_theme_configuration_id,
-    )
-    if configuration is None or configuration.website_id != website_id:
-        raise _unavailable()
-    version = session.get(ThemeFamilyVersion, configuration.theme_family_version_id)
-    family = (
-        session.get(ThemeFamily, version.theme_family_id)
-        if version is not None
-        else None
-    )
-    if version is None or family is None or family.family_key != "performance-local" or version.version != 3:
-        raise _unavailable()
-    from app.services.theme_delivery import (
-        ThemeDeliveryError,
-        _validate_activated_rehearsal_component,
-        _validate_activated_rehearsal_configuration,
+
+    # Website-scoped delivery is selected before Theme-family or provider
+    # details. The component key/version establish only the shared normalized
+    # five-field contract; they do not choose a delivery mode.
+    from app.services.form_delivery_modes import (
+        FormDeliveryConfigurationError,
+        form_delivery_readiness,
+        resolve_current_form_delivery_mode,
     )
 
     try:
-        theme_service._validate_family(family)
-        theme_service._validate_family_version(session, version)
-        contract = CompactEstimateFormConfigurationV3.model_validate(
-            component.configuration_payload
+        explicit_mode = resolve_current_form_delivery_mode(
+            session,
+            scope.website_id,
+            scope.component_configuration_id,
         )
-        activated_rehearsal = (
-            contract.submission_state == "rehearsal_ready"
-            and configuration.lifecycle_status == "active"
-        )
-        if activated_rehearsal:
-            _validate_activated_rehearsal_configuration(
-                session,
-                configuration=configuration,
-                version=version,
-                family=family,
-            )
-            _validate_activated_rehearsal_component(
-                session,
-                configuration=configuration,
-                component=component,
-            )
-        else:
-            theme_service._validate_component_configuration(session, component)
-    except (
-        ValueError,
-        ValidationError,
-        theme_service.ThemeConfigurationError,
-        ThemeDeliveryError,
-    ):
-        raise _unavailable() from None
-
-    mode: Literal["active", "activation_rehearsal"]
-    if contract.submission_state == "rehearsal_ready":
-        mode = "activation_rehearsal"
-    else:
-        mode = "active"
-    if mode == "active":
-        if (
-            contract.submission_state != "production_configured"
-            or version.lifecycle_status != "approved"
-            or not version.production_ready
-            or configuration.lifecycle_status != "active"
-            or configuration.materialized_theme_id is None
-            or configuration.website_theme_selection_id is None
-            or component.activation_identity is None
-            or component.activated_at is None
-            or component.rollback_identity is not None
-            or component.rollback_at is not None
-        ):
-            raise _unavailable()
-        try:
-            theme_service._require_audit_coverage(
-                session,
-                families=[family],
-                versions=[version],
-                configurations=[configuration],
-                components=[component],
-            )
-        except theme_service.ThemeConfigurationError:
+    except FormDeliveryConfigurationError as exc:
+        if exc.code != "form_delivery_mode_not_found":
             raise _unavailable() from None
-    else:
-        if (
-            contract.submission_state != "rehearsal_ready"
-            or configuration.lifecycle_status != "active"
-            or version.lifecycle_status != "preview_candidate"
-            or version.production_ready
-            or not contract.provider.test_only
-            or component.activation_identity is None
-            or component.activated_at is None
-            or component.rollback_identity is not None
-            or component.rollback_at is not None
-            or not disposable_rehearsal_environment_allowed()
-            or not _session_uses_explicit_disposable_database(session)
-        ):
-            raise _unavailable()
-        try:
-            theme_service._require_audit_coverage(
-                session,
-                families=[family],
-                versions=[version],
-                configurations=[configuration],
-                components=[component],
-            )
-        except theme_service.ThemeConfigurationError:
-            raise _unavailable() from None
-    readiness = evaluate_form_readiness(component, mode=mode)
-    if not readiness.can_submit:
-        raise _unavailable()
-    return FormGatewayPreflight(
-        website=website,
-        configuration=configuration,
-        component=component,
-        contract=contract,
-        readiness=readiness,
-        mode=mode,
-    )
-
-
-async def submit_preflighted_request(
-    request: Request,
-    preflight: FormGatewayPreflight,
-) -> PerformanceLocalFormSubmissionRead:
-    if request.scope.get("query_string", b""):
-        request.scope["query_string"] = b""
         raise FormGatewayError(
-            400,
-            "query_parameters_forbidden",
-            "Form submissions do not accept query parameters.",
-        )
-    _require_origin(request, preflight)
-    _require_csrf(request, preflight)
-    idempotency_key = _require_idempotency_key(request)
-    limit = preflight.contract.security.request_size_limit_bytes
-    if limit is None:  # guarded by readiness; retain fail-closed defense in depth
-        raise _unavailable()
-    body = await _read_bounded_json_body(request, limit)
-    values = _normalize_submission(body, preflight.contract)
-    envelope = NormalizedSubmissionEnvelope(
-        website_id=preflight.website.id,
-        component_configuration_id=preflight.component.id,
-        audit_identity=preflight.contract.audit_identity or "",
-        idempotency_key=idempotency_key,
-        **values.model_dump(mode="python"),
-    )
-    context = _provider_delivery_context(preflight)
-    spam_control = _spam_control_for(preflight)
-    try:
-        spam_control.verify(context, envelope)
-    except Exception:
-        raise _unavailable() from None
-    provider = _provider_for(preflight)
-    idempotency = _idempotency_boundary_for(preflight)
-
-    def submit_to_provider() -> PerformanceLocalFormSubmissionRead:
-        try:
-            return provider.submit(context, envelope)
-        except Exception:
-            raise _unavailable() from None
-
-    try:
-        return idempotency.deliver(
-            namespace=(
-                f"{preflight.website.id}:{preflight.component.id}:"
-                f"{preflight.component.integrity_fingerprint}:{idempotency_key}"
-            ),
-            request_identity=_submission_request_identity(context, envelope),
-            operation=submit_to_provider,
-        )
-    except _IdempotencyConflict:
-        raise FormGatewayError(
-            409,
-            "idempotency_conflict",
-            "The Idempotency-Key was already used for a different request.",
+            503,
+            "form_delivery_mode_not_found",
+            "Form submission is not available.",
         ) from None
-    except Exception:
-        raise _unavailable() from None
-
+    else:
+        explicit_readiness = form_delivery_readiness(
+            session,
+            explicit_mode,
+            allow_test_only=bool(
+                disposable_rehearsal_environment_allowed()
+                and _session_uses_explicit_disposable_database(session)
+            ),
+            secure_payload_store_available=False,
+        )
+        if explicit_mode.mode == "disabled":
+            raise FormGatewayError(
+                404,
+                "form_submission_disabled",
+                "Form submission is disabled.",
+            )
+        if explicit_mode.mode == "provider_owned":
+            raise FormGatewayError(
+                404,
+                "atlas_gateway_not_used",
+                "This form does not submit through Atlas.",
+            )
+        if not explicit_readiness.can_submit:
+            raise FormGatewayError(
+                503,
+                "form_delivery_mode_unavailable",
+                "Form submission is not available.",
+            )
+        # Managed payload encryption is intentionally unavailable in this
+        # milestone, so no explicit Atlas-owned mode can reach the legacy
+        # synchronous provider path even if future readiness code changes.
+        raise FormGatewayError(
+            503,
+            "form_delivery_mode_unavailable",
+            "Form submission is not available.",
+        )
 
 def disposable_rehearsal_environment_allowed() -> bool:
     settings = get_settings()
@@ -835,150 +268,35 @@ def require_local_operator_request(request: Request) -> None:
         )
 
 
-def _provider_for(preflight: FormGatewayPreflight) -> SubmissionProvider:
-    key = preflight.contract.provider.provider_key
-    if preflight.mode == "activation_rehearsal":
-        if not disposable_rehearsal_environment_allowed():
-            raise _unavailable()
-        provider = TEST_ONLY_SUBMISSION_PROVIDERS.get(key or "")
-    else:
-        provider = PRODUCTION_SUBMISSION_PROVIDERS.get(key or "")
-    if provider is None:
-        raise _unavailable()
-    return provider
-
-
-def _spam_control_for(preflight: FormGatewayPreflight) -> SpamControlAdapter:
-    strategy = preflight.contract.spam.strategy or ""
-    configuration_reference = (
-        preflight.contract.spam.configuration_reference or ""
-    )
-    if preflight.mode == "activation_rehearsal":
-        if not disposable_rehearsal_environment_allowed():
-            raise _unavailable()
-        adapter = TEST_ONLY_SPAM_CONTROLS.get(strategy)
-    else:
-        adapter = PRODUCTION_SPAM_CONTROLS.get(strategy)
-    if not _spam_adapter_supports(adapter, configuration_reference):
-        raise _unavailable()
-    assert adapter is not None
-    return adapter
-
-
-def _spam_adapter_supports(
-    adapter: SpamControlAdapter | None,
-    configuration_reference: str | None,
-) -> bool:
-    if adapter is None or not configuration_reference:
-        return False
-    try:
-        return adapter.supports_reference(configuration_reference) is True
-    except Exception:
-        return False
-
-
-def _idempotency_boundary_for(
-    preflight: FormGatewayPreflight,
-) -> IdempotencyBoundary:
-    strategy = preflight.contract.security.idempotency_strategy or ""
-    if preflight.mode == "activation_rehearsal":
-        if not disposable_rehearsal_environment_allowed():
-            raise _unavailable()
-        boundary = TEST_ONLY_IDEMPOTENCY_BOUNDARIES.get(strategy)
-    else:
-        boundary = PRODUCTION_IDEMPOTENCY_BOUNDARIES.get(strategy)
-    if boundary is None:
-        raise _unavailable()
-    return boundary
-
-
-def _provider_delivery_context(
-    preflight: FormGatewayPreflight,
-) -> ProviderDeliveryContext:
-    contract = preflight.contract
-    required = (
-        contract.provider.provider_key,
-        contract.provider.destination,
-        contract.provider.provider_secret_reference,
-        contract.audit_identity,
-        contract.privacy.policy_destination,
-        contract.privacy.consent_mode,
-        contract.retention.duration,
-        contract.retention.deletion_expiration_behavior,
-        contract.spam.strategy,
-        contract.spam.configuration_reference,
-        contract.success_behavior,
-        contract.failure_behavior,
-    )
-    if any(value is None or value == "" for value in required):
-        raise _unavailable()
-    return ProviderDeliveryContext(
-        provider_key=contract.provider.provider_key or "",
-        destination_reference=contract.provider.destination or "",
-        secret_reference=contract.provider.provider_secret_reference or "",
-        audit_identity=contract.audit_identity or "",
-        privacy_policy_destination=contract.privacy.policy_destination or "",
-        consent_mode=contract.privacy.consent_mode or "",
-        consent_text_version=contract.privacy.consent_text_version,
-        retention_duration=contract.retention.duration or "",
-        deletion_expiration_behavior=(
-            contract.retention.deletion_expiration_behavior or ""
-        ),
-        spam_strategy=contract.spam.strategy or "",
-        spam_configuration_reference=(
-            contract.spam.configuration_reference or ""
-        ),
-        success_behavior=contract.success_behavior or "",
-        failure_behavior=contract.failure_behavior or "",
-    )
-
-
-def _submission_request_identity(
-    context: ProviderDeliveryContext,
-    envelope: NormalizedSubmissionEnvelope,
-) -> str:
-    value = {
-        "context": context.__dict__,
-        "envelope": {
-            key: item
-            for key, item in envelope.__dict__.items()
-            if key != "idempotency_key"
-        },
-    }
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-
-
-def _require_origin(request: Request, preflight: FormGatewayPreflight) -> None:
+def _require_origin(request: Request, preflight: object) -> None:
     observed_values = request.headers.getlist("origin")
     observed = observed_values[0] if len(observed_values) == 1 else None
-    expected = (
-        str(get_settings().frontend_origin)
-        if preflight.mode == "activation_rehearsal"
-        else preflight.website.public_url
-    )
+    contained_test = getattr(preflight, "runtime_scope", None) == "contained_test"
+    if contained_test:
+        expected = str(get_settings().frontend_origin)
+    else:
+        expected = getattr(preflight, "website_public_url", None)
+        if expected is None:
+            # Compatibility for isolated legacy parser tests only. Production
+            # preflight uses the provider-neutral scalar projection.
+            website = getattr(preflight, "website", None)
+            expected = getattr(website, "public_url", None)
     observed_origin = _normalized_origin(observed) if observed is not None else None
-    expected_origin = _normalized_origin(expected)
+    expected_origin = _normalized_origin(expected) if isinstance(expected, str) else None
     if (
         observed_origin is None
         or expected_origin is None
         or observed_origin != expected_origin
     ):
         raise FormGatewayError(403, "origin_rejected", "The request origin is not allowed.")
-    if preflight.mode == "activation_rehearsal":
+    if contained_test:
         require_loopback_request(request)
 
 
 def _require_csrf(request: Request, preflight: FormGatewayPreflight) -> None:
     supplied_values = request.headers.getlist("x-atlas-csrf-token")
     supplied = supplied_values[0] if len(supplied_values) == 1 else ""
-    expected = _csrf_token(preflight.component, preflight.contract.audit_identity)
+    expected = preflight.csrf_token
     if not supplied or not hmac.compare_digest(supplied, expected):
         raise FormGatewayError(403, "csrf_rejected", "The request token is not valid.")
 
@@ -1074,10 +392,10 @@ def _json_structure_is_bounded(value: object) -> bool:
 
 def _normalize_submission(
     body: object,
-    contract: CompactEstimateFormConfigurationV3,
-) -> PerformanceLocalFormSubmissionInput:
+    contract: object,
+) -> NormalizedFormSubmissionInput:
     try:
-        parsed = PerformanceLocalFormSubmissionInput.model_validate(body)
+        parsed = NormalizedFormSubmissionInput.model_validate(body)
     except ValidationError:
         raise FormGatewayError(422, "submission_invalid", "The submitted fields are invalid.") from None
 
@@ -1100,9 +418,11 @@ def _normalize_submission(
     for durable_key, value in raw_values.items():
         field = field_contracts[durable_key]
         cleaned = _normalize_plain_text(value, required=field.required)
+        minimum_length = getattr(field, "minimum_length", None)
+        if minimum_length is None:
+            minimum_length = field.validation_contract.minimum_length
         if cleaned is not None and (
-            len(cleaned) < field.validation_contract.minimum_length
-            or len(cleaned) > field.maximum_length
+            len(cleaned) < minimum_length or len(cleaned) > field.maximum_length
         ):
             raise FormGatewayError(422, "submission_invalid", "The submitted fields are invalid.")
         normalized[public_keys[durable_key]] = cleaned
@@ -1125,7 +445,7 @@ def _normalize_submission(
     if contract.privacy.consent_mode == "explicit" and parsed.consent_accepted is not True:
         raise FormGatewayError(422, "consent_required", "Required consent was not accepted.")
     normalized["consent_accepted"] = parsed.consent_accepted
-    return PerformanceLocalFormSubmissionInput.model_validate(normalized)
+    return NormalizedFormSubmissionInput.model_validate(normalized)
 
 
 def _normalize_plain_text(value: str | None, *, required: bool) -> str | None:
@@ -1145,76 +465,21 @@ def _normalize_plain_text(value: str | None, *, required: bool) -> str | None:
     return normalized
 
 
-def _csrf_token(
-    component: WebsiteThemeComponentConfiguration,
-    audit_identity: str | None,
-) -> str:
+def _csrf_token(component: object, audit_identity: str | None) -> str:
+    website_id = getattr(component, "website_id")
+    component_id = getattr(
+        component,
+        "component_configuration_id",
+        getattr(component, "id", None),
+    )
+    if component_id is None:
+        raise ValueError("The form component lacks a stable configuration identity.")
+    integrity_fingerprint = getattr(component, "integrity_fingerprint")
     identity = (
-        f"atlas-form-csrf-v1:{component.website_id}:{component.id}:"
-        f"{component.integrity_fingerprint}:{audit_identity or ''}"
+        f"atlas-form-csrf-v1:{website_id}:{component_id}:"
+        f"{integrity_fingerprint}:{audit_identity or ''}"
     ).encode("utf-8")
     return hmac.new(_CSRF_PROCESS_KEY, identity, hashlib.sha256).hexdigest()
-
-
-def _missing_form_readiness(
-    *,
-    component_configuration_id: int | None = None,
-    submission_state: str = "missing",
-    initial: list[FormReadinessItemRead] | None = None,
-) -> PerformanceLocalFormReadinessRead:
-    blockers = list(initial or [])
-    if not blockers:
-        blockers.append(
-            _blocker(
-                "missing_form_component",
-                "component_configuration_id",
-                "No exact governed V3 form component is available.",
-            )
-        )
-    return PerformanceLocalFormReadinessRead(
-        status="blocked",
-        can_submit=False,
-        submission_state=submission_state,
-        component_configuration_id=component_configuration_id,
-        provider_state=FormProviderReadinessStateRead(
-            provider_key=None,
-            destination_configured=False,
-            adapter_registered=False,
-            test_only=False,
-        ),
-        privacy=FormPrivacyReadinessStateRead(
-            destination_configured=False,
-            consent_mode=None,
-            consent_text_version=None,
-            ready=False,
-        ),
-        retention=FormRetentionReadinessStateRead(
-            duration_configured=False,
-            deletion_behavior_configured=False,
-            ready=False,
-        ),
-        spam=FormSpamReadinessStateRead(strategy=None, ready=False),
-        behavior=FormBehaviorReadinessStateRead(
-            success_configured=False,
-            failure_configured=False,
-            ready=False,
-        ),
-        security=FormSecurityReadinessStateRead(
-            secret_reference_configured=False,
-            same_origin_policy=None,
-            csrf_policy=None,
-            csrf_token=None,
-            request_size_limit_bytes=None,
-            idempotency_strategy=None,
-            ready=False,
-        ),
-        audit_identity=None,
-        blockers=blockers,
-    )
-
-
-def _blocker(code: str, field: str, reason: str) -> FormReadinessItemRead:
-    return FormReadinessItemRead(code=code, field=field, reason=reason)
 
 
 def _unavailable() -> FormGatewayError:

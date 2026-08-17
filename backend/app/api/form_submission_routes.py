@@ -2,11 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlmodel import Session
 
 from app.db.session import get_session
-from app.schemas.theme_families import PerformanceLocalFormSubmissionRead
+from app.schemas.form_delivery import FormSubmissionAcceptanceRead
 from app.services.form_submission_gateway import (
     FormGatewayError,
     preflight_form_gateway,
-    submit_preflighted_request,
 )
 
 
@@ -15,14 +14,14 @@ router = APIRouter(tags=["form submission gateway"])
 
 @router.post(
     "/websites/{website_id}/forms/{component_configuration_id}/submissions",
-    response_model=PerformanceLocalFormSubmissionRead,
+    response_model=FormSubmissionAcceptanceRead,
 )
-async def submit_performance_local_form(
+async def submit_website_form(
     website_id: int,
     component_configuration_id: int,
     request: Request,
     session: Session = Depends(get_session),
-) -> PerformanceLocalFormSubmissionRead:
+) -> FormSubmissionAcceptanceRead:
     # Remove query values from the live request scope before any route error can
     # reach an access logger. Readiness is still evaluated first, and a blocked
     # form never consumes, decodes, validates, stores, or reflects the body.
@@ -33,7 +32,7 @@ async def submit_performance_local_form(
     if query_was_present:
         request.scope["query_string"] = b""
     try:
-        preflight = preflight_form_gateway(
+        preflight_form_gateway(
             session,
             website_id,
             component_configuration_id,
@@ -44,9 +43,18 @@ async def submit_performance_local_form(
                 "query_parameters_forbidden",
                 "Form submissions do not accept query parameters.",
             )
-        return await submit_preflighted_request(request, preflight)
+        raise FormGatewayError(
+            503,
+            "form_delivery_mode_unavailable",
+            "Form submission is not available.",
+        )
     except FormGatewayError as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail={"code": exc.code, "message": exc.safe_message},
         ) from exc
+
+
+# Temporary import compatibility for callers while the public route and
+# response contract are now provider-neutral.
+submit_performance_local_form = submit_website_form

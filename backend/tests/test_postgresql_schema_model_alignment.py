@@ -4,6 +4,8 @@ from app.db import session as db_session
 from app.models.entities import (
     BrandAsset,
     Business,
+    FormDeliveryConfigurationAudit,
+    FormDeliveryOutbox,
     InternalLinkIntent,
     NavigationItem,
     NavigationSet,
@@ -16,6 +18,8 @@ from app.models.entities import (
     WebsiteCoveragePlanningRecord,
     WebsiteDraftGenerationItem,
     WebsiteDraftGenerationRun,
+    WebsiteFormDeliveryModeRevision,
+    WebsiteFormRecipientRevision,
     WebsiteIdentityAssetAssignment,
     WebsiteServiceCityCoverageDecision,
     WebsiteServiceCountyCoverageDecision,
@@ -34,6 +38,17 @@ UTC_TIMESTAMP_MODELS = (
     WebsiteCityCoverageDecision,
     WebsiteServiceCityCoverageDecision,
 )
+UTC_CREATED_TIMESTAMP_MODELS = UTC_TIMESTAMP_MODELS + (
+    WebsiteFormDeliveryModeRevision,
+    WebsiteFormRecipientRevision,
+    FormDeliveryOutbox,
+    FormDeliveryConfigurationAudit,
+)
+UTC_UPDATED_TIMESTAMP_MODELS = UTC_TIMESTAMP_MODELS + (
+    WebsiteFormDeliveryModeRevision,
+    WebsiteFormRecipientRevision,
+    FormDeliveryOutbox,
+)
 
 
 def _normalized(expression: object) -> str:
@@ -49,7 +64,12 @@ def _checks(model) -> dict[str, str]:
 
 
 def test_only_the_authorized_models_use_timezone_aware_timestamp_mixins():
-    expected_tables = {model.__tablename__ for model in UTC_TIMESTAMP_MODELS}
+    expected_created_tables = {
+        model.__tablename__ for model in UTC_CREATED_TIMESTAMP_MODELS
+    }
+    expected_updated_tables = {
+        model.__tablename__ for model in UTC_UPDATED_TIMESTAMP_MODELS
+    }
     observed_created = {
         table.name
         for table in db_session.SQLModel.metadata.tables.values()
@@ -61,8 +81,8 @@ def test_only_the_authorized_models_use_timezone_aware_timestamp_mixins():
         if "updated_at" in table.c and table.c.updated_at.type.timezone is True
     }
 
-    assert observed_created == expected_tables
-    assert observed_updated == expected_tables
+    assert observed_created == expected_created_tables
+    assert observed_updated == expected_updated_tables
     assert all(TimezoneTimestampMixin in model.__mro__ for model in UTC_TIMESTAMP_MODELS)
     assert TimezoneTimestampMixin not in Business.__mro__
     assert TimezoneTimestampMixin not in WebsiteServiceCountyCoverageDecision.__mro__
@@ -167,4 +187,12 @@ def test_normal_create_all_excludes_every_alembic_owned_table(monkeypatch):
         "wordpressmetadatastate",
         "wordpressmetadatasyncaudit",
         "wordpressqualityreview",
+    }
+    assert db_session.ALEMBIC_OWNED_FORM_DELIVERY_TABLES == {
+        "websiteformdeliverymoderevision",
+        "websiteformrecipientrevision",
+        "formsubmissionenvelope",
+        "formdeliveryoutbox",
+        "formdeliveryattempt",
+        "formdeliveryconfigurationaudit",
     }

@@ -80,7 +80,7 @@ def test_0040_adds_nullable_provenance_and_exact_constraints(monkeypatch, tmp_pa
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260815_0046"
+        ).scalar_one() == "20260817_0047"
     get_settings.cache_clear()
 
 

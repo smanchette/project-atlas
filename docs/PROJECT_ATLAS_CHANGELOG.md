@@ -571,6 +571,48 @@ zero.
 
 ---
 
+## Shared Website Builder Core and Universal Form Delivery Foundation
+
+Updated the Architecture, Complete Website Blueprint, Product Specification,
+and Roadmap to version 1.1. The governing model now defines Atlas Website
+Builder as both a complete standalone product and an included, optionally
+integrated AtlasOps360 module backed by one non-forked Website Builder Core.
+AtlasOps360 may consume stable core contracts through a one-way adapter,
+service, or API boundary, but the core requires no AtlasOps360 account,
+database, authentication system, deployment, or subscription. GorillaDesk and
+other operational systems remain optional providers.
+
+Added one provider-neutral, Website/form-scoped delivery foundation with
+exactly five explicit modes: `disabled`, `atlas_email`, `provider_owned`,
+`atlasops360_native`, and `external_adapter`. Mode revision records are
+immutable, and each Website/form chain has exactly one current head. Durable
+recipient revisions, one normalized five-field submission envelope, the
+existing form gateway and provider
+registry, and fail-closed readiness prevent Theme or portal inference and
+prohibit fallback between modes. Atlas email is the universal standalone path;
+AtlasOps360-native delivery remains a future optional first-party adapter, and
+provider-owned forms keep submission receipt, delivery, retention, and
+notifications with the selected provider.
+
+Migration `20260817_0047` adds the additive form-delivery configuration,
+envelope, outbox, immutable attempt, and configuration-audit records. Atlas
+Data backup format 0.58 preserves their dependency graph and remains compatible
+with supported 0.57 data. The outbox retains only minimum safe delivery
+evidence and does not create a lead inbox, customer system, sales pipeline,
+scheduling system, estimating workflow, or CRM. Because Atlas has no approved
+production customer-payload encryption and key-management boundary, production
+payload persistence and delivery remain blocked rather than storing plaintext.
+
+Production provider registrations and transports remain empty or disabled;
+test adapters are confined to disposable, network-isolated rehearsal. No form
+mode or recipient was seeded into active Atlas, Performance Local V3 remains
+inactive, and no Theme version 4 was created. Active local Atlas remains at
+revision `20260815_0046`; no email was sent, no customer data was collected,
+and no AtlasOps360, GorillaDesk, WordPress, publication, or deployment request
+occurred.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.

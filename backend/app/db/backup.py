@@ -10,7 +10,7 @@ import tempfile
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import text
+from sqlalchemy import inspect as sa_inspect, text
 from sqlmodel import Session, SQLModel, select
 
 from app.core.config import get_settings
@@ -29,6 +29,10 @@ from app.models import (
     County,
     DraftingEligibilityAssessment,
     DraftingEligibilityDisposition,
+    FormDeliveryAttempt,
+    FormDeliveryConfigurationAudit,
+    FormDeliveryOutbox,
+    FormSubmissionEnvelope,
     WebsiteDraftGenerationItem,
     WebsiteDraftGenerationRun,
     GeneratedPage,
@@ -57,6 +61,8 @@ from app.models import (
     ThemeFamily,
     ThemeFamilyVersion,
     Website,
+    WebsiteFormDeliveryModeRevision,
+    WebsiteFormRecipientRevision,
     WebsiteCityCoverageDecision,
     WebsiteCountyCoverageDecision,
     WebsiteCoveragePlanningRecord,
@@ -96,7 +102,7 @@ from app.schemas.scoped_media_authorizations import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.57"
+BACKUP_VERSION = "0.58"
 BRAND_ASSET_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
 BRAND_ASSET_MIME_EXTENSIONS = {
     "image/jpeg": {".jpg", ".jpeg"},
@@ -145,6 +151,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.55",
     "0.56",
     "0.57",
+    "0.58",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -201,6 +208,12 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "website_theme_configurations": WebsiteThemeConfiguration,
     "website_theme_component_configurations": WebsiteThemeComponentConfiguration,
     "theme_configuration_audits": ThemeConfigurationAudit,
+    "website_form_delivery_mode_revisions": WebsiteFormDeliveryModeRevision,
+    "website_form_recipient_revisions": WebsiteFormRecipientRevision,
+    "form_submission_envelopes": FormSubmissionEnvelope,
+    "form_delivery_outbox_records": FormDeliveryOutbox,
+    "form_delivery_attempts": FormDeliveryAttempt,
+    "form_delivery_configuration_audits": FormDeliveryConfigurationAudit,
     "approval_audits": ApprovalAudit,
     "page_revisions": GeneratedPageRevision,
     "wordpress_draft_audits": WordPressDraftAudit,
@@ -224,6 +237,31 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "scoped_media_authorizations": ScopedMediaAuthorization,
     "settings": Setting,
     "knowledge_blocks": KnowledgeBlock,
+}
+
+FORM_DELIVERY_BACKUP_GROUPS = (
+    "website_form_delivery_mode_revisions",
+    "website_form_recipient_revisions",
+    "form_submission_envelopes",
+    "form_delivery_outbox_records",
+    "form_delivery_attempts",
+    "form_delivery_configuration_audits",
+)
+_FORM_DELIVERY_TEST_PAYLOAD_REFERENCE_PATTERN = re.compile(
+    r"^memory://form-payload/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+_FORM_DELIVERY_STABLE_METADATA_KEY_PATTERN = re.compile(
+    r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$"
+)
+_FORM_DELIVERY_OPAQUE_SOURCE_REFERENCE_PATTERN = re.compile(
+    r"^source-ref://[a-z0-9][a-z0-9/_-]{2,239}$"
+)
+_FORM_DELIVERY_TEST_KEY_REFERENCE = "secret-ref://synthetic/form-payload-key"
+_FORM_DELIVERY_COLLECTOR_MODES = {
+    "atlas_email",
+    "atlasops360_native",
+    "external_adapter",
 }
 
 _UTC_NAVIGATION_DECISION_GROUPS = (
@@ -273,6 +311,35 @@ _CONVERGED_UTC_TIMESTAMP_FIELDS = {
 _CONVERGED_UTC_MODEL_FIELDS = {
     BACKUP_MODELS[group]: fields
     for group, fields in _CONVERGED_UTC_TIMESTAMP_FIELDS.items()
+}
+
+_FORM_DELIVERY_UTC_TIMESTAMP_FIELDS = {
+    "website_form_delivery_mode_revisions": (
+        "created_at",
+        "updated_at",
+        "approved_at",
+        "activated_at",
+    ),
+    "website_form_recipient_revisions": (
+        "created_at",
+        "updated_at",
+        "verified_at",
+    ),
+    "form_submission_envelopes": ("received_at", "expires_at"),
+    "form_delivery_outbox_records": (
+        "created_at",
+        "updated_at",
+        "next_attempt_at",
+        "delivered_at",
+        "failed_at",
+        "expired_at",
+    ),
+    "form_delivery_attempts": ("started_at", "completed_at", "next_retry_at"),
+    "form_delivery_configuration_audits": ("created_at",),
+}
+_FORM_DELIVERY_UTC_MODEL_FIELDS = {
+    BACKUP_MODELS[group]: fields
+    for group, fields in _FORM_DELIVERY_UTC_TIMESTAMP_FIELDS.items()
 }
 
 
@@ -325,12 +392,16 @@ def export_backup(
     backup_dir: Path | None = None,
     created_at: datetime | None = None,
 ) -> dict[str, Any]:
+    form_delivery_tables_available = _form_delivery_export_tables_available(session)
     destination = backup_dir or BACKUP_DIR
     destination.mkdir(parents=True, exist_ok=True)
     timestamp = (created_at or datetime.now(UTC)).astimezone(UTC)
 
     data = {}
     for group, model in BACKUP_MODELS.items():
+        if group in FORM_DELIVERY_BACKUP_GROUPS and not form_delivery_tables_available:
+            data[group] = []
+            continue
         records = session.exec(select(model).order_by(model.id)).all()
         if group == "settings":
             records = [
@@ -341,6 +412,7 @@ def export_backup(
         data[group] = [record.model_dump(mode="json") for record in records]
     _canonicalize_navigation_decision_timestamps(data)
     _canonicalize_converged_utc_timestamps(data)
+    _canonicalize_form_delivery_utc_timestamps(data)
     table_counts = {group: len(records) for group, records in data.items()}
     payload = {
         "metadata": {
@@ -387,6 +459,24 @@ def export_backup(
     }
 
 
+def _form_delivery_export_tables_available(session: Session) -> bool:
+    """Accept only the complete 0047 table set or the complete pre-0047 absence."""
+
+    expected_tables = {
+        BACKUP_MODELS[group].__table__.key for group in FORM_DELIVERY_BACKUP_GROUPS
+    }
+    available_tables = set(sa_inspect(session.connection()).get_table_names())
+    present_tables = expected_tables & available_tables
+    if present_tables and present_tables != expected_tables:
+        missing = ", ".join(sorted(expected_tables - present_tables))
+        present = ", ".join(sorted(present_tables))
+        raise BackupValidationError(
+            "Backup refused a partial universal form-delivery schema; "
+            f"present tables: {present}; missing tables: {missing}."
+        )
+    return present_tables == expected_tables
+
+
 def list_backups(*, backup_dir: Path | None = None) -> list[dict[str, Any]]:
     destination = backup_dir or BACKUP_DIR
     if not destination.exists():
@@ -428,7 +518,8 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             session, data
         ) or _restore_managed_tables_match_backup(session, data)
         preserve_current_composition_identity = bool(
-            preserve_source_ids and payload["metadata"]["version"] == "0.57"
+            preserve_source_ids
+            and payload["metadata"]["version"] in {"0.57", "0.58"}
         )
     except Exception as exc:
         raise BackupValidationError(
@@ -1748,6 +1839,274 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
             )
 
             validate_theme_configuration_records(session)
+
+        from app.services.form_delivery_modes import (
+            form_delivery_configuration_audit_hash,
+            form_delivery_mode_fingerprint,
+            form_recipient_fingerprint,
+        )
+        from app.services.form_delivery_outbox import (
+            form_delivery_attempt_fingerprint,
+            form_submission_envelope_fingerprint,
+        )
+
+        form_delivery_mode_ids: dict[int, int] = {}
+        _require_restore_compatible_form_delivery_mode_prefixes(
+            session,
+            data.get("website_form_delivery_mode_revisions", []),
+            website_ids=website_ids,
+        )
+        for record in sorted(
+            data.get("website_form_delivery_mode_revisions", []),
+            key=lambda item: (
+                item["website_id"],
+                item["form_instance_key"],
+                item["revision"],
+            ),
+        ):
+            old_id = _record_id(
+                record,
+                "website_form_delivery_mode_revisions",
+            )
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "website_form_delivery_mode_revisions.website_id",
+            )
+            restored_record = {
+                **record,
+                "website_id": website_id,
+                "form_component_configuration_id": _mapped_id(
+                    theme_component_configuration_ids,
+                    record["form_component_configuration_id"],
+                    "website_form_delivery_mode_revisions.form_component_configuration_id",
+                ),
+                "supersedes_delivery_mode_revision_id": _mapped_optional_id(
+                    form_delivery_mode_ids,
+                    record.get("supersedes_delivery_mode_revision_id"),
+                    "website_form_delivery_mode_revisions.supersedes_delivery_mode_revision_id",
+                ),
+            }
+            restored_record["integrity_fingerprint"] = (
+                form_delivery_mode_fingerprint(restored_record)
+            )
+            restored = _restore_immutable_record(
+                session,
+                WebsiteFormDeliveryModeRevision,
+                select(WebsiteFormDeliveryModeRevision).where(
+                    WebsiteFormDeliveryModeRevision.website_id == website_id,
+                    WebsiteFormDeliveryModeRevision.form_instance_key
+                    == record["form_instance_key"],
+                    WebsiteFormDeliveryModeRevision.revision == record["revision"],
+                ),
+                restored_record,
+                label="Website form-delivery mode revision",
+            )
+            form_delivery_mode_ids[old_id] = _required_id(restored)
+
+        form_recipient_revision_ids: dict[int, int] = {}
+        _require_restore_compatible_form_recipient_prefixes(
+            session,
+            data.get("website_form_recipient_revisions", []),
+            website_ids=website_ids,
+        )
+        for record in sorted(
+            data.get("website_form_recipient_revisions", []),
+            key=lambda item: (
+                item["website_id"],
+                item["form_instance_key"],
+                item["recipient_key"],
+                item["revision"],
+            ),
+        ):
+            old_id = _record_id(record, "website_form_recipient_revisions")
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "website_form_recipient_revisions.website_id",
+            )
+            restored_record = {
+                **record,
+                "delivery_mode_revision_id": _mapped_id(
+                    form_delivery_mode_ids,
+                    record["delivery_mode_revision_id"],
+                    "website_form_recipient_revisions.delivery_mode_revision_id",
+                ),
+                "website_id": website_id,
+                "form_component_configuration_id": _mapped_id(
+                    theme_component_configuration_ids,
+                    record["form_component_configuration_id"],
+                    "website_form_recipient_revisions.form_component_configuration_id",
+                ),
+                "supersedes_recipient_revision_id": _mapped_optional_id(
+                    form_recipient_revision_ids,
+                    record.get("supersedes_recipient_revision_id"),
+                    "website_form_recipient_revisions.supersedes_recipient_revision_id",
+                ),
+            }
+            restored_record["integrity_fingerprint"] = form_recipient_fingerprint(
+                restored_record
+            )
+            restored = _restore_immutable_record(
+                session,
+                WebsiteFormRecipientRevision,
+                select(WebsiteFormRecipientRevision).where(
+                    WebsiteFormRecipientRevision.website_id == website_id,
+                    WebsiteFormRecipientRevision.form_instance_key
+                    == record["form_instance_key"],
+                    WebsiteFormRecipientRevision.recipient_key
+                    == record["recipient_key"],
+                    WebsiteFormRecipientRevision.revision == record["revision"],
+                ),
+                restored_record,
+                label="Website form-recipient revision",
+            )
+            form_recipient_revision_ids[old_id] = _required_id(restored)
+
+        form_submission_envelope_ids: dict[int, int] = {}
+        for record in data.get("form_submission_envelopes", []):
+            old_id = _record_id(record, "form_submission_envelopes")
+            website_id = _mapped_id(
+                website_ids,
+                record["website_id"],
+                "form_submission_envelopes.website_id",
+            )
+            component_id = _mapped_id(
+                theme_component_configuration_ids,
+                record["form_component_configuration_id"],
+                "form_submission_envelopes.form_component_configuration_id",
+            )
+            restored_record = {
+                **record,
+                "website_id": website_id,
+                "form_component_configuration_id": component_id,
+                "delivery_mode_revision_id": _mapped_id(
+                    form_delivery_mode_ids,
+                    record["delivery_mode_revision_id"],
+                    "form_submission_envelopes.delivery_mode_revision_id",
+                ),
+            }
+            restored_record["integrity_fingerprint"] = (
+                form_submission_envelope_fingerprint(restored_record)
+            )
+            restored = _restore_immutable_record(
+                session,
+                FormSubmissionEnvelope,
+                select(FormSubmissionEnvelope).where(
+                    FormSubmissionEnvelope.website_id == website_id,
+                    FormSubmissionEnvelope.form_component_configuration_id
+                    == component_id,
+                    FormSubmissionEnvelope.idempotency_digest
+                    == record["idempotency_digest"],
+                ),
+                restored_record,
+                label="form-submission envelope",
+            )
+            form_submission_envelope_ids[old_id] = _required_id(restored)
+
+        form_delivery_outbox_ids: dict[int, int] = {}
+        for record in data.get("form_delivery_outbox_records", []):
+            old_id = _record_id(record, "form_delivery_outbox_records")
+            envelope_id = _mapped_id(
+                form_submission_envelope_ids,
+                record["envelope_id"],
+                "form_delivery_outbox_records.envelope_id",
+            )
+            restored_record = {
+                **record,
+                "envelope_id": envelope_id,
+                "delivery_mode_revision_id": _mapped_id(
+                    form_delivery_mode_ids,
+                    record["delivery_mode_revision_id"],
+                    "form_delivery_outbox_records.delivery_mode_revision_id",
+                ),
+            }
+            restored = _restore_immutable_record(
+                session,
+                FormDeliveryOutbox,
+                select(FormDeliveryOutbox).where(
+                    FormDeliveryOutbox.envelope_id == envelope_id
+                ),
+                restored_record,
+                label="form-delivery outbox record",
+            )
+            form_delivery_outbox_ids[old_id] = _required_id(restored)
+
+        for record in sorted(
+            data.get("form_delivery_attempts", []),
+            key=lambda item: (item["outbox_id"], item["attempt_number"]),
+        ):
+            outbox_id = _mapped_id(
+                form_delivery_outbox_ids,
+                record["outbox_id"],
+                "form_delivery_attempts.outbox_id",
+            )
+            restored_record = {**record, "outbox_id": outbox_id}
+            restored_record["integrity_fingerprint"] = (
+                form_delivery_attempt_fingerprint(restored_record)
+            )
+            _restore_immutable_record(
+                session,
+                FormDeliveryAttempt,
+                select(FormDeliveryAttempt).where(
+                    FormDeliveryAttempt.outbox_id == outbox_id,
+                    FormDeliveryAttempt.attempt_number
+                    == record["attempt_number"],
+                ),
+                restored_record,
+                label="form-delivery attempt",
+            )
+
+        for record in data.get("form_delivery_configuration_audits", []):
+            restored_record = {
+                **record,
+                "delivery_mode_revision_id": _mapped_optional_id(
+                    form_delivery_mode_ids,
+                    record.get("delivery_mode_revision_id"),
+                    "form_delivery_configuration_audits.delivery_mode_revision_id",
+                ),
+                "recipient_revision_id": _mapped_optional_id(
+                    form_recipient_revision_ids,
+                    record.get("recipient_revision_id"),
+                    "form_delivery_configuration_audits.recipient_revision_id",
+                ),
+                "snapshot": _restore_form_delivery_audit_snapshot(
+                    record.get("snapshot"),
+                    website_ids=website_ids,
+                    component_ids=theme_component_configuration_ids,
+                    mode_revision_ids=form_delivery_mode_ids,
+                    recipient_revision_ids=form_recipient_revision_ids,
+                ),
+            }
+            restored_record["snapshot_hash"] = (
+                form_delivery_configuration_audit_hash(restored_record)
+            )
+            if restored_record["delivery_mode_revision_id"] is not None:
+                audit_target = select(FormDeliveryConfigurationAudit).where(
+                    FormDeliveryConfigurationAudit.delivery_mode_revision_id
+                    == restored_record["delivery_mode_revision_id"],
+                    FormDeliveryConfigurationAudit.recipient_revision_id.is_(None),
+                )
+            else:
+                audit_target = select(FormDeliveryConfigurationAudit).where(
+                    FormDeliveryConfigurationAudit.recipient_revision_id
+                    == restored_record["recipient_revision_id"],
+                    FormDeliveryConfigurationAudit.delivery_mode_revision_id.is_(None),
+                )
+            _restore_immutable_record(
+                session,
+                FormDeliveryConfigurationAudit,
+                audit_target,
+                restored_record,
+                label="form-delivery configuration audit",
+            )
+
+        if any(data.get(group) for group in FORM_DELIVERY_BACKUP_GROUPS):
+            from app.services.form_delivery_modes import (
+                validate_form_delivery_records,
+            )
+
+            validate_form_delivery_records(session)
 
         backup_version = payload["metadata"]["version"]
         backed_connection_plan_ids = {
@@ -3072,7 +3431,7 @@ def _refresh_restored_current_compositions(
         ]
         graph_ready = (
             payload["metadata"]["version"]
-            in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}
+            in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}
             and read_site_connection_plan(session, restored_plan_id).ready
         )
         claims_current = bool(backed_compositions) and all(
@@ -3120,7 +3479,7 @@ def _restored_current_compositions_match_authoritative_sources(
     site_plan_ids: dict[int, int],
     page_composition_ids: dict[int, int],
 ) -> bool:
-    """Prove a Backup 0.57 current graph can retain its exact identity.
+    """Prove a Backup 0.57+ current graph can retain its exact identity.
 
     The shortcut is deliberately based on the same live source projection and
     Site Connection readiness contract used by composition refresh.  A backup
@@ -3335,12 +3694,12 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
+    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
         for group in ("site_plans", "planned_pages", "planning_records"):
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
+    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
         for group in (
             "site_connection_planning_records",
             "navigation_sets",
@@ -3350,7 +3709,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
+    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
         for group in (
             "website_coverage_planning_records",
             "website_service_coverage_decisions",
@@ -3361,7 +3720,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
+    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
         for group in (
             "drafting_eligibility_assessments",
             "drafting_eligibility_dispositions",
@@ -3369,7 +3728,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
+    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
         for group in (
             "supporting_page_authorizations",
             "pre_draft_distinctness_briefs",
@@ -3377,7 +3736,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
+    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
         for group in (
             "website_draft_generation_runs",
             "website_draft_generation_items",
@@ -3388,36 +3747,36 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "website_service_county_coverage_decisions" not in data:
         data.setdefault("website_service_county_coverage_decisions", [])
         counts.setdefault("website_service_county_coverage_decisions", 0)
-    if backup_version not in {"0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
+    if backup_version not in {"0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
         for group in ("semantic_component_definitions", "page_compositions"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
+    if backup_version not in {"0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
         for group in ("brand_assets", "website_identity_asset_assignments"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
+    if backup_version not in {"0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
         for group in ("themes", "website_theme_selections"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.53", "0.54", "0.55", "0.56", "0.57"}:
+    if backup_version not in {"0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
         for group in (
             "website_media_planning_records",
             "planned_page_media_requirements",
         ):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.55", "0.56", "0.57"}:
+    if backup_version not in {"0.55", "0.56", "0.57", "0.58"}:
         data.setdefault("generated_page_qa_results", [])
         counts.setdefault("generated_page_qa_results", 0)
-    if backup_version not in {"0.56", "0.57"}:
+    if backup_version not in {"0.56", "0.57", "0.58"}:
         data.setdefault("scoped_media_authorizations", [])
         counts.setdefault("scoped_media_authorizations", 0)
         for record in data.get("image_metadata", []):
             if isinstance(record, dict):
                 record.setdefault("usage_authorization_mode", "contract_default")
                 record.setdefault("required_authorization_terms", [])
-    if backup_version != "0.57":
+    if backup_version not in {"0.57", "0.58"}:
         for group in (
             "theme_families",
             "theme_family_versions",
@@ -3425,6 +3784,14 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             "website_theme_component_configurations",
             "theme_configuration_audits",
         ):
+            records = data.setdefault(group, [])
+            if records:
+                raise BackupValidationError(
+                    f"Legacy backup version cannot contain '{group}' records."
+                )
+            counts.setdefault(group, 0)
+    if backup_version != "0.58":
+        for group in FORM_DELIVERY_BACKUP_GROUPS:
             records = data.setdefault(group, [])
             if records:
                 raise BackupValidationError(
@@ -3442,6 +3809,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             raise BackupValidationError(f"Backup data group '{group}' contains an invalid record.")
 
     _canonicalize_navigation_decision_timestamps(data)
+    _canonicalize_form_delivery_utc_timestamps(data)
 
     valid_asset_statuses = {"draft", "pending_review", "approved", "rejected", "retired"}
     valid_asset_types = {
@@ -3722,6 +4090,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     _validate_site_connection_decision_provenance(data, backup_version)
     _validate_nested_qa_page_identities(data, backup_version)
     _validate_theme_configuration_graph(data, backup_version)
+    _validate_form_delivery_graph(data, backup_version)
     _validate_unique_records(data)
     _validate_backup_references(data)
     _validate_brand_asset_ownership(data)
@@ -3784,12 +4153,19 @@ def _restore_managed_tables_are_empty(
 ) -> bool:
     """Prove the target is empty apart from exact migration-owned seed rows."""
 
+    available_tables = set(sa_inspect(session.connection()).get_table_names())
     checked_tables: set[str] = set()
     for group, model in BACKUP_MODELS.items():
         table_key = model.__table__.key
         if table_key in checked_tables:
             continue
         checked_tables.add(table_key)
+        if table_key not in available_tables:
+            if data.get(group):
+                raise BackupValidationError(
+                    f"Target schema does not contain table '{table_key}' required by '{group}'."
+                )
+            continue
         if session.exec(select(model).limit(1)).first() is None:
             continue
         if group != "semantic_component_definitions":
@@ -3860,8 +4236,15 @@ def _restore_managed_tables_match_backup(
 ) -> bool:
     """Return true only when the complete managed target exactly matches data."""
 
+    available_tables = set(sa_inspect(session.connection()).get_table_names())
     observed: dict[str, list[dict[str, Any]]] = {}
     for group, model in BACKUP_MODELS.items():
+        table_key = model.__table__.key
+        if table_key not in available_tables:
+            if data.get(group):
+                return False
+            observed[group] = []
+            continue
         records = session.exec(select(model).order_by(model.id)).all()
         if group == "settings":
             records = [
@@ -3874,6 +4257,7 @@ def _restore_managed_tables_match_backup(
     for comparable in (observed, expected):
         _canonicalize_navigation_decision_timestamps(comparable)
         _canonicalize_converged_utc_timestamps(comparable)
+        _canonicalize_form_delivery_utc_timestamps(comparable)
     return observed == expected
 
 
@@ -3979,7 +4363,7 @@ def _normalize_converged_utc_restore_values(
 ) -> dict[str, Any]:
     """Bind legacy UTC-naive values to TIMESTAMPTZ without session dependence."""
 
-    fields = _CONVERGED_UTC_MODEL_FIELDS.get(model)
+    fields = _CONVERGED_UTC_MODEL_FIELDS.get(model) or _FORM_DELIVERY_UTC_MODEL_FIELDS.get(model)
     if fields is None:
         return payload
     normalized = dict(payload)
@@ -4004,10 +4388,17 @@ def _restore_immutable_record(
     *,
     label: str,
 ) -> SQLModel:
-    """Insert a durable Theme record or reuse one exact immutable match."""
+    """Insert a durable record or reuse one exact immutable match."""
 
-    normalized = model.model_validate(payload)
-    existing = session.exec(statement).first()
+    normalized = model.model_validate(
+        _normalize_converged_utc_restore_values(model, payload)
+    )
+    matches = list(session.exec(statement).all())
+    if len(matches) > 1:
+        raise BackupValidationError(
+            f"Target {label} contains duplicate immutable identities; restore was refused."
+        )
+    existing = matches[0] if matches else None
     if existing is not None:
         expected = _normalized_immutable_projection(normalized)
         observed = _normalized_immutable_projection(existing)
@@ -4037,6 +4428,96 @@ def _normalized_immutable_projection(record: SQLModel) -> dict[str, Any]:
         return value
 
     return normalize(record.model_dump(mode="python", exclude={"id"}))
+
+
+def _require_restore_compatible_form_delivery_mode_prefixes(
+    session: Session,
+    records: list[dict[str, Any]],
+    *,
+    website_ids: dict[int, int],
+) -> None:
+    """Never merge an older mode lineage over a newer or gapped target chain."""
+
+    maximums: dict[tuple[int, str], int] = {}
+    for record in records:
+        scope = (
+            _mapped_id(
+                website_ids,
+                record["website_id"],
+                "website_form_delivery_mode_revisions.website_id",
+            ),
+            record["form_instance_key"],
+        )
+        maximums[scope] = max(maximums.get(scope, 0), record["revision"])
+    for (website_id, form_instance_key), source_maximum in maximums.items():
+        target = list(
+            session.exec(
+                select(WebsiteFormDeliveryModeRevision)
+                .where(
+                    WebsiteFormDeliveryModeRevision.website_id == website_id,
+                    WebsiteFormDeliveryModeRevision.form_instance_key
+                    == form_instance_key,
+                )
+                .order_by(WebsiteFormDeliveryModeRevision.revision)
+            ).all()
+        )
+        revisions = [record.revision for record in target]
+        if revisions != list(range(1, len(target) + 1)):
+            raise BackupValidationError(
+                "Target form-delivery mode lineage is incomplete or divergent; restore was refused."
+            )
+        if revisions and revisions[-1] > source_maximum:
+            raise BackupValidationError(
+                "Target form-delivery mode lineage is newer than the backup; restore was refused."
+            )
+
+
+def _require_restore_compatible_form_recipient_prefixes(
+    session: Session,
+    records: list[dict[str, Any]],
+    *,
+    website_ids: dict[int, int],
+) -> None:
+    """Never merge an older recipient lineage over newer durable evidence."""
+
+    maximums: dict[tuple[int, str, str], int] = {}
+    for record in records:
+        scope = (
+            _mapped_id(
+                website_ids,
+                record["website_id"],
+                "website_form_recipient_revisions.website_id",
+            ),
+            record["form_instance_key"],
+            record["recipient_key"],
+        )
+        maximums[scope] = max(maximums.get(scope, 0), record["revision"])
+    for (
+        website_id,
+        form_instance_key,
+        recipient_key,
+    ), source_maximum in maximums.items():
+        target = list(
+            session.exec(
+                select(WebsiteFormRecipientRevision)
+                .where(
+                    WebsiteFormRecipientRevision.website_id == website_id,
+                    WebsiteFormRecipientRevision.form_instance_key
+                    == form_instance_key,
+                    WebsiteFormRecipientRevision.recipient_key == recipient_key,
+                )
+                .order_by(WebsiteFormRecipientRevision.revision)
+            ).all()
+        )
+        revisions = [record.revision for record in target]
+        if revisions != list(range(1, len(target) + 1)):
+            raise BackupValidationError(
+                "Target form-recipient lineage is incomplete or divergent; restore was refused."
+            )
+        if revisions and revisions[-1] > source_maximum:
+            raise BackupValidationError(
+                "Target form-recipient lineage is newer than the backup; restore was refused."
+            )
 
 
 def _require_restore_compatible_scoped_authorization_prefix(
@@ -4969,6 +5450,23 @@ def _canonicalize_converged_utc_timestamps(
                 )
 
 
+def _canonicalize_form_delivery_utc_timestamps(
+    data: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Normalize revision 0047 form-delivery timestamps as explicit UTC."""
+
+    for group, fields in _FORM_DELIVERY_UTC_TIMESTAMP_FIELDS.items():
+        for record in data.get(group, []):
+            for field in fields:
+                value = record.get(field)
+                if value is None:
+                    continue
+                parsed = _datetime_value(value, f"{group}.{field}")
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=UTC)
+                record[field] = parsed.astimezone(UTC).isoformat()
+
+
 def _canonical_theme_datetime(value: Any, field: str) -> str | None:
     if value is None:
         return None
@@ -5170,6 +5668,44 @@ def _restore_theme_configuration_audit_snapshot(
                 restored[field],
                 f"theme_configuration_audits.snapshot.{field}",
             )
+    return restored
+
+
+def _restore_form_delivery_audit_snapshot(
+    snapshot: Any,
+    *,
+    website_ids: dict[int, int],
+    component_ids: dict[int, int],
+    mode_revision_ids: dict[int, int],
+    recipient_revision_ids: dict[int, int],
+) -> dict[str, Any]:
+    """Remap only the identities allowed by the fixed safe audit projection."""
+
+    if not isinstance(snapshot, dict):
+        raise BackupValidationError(
+            "Form-delivery configuration audit snapshot must be an object."
+        )
+    restored = deepcopy(snapshot)
+    target = restored.get("target")
+    if target == "mode_revision":
+        target_mapping = mode_revision_ids
+    elif target == "recipient_revision":
+        target_mapping = recipient_revision_ids
+    else:
+        raise BackupValidationError(
+            "Form-delivery configuration audit snapshot has an invalid target."
+        )
+    mappings = (
+        ("target_id", target_mapping),
+        ("website_id", website_ids),
+        ("form_component_configuration_id", component_ids),
+    )
+    for field, mapping in mappings:
+        restored[field] = _mapped_id(
+            mapping,
+            restored.get(field),
+            f"form_delivery_configuration_audits.snapshot.{field}",
+        )
     return restored
 
 
@@ -5511,7 +6047,7 @@ def _validate_site_connection_decision_provenance(
     data: dict[str, list[dict[str, Any]]],
     backup_version: str,
 ) -> None:
-    if backup_version in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
+    if backup_version in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
         _validate_052_site_connection_provenance_fields(data)
 
     planning_by_plan = {
@@ -5582,7 +6118,7 @@ def _validate_site_connection_decision_provenance(
                 "Backup Internal Link Intent crosses a Website, Site Plan, or page boundary."
             )
 
-    if backup_version not in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57"}:
+    if backup_version not in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
         return
 
     _validate_052_composition_connection_bindings(
@@ -6019,7 +6555,7 @@ def _validate_nested_qa_page_identities(
 ) -> None:
     """Reject QA projections that claim a page other than their owner."""
 
-    require_identity = backup_version in {"0.55", "0.56", "0.57"}
+    require_identity = backup_version in {"0.55", "0.56", "0.57", "0.58"}
     for record in data["generated_pages"]:
         qa_result = record.get("qa_result")
         if qa_result is None:
@@ -6080,7 +6616,7 @@ def _validate_theme_configuration_graph(
         "website_theme_component_configurations",
         "theme_configuration_audits",
     )
-    if backup_version != "0.57":
+    if backup_version not in {"0.57", "0.58"}:
         if any(data[group] for group in groups):
             raise BackupValidationError(
                 "Legacy backup contains unsupported durable Theme configuration records."
@@ -7118,6 +7654,997 @@ def _validate_theme_configuration_graph(
         ) from exc
 
 
+def _validate_form_delivery_graph(
+    data: dict[str, list[dict[str, Any]]],
+    backup_version: str,
+) -> None:
+    """Reject unsafe or inconsistent Backup 0.58 form-delivery graphs."""
+
+    if backup_version != "0.58":
+        if any(data[group] for group in FORM_DELIVERY_BACKUP_GROUPS):
+            raise BackupValidationError(
+                "Legacy backup contains unsupported form-delivery records."
+            )
+        return
+
+    from pydantic import EmailStr, TypeAdapter
+
+    from app.schemas.form_delivery import validate_mode_configuration
+    from app.services.form_delivery_modes import (
+        form_delivery_configuration_audit_hash,
+        form_delivery_mode_fingerprint,
+        form_recipient_fingerprint,
+        normalize_recipient_email,
+    )
+    from app.services.form_delivery_outbox import (
+        form_delivery_attempt_fingerprint,
+        form_submission_envelope_fingerprint,
+    )
+
+    models = {
+        "website_form_delivery_mode_revisions": WebsiteFormDeliveryModeRevision,
+        "website_form_recipient_revisions": WebsiteFormRecipientRevision,
+        "form_submission_envelopes": FormSubmissionEnvelope,
+        "form_delivery_outbox_records": FormDeliveryOutbox,
+        "form_delivery_attempts": FormDeliveryAttempt,
+        "form_delivery_configuration_audits": FormDeliveryConfigurationAudit,
+    }
+    try:
+        for group, model in models.items():
+            expected_fields = set(model.model_fields)
+            for record in data[group]:
+                if set(record) != expected_fields:
+                    raise BackupValidationError(
+                        f"Backup record in '{group}' does not match the exact 0.58 field contract."
+                    )
+                _record_id(record, group)
+                model.model_validate(
+                    _normalize_converged_utc_restore_values(model, record)
+                )
+
+        websites = {record["id"]: record for record in data["websites"]}
+        components = {
+            record["id"]: record
+            for record in data["website_theme_component_configurations"]
+        }
+        modes = {
+            record["id"]: record
+            for record in data["website_form_delivery_mode_revisions"]
+        }
+        recipients = {
+            record["id"]: record
+            for record in data["website_form_recipient_revisions"]
+        }
+        envelopes = {
+            record["id"]: record for record in data["form_submission_envelopes"]
+        }
+        outboxes = {
+            record["id"]: record
+            for record in data["form_delivery_outbox_records"]
+        }
+
+        if len(modes) != len(data["website_form_delivery_mode_revisions"]):
+            raise BackupValidationError(
+                "Backup contains duplicate form-delivery mode identities."
+            )
+        if len(recipients) != len(data["website_form_recipient_revisions"]):
+            raise BackupValidationError(
+                "Backup contains duplicate form-recipient identities."
+            )
+        if len(envelopes) != len(data["form_submission_envelopes"]):
+            raise BackupValidationError(
+                "Backup contains duplicate form-envelope identities."
+            )
+        if len(outboxes) != len(data["form_delivery_outbox_records"]):
+            raise BackupValidationError(
+                "Backup contains duplicate form-outbox identities."
+            )
+
+        mode_groups: dict[tuple[int, str], list[dict[str, Any]]] = {}
+        for record in modes.values():
+            website = websites.get(record["website_id"])
+            component = components.get(record["form_component_configuration_id"])
+            if website is None or component is None:
+                raise BackupValidationError(
+                    "Backup form-delivery mode has an unresolved Website or component."
+                )
+            if (
+                component.get("website_id") != record["website_id"]
+                or component.get("component_instance_key")
+                != record["form_instance_key"]
+                or component.get("component_key") != "compact_estimate_form"
+                or component.get("scope_type") != "website_default"
+                or component.get("planned_page_id") is not None
+                or component.get("overrides_component_configuration_id") is not None
+            ):
+                raise BackupValidationError(
+                    "Backup form-delivery mode crosses its exact Website/form component scope."
+                )
+            if (
+                not _is_positive_int(record.get("revision"))
+                or type(record.get("enabled")) is not bool
+                or record.get("lifecycle_status")
+                not in {"draft", "approved", "active", "retired"}
+                or record.get("mode")
+                not in {
+                    "disabled",
+                    "atlas_email",
+                    "provider_owned",
+                    "atlasops360_native",
+                    "external_adapter",
+                }
+                or not _is_form_delivery_safe_text(record.get("audit_identity"))
+                or not _is_form_delivery_safe_text(record.get("created_by"))
+                or not _is_form_delivery_safe_text(record.get("updated_by"))
+            ):
+                raise BackupValidationError(
+                    "Backup contains an invalid form-delivery mode revision."
+                )
+            created_at = _form_delivery_timestamp(record, "created_at")
+            updated_at = _form_delivery_timestamp(record, "updated_at")
+            if _comparable_datetime(updated_at) < _comparable_datetime(created_at):
+                raise BackupValidationError(
+                    "Backup form-delivery mode update predates creation."
+                )
+            approval_pair = (
+                record.get("approval_identity") is not None,
+                record.get("approved_at") is not None,
+            )
+            activation_pair = (
+                record.get("activation_identity") is not None,
+                record.get("activated_at") is not None,
+            )
+            if approval_pair[0] != approval_pair[1] or activation_pair[0] != activation_pair[1]:
+                raise BackupValidationError(
+                    "Backup form-delivery mode has incomplete approval or activation evidence."
+                )
+            approved_at = None
+            if record.get("approved_at") is not None:
+                approved_at = _form_delivery_timestamp(record, "approved_at")
+                if not _is_form_delivery_safe_text(
+                    record.get("approval_identity")
+                ):
+                    raise BackupValidationError(
+                        "Backup form-delivery approval evidence is invalid."
+                    )
+            if record["lifecycle_status"] in {"approved", "active"} and approved_at is None:
+                raise BackupValidationError(
+                    "Approved or active form-delivery mode lacks approval evidence."
+                )
+            if record.get("activated_at") is not None:
+                activated_at = _form_delivery_timestamp(record, "activated_at")
+                if (
+                    not _is_form_delivery_safe_text(record.get("activation_identity"))
+                    or _comparable_datetime(activated_at)
+                    < _comparable_datetime(approved_at or created_at)
+                ):
+                    raise BackupValidationError(
+                        "Backup form-delivery activation evidence is invalid."
+                    )
+            elif record["lifecycle_status"] == "active":
+                raise BackupValidationError(
+                    "Active form-delivery mode lacks activation evidence."
+                )
+            if record["enabled"] and (
+                record["mode"] == "disabled"
+                or record["lifecycle_status"] != "active"
+            ):
+                raise BackupValidationError(
+                    "Only an active non-disabled form-delivery mode may be enabled."
+                )
+            configuration = record.get("configuration_payload")
+            if not isinstance(configuration, dict):
+                raise BackupValidationError(
+                    "Backup form-delivery configuration must be an object."
+                )
+            validate_mode_configuration(record["mode"], configuration)
+            governed_fields = (
+                "provider_key",
+                "adapter_version",
+                "destination_identity",
+                "privacy_policy_reference",
+                "consent_policy_reference",
+                "retention_policy_reference",
+                "abuse_policy_reference",
+                "success_behavior",
+                "failure_behavior",
+                "idempotency_policy_reference",
+            )
+            if record["mode"] == "disabled":
+                if configuration or any(
+                    record.get(field) is not None for field in governed_fields
+                ):
+                    raise BackupValidationError(
+                        "Disabled form-delivery mode contains delivery configuration."
+                    )
+            elif any(
+                not _is_form_delivery_safe_text(record.get(field))
+                for field in (
+                    "provider_key",
+                    "adapter_version",
+                    "destination_identity",
+                )
+            ):
+                raise BackupValidationError(
+                    "Non-disabled form-delivery mode lacks provider, adapter, or destination identity."
+                )
+            if record["mode"] == "provider_owned" and any(
+                record.get(field) is not None
+                for field in (
+                    "consent_policy_reference",
+                    "retention_policy_reference",
+                    "abuse_policy_reference",
+                    "idempotency_policy_reference",
+                )
+            ):
+                raise BackupValidationError(
+                    "Provider-owned form mode cannot claim Atlas collection or retention policy."
+                )
+            if not _is_lower_sha256(record.get("integrity_fingerprint")) or (
+                record["integrity_fingerprint"]
+                != form_delivery_mode_fingerprint(record)
+            ):
+                raise BackupValidationError(
+                    "Backup form-delivery mode fingerprint is invalid."
+                )
+            mode_groups.setdefault(
+                (record["website_id"], record["form_instance_key"]), []
+            ).append(record)
+
+        for records in mode_groups.values():
+            ordered = sorted(records, key=lambda item: item["revision"])
+            if [item["revision"] for item in ordered] != list(
+                range(1, len(ordered) + 1)
+            ):
+                raise BackupValidationError(
+                    "Backup form-delivery mode revisions are not contiguous."
+                )
+            predecessor_ids: set[int] = set()
+            for index, record in enumerate(ordered):
+                expected_predecessor = ordered[index - 1]["id"] if index else None
+                if (
+                    record.get("supersedes_delivery_mode_revision_id")
+                    != expected_predecessor
+                    or (
+                        expected_predecessor is not None
+                        and expected_predecessor in predecessor_ids
+                    )
+                ):
+                    raise BackupValidationError(
+                        "Backup form-delivery mode lineage is branched, cyclic, or cross-scoped."
+                    )
+                if expected_predecessor is not None:
+                    predecessor_ids.add(expected_predecessor)
+            heads = [item for item in ordered if item["id"] not in predecessor_ids]
+            if len(heads) != 1 or heads[0] is not ordered[-1]:
+                raise BackupValidationError(
+                    "Backup form-delivery mode chain lacks exactly one current head."
+                )
+
+        successor_created_at_by_mode: dict[int, datetime] = {}
+        for record in modes.values():
+            predecessor_id = record.get("supersedes_delivery_mode_revision_id")
+            if predecessor_id is not None:
+                successor_created_at_by_mode[predecessor_id] = (
+                    _form_delivery_timestamp(record, "created_at")
+                )
+        first_envelope_received_at_by_mode: dict[int, datetime] = {}
+        for envelope in envelopes.values():
+            mode_id = envelope["delivery_mode_revision_id"]
+            received_at = _form_delivery_timestamp(envelope, "received_at")
+            prior = first_envelope_received_at_by_mode.get(mode_id)
+            if prior is None or _comparable_datetime(received_at) < (
+                _comparable_datetime(prior)
+            ):
+                first_envelope_received_at_by_mode[mode_id] = received_at
+
+        email_adapter = TypeAdapter(EmailStr)
+        recipient_groups: dict[
+            tuple[int, str, str], list[dict[str, Any]]
+        ] = {}
+        for record in recipients.values():
+            mode = modes.get(record["delivery_mode_revision_id"])
+            if (
+                mode is None
+                or mode["mode"] != "atlas_email"
+                or mode["website_id"] != record["website_id"]
+                or mode["form_component_configuration_id"]
+                != record["form_component_configuration_id"]
+                or mode["form_instance_key"] != record["form_instance_key"]
+            ):
+                raise BackupValidationError(
+                    "Backup form recipient crosses its exact Atlas-email mode scope."
+                )
+            if (
+                not _is_positive_int(record.get("revision"))
+                or type(record.get("enabled")) is not bool
+                or record.get("recipient_role") not in {"primary", "secondary"}
+                or record.get("verification_status")
+                not in {"unverified", "verified", "revoked"}
+                or not _is_form_delivery_safe_text(record.get("recipient_key"))
+                or not _is_form_delivery_safe_text(record.get("created_by"))
+                or not _is_form_delivery_safe_text(record.get("updated_by"))
+            ):
+                raise BackupValidationError(
+                    "Backup contains an invalid form-recipient revision."
+                )
+            email = str(email_adapter.validate_python(record.get("email")))
+            if (
+                record.get("normalized_email") != normalize_recipient_email(email)
+                or normalize_recipient_email(record["email"])
+                != record["normalized_email"]
+            ):
+                raise BackupValidationError(
+                    "Backup form recipient email is not deterministically normalized."
+                )
+            created_at = _form_delivery_timestamp(record, "created_at")
+            updated_at = _form_delivery_timestamp(record, "updated_at")
+            if _comparable_datetime(updated_at) < _comparable_datetime(created_at):
+                raise BackupValidationError(
+                    "Backup form-recipient update predates creation."
+                )
+            mode_created_at = _form_delivery_timestamp(mode, "created_at")
+            seal_times = [
+                value
+                for value in (
+                    successor_created_at_by_mode.get(mode["id"]),
+                    first_envelope_received_at_by_mode.get(mode["id"]),
+                )
+                if value is not None
+            ]
+            if _comparable_datetime(created_at) < _comparable_datetime(
+                mode_created_at
+            ) or any(
+                _comparable_datetime(created_at) > _comparable_datetime(seal_time)
+                for seal_time in seal_times
+            ):
+                raise BackupValidationError(
+                    "Backup form-recipient creation falls outside its immutable mode snapshot."
+                )
+            verification_fields = (
+                record.get("verified_at"),
+                record.get("verified_by"),
+                record.get("verification_method"),
+            )
+            if record["verification_status"] == "unverified":
+                if any(value is not None for value in verification_fields):
+                    raise BackupValidationError(
+                        "Unverified form recipient contains verification evidence."
+                    )
+            else:
+                if (
+                    any(value is None for value in verification_fields)
+                    or not _is_form_delivery_safe_text(record.get("verified_by"))
+                    or not _is_form_delivery_safe_text(
+                        record.get("verification_method")
+                    )
+                ):
+                    raise BackupValidationError(
+                        "Verified or revoked form recipient lacks valid provenance."
+                    )
+                _form_delivery_timestamp(record, "verified_at")
+            if not _is_lower_sha256(record.get("integrity_fingerprint")) or (
+                record["integrity_fingerprint"] != form_recipient_fingerprint(record)
+            ):
+                raise BackupValidationError(
+                    "Backup form-recipient fingerprint is invalid."
+                )
+            recipient_groups.setdefault(
+                (
+                    record["website_id"],
+                    record["form_instance_key"],
+                    record["recipient_key"],
+                ),
+                [],
+            ).append(record)
+
+        recipient_predecessor_ids: set[int] = set()
+        same_mode_recipient_predecessor_ids: dict[int, set[int]] = {}
+        for records in recipient_groups.values():
+            ordered = sorted(records, key=lambda item: item["revision"])
+            if [item["revision"] for item in ordered] != list(
+                range(1, len(ordered) + 1)
+            ):
+                raise BackupValidationError(
+                    "Backup form-recipient revisions are not contiguous."
+                )
+            predecessor_ids: set[int] = set()
+            for index, record in enumerate(ordered):
+                expected_predecessor = ordered[index - 1]["id"] if index else None
+                predecessor = ordered[index - 1] if index else None
+                current_mode = modes.get(record["delivery_mode_revision_id"])
+                predecessor_mode = (
+                    modes.get(predecessor["delivery_mode_revision_id"])
+                    if predecessor is not None
+                    else None
+                )
+                if (
+                    record.get("supersedes_recipient_revision_id")
+                    != expected_predecessor
+                    or (
+                        expected_predecessor is not None
+                        and expected_predecessor in predecessor_ids
+                    )
+                    or (
+                        predecessor_mode is not None
+                        and (
+                            current_mode is None
+                            or not (
+                                current_mode["id"] == predecessor_mode["id"]
+                                or current_mode.get(
+                                    "supersedes_delivery_mode_revision_id"
+                                )
+                                == predecessor_mode["id"]
+                            )
+                        )
+                    )
+                ):
+                    raise BackupValidationError(
+                        "Backup form-recipient lineage is branched, cyclic, or cross-scoped."
+                    )
+                if expected_predecessor is not None:
+                    predecessor_ids.add(expected_predecessor)
+                    recipient_predecessor_ids.add(expected_predecessor)
+                    if current_mode["id"] == predecessor_mode["id"]:
+                        same_mode_recipient_predecessor_ids.setdefault(
+                            current_mode["id"], set()
+                        ).add(expected_predecessor)
+            heads = [item for item in ordered if item["id"] not in predecessor_ids]
+            if len(heads) != 1 or heads[0] is not ordered[-1]:
+                raise BackupValidationError(
+                    "Backup form-recipient chain lacks exactly one current head."
+                )
+
+        recipient_heads_by_mode: dict[int, list[dict[str, Any]]] = {}
+        for record in recipients.values():
+            if record["id"] not in same_mode_recipient_predecessor_ids.get(
+                record["delivery_mode_revision_id"], set()
+            ):
+                recipient_heads_by_mode.setdefault(
+                    record["delivery_mode_revision_id"], []
+                ).append(record)
+        for heads in recipient_heads_by_mode.values():
+            normalized_addresses = [record["normalized_email"] for record in heads]
+            if len(normalized_addresses) != len(set(normalized_addresses)):
+                raise BackupValidationError(
+                    "Backup form mode contains duplicate current normalized recipient heads."
+                )
+            if sum(
+                1
+                for record in heads
+                if record["enabled"] and record["recipient_role"] == "primary"
+            ) > 1:
+                raise BackupValidationError(
+                    "Backup form mode contains multiple enabled primary recipient heads."
+                )
+
+        _validate_form_delivery_runtime_records(
+            envelopes=envelopes,
+            outboxes=outboxes,
+            attempts=data["form_delivery_attempts"],
+            modes=modes,
+            envelope_fingerprint=form_submission_envelope_fingerprint,
+            attempt_fingerprint=form_delivery_attempt_fingerprint,
+        )
+        _validate_form_delivery_audits(
+            audits=data["form_delivery_configuration_audits"],
+            modes=modes,
+            recipients=recipients,
+            audit_hash=form_delivery_configuration_audit_hash,
+        )
+    except BackupValidationError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise BackupValidationError(
+            "Backup contains invalid universal form-delivery data."
+        ) from exc
+
+
+def _validate_form_delivery_runtime_records(
+    *,
+    envelopes: dict[int, dict[str, Any]],
+    outboxes: dict[int, dict[str, Any]],
+    attempts: list[dict[str, Any]],
+    modes: dict[int, dict[str, Any]],
+    envelope_fingerprint: Any,
+    attempt_fingerprint: Any,
+) -> None:
+    for record in envelopes.values():
+        mode = modes.get(record["delivery_mode_revision_id"])
+        if (
+            mode is None
+            or mode["mode"] not in _FORM_DELIVERY_COLLECTOR_MODES
+            or mode["lifecycle_status"] != "active"
+            or mode["enabled"] is not True
+            or mode["website_id"] != record["website_id"]
+            or mode["form_component_configuration_id"]
+            != record["form_component_configuration_id"]
+            or mode["provider_key"] != record["destination_adapter_key"]
+            or mode["privacy_policy_reference"]
+            != record["privacy_policy_reference"]
+            or mode["retention_policy_reference"]
+            != record["retention_policy_reference"]
+            or mode["abuse_policy_reference"] != record["abuse_policy_reference"]
+            or mode["audit_identity"] != record["audit_identity"]
+        ):
+            raise BackupValidationError(
+                "Backup form envelope crosses mode scope or durable policy."
+            )
+        if (
+            not _is_positive_int(record.get("submission_contract_version"))
+            or (
+                record.get("consent_accepted") is not None
+                and type(record.get("consent_accepted")) is not bool
+            )
+            or not _is_form_delivery_safe_text(record.get("privacy_policy_reference"))
+            or not _is_form_delivery_safe_text(record.get("retention_policy_reference"))
+            or not _is_form_delivery_safe_text(record.get("abuse_policy_reference"))
+            or not _is_form_delivery_stable_key(record.get("anti_spam_decision"))
+            or not _is_form_delivery_stable_key(record.get("audit_identity"))
+            or not _is_lower_sha256(record.get("request_identity"))
+            or not _is_form_delivery_stable_key(
+                record.get("destination_adapter_key")
+            )
+            or not _is_lower_sha256(record.get("idempotency_digest"))
+            or (
+                record.get("consent_version") is not None
+                and not _is_form_delivery_stable_key(record.get("consent_version"))
+            )
+            or (
+                record.get("source_page_identity") is not None
+                and not _is_form_delivery_source_reference(
+                    record.get("source_page_identity")
+                )
+            )
+        ):
+            raise BackupValidationError(
+                "Backup contains invalid safe form-envelope metadata."
+            )
+        received_at = _form_delivery_timestamp(record, "received_at")
+        expires_at = None
+        if record.get("expires_at") is not None:
+            expires_at = _form_delivery_timestamp(record, "expires_at")
+            if _comparable_datetime(expires_at) < _comparable_datetime(received_at):
+                raise BackupValidationError(
+                    "Backup form envelope expires before receipt."
+                )
+        payload_reference = record.get("secure_payload_reference")
+        key_reference = record.get("encryption_key_reference")
+        if (payload_reference is None) != (key_reference is None):
+            raise BackupValidationError(
+                "Backup form envelope has incomplete secure-payload references."
+            )
+        if payload_reference is None:
+            raise BackupValidationError(
+                "Backup form envelope lacks its governed secure-payload reference."
+            )
+        if (
+            not isinstance(payload_reference, str)
+            or _FORM_DELIVERY_TEST_PAYLOAD_REFERENCE_PATTERN.fullmatch(
+                payload_reference
+            )
+            is None
+            or key_reference != _FORM_DELIVERY_TEST_KEY_REFERENCE
+        ):
+            raise BackupValidationError(
+                "Backup 0.58 form envelope may contain only opaque disposable-test payload references."
+            )
+        if not _is_lower_sha256(record.get("integrity_fingerprint")) or (
+            record["integrity_fingerprint"] != envelope_fingerprint(record)
+        ):
+            raise BackupValidationError(
+                "Backup form-envelope fingerprint is invalid."
+            )
+
+    attempt_ids: set[int] = set()
+    attempt_keys: set[tuple[int, int]] = set()
+    attempts_by_outbox: dict[int, list[dict[str, Any]]] = {}
+    for record in attempts:
+        record_id = _record_id(record, "form_delivery_attempts")
+        key = (record["outbox_id"], record["attempt_number"])
+        if record_id in attempt_ids or key in attempt_keys:
+            raise BackupValidationError(
+                "Backup contains duplicate form-delivery attempts."
+            )
+        attempt_ids.add(record_id)
+        attempt_keys.add(key)
+        if (
+            record["outbox_id"] not in outboxes
+            or not _is_positive_int(record.get("attempt_number"))
+            or record.get("outcome")
+            not in {"delivered", "transient_failure", "permanent_failure"}
+            or (
+                record.get("safe_error_code") is not None
+                and not _is_form_delivery_safe_code(record.get("safe_error_code"))
+            )
+            or (
+                record.get("safe_provider_reference") is not None
+                and not _is_lower_sha256(record.get("safe_provider_reference"))
+            )
+        ):
+            raise BackupValidationError(
+                "Backup contains invalid value-free form-delivery attempt evidence."
+            )
+        started_at = _form_delivery_timestamp(record, "started_at")
+        completed_at = _form_delivery_timestamp(record, "completed_at")
+        if _comparable_datetime(completed_at) < _comparable_datetime(started_at):
+            raise BackupValidationError(
+                "Backup form-delivery attempt completes before it starts."
+            )
+        if record["outcome"] == "transient_failure":
+            if record.get("next_retry_at") is None:
+                raise BackupValidationError(
+                    "Transient form-delivery failure lacks retry evidence."
+                )
+            next_retry_at = _form_delivery_timestamp(record, "next_retry_at")
+            if _comparable_datetime(next_retry_at) < _comparable_datetime(
+                completed_at
+            ):
+                raise BackupValidationError(
+                    "Backup form-delivery retry predates attempt completion."
+                )
+        elif record.get("next_retry_at") is not None:
+            raise BackupValidationError(
+                "Non-transient form-delivery attempt contains retry evidence."
+            )
+        if record["outcome"] == "delivered":
+            if (
+                record.get("safe_error_code") is not None
+                or not _is_lower_sha256(record.get("safe_provider_reference"))
+            ):
+                raise BackupValidationError(
+                    "Delivered form attempt lacks exact value-free provider evidence."
+                )
+        elif not _is_form_delivery_safe_code(record.get("safe_error_code")):
+            raise BackupValidationError(
+                "Failed form-delivery attempt lacks a safe error code."
+            )
+        if not _is_lower_sha256(record.get("integrity_fingerprint")) or (
+            record["integrity_fingerprint"] != attempt_fingerprint(record)
+        ):
+            raise BackupValidationError(
+                "Backup form-delivery attempt fingerprint is invalid."
+            )
+        attempts_by_outbox.setdefault(record["outbox_id"], []).append(record)
+
+    envelope_outboxes: set[int] = set()
+    for record in outboxes.values():
+        envelope = envelopes.get(record["envelope_id"])
+        mode = modes.get(record["delivery_mode_revision_id"])
+        if (
+            envelope is None
+            or mode is None
+            or record["envelope_id"] in envelope_outboxes
+            or envelope["delivery_mode_revision_id"]
+            != record["delivery_mode_revision_id"]
+            or record["adapter_key"] != mode["provider_key"]
+            or record["adapter_version"] != mode["adapter_version"]
+            or record["destination_identity"] != mode["destination_identity"]
+        ):
+            raise BackupValidationError(
+                "Backup form outbox crosses its exact envelope or mode scope."
+            )
+        envelope_outboxes.add(record["envelope_id"])
+        if (
+            record.get("status")
+            not in {
+                "queued",
+                "processing",
+                "retrying",
+                "delivered",
+                "terminal_failed",
+                "expired",
+            }
+            or type(record.get("attempt_count")) is not int
+            or record["attempt_count"] < 0
+            or not _is_positive_int(record.get("state_version"))
+            or not _is_form_delivery_safe_text(record.get("adapter_key"))
+            or not _is_form_delivery_safe_text(record.get("adapter_version"))
+            or not _is_form_delivery_safe_text(record.get("destination_identity"))
+            or (
+                record.get("last_safe_error_code") is not None
+                and not _is_form_delivery_safe_code(record.get("last_safe_error_code"))
+            )
+        ):
+            raise BackupValidationError(
+                "Backup contains invalid form-delivery outbox state."
+            )
+        created_at = _form_delivery_timestamp(record, "created_at")
+        updated_at = _form_delivery_timestamp(record, "updated_at")
+        if (
+            _comparable_datetime(updated_at) < _comparable_datetime(created_at)
+            or _comparable_datetime(created_at)
+            < _comparable_datetime(
+                _form_delivery_timestamp(envelope, "received_at")
+            )
+        ):
+            raise BackupValidationError(
+                "Backup form-delivery outbox chronology is invalid."
+            )
+        ordered_attempts = sorted(
+            attempts_by_outbox.get(record["id"], []),
+            key=lambda item: item["attempt_number"],
+        )
+        if (
+            record["attempt_count"] != len(ordered_attempts)
+            or [item["attempt_number"] for item in ordered_attempts]
+            != list(range(1, len(ordered_attempts) + 1))
+            or record["state_version"] < record["attempt_count"] + 1
+        ):
+            raise BackupValidationError(
+                "Backup form outbox attempt count or state version is inconsistent."
+            )
+        latest = ordered_attempts[-1] if ordered_attempts else None
+        if latest is not None:
+            if (
+                _comparable_datetime(
+                    _form_delivery_timestamp(latest, "completed_at")
+                )
+                > _comparable_datetime(updated_at)
+                or record.get("last_safe_error_code")
+                != latest.get("safe_error_code")
+            ):
+                raise BackupValidationError(
+                    "Backup form outbox does not match its latest attempt evidence."
+                )
+        elif record.get("last_safe_error_code") is not None:
+            raise BackupValidationError(
+                "Attempt-free form outbox contains a last error."
+            )
+        terminal_values = {
+            field: record.get(field)
+            for field in ("delivered_at", "failed_at", "expired_at")
+        }
+        for field, value in terminal_values.items():
+            if value is not None:
+                _form_delivery_timestamp(record, field)
+        status = record["status"]
+        if status == "queued":
+            if latest is not None or record.get("next_attempt_at") is not None or any(
+                value is not None for value in terminal_values.values()
+            ):
+                raise BackupValidationError(
+                    "Queued form outbox contains attempt or terminal evidence."
+                )
+        elif status == "retrying":
+            if (
+                latest is None
+                or latest["outcome"] != "transient_failure"
+                or record.get("next_attempt_at") is None
+                or any(value is not None for value in terminal_values.values())
+                or _comparable_datetime(
+                    _form_delivery_timestamp(record, "next_attempt_at")
+                )
+                != _comparable_datetime(
+                    _form_delivery_timestamp(latest, "next_retry_at")
+                )
+            ):
+                raise BackupValidationError(
+                    "Retrying form outbox lacks exact transient-failure evidence."
+                )
+        elif status == "delivered":
+            if (
+                latest is None
+                or latest["outcome"] != "delivered"
+                or terminal_values["delivered_at"] is None
+                or terminal_values["failed_at"] is not None
+                or terminal_values["expired_at"] is not None
+                or record.get("next_attempt_at") is not None
+            ):
+                raise BackupValidationError(
+                    "Delivered form outbox lacks exact terminal evidence."
+                )
+        elif status == "terminal_failed":
+            if (
+                latest is None
+                or latest["outcome"] != "permanent_failure"
+                or terminal_values["failed_at"] is None
+                or terminal_values["delivered_at"] is not None
+                or terminal_values["expired_at"] is not None
+                or record.get("next_attempt_at") is not None
+            ):
+                raise BackupValidationError(
+                    "Terminally failed form outbox lacks exact failure evidence."
+                )
+        elif status == "expired":
+            if (
+                terminal_values["expired_at"] is None
+                or terminal_values["delivered_at"] is not None
+                or terminal_values["failed_at"] is not None
+                or record.get("next_attempt_at") is not None
+                or envelope.get("expires_at") is None
+                or _comparable_datetime(
+                    _form_delivery_timestamp(record, "expired_at")
+                )
+                < _comparable_datetime(
+                    _form_delivery_timestamp(envelope, "expires_at")
+                )
+            ):
+                raise BackupValidationError(
+                    "Expired form outbox lacks exact expiration evidence."
+                )
+        elif any(value is not None for value in terminal_values.values()):
+            raise BackupValidationError(
+                "Processing form outbox contains terminal evidence."
+            )
+
+    if envelope_outboxes != set(envelopes):
+        raise BackupValidationError(
+            "Every backup form envelope must have exactly one delivery outbox."
+        )
+
+    if set(attempts_by_outbox) - set(outboxes):
+        raise BackupValidationError(
+            "Backup form-delivery attempt references an unresolved outbox."
+        )
+
+
+def _validate_form_delivery_audits(
+    *,
+    audits: list[dict[str, Any]],
+    modes: dict[int, dict[str, Any]],
+    recipients: dict[int, dict[str, Any]],
+    audit_hash: Any,
+) -> None:
+    audit_ids: set[int] = set()
+    hashes: set[str] = set()
+    covered_modes: set[int] = set()
+    covered_recipients: set[int] = set()
+    mode_snapshot_fields = {
+        "target",
+        "target_id",
+        "website_id",
+        "form_component_configuration_id",
+        "revision",
+        "mode",
+        "lifecycle_status",
+        "integrity_fingerprint",
+    }
+    recipient_snapshot_fields = {
+        "target",
+        "target_id",
+        "website_id",
+        "form_component_configuration_id",
+        "revision",
+        "recipient_key",
+        "verification_status",
+        "integrity_fingerprint",
+    }
+    for record in audits:
+        record_id = _record_id(record, "form_delivery_configuration_audits")
+        snapshot_hash = record.get("snapshot_hash")
+        if (
+            record_id in audit_ids
+            or snapshot_hash in hashes
+            or not _is_lower_sha256(snapshot_hash)
+            or not _is_form_delivery_safe_text(record.get("actor"))
+            or not _is_form_delivery_safe_text(record.get("rationale"))
+        ):
+            raise BackupValidationError(
+                "Backup contains duplicate or unsafe form-delivery audit evidence."
+            )
+        audit_ids.add(record_id)
+        hashes.add(snapshot_hash)
+        mode_id = record.get("delivery_mode_revision_id")
+        recipient_id = record.get("recipient_revision_id")
+        exact_target = (mode_id is not None) + (recipient_id is not None)
+        if exact_target != 1 or not isinstance(record.get("snapshot"), dict):
+            raise BackupValidationError(
+                "Backup form-delivery audit must have exactly one safe target."
+            )
+        snapshot = record["snapshot"]
+        if mode_id is not None:
+            target = modes.get(mode_id)
+            if target is None or mode_id in covered_modes:
+                raise BackupValidationError(
+                    "Backup form-delivery mode audit target is unresolved or duplicated."
+                )
+            covered_modes.add(mode_id)
+            expected_action = {
+                "approved": "mode_revision_approved",
+                "active": "mode_revision_activated",
+                "retired": "mode_revision_retired",
+            }.get(target["lifecycle_status"], "mode_revision_created")
+            expected_snapshot = {
+                "target": "mode_revision",
+                "target_id": target["id"],
+                "website_id": target["website_id"],
+                "form_component_configuration_id": target[
+                    "form_component_configuration_id"
+                ],
+                "revision": target["revision"],
+                "mode": target["mode"],
+                "lifecycle_status": target["lifecycle_status"],
+                "integrity_fingerprint": target["integrity_fingerprint"],
+            }
+            expected_fields = mode_snapshot_fields
+        else:
+            target = recipients.get(recipient_id)
+            if target is None or recipient_id in covered_recipients:
+                raise BackupValidationError(
+                    "Backup form-recipient audit target is unresolved or duplicated."
+                )
+            covered_recipients.add(recipient_id)
+            expected_action = {
+                "verified": "recipient_verified",
+                "revoked": "recipient_revoked",
+            }.get(target["verification_status"], "recipient_revision_created")
+            expected_snapshot = {
+                "target": "recipient_revision",
+                "target_id": target["id"],
+                "website_id": target["website_id"],
+                "form_component_configuration_id": target[
+                    "form_component_configuration_id"
+                ],
+                "revision": target["revision"],
+                "recipient_key": target["recipient_key"],
+                "verification_status": target["verification_status"],
+                "integrity_fingerprint": target["integrity_fingerprint"],
+            }
+            expected_fields = recipient_snapshot_fields
+        if (
+            set(snapshot) != expected_fields
+            or snapshot != expected_snapshot
+            or record.get("action_type") != expected_action
+            or record["snapshot_hash"] != audit_hash(record)
+        ):
+            raise BackupValidationError(
+                "Backup form-delivery audit snapshot, action, or hash is invalid."
+            )
+        if _comparable_datetime(
+            _form_delivery_timestamp(record, "created_at")
+        ) < _comparable_datetime(_form_delivery_timestamp(target, "created_at")):
+            raise BackupValidationError(
+                "Backup form-delivery audit predates its immutable target."
+            )
+    if covered_modes != set(modes) or covered_recipients != set(recipients):
+        raise BackupValidationError(
+            "Backup form-delivery graph lacks complete exact-target audit coverage."
+        )
+
+
+def _form_delivery_timestamp(record: dict[str, Any], field: str) -> datetime:
+    return _datetime_value(record.get(field), f"form_delivery.{field}")
+
+
+def _is_form_delivery_safe_text(value: Any) -> bool:
+    return bool(
+        isinstance(value, str)
+        and value == value.strip()
+        and value
+        and all(ord(character) >= 32 and ord(character) != 127 for character in value)
+    )
+
+
+def _is_form_delivery_safe_code(value: Any) -> bool:
+    return bool(
+        isinstance(value, str)
+        and re.fullmatch(r"[a-z0-9_-]{1,120}", value) is not None
+    )
+
+
+def _is_form_delivery_stable_key(value: Any) -> bool:
+    return bool(
+        isinstance(value, str)
+        and _FORM_DELIVERY_STABLE_METADATA_KEY_PATTERN.fullmatch(value) is not None
+    )
+
+
+def _is_form_delivery_source_reference(value: Any) -> bool:
+    return bool(
+        isinstance(value, str)
+        and _FORM_DELIVERY_OPAQUE_SOURCE_REFERENCE_PATTERN.fullmatch(value)
+        is not None
+    )
+
+
+def _is_lower_sha256(value: Any) -> bool:
+    return bool(
+        isinstance(value, str)
+        and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+    )
+
+
 def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
     key_fields: dict[str, tuple[str, ...]] = {
         "businesses": ("company_name",),
@@ -7178,6 +8705,25 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
             "revision",
         ),
         "theme_configuration_audits": ("snapshot_hash",),
+        "website_form_delivery_mode_revisions": (
+            "website_id",
+            "form_instance_key",
+            "revision",
+        ),
+        "website_form_recipient_revisions": (
+            "website_id",
+            "form_instance_key",
+            "recipient_key",
+            "revision",
+        ),
+        "form_submission_envelopes": (
+            "website_id",
+            "form_component_configuration_id",
+            "idempotency_digest",
+        ),
+        "form_delivery_outbox_records": ("envelope_id",),
+        "form_delivery_attempts": ("outbox_id", "attempt_number"),
+        "form_delivery_configuration_audits": ("snapshot_hash",),
         "brand_assets": ("brand_id", "asset_key", "version"),
         "website_identity_asset_assignments": (
             "website_identity_id",
@@ -7337,6 +8883,73 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
             (
                 "component_configuration_id",
                 "website_theme_component_configurations",
+                True,
+            ),
+        ),
+        "website_form_delivery_mode_revisions": (
+            ("website_id", "websites", False),
+            (
+                "form_component_configuration_id",
+                "website_theme_component_configurations",
+                False,
+            ),
+            (
+                "supersedes_delivery_mode_revision_id",
+                "website_form_delivery_mode_revisions",
+                True,
+            ),
+        ),
+        "website_form_recipient_revisions": (
+            (
+                "delivery_mode_revision_id",
+                "website_form_delivery_mode_revisions",
+                False,
+            ),
+            ("website_id", "websites", False),
+            (
+                "form_component_configuration_id",
+                "website_theme_component_configurations",
+                False,
+            ),
+            (
+                "supersedes_recipient_revision_id",
+                "website_form_recipient_revisions",
+                True,
+            ),
+        ),
+        "form_submission_envelopes": (
+            ("website_id", "websites", False),
+            (
+                "form_component_configuration_id",
+                "website_theme_component_configurations",
+                False,
+            ),
+            (
+                "delivery_mode_revision_id",
+                "website_form_delivery_mode_revisions",
+                False,
+            ),
+        ),
+        "form_delivery_outbox_records": (
+            ("envelope_id", "form_submission_envelopes", False),
+            (
+                "delivery_mode_revision_id",
+                "website_form_delivery_mode_revisions",
+                False,
+            ),
+        ),
+        "form_delivery_attempts": (
+            ("outbox_id", "form_delivery_outbox_records", False),
+        ),
+        "form_delivery_configuration_audits": (
+            (
+                "delivery_mode_revision_id",
+                "website_form_delivery_mode_revisions",
+                True,
+            ),
+            (
+                "recipient_revision_id",
+                "website_form_recipient_revisions",
                 True,
             ),
         ),
@@ -8168,7 +9781,7 @@ def _validate_page_media_ownership(
             raise BackupValidationError(
                 "Backup Image Metadata has an invalid usage-authorization mode."
             )
-        if backup_version not in {"0.56", "0.57"} and authorization_mode != "contract_default":
+        if backup_version not in {"0.56", "0.57", "0.58"} and authorization_mode != "contract_default":
             raise BackupValidationError(
                 "Legacy backups cannot claim scoped-required Image Metadata."
             )
@@ -8653,7 +10266,7 @@ def _validate_page_media_ownership(
                     "Backup Page Composition generated media component crosses its governed placement binding."
                 )
 
-    if backup_version not in {"0.53", "0.54", "0.55", "0.56", "0.57"} and (planning_records or requirements):
+    if backup_version not in {"0.53", "0.54", "0.55", "0.56", "0.57", "0.58"} and (planning_records or requirements):
         raise BackupValidationError(
             "Legacy backup versions cannot claim Page Media planning governance."
         )
@@ -8689,7 +10302,7 @@ def _validate_composition_media_authorization_binding(
     present = fields.intersection(binding)
     if not present:
         if (
-            backup_version in {"0.56", "0.57"}
+            backup_version in {"0.56", "0.57", "0.58"}
             and composition.get("status") == "current"
             and assignment.get("status") == "active"
             and image.get("usage_authorization_mode") == "scoped_required"
@@ -8755,7 +10368,7 @@ def _validate_scoped_media_authorizations(
     """Validate exact authorization scope, approval, assignment, and lineage."""
 
     records = data["scoped_media_authorizations"]
-    if backup_version not in {"0.56", "0.57"}:
+    if backup_version not in {"0.56", "0.57", "0.58"}:
         if records:
             raise BackupValidationError(
                 "Legacy backup versions cannot claim scoped-media authorizations."
@@ -9384,7 +10997,7 @@ def _validate_generated_page_qa_results(
     """Validate immutable QA identity, outcome integrity, and lineage."""
 
     records = data["generated_page_qa_results"]
-    if backup_version not in {"0.55", "0.56", "0.57"}:
+    if backup_version not in {"0.55", "0.56", "0.57", "0.58"}:
         if records:
             raise BackupValidationError(
                 "Legacy backup versions cannot claim durable Generated Page QA results."
@@ -9890,6 +11503,12 @@ def _has_coherent_page_media_urls(
     )
 
 
+def _restore_target_requires_metadata_bootstrap(bind: Any) -> bool:
+    """Reserve all-metadata create_all for a genuinely unmanaged target."""
+
+    return not sa_inspect(bind).has_table("alembic_version")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export or restore Project Atlas JSON backups.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -9905,7 +11524,16 @@ def main() -> None:
             # opt-in mutates an otherwise empty target database.
             restore_path = resolve_backup_path(args.backup_file)
             load_backup(restore_path)
-        create_db_and_tables(include_alembic_owned=args.command == "restore")
+        include_alembic_owned = bool(
+            args.command == "restore"
+            and _restore_target_requires_metadata_bootstrap(engine)
+        )
+        # A direct restore into a genuinely unmanaged target retains the
+        # explicit all-metadata opt-in. Once Alembic owns the target, its
+        # revision—not model metadata—must create governed tables; otherwise a
+        # 0.57 restore at 0046 would pre-create 0047 tables and make the
+        # additive migration correctly refuse the target.
+        create_db_and_tables(include_alembic_owned=include_alembic_owned)
         with Session(engine) as session:
             if args.command == "export":
                 result = export_backup(session)

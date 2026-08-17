@@ -489,8 +489,8 @@ def test_backup_055_round_trip_remaps_complete_page_media_graph_and_is_idempoten
         exported = export_backup(session, backup_dir=tmp_path)
 
     loaded = load_backup(Path(exported["path"]))
-    assert BACKUP_VERSION == "0.57"
-    assert loaded["metadata"]["version"] == "0.57"
+    assert BACKUP_VERSION == "0.58"
+    assert loaded["metadata"]["version"] == "0.58"
     assert loaded["metadata"]["table_counts"]["website_media_planning_records"] == 2
     assert loaded["metadata"]["table_counts"]["planned_page_media_requirements"] == 2
     exported_assignment = next(

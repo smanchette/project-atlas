@@ -1,6 +1,6 @@
 # Project Atlas Complete Website Blueprint
 
-**Version:** 1.0
+**Version:** 1.1
 
 **Status:** Governing Website-Design Blueprint
 
@@ -74,6 +74,7 @@ Atlas must preserve distinct domains for:
 | Content | Audience-facing language, page purpose, information structure, and calls to action |
 | Presentation | Layout, components, typography, color, spacing, responsive behavior, and theme selection |
 | Media | Images, logos, icons, video, documents, provenance, rights, and derivatives |
+| Form delivery | Website/form-scoped mode, destination, recipient, policy, envelope, readiness, and delivery evidence |
 | Intelligence | External signals, observations, analytics, trends, recommendations, and confidence |
 | Operational data | Customers, jobs, scheduling, dispatch, private records, and service operations |
 
@@ -194,6 +195,28 @@ Components should express stable purposes such as navigation, service summaries,
 A component receives approved content, identity, and media through explicit bindings. Changing a theme should not rewrite facts. Changing content should not require modifying component source. Changing media should not alter page purpose.
 
 Variation should be deliberate. Atlas may reuse a component model across sites while producing materially different visual systems and page compositions.
+
+### 9.1 Website Builder Core and Universal Form Delivery
+
+Atlas Website Builder is a complete standalone product and is also available as an included module within AtlasOps360. Both product paths use one Website Builder Core. The shared core must not fork, and neither product is a prerequisite for the other. It must remain independent of an AtlasOps360 account, database, authentication system, deployment, or subscription. Optional integration uses stable adapters, service boundaries, or APIs rather than cross-product table access, so a standalone Atlas Website can connect to AtlasOps360 later without being rebuilt.
+
+Form delivery is a separate Website Builder subsystem, not a Theme behavior, customer portal, lead inbox, CRM, or operational workflow. A Theme owns form presentation, accessible interaction, and component compatibility. Website/form configuration owns one explicit, revisioned effective mode and the references required by that mode. The permanent modes are:
+
+| Mode | Governing behavior |
+| --- | --- |
+| `disabled` | Atlas collects, stores, and delivers no submission. |
+| `atlas_email` | Atlas owns the normalized submission and delivery workflow; this is the universal standalone option and requires independently ready recipients, policies, transport, secret reference, idempotency, and secure payload handling. |
+| `provider_owned` | An approved provider owns submission receipt, delivery, retention, and provider-side notifications; Atlas owns safe presentation, configuration, readiness, audit, and fail-closed behavior. |
+| `atlasops360_native` | A future optional first-party adapter may receive the normalized submission envelope without making AtlasOps360 a core dependency. |
+| `external_adapter` | An installed, approved adapter may map the normalized envelope to another CRM, field-service system, API, or other supported destination. |
+
+The effective mode is scoped to the exact Website and form component. Its revision records are immutable, and the chain has exactly one current head. The mode must not be inferred from a Theme, portal configuration, provider presence, or another mode. No mode silently falls back to another, and incomplete configuration fails closed.
+
+Atlas-owned modes preserve one provider-neutral envelope for the approved five-field form contract: name, phone, ZIP code, requested service, and optional message. Provider adapters perform destination mapping without adding provider-specific fields to the core envelope. Durable recipient revisions are Website/form-scoped, normalized, deduplicated, verification-aware, and separate from transport credentials. Every delivery-mode revision owns the exact current heads of its immutable recipient chains. Initial roots and same-mode address, role, enabled-state, or verification successors may be appended only while that email-mode revision is current and has no submission evidence. A first submission or delivery-mode successor freezes that snapshot; recipient heads may then be carried forward only to the directly superseding email-mode revision.
+
+Atlas may keep only the minimum safe outbox and immutable delivery-attempt evidence required to prevent silent loss and support troubleshooting. Delivery evidence must not duplicate full customer payloads or recipient lists, and it must not grow into lead assignment, sales stages, scheduling, estimating, customer accounts, or a standalone CRM. Production customer values may be persisted only through an approved encryption and key-management boundary; absent that boundary, production submission persistence and delivery remain unavailable.
+
+Provider-owned presentation may use an approved external link, hosted-form route, sandboxed iframe, or adapter-controlled embed with a verified origin or destination, accessible labeling, privacy disclosure, and fixed sandbox and referrer policies where applicable. It must reject arbitrary HTML or JavaScript, unrestricted script or iframe origins, unverified provider domains, secrets in Website configuration, invisible tracking injection, misleading Atlas-retention claims, and fallback to Atlas email. GorillaDesk is one possible provider-owned-form example, not a required provider or a core dependency.
 
 ---
 
@@ -343,6 +366,7 @@ Quality assurance applies to the whole website and to each governed domain. Appr
 - logo, icon, media, rights, alt text, crops, and responsive delivery;
 - layout, accessibility, responsive behavior, and visual regression;
 - titles, canonical identity, metadata, and structured data;
+- form-mode scope, recipient verification, privacy and consent, retention ownership, abuse protection, adapter readiness, idempotency, and safe delivery evidence;
 - security, privacy, authentication boundaries, and secret isolation;
 - backups, deployment scope, audit records, recovery readiness, and public verification; and
 - site-wide completeness against the approved plan.
@@ -367,6 +391,7 @@ The following distinction is permanent:
 | Brand Assets Manager | Flo-Zone logos, variants, colors, and usage rules |
 | Website Identity Manager | Flo-Zone favicon, icon family, site identity, and social identity asset |
 | Component registry and theme adapters | Flo-Zone's selected design system, tokens, components, and layouts |
+| Website Builder Core and form-delivery contracts | Flo-Zone's independently approved Website/form mode, destination, recipients, policies, and adapter selection |
 | Page and relationship planning | Flo-Zone's home, service, county, city, contact, and supporting page inventory |
 | Media planning and provenance | Flo-Zone's approved photographs, generated assets, briefs, and placements |
 | SEO and structured-knowledge model | Flo-Zone's approved entities, service-market relationships, questions, and metadata |
@@ -400,6 +425,10 @@ The following rules govern complete Atlas websites:
 14. Human review remains mandatory where automation cannot establish truth or suitability.
 15. A complete website must remain ownable, portable, maintainable, and understandable by future stewards.
 16. Deferred implementation does not erase an architectural capability established here.
+17. Standalone Atlas and the AtlasOps360 Website Builder module must use one non-forked Website Builder Core, with neither product required by the other.
+18. Each form component has exactly one explicit Website/form-scoped mode: `disabled`, `atlas_email`, `provider_owned`, `atlasops360_native`, or `external_adapter`.
+19. Form modes do not infer, activate, or fall back to one another, and form delivery must remain distinct from customer portals and operational records.
+20. Atlas delivery evidence remains a minimal safe ledger, not a CRM, and production customer values require an approved secure payload boundary.
 
 ---
 
@@ -410,6 +439,7 @@ Atlas operates a website through related but independently governed planes:
 - **Knowledge plane:** business facts, research, claims, assumptions, provenance, and approvals.
 - **Experience plane:** content, page relationships, navigation, components, themes, accessibility, and conversion paths.
 - **Media plane:** brand assets, website identity, images, derivatives, rights, provenance, and delivery.
+- **Form-delivery plane:** Website/form mode revisions, recipients, policy references, normalized submission envelopes, adapter readiness, minimal outbox state, and immutable attempt evidence.
 - **Intelligence plane:** trends, analytics, health, competitors, reviews, questions, and recommendations.
 - **Operations plane:** publishing destinations, credentials, backups, deployments, audits, verification, recovery, and maintenance.
 - **Business-operations boundary:** customer and job data owned by operational systems such as GorillaDesk or AtlasOps360 and exposed to Atlas only through approved adapters.
@@ -433,7 +463,7 @@ This model supports manual operation today and progressively automated operation
 
 ## 19. Document Governance and Versioning
 
-This Blueprint begins at version 1.0 and is a governing design document subordinate to the Project Atlas Constitution.
+This Blueprint began at version 1.0 and remains a governing design document subordinate to the Project Atlas Constitution. Version 1.1 establishes the single shared Website Builder Core and the provider-neutral, Website/form-scoped delivery-mode boundary.
 
 Material changes require:
 
@@ -453,9 +483,9 @@ The Roadmap may sequence or defer capabilities established here. It may not sile
 
 ## 20. Summary
 
-Atlas builds complete business websites by combining verified business identity, approved knowledge, purposeful content, adaptable presentation, governed media, structured discovery, human review, safe publication, and long-term operation.
+Atlas builds complete business websites by combining verified business identity, approved knowledge, purposeful content, adaptable presentation, governed media, explicit form delivery, structured discovery, human review, safe publication, and long-term operation.
 
-The system is reusable; the company configuration is specific. Flo-Zone proves the complete model but does not define the limits of Atlas. Facts, content, presentation, media, intelligence, and operational data remain separate so each can evolve without corrupting the others.
+The Website Builder Core is reusable across standalone Atlas and the optional AtlasOps360 module; company and Website configuration remains specific. Flo-Zone proves the complete model but does not define the limits of Atlas. Facts, content, presentation, media, form delivery, intelligence, and operational data remain separate so each can evolve without corrupting the others.
 
 The lasting standard is not how quickly Atlas can produce pages. It is whether a business can confidently rely on the complete website Atlas creates and maintains.
 
@@ -518,6 +548,12 @@ Private information used to operate the business, including customers, jobs, sch
 **Provider adapter**  
 A bounded interface that connects Atlas to an external provider while preserving provider identity, source limitations, and Atlas domain boundaries.
 
+**Form-delivery mode**\
+One explicit, revisioned Website/form choice among `disabled`, `atlas_email`, `provider_owned`, `atlasops360_native`, and `external_adapter`.
+
+**Submission envelope**\
+The provider-neutral, versioned representation of an Atlas-owned form submission and its Website, component, mode, consent, policy, anti-abuse, idempotency, request, and adapter identities.
+
 **Structured knowledge**  
 Approved entities, facts, claims, and relationships expressed in machine-readable form without changing their factual status.
 
@@ -527,3 +563,5 @@ A mapping between Atlas's stable component and content concepts and a particular
 **Website Identity**  
 The site-specific visual and machine-readable identity represented by favicons, browser icons, touch icons, social identity assets, and related associations.
 
+**Website Builder Core**\
+The single shared complete-site engine used by standalone Atlas Website Builder and the optional AtlasOps360 Website Builder module without a fork or cross-product database dependency.

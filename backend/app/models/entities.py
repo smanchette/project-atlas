@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from sqlalchemy import CheckConstraint, Column, DateTime, Index, JSON, String, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKeyConstraint, Index, JSON, String, UniqueConstraint, text
 from sqlmodel import Field, SQLModel
 
 
@@ -733,6 +733,543 @@ class ThemeConfigurationAudit(SQLModel, table=True):
     )
     snapshot_hash: str = Field(max_length=64, index=True)
     created_at: datetime = Field(default_factory=utc_now, nullable=False, index=True)
+
+
+class WebsiteFormDeliveryModeRevision(TimezoneTimestampMixin, table=True):
+    """Append-only Website/form delivery decision revision."""
+
+    __table_args__ = (
+        ForeignKeyConstraint(["website_id"], ["website.id"], name="fk_fdm_website"),
+        ForeignKeyConstraint(
+            ["form_component_configuration_id"],
+            ["websitethemecomponentconfiguration.id"],
+            name="fk_fdm_component",
+        ),
+        ForeignKeyConstraint(
+            ["supersedes_delivery_mode_revision_id"],
+            ["websiteformdeliverymoderevision.id"],
+            name="fk_fdm_predecessor",
+        ),
+        UniqueConstraint(
+            "website_id",
+            "form_instance_key",
+            "revision",
+            name="uq_formdeliverymode_scope_revision",
+        ),
+        UniqueConstraint(
+            "supersedes_delivery_mode_revision_id",
+            name="uq_formdeliverymode_successor",
+        ),
+        CheckConstraint(
+            "lifecycle_status IN ('draft','approved','active','retired')",
+            name="ck_formdeliverymode_lifecycle",
+        ),
+        CheckConstraint(
+            "mode IN ('disabled','atlas_email','provider_owned',"
+            "'atlasops360_native','external_adapter')",
+            name="ck_formdeliverymode_mode",
+        ),
+        CheckConstraint("revision >= 1", name="ck_formdeliverymode_revision"),
+        CheckConstraint(
+            "(revision = 1 AND supersedes_delivery_mode_revision_id IS NULL) "
+            "OR (revision > 1 AND supersedes_delivery_mode_revision_id IS NOT NULL)",
+            name="ck_formdeliverymode_lineage",
+        ),
+        CheckConstraint(
+            "supersedes_delivery_mode_revision_id IS NULL "
+            "OR supersedes_delivery_mode_revision_id != id",
+            name="ck_formdeliverymode_not_self",
+        ),
+        CheckConstraint(
+            "(approval_identity IS NULL AND approved_at IS NULL) "
+            "OR (approval_identity IS NOT NULL AND approved_at IS NOT NULL)",
+            name="ck_formdeliverymode_approval_pair",
+        ),
+        CheckConstraint(
+            "lifecycle_status NOT IN ('approved','active') "
+            "OR (approval_identity IS NOT NULL AND approved_at IS NOT NULL)",
+            name="ck_formdeliverymode_approval_evidence",
+        ),
+        CheckConstraint(
+            "(activation_identity IS NULL AND activated_at IS NULL) "
+            "OR (activation_identity IS NOT NULL AND activated_at IS NOT NULL)",
+            name="ck_formdeliverymode_activation_pair",
+        ),
+        CheckConstraint(
+            "lifecycle_status != 'active' "
+            "OR (activation_identity IS NOT NULL AND activated_at IS NOT NULL)",
+            name="ck_formdeliverymode_active_evidence",
+        ),
+        CheckConstraint(
+            "mode != 'disabled' OR (enabled = false AND provider_key IS NULL "
+            "AND adapter_version IS NULL AND destination_identity IS NULL "
+            "AND privacy_policy_reference IS NULL "
+            "AND consent_policy_reference IS NULL "
+            "AND retention_policy_reference IS NULL "
+            "AND abuse_policy_reference IS NULL "
+            "AND success_behavior IS NULL AND failure_behavior IS NULL "
+            "AND idempotency_policy_reference IS NULL)",
+            name="ck_formdeliverymode_disabled_empty",
+        ),
+        CheckConstraint(
+            "enabled = false OR (mode != 'disabled' AND lifecycle_status = 'active')",
+            name="ck_formdeliverymode_enabled_state",
+        ),
+        CheckConstraint(
+            "length(integrity_fingerprint) = 64 "
+            "AND integrity_fingerprint = lower(integrity_fingerprint)",
+            name="ck_formdeliverymode_fingerprint",
+        ),
+        Index("ix_fdm_website_id", "website_id"),
+        Index(
+            "ix_fdm_form_component_configuration_id",
+            "form_component_configuration_id",
+        ),
+        Index("ix_fdm_form_instance_key", "form_instance_key"),
+        Index(
+            "ix_fdm_supersedes_delivery_mode_revision_id",
+            "supersedes_delivery_mode_revision_id",
+        ),
+        Index("ix_fdm_lifecycle_status", "lifecycle_status"),
+        Index("ix_fdm_mode", "mode"),
+        Index("ix_fdm_provider_key", "provider_key"),
+        Index("ix_fdm_integrity_fingerprint", "integrity_fingerprint"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int
+    form_component_configuration_id: int
+    form_instance_key: str = Field(max_length=120)
+    revision: int = Field(default=1, ge=1)
+    supersedes_delivery_mode_revision_id: int | None = Field(
+        default=None,
+    )
+    lifecycle_status: str = Field(default="draft", max_length=24)
+    mode: str = Field(max_length=32)
+    enabled: bool = Field(default=False, nullable=False)
+    provider_key: str | None = Field(default=None, max_length=120)
+    adapter_version: str | None = Field(default=None, max_length=80)
+    destination_identity: str | None = Field(default=None, max_length=1000)
+    configuration_payload: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    privacy_policy_reference: str | None = Field(default=None, max_length=1000)
+    consent_policy_reference: str | None = Field(default=None, max_length=240)
+    retention_policy_reference: str | None = Field(default=None, max_length=240)
+    abuse_policy_reference: str | None = Field(default=None, max_length=240)
+    success_behavior: str | None = Field(default=None, max_length=1000)
+    failure_behavior: str | None = Field(default=None, max_length=1000)
+    idempotency_policy_reference: str | None = Field(default=None, max_length=240)
+    audit_identity: str = Field(max_length=160)
+    approval_identity: str | None = Field(default=None, max_length=160)
+    approved_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),
+    )
+    activation_identity: str | None = Field(default=None, max_length=160)
+    activated_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),
+    )
+    created_by: str = Field(max_length=160)
+    updated_by: str = Field(max_length=160)
+    integrity_fingerprint: str = Field(max_length=64)
+
+
+class WebsiteFormRecipientRevision(TimezoneTimestampMixin, table=True):
+    """Append-only recipient configuration scoped to one exact mode revision."""
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["delivery_mode_revision_id"],
+            ["websiteformdeliverymoderevision.id"],
+            name="fk_frr_mode",
+        ),
+        ForeignKeyConstraint(["website_id"], ["website.id"], name="fk_frr_website"),
+        ForeignKeyConstraint(
+            ["form_component_configuration_id"],
+            ["websitethemecomponentconfiguration.id"],
+            name="fk_frr_component",
+        ),
+        ForeignKeyConstraint(
+            ["supersedes_recipient_revision_id"],
+            ["websiteformrecipientrevision.id"],
+            name="fk_frr_predecessor",
+        ),
+        UniqueConstraint(
+            "website_id",
+            "form_instance_key",
+            "recipient_key",
+            "revision",
+            name="uq_formrecipient_scope_revision",
+        ),
+        UniqueConstraint(
+            "supersedes_recipient_revision_id",
+            name="uq_formrecipient_successor",
+        ),
+        CheckConstraint(
+            "recipient_role IN ('primary','secondary')",
+            name="ck_formrecipient_role",
+        ),
+        CheckConstraint(
+            "verification_status IN ('unverified','verified','revoked')",
+            name="ck_formrecipient_verification",
+        ),
+        CheckConstraint("revision >= 1", name="ck_formrecipient_revision"),
+        CheckConstraint(
+            "(revision = 1 AND supersedes_recipient_revision_id IS NULL) "
+            "OR (revision > 1 AND supersedes_recipient_revision_id IS NOT NULL)",
+            name="ck_formrecipient_lineage",
+        ),
+        CheckConstraint(
+            "supersedes_recipient_revision_id IS NULL "
+            "OR supersedes_recipient_revision_id != id",
+            name="ck_formrecipient_not_self",
+        ),
+        CheckConstraint(
+            "(verification_status = 'unverified' AND verified_at IS NULL "
+            "AND verified_by IS NULL AND verification_method IS NULL) "
+            "OR (verification_status IN ('verified','revoked') "
+            "AND verified_at IS NOT NULL AND verified_by IS NOT NULL "
+            "AND verification_method IS NOT NULL)",
+            name="ck_formrecipient_verification_evidence",
+        ),
+        CheckConstraint(
+            "length(integrity_fingerprint) = 64 "
+            "AND integrity_fingerprint = lower(integrity_fingerprint)",
+            name="ck_formrecipient_fingerprint",
+        ),
+        Index("ix_frr_delivery_mode_revision_id", "delivery_mode_revision_id"),
+        Index("ix_frr_website_id", "website_id"),
+        Index(
+            "ix_frr_form_component_configuration_id",
+            "form_component_configuration_id",
+        ),
+        Index("ix_frr_form_instance_key", "form_instance_key"),
+        Index("ix_frr_recipient_key", "recipient_key"),
+        Index(
+            "ix_frr_supersedes_recipient_revision_id",
+            "supersedes_recipient_revision_id",
+        ),
+        Index("ix_frr_normalized_email", "normalized_email"),
+        Index("ix_frr_recipient_role", "recipient_role"),
+        Index("ix_frr_verification_status", "verification_status"),
+        Index("ix_frr_integrity_fingerprint", "integrity_fingerprint"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    delivery_mode_revision_id: int
+    website_id: int
+    form_component_configuration_id: int
+    form_instance_key: str = Field(max_length=120)
+    recipient_key: str = Field(max_length=120)
+    revision: int = Field(default=1, ge=1)
+    supersedes_recipient_revision_id: int | None = Field(
+        default=None,
+    )
+    email: str = Field(max_length=320)
+    normalized_email: str = Field(max_length=320)
+    label: str | None = Field(default=None, max_length=160)
+    recipient_role: str = Field(max_length=16)
+    enabled: bool = Field(default=True, nullable=False)
+    verification_status: str = Field(default="unverified", max_length=20)
+    verified_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),
+    )
+    verified_by: str | None = Field(default=None, max_length=160)
+    verification_method: str | None = Field(default=None, max_length=120)
+    created_by: str = Field(max_length=160)
+    updated_by: str = Field(max_length=160)
+    integrity_fingerprint: str = Field(max_length=64)
+
+
+class FormSubmissionEnvelope(SQLModel, table=True):
+    """Safe durable envelope metadata; normalized customer values live elsewhere."""
+
+    __table_args__ = (
+        ForeignKeyConstraint(["website_id"], ["website.id"], name="fk_fse_website"),
+        ForeignKeyConstraint(
+            ["form_component_configuration_id"],
+            ["websitethemecomponentconfiguration.id"],
+            name="fk_fse_component",
+        ),
+        ForeignKeyConstraint(
+            ["delivery_mode_revision_id"],
+            ["websiteformdeliverymoderevision.id"],
+            name="fk_fse_mode",
+        ),
+        UniqueConstraint(
+            "website_id",
+            "form_component_configuration_id",
+            "idempotency_digest",
+            name="uq_formenvelope_idempotency",
+        ),
+        CheckConstraint(
+            "submission_contract_version >= 1",
+            name="ck_formenvelope_contract_version",
+        ),
+        CheckConstraint(
+            "length(idempotency_digest) = 64 "
+            "AND idempotency_digest = lower(idempotency_digest)",
+            name="ck_formenvelope_idempotency_digest",
+        ),
+        CheckConstraint(
+            "(secure_payload_reference IS NULL AND encryption_key_reference IS NULL) "
+            "OR (secure_payload_reference IS NOT NULL "
+            "AND encryption_key_reference IS NOT NULL)",
+            name="ck_formenvelope_payload_pair",
+        ),
+        CheckConstraint(
+            "expires_at IS NULL OR expires_at >= received_at",
+            name="ck_formenvelope_expiry",
+        ),
+        CheckConstraint(
+            "length(integrity_fingerprint) = 64 "
+            "AND integrity_fingerprint = lower(integrity_fingerprint)",
+            name="ck_formenvelope_fingerprint",
+        ),
+        Index("ix_fse_website_id", "website_id"),
+        Index(
+            "ix_fse_form_component_configuration_id",
+            "form_component_configuration_id",
+        ),
+        Index("ix_fse_delivery_mode_revision_id", "delivery_mode_revision_id"),
+        Index("ix_fse_idempotency_digest", "idempotency_digest"),
+        Index("ix_fse_received_at", "received_at"),
+        Index("ix_fse_destination_adapter_key", "destination_adapter_key"),
+        Index("ix_fse_expires_at", "expires_at"),
+        Index("ix_fse_integrity_fingerprint", "integrity_fingerprint"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    website_id: int
+    form_component_configuration_id: int
+    delivery_mode_revision_id: int
+    submission_contract_version: int = Field(default=1, ge=1)
+    consent_accepted: bool | None = None
+    consent_version: str | None = Field(default=None, max_length=160)
+    privacy_policy_reference: str = Field(max_length=1000)
+    retention_policy_reference: str = Field(max_length=240)
+    abuse_policy_reference: str = Field(max_length=240)
+    anti_spam_decision: str = Field(max_length=120)
+    idempotency_digest: str = Field(max_length=64)
+    received_at: datetime = Field(
+        default_factory=utc_now,
+        sa_type=DateTime(timezone=True),
+        nullable=False,
+    )
+    audit_identity: str = Field(max_length=160)
+    request_identity: str = Field(max_length=240)
+    source_page_identity: str | None = Field(default=None, max_length=240)
+    destination_adapter_key: str = Field(max_length=120)
+    secure_payload_reference: str | None = Field(default=None, max_length=500)
+    encryption_key_reference: str | None = Field(default=None, max_length=260)
+    expires_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),
+    )
+    integrity_fingerprint: str = Field(max_length=64)
+
+
+class FormDeliveryOutbox(TimezoneTimestampMixin, table=True):
+    """Mutable minimal delivery state; never a lead or customer record."""
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["envelope_id"],
+            ["formsubmissionenvelope.id"],
+            name="fk_fdo_envelope",
+        ),
+        ForeignKeyConstraint(
+            ["delivery_mode_revision_id"],
+            ["websiteformdeliverymoderevision.id"],
+            name="fk_fdo_mode",
+        ),
+        UniqueConstraint("envelope_id", name="uq_formoutbox_envelope"),
+        CheckConstraint(
+            "status IN ('queued','processing','retrying','delivered',"
+            "'terminal_failed','expired')",
+            name="ck_formoutbox_status",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0 AND state_version >= 1",
+            name="ck_formoutbox_counts",
+        ),
+        CheckConstraint(
+            "(status = 'delivered' AND delivered_at IS NOT NULL) OR "
+            "(status != 'delivered' AND delivered_at IS NULL)",
+            name="ck_formoutbox_delivered_evidence",
+        ),
+        CheckConstraint(
+            "(status = 'terminal_failed' AND failed_at IS NOT NULL) OR "
+            "(status != 'terminal_failed' AND failed_at IS NULL)",
+            name="ck_formoutbox_failed_evidence",
+        ),
+        CheckConstraint(
+            "(status = 'expired' AND expired_at IS NOT NULL) OR "
+            "(status != 'expired' AND expired_at IS NULL)",
+            name="ck_formoutbox_expired_evidence",
+        ),
+        CheckConstraint(
+            "(status = 'retrying' AND next_attempt_at IS NOT NULL) OR "
+            "(status != 'retrying' AND next_attempt_at IS NULL)",
+            name="ck_formoutbox_retry_evidence",
+        ),
+        Index("ix_fdo_envelope_id", "envelope_id"),
+        Index("ix_fdo_delivery_mode_revision_id", "delivery_mode_revision_id"),
+        Index("ix_fdo_adapter_key", "adapter_key"),
+        Index("ix_fdo_status", "status"),
+        Index("ix_fdo_next_attempt_at", "next_attempt_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    envelope_id: int
+    delivery_mode_revision_id: int
+    adapter_key: str = Field(max_length=120)
+    adapter_version: str = Field(max_length=80)
+    destination_identity: str = Field(max_length=1000)
+    status: str = Field(default="queued", max_length=24)
+    attempt_count: int = Field(default=0, ge=0)
+    next_attempt_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),
+    )
+    last_safe_error_code: str | None = Field(default=None, max_length=120)
+    state_version: int = Field(default=1, ge=1)
+    delivered_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),
+    )
+    failed_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),
+    )
+    expired_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),
+    )
+
+
+class FormDeliveryAttempt(SQLModel, table=True):
+    """Immutable, value-free delivery-attempt evidence."""
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["outbox_id"],
+            ["formdeliveryoutbox.id"],
+            name="fk_fda_outbox",
+        ),
+        UniqueConstraint(
+            "outbox_id",
+            "attempt_number",
+            name="uq_formattempt_outbox_number",
+        ),
+        CheckConstraint("attempt_number >= 1", name="ck_formattempt_number"),
+        CheckConstraint(
+            "outcome IN ('delivered','transient_failure','permanent_failure')",
+            name="ck_formattempt_outcome",
+        ),
+        CheckConstraint(
+            "completed_at >= started_at",
+            name="ck_formattempt_chronology",
+        ),
+        CheckConstraint(
+            "(outcome = 'transient_failure' AND next_retry_at IS NOT NULL) OR "
+            "(outcome != 'transient_failure' AND next_retry_at IS NULL)",
+            name="ck_formattempt_retry_evidence",
+        ),
+        CheckConstraint(
+            "length(integrity_fingerprint) = 64 "
+            "AND integrity_fingerprint = lower(integrity_fingerprint)",
+            name="ck_formattempt_fingerprint",
+        ),
+        Index("ix_fda_outbox_id", "outbox_id"),
+        Index("ix_fda_outcome", "outcome"),
+        Index("ix_fda_integrity_fingerprint", "integrity_fingerprint"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    outbox_id: int
+    attempt_number: int = Field(ge=1)
+    started_at: datetime = Field(sa_type=DateTime(timezone=True), nullable=False)
+    completed_at: datetime = Field(sa_type=DateTime(timezone=True), nullable=False)
+    outcome: str = Field(max_length=24)
+    safe_error_code: str | None = Field(default=None, max_length=120)
+    safe_provider_reference: str | None = Field(default=None, max_length=240)
+    next_retry_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),
+    )
+    integrity_fingerprint: str = Field(max_length=64)
+
+
+class FormDeliveryConfigurationAudit(SQLModel, table=True):
+    """Append-only safe audit identity for mode or recipient revisions."""
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["delivery_mode_revision_id"],
+            ["websiteformdeliverymoderevision.id"],
+            name="fk_fca_mode",
+        ),
+        ForeignKeyConstraint(
+            ["recipient_revision_id"],
+            ["websiteformrecipientrevision.id"],
+            name="fk_fca_recipient",
+        ),
+        CheckConstraint(
+            "(CASE WHEN delivery_mode_revision_id IS NULL THEN 0 ELSE 1 END + "
+            "CASE WHEN recipient_revision_id IS NULL THEN 0 ELSE 1 END) = 1",
+            name="ck_formdeliveryaudit_exact_target",
+        ),
+        CheckConstraint(
+            "action_type IN ('mode_revision_created','mode_revision_approved',"
+            "'mode_revision_activated','mode_revision_retired',"
+            "'recipient_revision_created','recipient_verified','recipient_revoked')",
+            name="ck_formdeliveryaudit_action",
+        ),
+        CheckConstraint(
+            "(delivery_mode_revision_id IS NOT NULL AND recipient_revision_id IS NULL "
+            "AND action_type LIKE 'mode_revision_%') OR "
+            "(recipient_revision_id IS NOT NULL AND delivery_mode_revision_id IS NULL "
+            "AND (action_type LIKE 'recipient_revision_%' "
+            "OR action_type IN ('recipient_verified','recipient_revoked')))",
+            name="ck_formdeliveryaudit_action_target",
+        ),
+        CheckConstraint(
+            "length(snapshot_hash) = 64 AND snapshot_hash = lower(snapshot_hash)",
+            name="ck_formdeliveryaudit_hash",
+        ),
+        UniqueConstraint("snapshot_hash", name="uq_formdeliveryaudit_hash"),
+        Index("ix_fca_delivery_mode_revision_id", "delivery_mode_revision_id"),
+        Index("ix_fca_recipient_revision_id", "recipient_revision_id"),
+        Index("ix_fca_action_type", "action_type"),
+        Index("ix_fca_snapshot_hash", "snapshot_hash"),
+        Index("ix_fca_created_at", "created_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    delivery_mode_revision_id: int | None = Field(
+        default=None,
+    )
+    recipient_revision_id: int | None = Field(
+        default=None,
+    )
+    action_type: str = Field(max_length=48)
+    actor: str = Field(max_length=160)
+    rationale: str = Field(max_length=2000)
+    snapshot: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    snapshot_hash: str = Field(max_length=64)
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_type=DateTime(timezone=True),
+        nullable=False,
+    )
 
 
 class SitePlan(TimestampMixin, table=True):

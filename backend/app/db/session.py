@@ -18,6 +18,16 @@ ALEMBIC_OWNED_DURABLE_THEME_TABLES = frozenset(
         "themeconfigurationaudit",
     }
 )
+ALEMBIC_OWNED_FORM_DELIVERY_TABLES = frozenset(
+    {
+        "websiteformdeliverymoderevision",
+        "websiteformrecipientrevision",
+        "formsubmissionenvelope",
+        "formdeliveryoutbox",
+        "formdeliveryattempt",
+        "formdeliveryconfigurationaudit",
+    }
+)
 ALEMBIC_OWNED_RUNTIME_TABLES = frozenset(
     {
         "wordpressmetadatastate",
@@ -26,7 +36,9 @@ ALEMBIC_OWNED_RUNTIME_TABLES = frozenset(
     }
 )
 ALEMBIC_OWNED_TABLES = (
-    ALEMBIC_OWNED_DURABLE_THEME_TABLES | ALEMBIC_OWNED_RUNTIME_TABLES
+    ALEMBIC_OWNED_DURABLE_THEME_TABLES
+    | ALEMBIC_OWNED_FORM_DELIVERY_TABLES
+    | ALEMBIC_OWNED_RUNTIME_TABLES
 )
 
 

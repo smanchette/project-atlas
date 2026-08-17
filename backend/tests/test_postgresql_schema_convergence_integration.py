@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 from typing import Any
 from uuid import UUID
@@ -37,7 +38,25 @@ DATABASE_PREFIX = "atlas_pg_migration_chain_test_0046_"
 LOCAL_POSTGRES_HOSTS = {"127.0.0.1", "::1", "localhost", "postgres"}
 SOURCE_REVISION = "20260813_0045"
 HEAD_REVISION = "20260815_0046"
+FORM_DELIVERY_REVISION = "20260817_0047"
+FORM_DELIVERY_TABLES = frozenset(
+    {
+        "websiteformdeliverymoderevision",
+        "websiteformrecipientrevision",
+        "formsubmissionenvelope",
+        "formdeliveryoutbox",
+        "formdeliveryattempt",
+        "formdeliveryconfigurationaudit",
+    }
+)
 EXPECTED_APPLICATION_ROWS = 1639
+EXPECTED_CURRENT_0046_APPLICATION_ROWS = 1649
+EXPECTED_CURRENT_0046_DATA_SHA256 = (
+    "9232da1cb000a85b1b61267be67184d6698bf232582d13c6d400d798cd89a20e"
+)
+EXPECTED_CURRENT_0046_SEQUENCE_SHA256 = (
+    "4b5c880fc5f58a553e520494275eea51be4140a4d4cfce68c8bc40260695beeb"
+)
 EXPECTED_BACKUP_SHA256 = (
     "014239052df4f913a0ab9c04fe118ab2d1f58758ee747a19e389b3b98da17282"
 )
@@ -115,7 +134,12 @@ class _PostgresPlan:
             )
         return self._database(name)
 
-    def adopt_precreated(self) -> _Database:
+    def adopt_precreated(
+        self,
+        *,
+        expected_revision: str,
+        clone_label: str,
+    ) -> _Database:
         """Adopt an exact, operator-restored active-style disposable clone."""
 
         name = self._consume_name()
@@ -125,10 +149,14 @@ class _PostgresPlan:
                 {"name": name},
             ).scalar_one_or_none()
         assert exists == 1, (
-            "The active-style integration database must be restored from the sealed "
-            f"0045 dump before pytest starts: {name}"
+            f"The {clone_label} integration database must be restored from its "
+            f"sealed dump before pytest starts: {name}"
         )
-        return self._database(name)
+        database = self._database(name)
+        assert _revision(database.engine) == expected_revision, (
+            f"The {clone_label} clone has the wrong Alembic revision."
+        )
+        return database
 
     def close(self) -> None:
         failures: list[str] = []
@@ -279,6 +307,23 @@ def _migration_module():
     )
     spec = importlib.util.spec_from_file_location(
         "atlas_migration_0046_integration", path
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _form_delivery_migration_module():
+    path = (
+        BACKEND
+        / "alembic"
+        / "versions"
+        / "20260817_0047_universal_form_delivery_modes.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "atlas_migration_0047_integration", path
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -496,6 +541,17 @@ def _application_row_count(fingerprints: dict[str, tuple[int, str]]) -> int:
     return sum(count for count, _digest in fingerprints.values())
 
 
+def _state_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            _canonical_value(value),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _require_frozen_success_digests(migration: Any) -> None:
     pending = {
         variant: digest
@@ -527,6 +583,68 @@ def _restore_accepted_backup(engine: Engine, backup_path: Path) -> dict[str, Any
 
     with Session(engine) as session:
         return restore_backup(session, backup_path)
+
+
+def _restore_accepted_backup_cli(
+    database: _Database,
+    backup_path: Path,
+) -> dict[str, Any]:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "ATLAS_RUNTIME_MODE": "automated_test",
+            "DATABASE_URL": database.url.render_as_string(hide_password=False),
+            "MEDIA_PUBLIC_URL": "http://localhost:8000/media",
+            "PGOPTIONS": "-c timezone=UTC",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "SEED_ON_STARTUP": "false",
+        }
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "app.db.backup",
+            "restore",
+            str(backup_path),
+        ],
+        cwd=BACKEND,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["status"] == "restored"
+    return payload
+
+
+def _assert_0047_surface_and_empty(database: _Database) -> None:
+    migration = _form_delivery_migration_module()
+    assert _revision(database.engine) == FORM_DELIVERY_REVISION
+    with database.engine.connect() as connection:
+        migration._assert_exact_owned_shape(connection)
+        for table in FORM_DELIVERY_TABLES:
+            assert connection.execute(
+                text(f"SELECT COUNT(*) FROM {table}")
+            ).scalar_one() == 0
+
+
+def _assert_legacy_state_preserved(
+    database: _Database,
+    *,
+    before_data: dict[str, tuple[int, str]],
+    before_sequences: dict[str, tuple[int, bool]],
+) -> None:
+    after_data = _data_fingerprints(database.engine)
+    after_sequences = _sequence_state(database.engine)
+    assert {name: after_data[name] for name in before_data} == before_data
+    assert {
+        name: after_sequences[name] for name in before_sequences
+    } == before_sequences
 
 
 def _rows(connection: Any, statement: str) -> tuple[tuple[Any, ...], ...]:
@@ -786,6 +904,7 @@ def _assert_accepted_application_identities(engine: Engine) -> None:
             customer_or_submission_tables = tuple(
                 name
                 for name in table_names
+                if name not in FORM_DELIVERY_TABLES
                 if re.search(
                     r"(?:customer|form.*submission|submission.*form|"
                     r"lead.*submission)",
@@ -797,12 +916,167 @@ def _assert_accepted_application_identities(engine: Engine) -> None:
     _assert_production_form_registries_empty()
 
 
+def _assert_current_active_0046_identities(engine: Engine) -> None:
+    """Assert the sealed post-V3, pre-0047 active-clone identities."""
+
+    with engine.connect().execution_options(
+        isolation_level="REPEATABLE READ"
+    ) as connection:
+        with connection.begin():
+            connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+
+            assert _rows(
+                connection,
+                "SELECT id, website_id, theme_id, version, status "
+                "FROM websitethemeselection ORDER BY id",
+            ) == ((1, 1, 1, 1, "active"),)
+            assert _rows(
+                connection,
+                "SELECT id, theme_family_id, version, lifecycle_status, "
+                "production_ready, source_commit FROM themefamilyversion "
+                "ORDER BY id",
+            ) == (
+                (
+                    1,
+                    1,
+                    2,
+                    "preview_candidate",
+                    False,
+                    "1b766664ea99d923195bbf98e8a1e4d833b50084",
+                ),
+                (
+                    2,
+                    1,
+                    3,
+                    "preview_candidate",
+                    False,
+                    "d641893667554ed2ba04d973b0c15a2806999651",
+                ),
+            )
+            assert _rows(
+                connection,
+                "SELECT id, website_id, theme_family_version_id, "
+                "configuration_key, lifecycle_status, approved_by, "
+                "materialized_theme_id, website_theme_selection_id, "
+                "activated_by, activated_at FROM websitethemeconfiguration "
+                "WHERE id = 2",
+            ) == (
+                (
+                    2,
+                    1,
+                    2,
+                    "performance-local-v3-draft",
+                    "draft",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            assert _rows(
+                connection,
+                "SELECT id, website_theme_configuration_id, component_key, "
+                "revision, lifecycle_status, activation_identity, activated_at "
+                "FROM websitethemecomponentconfiguration "
+                "WHERE id BETWEEN 4 AND 6 ORDER BY id",
+            ) == (
+                (4, 2, "compact_estimate_form", 1, "current", None, None),
+                (5, 2, "campaign_banner", 1, "current", None, None),
+                (6, 2, "sticky_mobile_action_bar", 1, "current", None, None),
+            )
+            assert _rows(
+                connection,
+                "SELECT id, action_type FROM themeconfigurationaudit "
+                "WHERE id BETWEEN 7 AND 11 ORDER BY id",
+            ) == (
+                (7, "family_version_registered"),
+                (8, "website_draft_created"),
+                (9, "component_created"),
+                (10, "component_created"),
+                (11, "component_created"),
+            )
+
+            assert _rows(
+                connection,
+                "SELECT id, planned_page_id, generated_page_id, "
+                "composition_version, status, source_hash "
+                "FROM pagecomposition WHERE id = 41",
+            ) == (
+                (
+                    41,
+                    41,
+                    41,
+                    8,
+                    "current",
+                    EXPECTED_COMPOSITION_SOURCE_SHA256,
+                ),
+            )
+            assert _rows(
+                connection,
+                "SELECT id, generated_page_id, page_composition_id, "
+                "composition_version, readiness_status, passed_count, "
+                "warning_count, failed_count, result_hash "
+                "FROM generatedpageqaresult WHERE id = 80",
+            ) == (
+                (
+                    80,
+                    41,
+                    41,
+                    8,
+                    "ready",
+                    23,
+                    0,
+                    0,
+                    EXPECTED_QA_RESULT_SHA256,
+                ),
+            )
+            assert _rows(
+                connection,
+                "SELECT id, wordpress_media_id, wordpress_media_checksum "
+                "FROM imagemetadata WHERE wordpress_media_id = 31",
+            ) == ((1, 31, EXPECTED_MEDIA_31_SHA256),)
+            assert connection.execute(
+                text("SELECT COUNT(*) FROM imagemetadata WHERE wordpress_media_id = 32")
+            ).scalar_one() == 0
+
+            component_payload = connection.execute(
+                text(
+                    "SELECT configuration_payload "
+                    "FROM websitethemecomponentconfiguration WHERE id = 4"
+                )
+            ).scalar_one()
+            provider = component_payload["provider"]
+            assert provider["provider_key"] is None
+            assert provider["destination"] is None
+            assert provider["provider_secret_reference"] is None
+            assert provider["test_only"] is False
+            assert component_payload["submission_state"] == (
+                "disabled_pending_provider_configuration"
+            )
+
+            assert all(
+                connection.execute(
+                    text(
+                        "SELECT to_regclass('public.' || :table) IS NULL"
+                    ),
+                    {"table": table},
+                ).scalar_one()
+                for table in FORM_DELIVERY_TABLES
+            )
+
+    _assert_production_form_registries_empty()
+
+
 def test_postgresql_active_style_0045_upgrade_preserves_every_row_and_sequence(
     postgres_plan: _PostgresPlan,
     migration: Any,
 ) -> None:
     _require_frozen_success_digests(migration)
-    database = postgres_plan.adopt_precreated()
+    database = postgres_plan.adopt_precreated(
+        expected_revision=SOURCE_REVISION,
+        clone_label="accepted active-style 0045",
+    )
     assert _revision(database.engine) == SOURCE_REVISION
     source = _surface(database.engine, migration)
     assert migration._classify_postgres_surface(source) == "active"
@@ -833,7 +1107,10 @@ def test_postgresql_active_blocked_disposition_fails_before_mutation_or_remap(
     migration: Any,
 ) -> None:
     _require_frozen_success_digests(migration)
-    database = postgres_plan.adopt_precreated()
+    database = postgres_plan.adopt_precreated(
+        expected_revision=SOURCE_REVISION,
+        clone_label="accepted blocked-preflight 0045",
+    )
     assert _revision(database.engine) == SOURCE_REVISION
     assert _surface(database.engine, migration) == migration._expected_postgres_surface(
         "active"
@@ -901,11 +1178,157 @@ def test_postgresql_active_blocked_disposition_fails_before_mutation_or_remap(
         ).scalar_one() == 1
 
 
-def test_postgresql_backup_057_restores_to_head_and_repeats_exactly(
+def test_postgresql_current_active_0046_clone_upgrades_to_0047_without_drift(
+    postgres_plan: _PostgresPlan,
+    migration: Any,
+) -> None:
+    _require_frozen_success_digests(migration)
+    database = postgres_plan.adopt_precreated(
+        expected_revision=HEAD_REVISION,
+        clone_label="sealed current active-style 0046",
+    )
+    assert _revision(database.engine) == HEAD_REVISION
+    assert _manifest_sha256(database.engine, migration) == (
+        migration.EXPECTED_CATALOG_MANIFEST_SHA256["canonical"]
+    )
+
+    before_data = _data_fingerprints(database.engine)
+    before_sequences = _sequence_state(database.engine)
+    assert _application_row_count(before_data) == (
+        EXPECTED_CURRENT_0046_APPLICATION_ROWS
+    )
+    assert _state_sha256(before_data) == EXPECTED_CURRENT_0046_DATA_SHA256
+    assert _state_sha256(before_sequences) == EXPECTED_CURRENT_0046_SEQUENCE_SHA256
+    _assert_current_active_0046_identities(database.engine)
+
+    _upgrade(database, FORM_DELIVERY_REVISION)
+
+    _assert_0047_surface_and_empty(database)
+    _assert_legacy_state_preserved(
+        database,
+        before_data=before_data,
+        before_sequences=before_sequences,
+    )
+    after_data = _data_fingerprints(database.engine)
+    after_sequences = _sequence_state(database.engine)
+    assert _application_row_count(after_data) == (
+        EXPECTED_CURRENT_0046_APPLICATION_ROWS
+    )
+    assert set(after_data).difference(before_data) == FORM_DELIVERY_TABLES
+
+    _upgrade(database, FORM_DELIVERY_REVISION)
+    _assert_0047_surface_and_empty(database)
+    assert _data_fingerprints(database.engine) == after_data
+    assert _sequence_state(database.engine) == after_sequences
+
+    from app.models.entities import (
+        FormDeliveryAttempt,
+        FormDeliveryConfigurationAudit,
+        FormDeliveryOutbox,
+        FormSubmissionEnvelope,
+        WebsiteFormDeliveryModeRevision,
+        WebsiteFormRecipientRevision,
+        WebsiteThemeComponentConfiguration,
+    )
+    from app.schemas.form_delivery import WebsiteFormDeliveryModeRevisionCreate
+    from app.services.form_delivery_modes import (
+        create_form_delivery_mode_revision,
+        form_delivery_readiness,
+    )
+
+    with Session(database.engine) as session:
+        component = session.get(WebsiteThemeComponentConfiguration, 4)
+        assert component is not None
+        assert component.website_id == 1
+        assert component.website_theme_configuration_id == 2
+        assert component.component_key == "compact_estimate_form"
+        governed_candidate_count = session.exec(
+            text(
+                "SELECT COUNT(*) FROM business "
+                "JOIN website ON website.business_id = business.id "
+                "WHERE website.id = 1 "
+                "AND NULLIF(BTRIM(business.email), '') IS NOT NULL"
+            )
+        ).one()[0]
+        assert governed_candidate_count == 1
+
+        mode = create_form_delivery_mode_revision(
+            session,
+            1,
+            WebsiteFormDeliveryModeRevisionCreate(
+                form_component_configuration_id=component.id,
+                form_instance_key=component.component_instance_key,
+                lifecycle_status="draft",
+                mode="atlas_email",
+                enabled=False,
+                provider_key="atlas-email-unconfigured",
+                adapter_version="unconfigured-v1",
+                destination_identity=(
+                    "recipient-set-ref://flo-zone/pending-governance"
+                ),
+                configuration_payload={
+                    "transport_key_reference": "unconfigured-transport",
+                    "transport_secret_reference": (
+                        "secret-ref://unconfigured/atlas-email"
+                    ),
+                    "notification_preference": "all_verified",
+                    "consent_required": False,
+                },
+                audit_identity="flo-zone-inactive-email-rehearsal",
+                created_by="Project Atlas disposable rehearsal",
+                updated_by="Project Atlas disposable rehearsal",
+                rationale=(
+                    "Rehearse an inactive Website-scoped email mode without "
+                    "inventing a recipient or enabling delivery."
+                ),
+            ),
+        )
+        readiness = form_delivery_readiness(
+            session,
+            mode,
+            allow_test_only=False,
+            secure_payload_store_available=False,
+        )
+        blocker_codes = {blocker.code for blocker in readiness.blockers}
+        assert readiness.status == "blocked"
+        assert readiness.can_present is False
+        assert readiness.can_submit is False
+        assert readiness.production_enabled is False
+        assert {
+            "mode_not_active",
+            "mode_not_enabled",
+            "missing_mode_approval",
+            "missing_mode_activation",
+            "provider_adapter_unavailable",
+            "missing_privacy_policy",
+            "missing_retention_policy",
+            "missing_abuse_policy",
+            "missing_success_behavior",
+            "missing_failure_behavior",
+            "missing_idempotency_policy",
+            "secure_payload_store_unavailable",
+            "blocked_missing_verified_recipient",
+        }.issubset(blocker_codes)
+        assert session.exec(select(WebsiteFormRecipientRevision)).all() == []
+        assert session.exec(select(FormSubmissionEnvelope)).all() == []
+        assert session.exec(select(FormDeliveryOutbox)).all() == []
+        assert session.exec(select(FormDeliveryAttempt)).all() == []
+        assert len(session.exec(select(WebsiteFormDeliveryModeRevision)).all()) == 1
+        assert len(session.exec(select(FormDeliveryConfigurationAudit)).all()) == 1
+
+    _assert_legacy_state_preserved(
+        database,
+        before_data=before_data,
+        before_sequences=before_sequences,
+    )
+
+
+def test_postgresql_backup_057_restores_to_0046_then_upgrades_to_0047(
     postgres_plan: _PostgresPlan,
     migration: Any,
     accepted_backup_media_settings: None,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.db.backup import (
         BACKUP_VERSION,
@@ -917,7 +1340,7 @@ def test_postgresql_backup_057_restores_to_head_and_repeats_exactly(
     _require_frozen_success_digests(migration)
     backup_path = _backup_path()
     payload = load_backup(backup_path)
-    assert BACKUP_VERSION == "0.57"
+    assert BACKUP_VERSION == "0.58"
     assert payload["metadata"]["version"] == "0.57"
     assert sum(payload["metadata"]["table_counts"].values()) == (
         EXPECTED_APPLICATION_ROWS
@@ -982,7 +1405,7 @@ def test_postgresql_backup_057_restores_to_head_and_repeats_exactly(
         assert observed_contracts == expected_contracts
         assert _restore_managed_tables_are_empty(session, payload["data"]) is True
 
-    first = _restore_accepted_backup(database.engine, backup_path)
+    first = _restore_accepted_backup_cli(database, backup_path)
     assert first["records_processed"] == EXPECTED_APPLICATION_ROWS
     first_data = _data_fingerprints(database.engine)
     first_sequences = _sequence_state(database.engine)
@@ -1000,19 +1423,49 @@ def test_postgresql_backup_057_restores_to_head_and_repeats_exactly(
     with Session(database.engine) as session:
         exported = export_backup(session, backup_dir=tmp_path)
     exported_payload = load_backup(Path(exported["path"]))
-    assert exported_payload["metadata"]["version"] == "0.57"
+    assert exported_payload["metadata"]["version"] == "0.58"
     assert exported_payload["metadata"]["table_counts"] == payload["metadata"][
         "table_counts"
     ]
     assert _data_fingerprints(database.engine) == first_data
     assert _sequence_state(database.engine) == first_sequences
 
-    _upgrade(database, "head")
-    assert _revision(database.engine) == HEAD_REVISION
-    assert _manifest_sha256(database.engine, migration) == canonical_manifest
-    assert _data_fingerprints(database.engine) == first_data
-    assert _sequence_state(database.engine) == first_sequences
+    _upgrade(database, FORM_DELIVERY_REVISION)
+    _assert_0047_surface_and_empty(database)
+    _assert_legacy_state_preserved(
+        database,
+        before_data=first_data,
+        before_sequences=first_sequences,
+    )
+
+    after_first_0047 = _data_fingerprints(database.engine)
+    after_first_0047_sequences = _sequence_state(database.engine)
+    assert _application_row_count(after_first_0047) == EXPECTED_APPLICATION_ROWS
+    _upgrade(database, FORM_DELIVERY_REVISION)
+    _assert_0047_surface_and_empty(database)
+    assert _data_fingerprints(database.engine) == after_first_0047
+    assert _sequence_state(database.engine) == after_first_0047_sequences
+
+    from app import main as app_main
+    from app.db import session as db_session
+
+    monkeypatch.setattr(db_session, "engine", database.engine)
+    monkeypatch.setattr(app_main, "engine", database.engine)
+    monkeypatch.setattr(app_main.settings, "seed_on_startup", True)
+
+    with TestClient(app_main.app) as client:
+        assert client.get("/health").json()["status"] == "ok"
+    after_first_start_data = _data_fingerprints(database.engine)
+    after_first_start_sequences = _sequence_state(database.engine)
+    _assert_0047_surface_and_empty(database)
     _assert_accepted_application_identities(database.engine)
+
+    with TestClient(app_main.app) as client:
+        assert client.get("/health").json()["status"] == "ok"
+    _assert_0047_surface_and_empty(database)
+    _assert_accepted_application_identities(database.engine)
+    assert _data_fingerprints(database.engine) == after_first_start_data
+    assert _sequence_state(database.engine) == after_first_start_sequences
 
 
 def test_postgresql_startup_is_schema_noop_and_second_start_is_idempotent(

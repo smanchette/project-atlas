@@ -53,6 +53,9 @@ const PerformanceLocalComponentGalleryPage = lazy(
 const PerformanceLocalDeliveryPage = lazy(
   () => import("./pages/PerformanceLocalDeliveryPage"),
 );
+const UniversalFormModesReviewPage = lazy(
+  () => import("./pages/UniversalFormModesReviewPage"),
+);
 
 const navItems = [
   { to: "/", label: "Dashboard", icon: Home },
@@ -198,6 +201,10 @@ function App() {
       <Route
         path="/theme-lab/performance-local/components"
         element={<ThemeLabRoute><PerformanceLocalComponentGalleryPage /></ThemeLabRoute>}
+      />
+      <Route
+        path="/theme-lab/universal-form-modes"
+        element={<ThemeLabRoute><UniversalFormModesReviewPage /></ThemeLabRoute>}
       />
       <Route path="*" element={<DashboardShell />} />
     </Routes>

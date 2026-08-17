@@ -58,7 +58,9 @@ from app.schemas.theme_families import (
     WebsiteThemeConfigurationCreate,
     validate_component_payload,
 )
+from app.schemas.form_delivery import WebsiteFormDeliveryModeRevisionCreate
 from app.services import form_submission_gateway as gateway
+from app.services.form_delivery_modes import create_form_delivery_mode_revision
 from app.services import page_export
 from app.services import page_qa as page_qa_service
 from app.services import theme_activation_rehearsal
@@ -703,8 +705,8 @@ def test_disabled_gateway_returns_stable_503_without_entering_body_handler(
         raise AssertionError("disabled gateway consumed the request body")
 
     monkeypatch.setattr(
-        form_submission_routes,
-        "submit_preflighted_request",
+        gateway,
+        "_read_bounded_json_body",
         forbidden_body_handler,
     )
     app.dependency_overrides[get_session] = lambda: session
@@ -718,7 +720,7 @@ def test_disabled_gateway_returns_stable_503_without_entering_body_handler(
         app.dependency_overrides.clear()
     assert response.status_code == 503
     assert response.json()["detail"] == {
-        "code": "form_submission_unavailable",
+        "code": "form_delivery_mode_not_found",
         "message": "Form submission is not available.",
     }
     assert "do-not-reflect" not in response.text
@@ -824,6 +826,89 @@ def test_disabled_readiness_reports_each_governance_blocker_separately(
         "missing_idempotency_strategy",
         "missing_audit_identity",
     } <= codes
+
+
+@pytest.mark.parametrize(
+    ("delivery_mode", "expected_code"),
+    (
+        ("disabled", "form_submission_disabled"),
+        ("atlas_email", "form_delivery_mode_unavailable"),
+    ),
+)
+def test_explicit_website_mode_preempts_unchanged_provider_disabled_v3_gateway(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    delivery_mode: str,
+    expected_code: str,
+) -> None:
+    graph = _seed_v3(session)
+    assert graph.form.configuration_payload["submission_state"] == (
+        "disabled_pending_provider_configuration"
+    )
+    now = datetime.now(UTC)
+    atlas_email = delivery_mode == "atlas_email"
+    create_form_delivery_mode_revision(
+        session,
+        graph.website.id,
+        WebsiteFormDeliveryModeRevisionCreate(
+            form_component_configuration_id=graph.form.id,
+            form_instance_key=graph.form.component_instance_key,
+            lifecycle_status="active",
+            mode=delivery_mode,
+            enabled=atlas_email,
+            provider_key=(gateway.SYNTHETIC_PROVIDER_KEY if atlas_email else None),
+            adapter_version=("test-v1" if atlas_email else None),
+            destination_identity=(
+                "recipient-set-ref://synthetic/recipients" if atlas_email else None
+            ),
+            configuration_payload=(
+                {
+                    "transport_key_reference": "synthetic-mail",
+                    "transport_secret_reference": "secret-ref://synthetic/mail",
+                    "notification_preference": "all_verified",
+                    "consent_required": False,
+                }
+                if atlas_email
+                else {}
+            ),
+            privacy_policy_reference=("/privacy" if atlas_email else None),
+            retention_policy_reference=(
+                "policy-ref://synthetic/retention" if atlas_email else None
+            ),
+            abuse_policy_reference=(
+                "policy-ref://synthetic/abuse" if atlas_email else None
+            ),
+            success_behavior=("Show success." if atlas_email else None),
+            failure_behavior=("Show failure." if atlas_email else None),
+            idempotency_policy_reference=(
+                "policy-ref://synthetic/idempotency" if atlas_email else None
+            ),
+            audit_identity=f"test-explicit-{delivery_mode}",
+            approval_identity="test-approval",
+            approved_at=now,
+            activation_identity="test-activation",
+            activated_at=now,
+            created_by="test",
+            updated_by="test",
+            rationale="Prove Website-scoped mode authority over unchanged V3.",
+        ),
+    )
+
+    def legacy_readiness_must_not_run(*_args, **_kwargs):
+        raise AssertionError("legacy V3 readiness must not select an explicit mode")
+
+    monkeypatch.setattr(
+        gateway,
+        "evaluate_form_readiness",
+        legacy_readiness_must_not_run,
+    )
+    with pytest.raises(gateway.FormGatewayError) as error:
+        gateway.preflight_form_gateway(
+            session,
+            graph.website.id,
+            graph.form.id,
+        )
+    assert error.value.code == expected_code
 
 
 def test_production_readiness_requires_independent_spam_control_adapter(
@@ -1179,7 +1264,7 @@ def test_rehearsal_gateway_refuses_non_disposable_actual_session_bind(
             )
         assert (blocked.value.status_code, blocked.value.code) == (
             503,
-            "form_submission_unavailable",
+            "form_delivery_mode_not_found",
         )
 
 
@@ -1200,10 +1285,9 @@ def test_active_gateway_rejects_malformed_expected_and_observed_origins() -> Non
     assert calls["receive"] == 0
 
 
-def test_post_activation_rehearsal_gateway_submits_only_after_exact_audit_preflight(
+def test_post_activation_rehearsal_gateway_requires_explicit_mode_before_body(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     graph = _seed_v3(session, state="rehearsal_ready")
     _activate_rehearsal_graph(session, graph)
@@ -1216,206 +1300,32 @@ def test_post_activation_rehearsal_gateway_submits_only_after_exact_audit_prefli
             frontend_origin="http://localhost:5173",
         ),
     )
-    delegate = gateway.TEST_ONLY_SUBMISSION_PROVIDERS[
-        gateway.SYNTHETIC_PROVIDER_KEY
-    ]
     provider_calls = 0
 
-    class CountingProvider:
+    class ForbiddenProvider:
         provider_key = gateway.SYNTHETIC_PROVIDER_KEY
 
         def submit(self, context, envelope):
             nonlocal provider_calls
             provider_calls += 1
-            return delegate.submit(context, envelope)
+            raise AssertionError("legacy provider fallback must never run")
 
     monkeypatch.setattr(
         gateway,
         "TEST_ONLY_SUBMISSION_PROVIDERS",
-        {gateway.SYNTHETIC_PROVIDER_KEY: CountingProvider()},
+        {gateway.SYNTHETIC_PROVIDER_KEY: ForbiddenProvider()},
     )
-
-    preflight = gateway.preflight_form_gateway(
-        session,
-        graph.website.id,
-        graph.form.id,
-    )
-    assert preflight.mode == "activation_rehearsal"
-    assert preflight.readiness.can_submit is True
-    body = json.dumps(
-        {
-            "name": "Synthetic Person",
-            "phone": "(407) 555-0100",
-            "postal_code": "32801",
-            "requested_service": "Synthetic Service",
-            "message": "Synthetic rehearsal only.",
-            "consent_accepted": None,
-        }
-    ).encode("utf-8")
-    submission_headers = {
-        "Idempotency-Key": "synthetic-rehearsal-request-0001",
-        "X-Atlas-CSRF-Token": preflight.readiness.security.csrf_token or "",
-    }
-    duplicate_header_cases = [
-        (b"origin", b"http://127.0.0.1:5173", "origin_rejected"),
-        (b"x-atlas-csrf-token", b"duplicate-token", "csrf_rejected"),
-        (b"idempotency-key", b"synthetic-rehearsal-request-duplicate", "idempotency_key_invalid"),
-    ]
-    for header_name, header_value, expected_code in duplicate_header_cases:
-        ambiguous_request, ambiguous_calls = _raw_request(
-            [body],
-            content_length=len(body),
-            origin="http://localhost:5173",
-            extra_headers=submission_headers,
+    with pytest.raises(gateway.FormGatewayError) as missing_mode:
+        gateway.preflight_form_gateway(
+            session,
+            graph.website.id,
+            graph.form.id,
         )
-        ambiguous_request.scope["headers"].append((header_name, header_value))
-        with pytest.raises(gateway.FormGatewayError) as ambiguous:
-            asyncio.run(
-                gateway.submit_preflighted_request(ambiguous_request, preflight)
-            )
-        assert ambiguous.value.code == expected_code
-        assert ambiguous_calls["receive"] == 0
-
-    request, calls = _raw_request(
-        [body],
-        content_length=len(body),
-        origin="http://localhost:5173",
-        extra_headers=submission_headers,
-    )
-    result = asyncio.run(gateway.submit_preflighted_request(request, preflight))
-    assert result.status == "accepted"
-    assert result.provider_reference.startswith("synthetic-")
-    assert calls["receive"] > 0
-    assert provider_calls == 1
-
-    replay_request, _ = _raw_request(
-        [body],
-        content_length=len(body),
-        origin="http://localhost:5173",
-        extra_headers=submission_headers,
-    )
-    replay = asyncio.run(
-        gateway.submit_preflighted_request(replay_request, preflight)
-    )
-    assert replay == result
-    assert provider_calls == 1
-
-    changed = json.dumps(
-        {**json.loads(body), "requested_service": "Different synthetic service"}
-    ).encode("utf-8")
-    conflict_request, _ = _raw_request(
-        [changed],
-        content_length=len(changed),
-        origin="http://localhost:5173",
-        extra_headers=submission_headers,
-    )
-    with pytest.raises(gateway.FormGatewayError) as conflict:
-        asyncio.run(
-            gateway.submit_preflighted_request(conflict_request, preflight)
-        )
-    assert (conflict.value.status_code, conflict.value.code) == (
-        409,
-        "idempotency_conflict",
-    )
-    assert provider_calls == 1
-
-    class ExplodingProvider:
-        provider_key = gateway.SYNTHETIC_PROVIDER_KEY
-
-        def submit(self, _context, _envelope):
-            raise RuntimeError("literal-secret Private Customer provider failure")
-
-    monkeypatch.setattr(
-        gateway,
-        "TEST_ONLY_SUBMISSION_PROVIDERS",
-        {gateway.SYNTHETIC_PROVIDER_KEY: ExplodingProvider()},
-    )
-    failure_headers = {
-        **submission_headers,
-        "Idempotency-Key": "synthetic-rehearsal-request-safe-error-0002",
-    }
-    exploding_request, _ = _raw_request(
-        [body],
-        content_length=len(body),
-        origin="http://localhost:5173",
-        extra_headers=failure_headers,
-    )
-    with pytest.raises(gateway.FormGatewayError) as safe_failure:
-        asyncio.run(
-            gateway.submit_preflighted_request(exploding_request, preflight)
-        )
-    assert (safe_failure.value.status_code, safe_failure.value.code) == (
+    assert (missing_mode.value.status_code, missing_mode.value.code) == (
         503,
-        "form_submission_unavailable",
+        "form_delivery_mode_not_found",
     )
-    assert safe_failure.value.__cause__ is None
-    assert safe_failure.value.__suppress_context__ is True
-    assert "literal-secret" not in str(safe_failure.value)
-    assert "Private Customer" not in str(safe_failure.value)
-    assert "literal-secret" not in caplog.text
-    assert "Private Customer" not in caplog.text
-
-    class SpoofingProvider:
-        provider_key = gateway.SYNTHETIC_PROVIDER_KEY
-
-        def submit(self, _context, _envelope):
-            raise gateway.FormGatewayError(
-                418,
-                "provider_owned_detail",
-                "literal-secret Private Customer provider-safe-message spoof",
-            )
-
-    monkeypatch.setattr(
-        gateway,
-        "TEST_ONLY_SUBMISSION_PROVIDERS",
-        {gateway.SYNTHETIC_PROVIDER_KEY: SpoofingProvider()},
-    )
-    spoofing_request, _ = _raw_request(
-        [body],
-        content_length=len(body),
-        origin="http://localhost:5173",
-        extra_headers={
-            **submission_headers,
-            "Idempotency-Key": "synthetic-rehearsal-request-safe-error-0003",
-        },
-    )
-    with pytest.raises(gateway.FormGatewayError) as spoofed_failure:
-        asyncio.run(
-            gateway.submit_preflighted_request(spoofing_request, preflight)
-        )
-    assert (spoofed_failure.value.status_code, spoofed_failure.value.code) == (
-        503,
-        "form_submission_unavailable",
-    )
-    assert "literal-secret" not in str(spoofed_failure.value)
-    assert "Private Customer" not in str(spoofed_failure.value)
-    assert "literal-secret" not in caplog.text
-    assert "Private Customer" not in caplog.text
-
-    activation_audit = session.exec(
-        select(ThemeConfigurationAudit).where(
-            ThemeConfigurationAudit.component_configuration_id == graph.form.id,
-            ThemeConfigurationAudit.action_type == "component_activated",
-        )
-    ).one()
-    session.delete(activation_audit)
-    session.commit()
-    blocked_request, blocked_calls = _raw_request([body])
-    with pytest.raises(HTTPException) as blocked:
-        asyncio.run(
-            form_submission_routes.submit_performance_local_form(
-                graph.website.id,
-                graph.form.id,
-                blocked_request,
-                session,
-            )
-        )
-    assert blocked.value.status_code == 503
-    assert blocked.value.detail == {
-        "code": "form_submission_unavailable",
-        "message": "Form submission is not available.",
-    }
-    assert blocked_calls["receive"] == 0
+    assert provider_calls == 0
 
 
 @pytest.mark.parametrize("scope_case", ["cross_page", "expired_override", "inactive"])
@@ -1615,7 +1525,7 @@ def test_active_gateway_and_public_export_require_full_readiness_and_audits_befo
         gateway.preflight_form_gateway(session, graph.website.id, graph.form.id)
     assert (missing_audit.value.status_code, missing_audit.value.code) == (
         503,
-        "form_submission_unavailable",
+        "form_delivery_mode_not_found",
     )
 
 
@@ -1819,20 +1729,10 @@ def test_malformed_origin_and_deep_json_return_stable_errors_before_delivery(
             frontend_origin="http://localhost:5173",
         ),
     )
-    readiness = gateway.evaluate_form_readiness(
-        graph.form,
-        mode="activation_rehearsal",
-        test_environment_allowed=True,
-    )
-    preflight = gateway.FormGatewayPreflight(
+    preflight = SimpleNamespace(
         website=graph.website,
-        configuration=graph.configuration,
         component=graph.form,
-        contract=CompactEstimateFormConfigurationV3.model_validate(
-            graph.form.configuration_payload
-        ),
-        readiness=readiness,
-        mode="activation_rehearsal",
+        runtime_scope="contained_test",
     )
     receive_calls = 0
 
@@ -1856,7 +1756,7 @@ def test_malformed_origin_and_deep_json_return_stable_errors_before_delivery(
         receive_never,
     )
     with pytest.raises(gateway.FormGatewayError) as origin_error:
-        asyncio.run(gateway.submit_preflighted_request(malformed_origin_request, preflight))
+        gateway._require_origin(malformed_origin_request, preflight)
     assert origin_error.value.code == "origin_rejected"
     assert receive_calls == 0
     assert gateway._normalized_origin(
@@ -2182,7 +2082,7 @@ def test_backup_057_round_trips_canonical_v3_draft_graph(
     graph = _seed_v3(session, state="rehearsal_ready")
     exported = export_backup(session, backup_dir=tmp_path)
     loaded = load_backup(Path(exported["path"]))
-    assert loaded["metadata"]["version"] == "0.57"
+    assert loaded["metadata"]["version"] == "0.58"
     assert loaded["metadata"]["table_counts"]["theme_family_versions"] == 2
 
     target_engine = create_engine(

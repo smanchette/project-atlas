@@ -176,7 +176,7 @@ def test_0043_clean_upgrade_creates_empty_durable_qa_table(
         )
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260815_0046"
+        ).scalar_one() == "20260817_0047"
     engine.dispose()
     get_settings.cache_clear()
 
@@ -210,7 +210,7 @@ def test_0043_adopts_exact_empty_model_created_table(
         ).scalar_one() == "historical_unbound"
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260815_0046"
+        ).scalar_one() == "20260817_0047"
     inspector = inspect(engine)
     assert "uq_generatedpageqaresult_current_page" in {
         item["name"] for item in inspector.get_indexes(TABLE)

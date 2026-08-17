@@ -1,6 +1,6 @@
 # Project Atlas Product Specification
 
-**Version:** 1.0
+**Version:** 1.1
 
 **Status:** Governing Product Specification
 
@@ -58,6 +58,8 @@ Atlas must be capable of:
 
 The first complete Flo-Zone website proves these capabilities in a real setting. A second company must be supportable through configuration and extension rather than a rewrite of the platform.
 
+Atlas Website Builder is both a complete standalone product and an included, optionally integrated AtlasOps360 module. Both paths consume one Website Builder Core. AtlasOps360 may depend on the stable core contracts, but the core must not depend on AtlasOps360, fork for AtlasOps360, or require an AtlasOps360 account, database, authentication system, deployment, or subscription.
+
 ---
 
 ## 4. Platform Architecture Overview
@@ -71,6 +73,7 @@ Atlas is organized into independently governed capability planes:
 | Planning | Website scope, content briefs, pages, relationships, navigation, media needs, and discovery goals |
 | Experience | Components, themes, layouts, presentation, responsive behavior, and accessibility |
 | Media | Brand assets, website identity, images, derivatives, provenance, rights, and approvals |
+| Form delivery | Website/form mode revisions, recipients, normalized envelopes, adapter readiness, and minimal delivery evidence |
 | Intelligence | Search, AI discovery, health, analytics, competitors, reviews, customer questions, and recommendations |
 | Delivery | Provider connections, deployment, rendering, verification, backups, audits, recovery, and maintenance |
 | Operations boundary | Customer, job, scheduling, dispatch, and other private operational systems connected only through approved adapters |
@@ -95,6 +98,9 @@ The core model consists of distinct but related concepts:
 - **Content item:** audience-facing language derived from approved knowledge for a defined purpose.
 - **Page and page relationship:** a planned website unit and its semantic connections.
 - **Component, theme, and layout:** presentation definitions that consume content without owning its factual meaning.
+- **Form-delivery-mode revision:** the explicit, immutable Website/form choice and readiness configuration for one form component.
+- **Form-recipient revision:** a Website/form-scoped, normalized and verification-aware delivery destination that is separate from transport credentials.
+- **Submission envelope, outbox record, and delivery attempt:** the provider-neutral submission identity and minimum safe delivery evidence, not a customer or lead record.
 - **Media item:** an asset with provenance, rights, approval, and derivative relationships.
 - **Intelligence observation:** a time-bound external signal with provider, scope, confidence, and limitations.
 - **Provider connection:** a configured integration with an external system.
@@ -111,6 +117,7 @@ The following separation is mandatory:
 | Content | Audience-facing expression with purpose and version | Authoritative business truth |
 | Presentation | Components, themes, layouts, and tokens | Content or factual ownership |
 | Media | Assets, rights, provenance, and derivatives | Proof of a claim without validation |
+| Form delivery | Explicit Website/form mode, destination, recipients, policies, envelope, readiness, and delivery evidence | Theme behavior, portal state, customer records, or CRM workflow |
 | Intelligence | Attributed, time-bound signals and recommendations | Verified knowledge or publishing authority |
 | Operational data | Private customers, jobs, schedules, and service records | Public website data |
 
@@ -220,6 +227,20 @@ Each subsystem contract defines a durable product responsibility. Current releas
 
 ---
 
+## 12A. Website Builder Core and Universal Form Delivery
+
+**Responsibility:** Provide the one reusable complete-site engine used by standalone Atlas Website Builder and by the optional Website Builder module included with AtlasOps360. The core owns Websites, Pages, content, Theme Families and Theme Versions, component configuration, media governance, SEO, navigation, form presentation and field contracts, provider-neutral submission envelopes, publishing and deployment adapters, and Website-scoped integration configuration. Its form-delivery subsystem owns explicit mode revisions, recipient revisions, normalized submission contracts, readiness, and the minimum safe outbox and immutable attempt evidence required for reliable delivery.
+
+**Boundary:** AtlasOps360 may consume the core through a one-way dependency, but it may not own, absorb, replace, or fork it. The core has no hard runtime dependency on an AtlasOps360 account, database, authentication system, deployment, or subscription, and integration must not use cross-product table access. Form delivery is not Theme behavior, customer-portal routing, a lead inbox, a sales pipeline, a scheduling or estimating system, or a CRM. Production customer values must not be stored in plaintext and remain unavailable for persistence or delivery without approved encryption and key management.
+
+**Relationships:** Themes own accessible form presentation and component compatibility. Website/form configuration owns exactly one effective revision with one of five modes: `disabled`, `atlas_email`, `provider_owned`, `atlasops360_native`, or `external_adapter`. Providers own provider-specific delivery or embedded-form behavior. Atlas-owned modes use the existing form gateway, one normalized five-field submission envelope, and the single existing provider registry. Provider-owned forms and customer portals remain separate capabilities.
+
+**Configuration and extensibility:** Configuration records are immutable and revisioned, scoped to the exact Website and form component, and organized as a chain with exactly one current head for that scope. Each delivery-mode revision owns the exact current heads of its immutable recipient chains. Initial recipient roots and same-mode address, role, enabled-state, or verification successors may be appended only while that email-mode revision is current and has no submission evidence. A first submission or delivery-mode successor freezes that snapshot; recipient heads may then be carried forward only to the directly superseding email-mode revision. No mode may be inferred from a Theme, portal setting, provider presence, or another mode, and no mode may silently fall back. `atlas_email` is the universal standalone option and requires independently ready recipients, policies, transport, secret reference, idempotency, and secure payload handling. `provider_owned` supports approved external links, hosted routes, sandboxed iframes, or adapter-controlled embeds with verified origins or destinations, accessibility labels, privacy disclosure, and fixed sandbox and referrer policies where applicable, while rejecting arbitrary HTML or JavaScript, unrestricted origins, embedded secrets, and misleading retention claims. `atlasops360_native` is a future optional first-party adapter. `external_adapter` requires an installed approved adapter. GorillaDesk is one possible provider-owned-form example, not a dependency.
+
+**Implementation goal:** Let every Website choose an explicit form path, including no form, while keeping standalone Atlas complete, allowing later AtlasOps360 connection without rebuilding the Website, and preventing provider or operational dependencies from spreading into the shared core. The current foundation defines contracts and fail-closed readiness; it does not declare any production email transport, provider-owned form, AtlasOps360 adapter, external adapter, or customer-submission path active.
+
+---
+
 ## 13. Theme & Design System
 
 **Responsibility:** Define design tokens, typography, color, spacing, sizing, borders, elevation, motion, responsive behavior, layout systems, component mappings, and brand application.
@@ -312,9 +333,9 @@ Each subsystem contract defines a durable product responsibility. Current releas
 
 **Relationships:** Uses Provider Adapters, Navigation, Components, Website Configuration, authentication boundaries, and verification. It may connect to GorillaDesk, AtlasOps360, or future providers.
 
-**Configuration and extensibility:** Supports provider selection, per-website enablement, labels, routes, authentication mode, health state, and fallback policy. When disabled, a portal must be hidden completely.
+**Configuration and extensibility:** Supports provider selection, per-website enablement, labels, routes, authentication mode, health state, and explicit unavailable behavior. When disabled, a portal must be hidden completely.
 
-**Implementation goal:** Allow portal providers to change without exposing private data to public website generation or coupling navigation to a single vendor.
+**Implementation goal:** Allow portal providers to change without exposing private data to public website generation or coupling navigation to a single vendor. Portal configuration must not select, infer, or substitute for a form-delivery mode.
 
 ---
 
@@ -324,11 +345,11 @@ Each subsystem contract defines a durable product responsibility. Current releas
 
 **Boundary:** An adapter translates capabilities and observations. It does not redefine Atlas domain truth, tenancy, approval, security, audit, or recovery rules.
 
-**Relationships:** Serves CMS providers, rendering engines, AI services, image generators, CRM systems, customer portals, analytics, search, reviews, storage, delivery, authentication, and operational platforms.
+**Relationships:** Serves CMS providers, rendering engines, AI services, image generators, Website form delivery, CRM systems, customer portals, analytics, search, reviews, storage, delivery, authentication, and operational platforms.
 
 **Configuration and extensibility:** Adapters declare identity, version, capabilities, permissions, configuration schema, credential requirements, rate limits, health, failure modes, data classifications, and supported operations.
 
-**Implementation goal:** Support multiple CMS providers, rendering engines, AI providers, CRM integrations, GorillaDesk, AtlasOps360, and future services without spreading provider-specific behavior through core domains.
+**Implementation goal:** Support multiple CMS providers, rendering engines, AI providers, CRM integrations, GorillaDesk, AtlasOps360, and future services without spreading provider-specific behavior through core domains or permitting adapters to become implicit form-mode fallbacks.
 
 ---
 
@@ -396,7 +417,7 @@ Atlas security is based on explicit identity, tenant isolation, least privilege,
 
 Security applies consistently across operator interfaces, automation, mobile and desktop applications, REST and GraphQL APIs, plugins, SDK clients, providers, and background work. No interface may bypass service-level authorization.
 
-Secrets must remain outside content, media, evidence, logs, backups not designed for secrets, public APIs, source control, and client state. External data is untrusted until validated. Private operational data requires explicit scope and must not leak into public website domains.
+Secrets must remain outside content, media, evidence, logs, backups not designed for secrets, public APIs, source control, and client state. Website configuration may hold opaque secret references but never secret values. Form logs and delivery-attempt evidence must exclude customer field values, raw request bodies, recipient lists, provider payloads, and secret-reference values. External data is untrusted until validated. Private operational data requires explicit scope and must not leak into public website domains.
 
 The implementation goal is a security model that scales from a local proving environment to multi-tenant hosted operation without changing its trust principles.
 
@@ -443,6 +464,8 @@ Configuration must be:
 
 Defaults must be safe and must not embed Flo-Zone facts or provider assumptions. Environment configuration must not silently override durable company truth.
 
+Consequential form-delivery configuration must be revisioned at the Website/form boundary, retain supersession lineage and audit identity, and fail closed when recipient verification, policy, provider, transport, adapter, destination, consent, anti-abuse, idempotency, or secure-payload requirements are incomplete. Recipient addresses are configuration, not transport credentials.
+
 The implementation goal is to support new companies and websites primarily through governed configuration rather than source-code changes.
 
 ---
@@ -461,7 +484,7 @@ Flo-Zone is one company context and must never become the implicit default tenan
 
 ## 30. Multi-Website Architecture
 
-A company may operate multiple websites with distinct domains, identities, audiences, brands, languages, page inventories, themes, providers, credentials, deployments, and maintenance schedules.
+A company may operate multiple websites with distinct domains, identities, audiences, brands, languages, page inventories, themes, form-delivery modes and recipients, providers, credentials, deployments, and maintenance schedules.
 
 Websites may reuse approved company facts or assets through explicit references. They must not share content, media assignments, canonical identity, provider configuration, or publication state accidentally.
 
@@ -485,7 +508,7 @@ The implementation goal is flexible brand reuse without identity ambiguity or du
 
 ## 32. Extensibility Model
 
-Atlas extensibility is contract-based. Extensions may add providers, components, themes, page types, validators, intelligence sources, media processors, workflow steps, exports, or operator tools without bypassing core security and governance.
+Atlas extensibility is contract-based. Extensions may add providers, form-delivery adapters, components, themes, page types, validators, intelligence sources, media processors, workflow steps, exports, or operator tools without bypassing core security and governance.
 
 The model permanently supports:
 
@@ -511,7 +534,7 @@ The implementation goal is a stable ecosystem boundary that allows Atlas to grow
 
 Atlas must preserve architectural support for the following capabilities even when they are not implemented in the current milestone:
 
-- AtlasOps360 integration through explicit operational and identity boundaries;
+- deeper AtlasOps360 integration through explicit operational, identity, adapter, and API boundaries, including future optional native form notifications;
 - CRM integrations, including GorillaDesk and future providers;
 - additional customer portal providers;
 - multiple AI text, reasoning, image, and evaluation provider adapters;
@@ -586,6 +609,9 @@ An approved, presentation-neutral statement about a company or its legitimate op
 **Content**  
 Audience-facing expression created for a defined purpose from approved knowledge.
 
+**Form-delivery mode**\
+One explicit, revisioned Website/form choice among `disabled`, `atlas_email`, `provider_owned`, `atlasops360_native`, and `external_adapter`.
+
 **Intelligence**  
 Attributed, time-bound external observation or derived recommendation that has not automatically become approved knowledge.
 
@@ -613,6 +639,12 @@ A provider or subsystem that turns approved page, component, theme, content, and
 **Schema**  
 A machine-readable representation of approved entities, facts, and relationships; not a source of new claims.
 
+**Submission envelope**\
+The provider-neutral, versioned representation of an Atlas-owned form submission and its Website, component, mode, consent, policy, anti-abuse, idempotency, request, and destination-adapter identities.
+
+**Website Builder Core**\
+The single shared complete-site engine used by standalone Atlas Website Builder and the optional AtlasOps360 Website Builder module through a one-way, non-forked dependency.
+
 **Website identity**  
 The site-specific browser, device, social, and machine-readable identity associated with a website.
 
@@ -629,6 +661,7 @@ The site-specific browser, device, social, and machine-readable identity associa
 | Content Planning | Knowledge and audience intent | Versioned content brief | Business truth | Human and AI authoring providers |
 | Page Planning | Site goals and domain relationships | Page graph and requirements | Final prose and layout | New page types and CMS targets |
 | Component Registry | Semantic presentation contracts | Reusable components | Factual ownership | Third-party component packages |
+| Website Builder Core and Form Delivery | Website, component, explicit mode, recipients, policies, and adapter readiness | Provider-neutral form behavior and minimal delivery evidence | Portal state, operational records, and CRM workflow | Atlas email, provider-owned, AtlasOps360-native, and approved external adapters |
 | Theme & Design | Brand and design configuration | Presentation system | Content meaning | Multiple design and rendering systems |
 | Navigation | Page graph and journeys | Menus and link structures | Page authorization | Localized and private navigation |
 | Media Management | Media plans and source assets | Approved responsive media | Unsupported factual proof | New storage and media formats |
@@ -656,8 +689,7 @@ The site-specific browser, device, social, and machine-readable identity associa
 | Quality and template expansion | Component Registry, Theme & Design, QA-related verification, versioning |
 | Website maintenance | Intelligence, Verification, Content and Page Planning, Deployment, Audit & Recovery |
 | Multi-company SaaS | Security, Multi-Company, Multi-Website, multi-tenant configuration and operations |
-| Product-family integration | Provider Adapters, AtlasOps360 boundary, Customer Portal, shared identity contracts |
+| Product-family integration | Shared Website Builder Core, one-way AtlasOps360 adapter/API boundary, Provider Adapters, Customer Portal, shared identity contracts |
 | Operational intelligence network | Intelligence, Knowledge, privacy, provenance, opt-in sharing, tenant isolation |
 
 Roadmap phases determine implementation order. Capability boundaries in this Specification remain stable unless a governing-document update explicitly changes them.
-
