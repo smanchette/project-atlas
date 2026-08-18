@@ -2571,6 +2571,1643 @@ th {
   }
 }
 
+/* Performance Local V4 is an operator-only, source-defined review surface.
+   Every selector is V4-specific so the approved V2/V3 renderer remains exact. */
+.performanceLocalV4Review,
+.performanceLocalV4ReviewState {
+  min-width: 0;
+  min-height: 100vh;
+  background: #e9eeea;
+  color: #13251d;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.performanceLocalV4ReviewHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 560px);
+  gap: 28px;
+  align-items: end;
+  padding: 28px clamp(20px, 4vw, 64px);
+  background: #10261c;
+  color: #f5f8f5;
+  border-bottom: 5px solid #b7df3a;
+}
+
+.performanceLocalV4ReviewTitle,
+.performanceLocalV4ReviewHeader p {
+  margin: 0;
+}
+
+.performanceLocalV4ReviewTitle {
+  display: block;
+  max-width: 760px;
+  margin-top: 12px;
+  font-size: clamp(1.4rem, 3vw, 2.45rem);
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+}
+
+.performanceLocalV4ReviewHeader p,
+.performanceLocalV4ReviewBack {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.performanceLocalV4ReviewHeader p {
+  margin-top: 22px;
+  color: #b7df3a;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.75rem;
+}
+
+.performanceLocalV4ReviewHeader > div > span {
+  display: block;
+  margin-top: 10px;
+  color: #c9d6cf;
+}
+
+.performanceLocalV4ReviewBack {
+  min-height: 44px;
+  color: #f5f8f5;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.performanceLocalV4ReviewBack:focus-visible,
+.performanceLocalV4ReviewControls button:focus-visible,
+.performanceLocalV4ReviewControls input:focus-visible,
+.performanceLocalV4Manifest summary:focus-visible {
+  outline: 3px solid #b7df3a;
+  outline-offset: 3px;
+}
+
+.performanceLocalV4ReviewControls {
+  display: grid;
+  gap: 12px;
+}
+
+.performanceLocalV4ReviewControls fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid #3e5b4d;
+  border-radius: 12px;
+}
+
+.performanceLocalV4ReviewControls legend {
+  padding: 0 6px;
+  color: #c9d6cf;
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.performanceLocalV4ReviewControls button {
+  min-height: 44px;
+  padding: 9px 14px;
+  border: 1px solid #587564;
+  border-radius: 999px;
+  background: transparent;
+  color: #f5f8f5;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.performanceLocalV4ReviewControls button[aria-pressed="true"] {
+  border-color: #b7df3a;
+  background: #b7df3a;
+  color: #10261c;
+}
+
+.performanceLocalV4ReviewControls > label {
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+  width: fit-content;
+  min-height: 44px;
+  font-weight: 750;
+}
+
+.performanceLocalV4ReviewControls input {
+  width: 22px;
+  height: 22px;
+  accent-color: #b7df3a;
+}
+
+.performanceLocalV4DemoNotice {
+  margin: 0;
+  padding: 12px 24px;
+  background: #fff0b8;
+  color: #493400;
+  border-bottom: 1px solid #dcb532;
+  font-weight: 850;
+  text-align: center;
+  letter-spacing: 0.055em;
+}
+
+.performanceLocalV4PreviewCanvas {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  background: #fff;
+}
+
+.performanceLocalV4DiagnosticPanel {
+  margin: 32px clamp(20px, 4vw, 64px) 64px;
+  padding: clamp(22px, 3vw, 38px);
+  border: 1px solid #c7d2ca;
+  border-radius: 22px;
+  background: #fff;
+  box-shadow: 0 18px 50px rgb(17 37 28 / 9%);
+}
+
+.performanceLocalV4DiagnosticHeading {
+  display: flex;
+  gap: 20px;
+  align-items: start;
+  justify-content: space-between;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #dfe6e1;
+}
+
+.performanceLocalV4DiagnosticHeading p,
+.performanceLocalV4DiagnosticHeading h2 {
+  margin: 0;
+}
+
+.performanceLocalV4DiagnosticHeading p {
+  color: #52705f;
+  font-size: 0.75rem;
+  font-weight: 850;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.performanceLocalV4DiagnosticHeading h2 {
+  margin-top: 6px;
+  font-size: clamp(1.3rem, 2.4vw, 2rem);
+}
+
+.performanceLocalV4DiagnosticHeading > span {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: #f5e5e5;
+  color: #8c2626;
+  font-weight: 800;
+}
+
+.performanceLocalV4DiagnosticHeading > span[data-tone="ready"] {
+  background: #e6f3df;
+  color: #275f27;
+}
+
+.performanceLocalV4DiagnosticGrid,
+.performanceLocalV4Manifest dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin: 24px 0 0;
+  overflow: hidden;
+  border: 1px solid #dfe6e1;
+  border-radius: 14px;
+  background: #dfe6e1;
+}
+
+.performanceLocalV4DiagnosticGrid > div,
+.performanceLocalV4Manifest dl > div {
+  min-width: 0;
+  padding: 13px 15px;
+  background: #f8faf8;
+}
+
+.performanceLocalV4DiagnosticGrid dt,
+.performanceLocalV4Manifest dt {
+  color: #62766b;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.performanceLocalV4DiagnosticGrid dd,
+.performanceLocalV4Manifest dd {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.performanceLocalV4DiagnosticLists {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.performanceLocalV4DiagnosticLists > div {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid #dfe6e1;
+  border-radius: 14px;
+  background: #f8faf8;
+}
+
+.performanceLocalV4DiagnosticLists h3,
+.performanceLocalV4DiagnosticLists p,
+.performanceLocalV4DiagnosticLists ul {
+  margin: 0;
+}
+
+.performanceLocalV4DiagnosticLists h3 {
+  font-size: 0.9rem;
+}
+
+.performanceLocalV4DiagnosticLists p,
+.performanceLocalV4DiagnosticLists ul {
+  margin-top: 10px;
+  color: #53685c;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.performanceLocalV4Manifest {
+  margin-top: 24px;
+  border: 1px solid #dfe6e1;
+  border-radius: 14px;
+  background: #f8faf8;
+}
+
+.performanceLocalV4Manifest summary {
+  min-height: 48px;
+  padding: 14px 16px;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.performanceLocalV4Manifest dl {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0 16px 16px;
+}
+
+.performanceLocalV4SafetyNote {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 24px 0 0;
+  padding: 13px 16px;
+  border-radius: 12px;
+  background: #fff0d9;
+  color: #6c4300;
+  font-weight: 750;
+}
+
+.performanceLocalV4ReviewState {
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  text-align: center;
+}
+
+.performanceLocalV4ReviewState h1,
+.performanceLocalV4ReviewState p {
+  margin: 0;
+}
+
+.performanceLocalV4ReviewState h1 {
+  max-width: 780px;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.performanceLocalV4ReviewState a {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 48px;
+  margin-top: 22px;
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: #173e2c;
+  color: #fff;
+  text-decoration: none;
+  font-weight: 800;
+}
+
+.performanceLocalV4Site {
+  --plv4-forest: var(--atlas-color-primary, #123b29);
+  --plv4-forest-deep: var(--atlas-color-secondary, #0b2a1d);
+  --plv4-forest-foreground: var(--atlas-color-primary-foreground, #fff);
+  --plv4-secondary-foreground: var(--atlas-color-secondary-foreground, #fff);
+  --plv4-lime: var(--atlas-color-accent, #b7df3a);
+  --plv4-lime-foreground: var(--atlas-color-accent-foreground, #0b2a1d);
+  --plv4-cream: var(--atlas-color-background, #f7f4e9);
+  --plv4-surface: var(--atlas-color-surface, #fff);
+  --plv4-ink: var(--atlas-color-text, #14251d);
+  --plv4-muted: color-mix(in srgb, var(--plv4-ink) 74%, var(--plv4-surface));
+  --plv4-line: color-mix(in srgb, var(--plv4-ink) 22%, var(--plv4-surface));
+  --plv4-focus: var(--atlas-color-focus, #005fcc);
+  min-width: 0;
+  min-height: 100vh;
+  background: var(--plv4-surface);
+  color: var(--plv4-ink);
+  font-family: var(--atlas-font-body, Inter, ui-sans-serif, system-ui, sans-serif);
+  font-weight: var(--atlas-font-weight-body, 400);
+  font-size: 16px;
+  line-height: 1.65;
+}
+
+.performanceLocalV4Site *,
+.performanceLocalV4Site *::before,
+.performanceLocalV4Site *::after {
+  box-sizing: border-box;
+}
+
+.performanceLocalV4Site :where(h1, h2, h3, p) {
+  overflow-wrap: anywhere;
+}
+
+.performanceLocalV4Site :where(a, button, input, textarea, summary):focus-visible {
+  outline: 3px solid var(--plv4-focus);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 6px var(--plv4-surface);
+}
+
+.performanceLocalV4Site a {
+  color: inherit;
+}
+
+.performanceLocalV4Container {
+  width: min(var(--atlas-content-width-wide, 1180px), calc(100% - 48px));
+  min-width: 0;
+  margin-inline: auto;
+}
+
+.performanceLocalV4SkipLink {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 120;
+  min-height: 44px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--plv4-ink);
+  font-weight: 850;
+  transform: translateY(-180%);
+}
+
+.performanceLocalV4SkipLink:focus {
+  transform: translateY(0);
+}
+
+.performanceLocalV4Campaign {
+  position: relative;
+  z-index: 52;
+  min-height: 44px;
+  background: var(--plv4-lime);
+  color: var(--plv4-lime-foreground);
+}
+
+.performanceLocalV4Campaign > a,
+.performanceLocalV4CampaignInner {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 8px 24px;
+  text-align: center;
+}
+
+.performanceLocalV4Campaign > a,
+.performanceLocalV4CampaignInner > a {
+  font-weight: 900;
+}
+
+.performanceLocalV4CampaignInner p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0;
+}
+
+.performanceLocalV4Header {
+  position: sticky;
+  top: 0;
+  z-index: 60;
+  border-bottom: 1px solid rgb(16 46 33 / 12%);
+  background: rgb(255 255 255 / 96%);
+  box-shadow: 0 8px 28px rgb(15 44 31 / 8%);
+  backdrop-filter: blur(14px);
+}
+
+.performanceLocalV4HeaderInner {
+  display: grid;
+  grid-template-columns: minmax(210px, 1fr) minmax(0, 1.6fr) auto;
+  gap: 22px;
+  align-items: center;
+  min-height: 82px;
+}
+
+.performanceLocalV4Brand {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+}
+
+.performanceLocalV4Brand > span:last-child {
+  display: grid;
+  min-width: 0;
+  line-height: 1.15;
+}
+
+.performanceLocalV4Brand strong,
+.performanceLocalV4Brand small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.performanceLocalV4Brand small {
+  margin-top: 4px;
+  color: var(--plv4-muted);
+  font-size: 0.72rem;
+}
+
+.performanceLocalV4BrandMark {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  background: var(--plv4-forest);
+  color: var(--plv4-forest-foreground);
+  font-weight: 900;
+  letter-spacing: 0.02em;
+}
+
+.performanceLocalV4Logo {
+  display: block;
+  width: auto;
+  max-width: 190px;
+  height: 48px;
+  object-fit: contain;
+}
+
+.performanceLocalV4DesktopNav > ul,
+.performanceLocalV4DesktopNav ul,
+.performanceLocalV4Footer nav ul,
+.performanceLocalV4Drawer nav ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.performanceLocalV4DesktopNav > ul {
+  display: flex;
+  gap: clamp(10px, 1.5vw, 24px);
+  align-items: center;
+  justify-content: center;
+}
+
+.performanceLocalV4DesktopNav a,
+.performanceLocalV4DesktopNav .performanceLocalV4NavigationToggle {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  min-height: 44px;
+  font-size: 0.9rem;
+  font-weight: 750;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.performanceLocalV4NavigationParent {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.performanceLocalV4NavigationToggle {
+  display: grid;
+  flex: 0 0 44px;
+  place-items: center;
+  width: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.performanceLocalV4NavigationToggle svg {
+  width: 18px;
+  height: 18px;
+  transition: transform 160ms ease;
+}
+
+.performanceLocalV4NavigationToggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.performanceLocalV4DesktopNav .performanceLocalV4NavigationBranch {
+  position: relative;
+}
+
+.performanceLocalV4DesktopNav .performanceLocalV4NavigationBranch > ul {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: max-content;
+  min-width: 220px;
+  max-width: 320px;
+  padding: 8px;
+  border: 1px solid var(--plv4-line);
+  border-radius: 12px;
+  background: var(--plv4-surface);
+  color: var(--plv4-ink);
+  box-shadow: 0 18px 42px rgb(15 44 31 / 16%);
+}
+
+.performanceLocalV4DesktopNav .performanceLocalV4NavigationBranch > ul .performanceLocalV4NavigationBranch > ul {
+  top: 0;
+  left: calc(100% + 8px);
+}
+
+.performanceLocalV4DesktopNav .performanceLocalV4NavigationBranch > ul a,
+.performanceLocalV4DesktopNav .performanceLocalV4NavigationBranch > ul span {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 7px 10px;
+  border-radius: 8px;
+}
+
+.performanceLocalV4HeaderActions,
+.performanceLocalV4ActionRow,
+.performanceLocalV4ContactPathways {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.performanceLocalV4HeaderActions > a {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: var(--plv4-lime);
+  color: var(--plv4-lime-foreground);
+  font-size: 0.82rem;
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.performanceLocalV4PhoneCompact svg,
+.performanceLocalV4Button svg,
+.performanceLocalV4Email svg {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+}
+
+.performanceLocalV4MenuTrigger {
+  display: none;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 1px solid var(--plv4-line);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--plv4-forest);
+}
+
+.performanceLocalV4DrawerBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  justify-content: flex-end;
+  background: rgb(4 17 11 / 62%);
+}
+
+.performanceLocalV4Drawer {
+  width: min(420px, 92vw);
+  height: 100%;
+  padding: 22px;
+  overflow-y: auto;
+  background: #fff;
+  box-shadow: -16px 0 45px rgb(4 17 11 / 22%);
+}
+
+.performanceLocalV4Drawer > button {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin-left: auto;
+  border: 1px solid var(--plv4-line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.performanceLocalV4Drawer nav {
+  margin-top: 24px;
+}
+
+.performanceLocalV4Drawer nav a,
+.performanceLocalV4Drawer nav span {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 48px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--plv4-line);
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.performanceLocalV4Drawer .performanceLocalV4NavigationParent > :where(a, span) {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.performanceLocalV4Drawer .performanceLocalV4NavigationToggle {
+  flex-basis: 48px;
+  width: 48px;
+  min-width: 48px;
+  min-height: 48px;
+  border-bottom: 1px solid var(--plv4-line);
+}
+
+.performanceLocalV4Drawer nav ul ul {
+  padding-left: 18px;
+}
+
+.performanceLocalV4Region {
+  min-width: 0;
+  padding: clamp(58px, 7vw, 104px) 0;
+  scroll-margin-top: 96px;
+}
+
+.performanceLocalV4Region:nth-child(even) {
+  background: var(--plv4-cream);
+}
+
+.performanceLocalV4Region-hero {
+  position: relative;
+  padding: clamp(62px, 8vw, 118px) 0;
+  background: var(--plv4-forest);
+  color: var(--plv4-forest-foreground);
+}
+
+.performanceLocalV4Region-trust,
+.performanceLocalV4Region-credentials,
+.performanceLocalV4Region-county_credentials {
+  padding: 34px 0;
+  background: #edf3ee;
+}
+
+.performanceLocalV4Region-final_conversion {
+  background: var(--plv4-forest-deep);
+  color: var(--plv4-secondary-foreground);
+}
+
+.performanceLocalV4HeroGrid,
+.performanceLocalV4Authority,
+.performanceLocalV4FinalGrid,
+.performanceLocalV4AttachedGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: clamp(28px, 5vw, 72px);
+  align-items: center;
+  min-width: 0;
+}
+
+.performanceLocalV4HeroGrid:has(.performanceLocalV4Media),
+.performanceLocalV4HeroGrid:has(.performanceLocalV4DemoMedia),
+.performanceLocalV4Authority:has(.performanceLocalV4Media),
+.performanceLocalV4Authority:has(.performanceLocalV4DemoMedia),
+.performanceLocalV4AttachedGrid {
+  grid-template-columns: minmax(0, 1.05fr) minmax(300px, 0.95fr);
+}
+
+.performanceLocalV4AttachedContent {
+  min-width: 0;
+}
+
+.performanceLocalV4FinalGrid:has(.performanceLocalV4Form) {
+  grid-template-columns: minmax(0, 0.8fr) minmax(420px, 1.2fr);
+}
+
+.performanceLocalV4HeroCopy,
+.performanceLocalV4AuthorityCopy,
+.performanceLocalV4FinalCopy {
+  min-width: 0;
+}
+
+.performanceLocalV4Eyebrow {
+  margin: 0 0 14px;
+  color: var(--plv4-forest-foreground);
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.performanceLocalV4HeroCopy h1,
+.performanceLocalV4Authority h2,
+.performanceLocalV4FinalCopy h2,
+.performanceLocalV4CardGrid h2,
+.performanceLocalV4Process h2 {
+  margin: 0;
+  font-family: var(--atlas-font-heading, Georgia, "Times New Roman", serif);
+  font-weight: var(--atlas-font-weight-heading, 700);
+  line-height: var(--atlas-line-height-heading, 1.04);
+  letter-spacing: var(--atlas-letter-spacing-heading, -0.025em);
+}
+
+.performanceLocalV4HeroCopy h1 {
+  max-width: 850px;
+  font-size: clamp(2.5rem, 6vw, 5.7rem);
+}
+
+.performanceLocalV4HeroSummary {
+  max-width: 720px;
+  margin: 24px 0 0;
+  color: var(--plv4-forest-foreground);
+  font-size: clamp(1.04rem, 1.7vw, 1.28rem);
+  line-height: 1.7;
+}
+
+.performanceLocalV4HeroCopy .performanceLocalV4ActionRow {
+  margin-top: 30px;
+}
+
+.performanceLocalV4Button,
+.performanceLocalV4ButtonSecondary,
+.performanceLocalV4Email,
+.performanceLocalV4PhoneCompact {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: var(--plv4-lime);
+  color: var(--plv4-lime-foreground);
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.performanceLocalV4ButtonSecondary {
+  border: 1px solid color-mix(in srgb, var(--plv4-forest-foreground) 60%, transparent);
+  background: transparent;
+  color: var(--plv4-forest-foreground);
+}
+
+.performanceLocalV4Authority + .performanceLocalV4Authority {
+  margin-top: clamp(38px, 6vw, 76px);
+}
+
+.performanceLocalV4Authority h2,
+.performanceLocalV4FinalCopy h2 {
+  font-size: clamp(2rem, 4vw, 3.7rem);
+}
+
+.performanceLocalV4Authority p,
+.performanceLocalV4FinalCopy p,
+.performanceLocalV4Process p {
+  max-width: 72ch;
+  margin: 20px 0 0;
+  white-space: pre-line;
+  font-size: clamp(1rem, 1.3vw, 1.1rem);
+  line-height: 1.75;
+}
+
+.performanceLocalV4StructuredBody {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 18px;
+  margin-top: 28px;
+}
+
+.performanceLocalV4SourceSection {
+  min-width: 0;
+  padding: clamp(20px, 2.8vw, 30px);
+  border: 1px solid var(--plv4-line);
+  border-radius: var(--atlas-card-radius, 16px);
+  background: var(--atlas-card-background, #fff);
+  color: var(--atlas-card-text, var(--plv4-ink));
+  box-shadow: var(--atlas-card-shadow, 0 12px 34px rgb(14 43 30 / 8%));
+}
+
+.performanceLocalV4SourceSection h3 {
+  margin: 0;
+  font-family: var(--atlas-font-heading, Georgia, "Times New Roman", serif);
+  font-size: clamp(1.15rem, 1.8vw, 1.45rem);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.performanceLocalV4SourceSection p,
+.performanceLocalV4SourceFlow > p {
+  margin-top: 14px;
+}
+
+.performanceLocalV4SourceFlow {
+  min-width: 0;
+}
+
+.performanceLocalV4SourceFlow:has(.performanceLocalV4SourceCards) {
+  grid-column: 1 / -1;
+}
+
+.performanceLocalV4InlineSteps,
+.performanceLocalV4Process,
+.performanceLocalV4SourceCards {
+  margin: 28px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.performanceLocalV4SourceCards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.performanceLocalV4SourceCards li {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--plv4-line);
+  border-radius: var(--atlas-card-radius, 16px);
+  background: var(--atlas-card-background, #fff);
+  color: var(--atlas-card-text, var(--plv4-ink));
+  box-shadow: var(--atlas-card-shadow, 0 12px 34px rgb(14 43 30 / 8%));
+  overflow-wrap: anywhere;
+  font-weight: 700;
+}
+
+.performanceLocalV4InlineSteps {
+  display: grid;
+  gap: 14px;
+}
+
+.performanceLocalV4InlineSteps li {
+  display: grid;
+  gap: 5px;
+  padding: 16px 18px;
+  border-left: 4px solid var(--plv4-lime);
+  border-radius: 0 10px 10px 0;
+  background: #f3f6f3;
+}
+
+.performanceLocalV4Process {
+  display: grid;
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--plv4-line);
+  border-radius: 20px;
+  background: var(--plv4-line);
+}
+
+.performanceLocalV4Process li {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 22px;
+  min-width: 0;
+  padding: clamp(22px, 4vw, 38px);
+  background: #fff;
+}
+
+.performanceLocalV4StepMarker {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  border-radius: 18px;
+  background: var(--plv4-forest);
+  color: var(--plv4-forest-foreground);
+  font-weight: 900;
+}
+
+.performanceLocalV4Media,
+.performanceLocalV4DemoMedia {
+  min-width: 0;
+  margin: 0;
+}
+
+.performanceLocalV4MediaFrame {
+  overflow: hidden;
+  border-radius: 22px;
+  background: #e8ede9;
+  box-shadow: 0 26px 60px rgb(12 42 28 / 18%);
+}
+
+.performanceLocalV4MediaFrame img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.performanceLocalV4Media-hero-desktop .performanceLocalV4MediaFrame,
+.performanceLocalV4DemoMedia-hero {
+  aspect-ratio: 16 / 9;
+}
+
+.performanceLocalV4Media-supporting-landscape .performanceLocalV4MediaFrame,
+.performanceLocalV4Media-inline-content .performanceLocalV4MediaFrame,
+.performanceLocalV4DemoMedia-supporting {
+  aspect-ratio: 4 / 3;
+}
+
+.performanceLocalV4Media figcaption {
+  margin-top: 10px;
+  color: var(--plv4-muted);
+  font-size: 0.82rem;
+}
+
+.performanceLocalV4Region-hero .performanceLocalV4Media figcaption {
+  color: var(--plv4-forest-foreground);
+}
+
+.performanceLocalV4DemoMedia {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 260px;
+  overflow: hidden;
+  border: 3px dashed #9b7714;
+  border-radius: 22px;
+  background:
+    linear-gradient(135deg, transparent 48%, rgb(137 105 16 / 12%) 49%, rgb(137 105 16 / 12%) 51%, transparent 52%),
+    radial-gradient(circle at 28% 30%, rgb(183 223 58 / 55%) 0 10%, transparent 11%),
+    #fff3c8;
+  color: #4c3900;
+}
+
+.performanceLocalV4DemoMedia span {
+  max-width: 280px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: #fff9e6;
+  box-shadow: 0 5px 20px rgb(83 63 8 / 14%);
+  font-size: 0.76rem;
+  font-weight: 900;
+  letter-spacing: 0.07em;
+  text-align: center;
+}
+
+.performanceLocalV4TrustGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.performanceLocalV4TrustGrid article {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 2px 12px;
+  align-items: center;
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid #cedbd2;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.performanceLocalV4TrustGrid svg {
+  grid-row: 1 / span 2;
+  color: var(--plv4-forest);
+}
+
+.performanceLocalV4TrustGrid span {
+  color: var(--plv4-muted);
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.performanceLocalV4CardGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.performanceLocalV4CardGrid article {
+  min-width: 0;
+  padding: clamp(20px, 3vw, 30px);
+  border: 1px solid var(--plv4-line);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 12px 34px rgb(14 43 30 / 8%);
+}
+
+.performanceLocalV4CardGrid h2 {
+  font-size: clamp(1.3rem, 2.2vw, 1.8rem);
+}
+
+.performanceLocalV4CardGrid h2 a {
+  display: inline-flex;
+  align-items: center;
+  min-width: 44px;
+  min-height: 44px;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 5px;
+}
+
+.performanceLocalV4CardGrid p {
+  margin: 14px 0 0;
+  color: var(--plv4-muted);
+}
+
+.performanceLocalV4FaqList {
+  display: grid;
+  max-width: 880px;
+  margin-inline: auto;
+  border-top: 1px solid var(--plv4-line);
+}
+
+.performanceLocalV4FaqList details {
+  border-bottom: 1px solid var(--plv4-line);
+}
+
+.performanceLocalV4FaqList summary {
+  min-height: 56px;
+  padding: 18px 4px;
+  font-size: clamp(1rem, 1.7vw, 1.18rem);
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.performanceLocalV4FaqList p {
+  max-width: 74ch;
+  margin: 0;
+  padding: 0 4px 24px;
+  white-space: pre-line;
+  line-height: 1.75;
+}
+
+.performanceLocalV4ContactPathways {
+  padding: clamp(22px, 4vw, 38px);
+  border-radius: 18px;
+  background: var(--plv4-forest);
+  color: var(--plv4-forest-foreground);
+}
+
+.performanceLocalV4Form {
+  min-width: 0;
+  padding: clamp(20px, 3vw, 32px);
+  border: 1px solid color-mix(in srgb, var(--plv4-secondary-foreground) 22%, transparent);
+  border-radius: 20px;
+  background: rgb(255 255 255 / 9%);
+}
+
+.performanceLocalV4FormNotice {
+  margin: 0 0 18px;
+  color: var(--plv4-secondary-foreground);
+  font-size: 0.9rem;
+}
+
+.performanceLocalV4FormGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.performanceLocalV4Form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--plv4-secondary-foreground);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.performanceLocalV4FormFieldFull {
+  grid-column: 1 / -1;
+}
+
+.performanceLocalV4Form input,
+.performanceLocalV4Form textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  padding: 11px 12px;
+  border: 1px solid #9cb0a4;
+  border-radius: 10px;
+  background: #fff;
+  color: var(--plv4-ink);
+  font: inherit;
+  resize: vertical;
+}
+
+.performanceLocalV4Form button {
+  min-height: 48px;
+  margin-top: 16px;
+  padding: 10px 18px;
+  border: 0;
+  border-radius: 999px;
+  background: #c4cec7;
+  color: #53685c;
+  font: inherit;
+  font-weight: 850;
+}
+
+.performanceLocalV4Footer {
+  padding: clamp(48px, 7vw, 84px) 0;
+  background: #071c13;
+  color: #dce8e1;
+}
+
+.performanceLocalV4FooterGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(180px, 0.8fr) minmax(220px, 1fr);
+  gap: 38px;
+}
+
+.performanceLocalV4FooterBrand,
+.performanceLocalV4FooterContact {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-width: 0;
+}
+
+.performanceLocalV4Footer nav a,
+.performanceLocalV4Footer nav span,
+.performanceLocalV4FooterContact a {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 44px;
+  color: #dce8e1;
+  text-decoration: none;
+}
+
+.performanceLocalV4Footer nav ul ul {
+  padding-left: 18px;
+}
+
+.performanceLocalV4Footer nav summary {
+  min-height: 44px;
+  padding-block: 10px;
+  cursor: pointer;
+}
+
+.performanceLocalV4Footer .performanceLocalV4NavigationToggle {
+  color: #dce8e1;
+}
+
+.performanceLocalV4StickyActions {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 75;
+  display: none;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  border-top: 1px solid #294b3a;
+  background: rgb(7 28 19 / 97%);
+  box-shadow: 0 -12px 34px rgb(4 17 11 / 24%);
+}
+
+.performanceLocalV4StickyActions > a {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 48px;
+  padding: 9px 10px;
+  border-radius: 12px;
+  background: var(--plv4-lime);
+  color: var(--plv4-lime-foreground);
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.performanceLocalV4BackToTop {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 68;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--plv4-forest);
+  color: var(--plv4-forest-foreground);
+  box-shadow: 0 12px 30px rgb(4 17 11 / 24%);
+}
+
+.performanceLocalV4SourceBlocker,
+.performanceLocalV4Unavailable {
+  min-width: 0;
+  padding: 28px;
+  border: 2px solid #a33c3c;
+  background: #fff0f0;
+  color: #701e1e;
+  overflow-wrap: anywhere;
+}
+
+.performanceLocalV4Unavailable {
+  min-height: 50vh;
+}
+
+.performanceLocalV4LayoutHome .performanceLocalV4Region-company_value .performanceLocalV4RegionInner,
+.performanceLocalV4LayoutAbout .performanceLocalV4Region-service_philosophy .performanceLocalV4RegionInner,
+.performanceLocalV4LayoutService .performanceLocalV4Region-approved_guidance .performanceLocalV4RegionInner {
+  min-width: 0;
+}
+
+.performanceLocalV4LayoutHome .performanceLocalV4Region-company_value .performanceLocalV4RegionInner:has(> :nth-child(2)),
+.performanceLocalV4LayoutAbout .performanceLocalV4Region-service_philosophy .performanceLocalV4RegionInner:has(> :nth-child(2)),
+.performanceLocalV4LayoutService .performanceLocalV4Region-approved_guidance .performanceLocalV4RegionInner:has(> :nth-child(2)) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.performanceLocalV4LayoutCounty .performanceLocalV4Region-city_discovery .performanceLocalV4RegionInner:has(> :nth-child(2)),
+.performanceLocalV4LayoutCounty .performanceLocalV4Region-related_city_discovery .performanceLocalV4CardGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.performanceLocalV4CountyRelatedCityDiscovery {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+}
+
+.performanceLocalV4LayoutAbout .performanceLocalV4Region-company_story .performanceLocalV4AuthorityCopy {
+  max-width: 880px;
+}
+
+.performanceLocalV4LayoutContact .performanceLocalV4Region-immediate_contact .performanceLocalV4RegionInner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.75fr);
+  gap: 24px;
+}
+
+.performanceLocalV4LayoutFaq .performanceLocalV4Region-faq {
+  background: #fff;
+}
+
+/* The six V4 adapters share primitives, but each keeps a page-type-specific rhythm. */
+.performanceLocalV4LayoutHome .performanceLocalV4Region-hero {
+  padding-block: clamp(82px, 10vw, 142px);
+}
+
+.performanceLocalV4LayoutHome .performanceLocalV4Region-service_discovery {
+  background: var(--plv4-cream);
+}
+
+.performanceLocalV4LayoutHome .performanceLocalV4Region-service_discovery .performanceLocalV4Authority h2 {
+  max-width: 18ch;
+}
+
+.performanceLocalV4LayoutHome .performanceLocalV4Region-service_discovery .performanceLocalV4SourceCards li,
+.performanceLocalV4LayoutHome .performanceLocalV4Region-service_discovery .performanceLocalV4SourceSection {
+  border-top: 4px solid var(--plv4-lime);
+}
+
+.performanceLocalV4LayoutHome .performanceLocalV4Region-company_value .performanceLocalV4AuthorityCopy {
+  max-width: 900px;
+}
+
+.performanceLocalV4LayoutService .performanceLocalV4Region-hero .performanceLocalV4HeroCopy h1 {
+  max-width: 760px;
+  font-size: clamp(2.5rem, 5.2vw, 4.9rem);
+}
+
+.performanceLocalV4LayoutService .performanceLocalV4Region-service_overview {
+  background: #fff;
+}
+
+.performanceLocalV4LayoutService .performanceLocalV4Region-approved_guidance {
+  background: var(--plv4-cream);
+}
+
+.performanceLocalV4LayoutService .performanceLocalV4Region-approved_guidance .performanceLocalV4StructuredBody {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 310px), 1fr));
+}
+
+.performanceLocalV4LayoutService .performanceLocalV4Region-related_discovery .performanceLocalV4CardGrid article {
+  border-bottom: 4px solid var(--plv4-forest);
+}
+
+.performanceLocalV4LayoutCounty .performanceLocalV4Region-hero .performanceLocalV4HeroCopy h1 {
+  max-width: 800px;
+  font-size: clamp(2.5rem, 5.4vw, 5.1rem);
+}
+
+.performanceLocalV4LayoutCounty .performanceLocalV4Region-city_discovery {
+  background: var(--plv4-forest-deep);
+  color: var(--plv4-secondary-foreground);
+}
+
+.performanceLocalV4LayoutCounty .performanceLocalV4Region-city_discovery .performanceLocalV4SourceCards {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+}
+
+.performanceLocalV4LayoutCounty .performanceLocalV4Region-city_discovery .performanceLocalV4SourceCards li {
+  border-color: rgb(255 255 255 / 22%);
+  background: rgb(255 255 255 / 10%);
+  color: var(--plv4-secondary-foreground);
+  box-shadow: none;
+}
+
+.performanceLocalV4LayoutCounty .performanceLocalV4Region-service_process .performanceLocalV4Authority,
+.performanceLocalV4LayoutCounty .performanceLocalV4Region-customer_expectations .performanceLocalV4Authority {
+  padding-left: clamp(20px, 4vw, 52px);
+  border-left: 5px solid var(--plv4-lime);
+}
+
+.performanceLocalV4LayoutAbout .performanceLocalV4Region-hero .performanceLocalV4HeroCopy h1 {
+  max-width: 720px;
+  font-size: clamp(2.6rem, 5.5vw, 5.2rem);
+}
+
+.performanceLocalV4LayoutAbout .performanceLocalV4Region-company_story {
+  padding-block: clamp(84px, 10vw, 142px);
+  background: #fff;
+}
+
+.performanceLocalV4LayoutAbout .performanceLocalV4Region-company_story .performanceLocalV4AuthorityCopy > p,
+.performanceLocalV4LayoutAbout .performanceLocalV4Region-company_story .performanceLocalV4SourceFlow > p {
+  font-size: clamp(1.08rem, 1.7vw, 1.3rem);
+  line-height: 1.85;
+}
+
+.performanceLocalV4LayoutAbout .performanceLocalV4Region-credentials .performanceLocalV4TrustGrid article {
+  border-top: 4px solid var(--plv4-lime);
+}
+
+.performanceLocalV4LayoutAbout .performanceLocalV4Region-service_philosophy {
+  background: var(--plv4-cream);
+}
+
+.performanceLocalV4LayoutContact .performanceLocalV4Region-hero,
+.performanceLocalV4LayoutFaq .performanceLocalV4Region-hero {
+  padding-block: clamp(50px, 6vw, 76px);
+}
+
+.performanceLocalV4LayoutContact .performanceLocalV4Region-hero .performanceLocalV4HeroCopy h1,
+.performanceLocalV4LayoutFaq .performanceLocalV4Region-hero .performanceLocalV4HeroCopy h1 {
+  max-width: 680px;
+  font-size: clamp(2.4rem, 4.8vw, 4.4rem);
+}
+
+.performanceLocalV4LayoutContact .performanceLocalV4Region-immediate_contact {
+  padding-block: clamp(42px, 5vw, 68px);
+  background: #fff;
+}
+
+.performanceLocalV4LayoutContact .performanceLocalV4Region-final_conversion {
+  padding-block: clamp(52px, 6vw, 82px);
+}
+
+.performanceLocalV4LayoutContact .performanceLocalV4Region-contact_expectations .performanceLocalV4AuthorityCopy,
+.performanceLocalV4LayoutContact .performanceLocalV4Region-service_area_discovery .performanceLocalV4AuthorityCopy {
+  max-width: 840px;
+}
+
+.performanceLocalV4LayoutFaq .performanceLocalV4Region-faq {
+  padding-block: clamp(48px, 6vw, 82px);
+  background: var(--plv4-cream);
+}
+
+.performanceLocalV4LayoutFaq .performanceLocalV4FaqList {
+  gap: 12px;
+  max-width: 960px;
+  border-top: 0;
+}
+
+.performanceLocalV4LayoutFaq .performanceLocalV4FaqList details {
+  border: 1px solid var(--plv4-line);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgb(14 43 30 / 6%);
+}
+
+.performanceLocalV4LayoutFaq .performanceLocalV4FaqList summary {
+  padding-inline: clamp(18px, 3vw, 28px);
+}
+
+.performanceLocalV4LayoutFaq .performanceLocalV4FaqList p {
+  padding-inline: clamp(18px, 3vw, 28px);
+}
+
+@media (max-width: 1100px) {
+  .performanceLocalV4ReviewHeader,
+  .performanceLocalV4HeaderInner,
+  .performanceLocalV4FinalGrid:has(.performanceLocalV4Form) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .performanceLocalV4DesktopNav,
+  .performanceLocalV4HeaderActions {
+    display: none;
+  }
+
+  .performanceLocalV4HeaderInner {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .performanceLocalV4MenuTrigger {
+    display: grid;
+  }
+
+  .performanceLocalV4DiagnosticGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .performanceLocalV4DiagnosticLists,
+  .performanceLocalV4CardGrid,
+  .performanceLocalV4SourceCards,
+  .performanceLocalV4LayoutCounty .performanceLocalV4Region-related_city_discovery .performanceLocalV4CardGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .performanceLocalV4ReviewHeader,
+  .performanceLocalV4DiagnosticGrid,
+  .performanceLocalV4Manifest dl,
+  .performanceLocalV4DiagnosticLists,
+  .performanceLocalV4HeroGrid:has(.performanceLocalV4Media),
+  .performanceLocalV4HeroGrid:has(.performanceLocalV4DemoMedia),
+  .performanceLocalV4Authority:has(.performanceLocalV4Media),
+  .performanceLocalV4Authority:has(.performanceLocalV4DemoMedia),
+  .performanceLocalV4AttachedGrid,
+  .performanceLocalV4FooterGrid,
+  .performanceLocalV4TrustGrid,
+  .performanceLocalV4CardGrid,
+  .performanceLocalV4SourceCards,
+  .performanceLocalV4LayoutHome .performanceLocalV4Region-company_value .performanceLocalV4RegionInner,
+  .performanceLocalV4LayoutAbout .performanceLocalV4Region-service_philosophy .performanceLocalV4RegionInner,
+  .performanceLocalV4LayoutService .performanceLocalV4Region-approved_guidance .performanceLocalV4RegionInner,
+  .performanceLocalV4LayoutCounty .performanceLocalV4Region-city_discovery .performanceLocalV4RegionInner,
+  .performanceLocalV4LayoutCounty .performanceLocalV4Region-related_city_discovery .performanceLocalV4CardGrid,
+  .performanceLocalV4LayoutContact .performanceLocalV4Region-immediate_contact .performanceLocalV4RegionInner {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .performanceLocalV4ReviewHeader {
+    padding: 22px 18px;
+  }
+
+  .performanceLocalV4DiagnosticPanel {
+    margin: 20px 12px 42px;
+    padding: 18px;
+    border-radius: 16px;
+  }
+
+  .performanceLocalV4DiagnosticPanel[data-v4-post-site-clearance="legacy-mobile-fixed-controls"] {
+    padding-bottom: calc(180px + env(safe-area-inset-bottom));
+  }
+
+  .performanceLocalV4DiagnosticHeading {
+    display: grid;
+  }
+
+  .performanceLocalV4DiagnosticHeading > span {
+    width: fit-content;
+  }
+
+  .performanceLocalV4Container {
+    width: min(100% - 32px, 1180px);
+  }
+
+  .performanceLocalV4HeaderInner {
+    min-height: 70px;
+  }
+
+  .performanceLocalV4Brand small {
+    display: none;
+  }
+
+  .performanceLocalV4Region {
+    padding: 54px 0;
+  }
+
+  .performanceLocalV4Region-hero {
+    padding: 62px 0;
+  }
+
+  .performanceLocalV4HeroCopy h1 {
+    font-size: clamp(2.25rem, 13vw, 4rem);
+  }
+
+  .performanceLocalV4ActionRow,
+  .performanceLocalV4ContactPathways {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .performanceLocalV4ActionRow > a,
+  .performanceLocalV4ContactPathways > a {
+    width: 100%;
+  }
+
+  .performanceLocalV4Process li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .performanceLocalV4FormGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .performanceLocalV4Form label {
+    grid-column: 1;
+  }
+
+  .performanceLocalV4StickyActions {
+    display: grid;
+  }
+
+  .performanceLocalV4Site[data-sticky-actions-visible="true"] .performanceLocalV4Footer {
+    padding-bottom: calc(148px + env(safe-area-inset-bottom));
+  }
+
+  .performanceLocalV4Site[data-sticky-actions-visible="true"] .performanceLocalV4BackToTop {
+    bottom: calc(86px + env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-width: 440px) {
+  .performanceLocalV4ReviewControls fieldset,
+  .performanceLocalV4ReviewControls button {
+    width: 100%;
+  }
+
+  .performanceLocalV4Campaign > a,
+  .performanceLocalV4CampaignInner {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 10px 16px;
+  }
+
+  .performanceLocalV4BrandMark {
+    width: 42px;
+    height: 42px;
+  }
+
+  .performanceLocalV4Logo {
+    max-width: 150px;
+    height: 42px;
+  }
+
+  .performanceLocalV4HeroCopy h1 {
+    font-size: clamp(2.1rem, 12vw, 3.35rem);
+  }
+
+  .performanceLocalV4DemoMedia {
+    min-height: 220px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .performanceLocalV4Site *,
+  .performanceLocalV4Site *::before,
+  .performanceLocalV4Site *::after,
+  .performanceLocalV4SkipLink {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
 /* Local-only universal form delivery evidence surface. */
 .universalFormModesReview {
   --ufm-ink: #17211d;

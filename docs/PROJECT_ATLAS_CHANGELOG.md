@@ -645,6 +645,33 @@ collected, and no email or provider request was sent.
 
 ---
 
+## Performance Local V4 Page-Type Layout Completion
+
+Added a source-only Performance Local version-4 draft preview with seven exact
+layout contracts for the established `home`, `service`, `county`,
+`city_service`, `about`, `contact`, and `faq` page types. Six page types now
+have purpose-built presentation hierarchies; `city_service` remains an exact
+preservation control over the unchanged V3 renderer. The resolver rejects
+unknown values and the noncanonical `service_county` alias, while the `county`
+contract supplies the Service-County presentation.
+
+The local Theme Lab review consumes every governed source component exactly
+once, keeps media bound to its source target, applies the resolved Website
+Theme tokens, preserves the provider-disabled five-default/six-maximum form
+contract, and reports layout, media, QA, form, activation, export, and
+publication readiness separately. Truthful mode never invents missing media;
+synthetic structural placeholders remain visibly labeled and unavailable to
+public rendering or export.
+
+Fresh Data, Media, and Program recovery artifacts and an isolated restore
+preceded the work. The resulting full-site audit covers all 65 Planned and
+Generated Pages, 65 current Compositions, and 1,165 component instances. V4
+remains `preview_candidate` and `productionReady: false`; no durable V4 record,
+migration, Theme selection, activation, seed, publication, deployment,
+customer-data operation, or external provider request was created.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.

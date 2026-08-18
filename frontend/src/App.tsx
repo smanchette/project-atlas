@@ -50,6 +50,9 @@ const ThemeLabPage = lazy(() => import("./pages/ThemeLabPage"));
 const PerformanceLocalComponentGalleryPage = lazy(
   () => import("./pages/PerformanceLocalComponentGalleryPage"),
 );
+const PerformanceLocalV4ReviewPage = lazy(
+  () => import("./pages/PerformanceLocalV4ReviewPage"),
+);
 const PerformanceLocalDeliveryPage = lazy(
   () => import("./pages/PerformanceLocalDeliveryPage"),
 );
@@ -197,6 +200,10 @@ function App() {
       <Route
         path="/theme-lab/generated-pages/:id"
         element={<ThemeLabRoute><ThemeLabPage /></ThemeLabRoute>}
+      />
+      <Route
+        path="/theme-lab/performance-local/v4/generated-pages/:id"
+        element={<ThemeLabRoute><PerformanceLocalV4ReviewPage /></ThemeLabRoute>}
       />
       <Route
         path="/theme-lab/performance-local/components"
