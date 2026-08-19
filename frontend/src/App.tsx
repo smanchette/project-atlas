@@ -53,6 +53,9 @@ const PerformanceLocalComponentGalleryPage = lazy(
 const PerformanceLocalV4ReviewPage = lazy(
   () => import("./pages/PerformanceLocalV4ReviewPage"),
 );
+const PerformanceLocalV5ReviewPage = lazy(
+  () => import("./pages/PerformanceLocalV5ReviewPage"),
+);
 const PerformanceLocalDeliveryPage = lazy(
   () => import("./pages/PerformanceLocalDeliveryPage"),
 );
@@ -204,6 +207,10 @@ function App() {
       <Route
         path="/theme-lab/performance-local/v4/generated-pages/:id"
         element={<ThemeLabRoute><PerformanceLocalV4ReviewPage /></ThemeLabRoute>}
+      />
+      <Route
+        path="/theme-lab/performance-local/v5/generated-pages/:id"
+        element={<ThemeLabRoute><PerformanceLocalV5ReviewPage /></ThemeLabRoute>}
       />
       <Route
         path="/theme-lab/performance-local/components"

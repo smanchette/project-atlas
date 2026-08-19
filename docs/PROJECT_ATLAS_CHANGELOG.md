@@ -672,6 +672,24 @@ customer-data operation, or external provider request was created.
 
 ---
 
+## Performance Local V5 Visual Layout Polish
+
+Added an additive, source-only Performance Local version-5 draft preview that
+composes the six non-City-Service page types into deliberate responsive
+layouts. Dense Service and County guidance and FAQ content now use closed
+native disclosures, sparse source regions are composed without empty bands,
+and all six layouts share one contained, provider-disabled final-conversion
+presentation while preserving the five-default/six-maximum form contract.
+
+The approved Page 41 City-Service renderer remains unchanged as the visual
+preservation control. Native-resolution review evidence covers desktop,
+tablet, and mobile rendering without changing active Atlas. V5 remains
+`preview_candidate` and `productionReady: false`; no migration, durable Theme
+registration, selection, activation, form-mode seed, publication, or
+deployment occurred.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.
