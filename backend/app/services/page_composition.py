@@ -42,6 +42,15 @@ from app.services.page_media_roles import (
     SemanticMediaRoleError,
     resolve_semantic_media_role,
 )
+from app.services.page_composition_history import (
+    COMPOSITION_REFRESH_ACTOR,
+    COMPOSITION_REFRESH_SOURCE,
+    OPERATOR_DECISION_SOURCE,
+    PageCompositionHistoryError,
+    advance_composition_revision,
+    create_initial_composition_revision,
+    current_composition_revision,
+)
 from app.services.scoped_media_authorizations import (
     asset_requires_exact_scoped_use,
     current_scoped_media_authorization,
@@ -97,24 +106,59 @@ def refresh_site_plan_compositions(
     created = refreshed = unchanged = 0
     blocked: list[dict[str, Any]] = []
     compositions: list[PageComposition] = []
-    for planned in pages:
-        if not planned.generated_page_id:
-            blocked.append({"planned_page_id": planned.id, "reason": "A Generated Page draft is required before composition."})
-            continue
-        try:
-            composition, outcome = _compose(session, plan, planned)
-        except PageCompositionError as exc:
-            blocked.append({"planned_page_id": planned.id, "reason": str(exc)})
-            continue
-        compositions.append(composition)
-        if outcome == "created":
-            created += 1
-        elif outcome == "refreshed":
-            refreshed += 1
+    savepoint = session.begin_nested()
+    try:
+        for planned in pages:
+            if not planned.generated_page_id:
+                blocked.append({"planned_page_id": planned.id, "reason": "A Generated Page draft is required before composition."})
+                continue
+            try:
+                composition, outcome = _compose(session, plan, planned)
+            except PageCompositionError as exc:
+                blocked.append({"planned_page_id": planned.id, "reason": str(exc)})
+                continue
+            compositions.append(composition)
+            if outcome == "created":
+                created += 1
+            elif outcome == "refreshed":
+                refreshed += 1
+            else:
+                unchanged += 1
+        if blocked:
+            savepoint.rollback()
+            compositions = []
+            created = refreshed = unchanged = 0
+            if commit:
+                session.rollback()
         else:
-            unchanged += 1
-    if commit:
-        session.commit()
+            # Resolve and validate the exact return payload while the refresh
+            # savepoint and its source-row locks are still active. A canonical
+            # source writer may proceed as soon as the outer commit releases
+            # those locks, so a strict-current read after commit could report a
+            # race as an exception even though this refresh already committed.
+            result = SitePlanCompositionRefreshResult(
+                website_id=plan.website_id,
+                site_plan_id=plan.id or plan_id,
+                created=created,
+                refreshed=refreshed,
+                unchanged=unchanged,
+                blocked=blocked,
+                compositions=[
+                    _read(session, item, require_current=True)
+                    for item in compositions
+                ],
+            )
+            savepoint.commit()
+            if commit:
+                session.commit()
+    except Exception:
+        if savepoint.is_active:
+            savepoint.rollback()
+        if commit:
+            session.rollback()
+        raise
+    if not blocked:
+        return result
     return SitePlanCompositionRefreshResult(
         website_id=plan.website_id,
         site_plan_id=plan.id or plan_id,
@@ -122,7 +166,7 @@ def refresh_site_plan_compositions(
         refreshed=refreshed,
         unchanged=unchanged,
         blocked=blocked,
-        compositions=[_read(session, item, require_current=True) for item in compositions],
+        compositions=[],
     )
 
 
@@ -153,9 +197,25 @@ def update_operator_composition_decisions(
     composition_id: int,
     payload: PageCompositionDecisionUpdate,
 ) -> PageCompositionRead:
-    composition = session.get(PageComposition, composition_id)
+    composition = session.exec(
+        select(PageComposition)
+        .where(PageComposition.id == composition_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).one_or_none()
     if not composition:
         raise PageCompositionError("Page composition not found.")
+    try:
+        current_composition_revision(session, composition, lock=True)
+    except PageCompositionHistoryError as exc:
+        raise PageCompositionError(str(exc)) from exc
+    # An operator decision may only advance an already authoritative head.
+    # Validate live sources before inserting immutable evidence so a stale
+    # composition cannot commit a successor and fail only on the final read.
+    _read(session, composition, require_current=True)
+    actor = payload.decided_by.strip()
+    if not actor:
+        raise PageCompositionError("Operator identity is required.")
     generated_by_key = {item["instance_key"]: item for item in composition.generated_components}
     seen: set[str] = set()
     decisions: list[dict[str, Any]] = []
@@ -205,20 +265,42 @@ def update_operator_composition_decisions(
                 )
         decision = value.model_dump(exclude_none=True)
         decision["provenance"] = "operator"
-        decision["decided_by"] = payload.decided_by.strip()
-        decision["decided_at"] = datetime.now(UTC).isoformat()
+        decision["decided_by"] = actor
         decisions.append(decision)
-    if not payload.decided_by.strip():
-        raise PageCompositionError("Operator identity is required.")
-    composition.operator_decisions = decisions
-    composition.decided_by = payload.decided_by.strip()
-    composition.decided_at = datetime.now(UTC)
-    composition.composition_version += 1
-    composition.updated_at = datetime.now(UTC)
-    session.add(composition)
+    existing_without_timestamps = [
+        {
+            key: value
+            for key, value in decision.items()
+            if key != "decided_at"
+        }
+        for decision in composition.operator_decisions
+    ]
+    if decisions == existing_without_timestamps:
+        return _read(session, composition, require_current=True)
+    decided_at = datetime.now(UTC)
+    for decision in decisions:
+        decision["decided_at"] = decided_at.isoformat()
+    try:
+        advance_composition_revision(
+            session,
+            composition,
+            generated_components=composition.generated_components,
+            operator_decisions=decisions,
+            source_snapshot=composition.source_snapshot,
+            source_hash=composition.source_hash,
+            generated_at=composition.generated_at,
+            decided_by=actor,
+            decided_at=decided_at,
+            recorded_by=actor,
+            record_source=OPERATOR_DECISION_SOURCE,
+            recorded_at=decided_at,
+            head_updated_at=decided_at,
+        )
+    except PageCompositionHistoryError as exc:
+        raise PageCompositionError(str(exc)) from exc
+    result = _read(session, composition, require_current=True)
     session.commit()
-    session.refresh(composition)
-    return _read(session, composition, require_current=True)
+    return result
 
 
 def composition_diagnostics(session: Session, plan: SitePlan) -> tuple[list[int], list[int]]:
@@ -275,6 +357,11 @@ def _compose(session: Session, plan: SitePlan, planned: PlannedPage) -> tuple[Pa
         .with_for_update()
         .execution_options(populate_existing=True)
     ).first()
+    if existing is not None:
+        try:
+            current_composition_revision(session, existing, lock=True)
+        except PageCompositionHistoryError as exc:
+            raise PageCompositionError(str(exc)) from exc
 
     from app.services.page_media_planning import validate_required_media_for_page
 
@@ -300,13 +387,24 @@ def _compose(session: Session, plan: SitePlan, planned: PlannedPage) -> tuple[Pa
     if existing and existing.source_hash == source_hash and existing.generated_components == components:
         return existing, "unchanged"
     if existing:
-        existing.generated_components = components
-        existing.source_snapshot = snapshot
-        existing.source_hash = source_hash
-        existing.status = "current"
-        existing.generated_at = datetime.now(UTC)
-        existing.composition_version += 1
-        existing.updated_at = datetime.now(UTC)
+        generated_at = datetime.now(UTC)
+        try:
+            advance_composition_revision(
+                session,
+                existing,
+                generated_components=components,
+                operator_decisions=existing.operator_decisions,
+                source_snapshot=snapshot,
+                source_hash=source_hash,
+                generated_at=generated_at,
+                decided_by=existing.decided_by,
+                decided_at=existing.decided_at,
+                recorded_by=COMPOSITION_REFRESH_ACTOR,
+                record_source=COMPOSITION_REFRESH_SOURCE,
+                recorded_at=generated_at,
+            )
+        except PageCompositionHistoryError as exc:
+            raise PageCompositionError(str(exc)) from exc
         row = existing
         outcome = "refreshed"
     else:
@@ -320,6 +418,11 @@ def _compose(session: Session, plan: SitePlan, planned: PlannedPage) -> tuple[Pa
             source_hash=source_hash,
         )
         session.add(row)
+        session.flush()
+        try:
+            create_initial_composition_revision(session, row)
+        except PageCompositionHistoryError as exc:
+            raise PageCompositionError(str(exc)) from exc
         outcome = "created"
     session.flush()
     _validate(session, row, plan, planned, generated)
@@ -596,6 +699,10 @@ def _bind_governed_media_regions(
 
 
 def _read(session: Session, composition: PageComposition, *, require_current: bool) -> PageCompositionRead:
+    try:
+        current_composition_revision(session, composition)
+    except PageCompositionHistoryError as exc:
+        raise PageCompositionError(str(exc)) from exc
     plan = _plan(session, composition.site_plan_id)
     planned = session.get(PlannedPage, composition.planned_page_id)
     generated = session.get(GeneratedPage, composition.generated_page_id)

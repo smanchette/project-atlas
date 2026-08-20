@@ -8,7 +8,7 @@ from sqlmodel import Session, SQLModel
 
 from app.core.config import get_settings
 from app.db import session as db_session
-from app.models import Brand, Business, Website
+from app.models import Brand, Business, GeneratedPageQAResult, Website
 from app.models import entities  # noqa: F401
 
 
@@ -53,6 +53,22 @@ def _assert_version_checks(engine) -> None:
             assert _canonical_check(observed[name]) == _canonical_check(expression)
 
 
+def _create_pre_0048_runtime_tables() -> None:
+    """Exercise historical startup without projecting the future history FK."""
+
+    table = GeneratedPageQAResult.__table__
+    history_fk = next(
+        constraint
+        for constraint in table.constraints
+        if constraint.name == "fk_generatedpageqaresult_composition_revision"
+    )
+    table.constraints.remove(history_fk)
+    try:
+        db_session.create_db_and_tables()
+    finally:
+        table.append_constraint(history_fk)
+
+
 def test_0039_adds_theme_tables_on_clean_disposable_database(monkeypatch, tmp_path) -> None:
     database = tmp_path / "themes-clean.sqlite3"
     config = _config(monkeypatch, database)
@@ -67,7 +83,7 @@ def test_0039_adds_theme_tables_on_clean_disposable_database(monkeypatch, tmp_pa
     }
     _assert_version_checks(engine)
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260817_0047"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260820_0048"
     get_settings.cache_clear()
 
 
@@ -80,7 +96,7 @@ def test_runtime_startup_does_not_precreate_0045_alembic_owned_tables(
     command.upgrade(config, "20260801_0038")
     engine = create_engine(f"sqlite:///{database.as_posix()}")
     monkeypatch.setattr(db_session, "engine", engine)
-    db_session.create_db_and_tables()
+    _create_pre_0048_runtime_tables()
 
     assert {
         "themefamily",
@@ -95,7 +111,7 @@ def test_runtime_startup_does_not_precreate_0045_alembic_owned_tables(
     with engine.connect() as connection:
         assert connection.execute(text("SELECT COUNT(*) FROM theme")).scalar_one() == 0
         assert connection.execute(text("SELECT COUNT(*) FROM websitethemeselection")).scalar_one() == 0
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260817_0047"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260820_0048"
     _assert_version_checks(engine)
     get_settings.cache_clear()
 

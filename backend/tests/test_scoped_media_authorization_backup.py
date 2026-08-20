@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 
@@ -25,6 +25,10 @@ from app.models import (
 from app.schemas.scoped_media_authorizations import (
     scoped_media_approval_fingerprint,
     scoped_media_authorization_fingerprint,
+)
+from app.services.page_composition_history import (
+    advance_composition_revision,
+    composition_revision_hash,
 )
 from test_page_media_planning_backup import _engine, _hash, _scope, _seed_governed_graph
 
@@ -134,9 +138,21 @@ def _seed_authorization_history(session: Session) -> tuple[int, int]:
             "authorization_assignment_version": assignment.assignment_version,
         }
     )
-    composition.source_snapshot = snapshot
-    composition.source_hash = _hash(snapshot)
-    session.add(composition)
+    recorded_at = datetime.now(UTC)
+    advance_composition_revision(
+        session,
+        composition,
+        generated_components=composition.generated_components,
+        operator_decisions=composition.operator_decisions,
+        source_snapshot=snapshot,
+        source_hash=_hash(snapshot),
+        generated_at=recorded_at,
+        decided_by=composition.decided_by,
+        decided_at=composition.decided_at,
+        recorded_at=recorded_at,
+        recorded_by="test:scoped-media-authorization-backup",
+        record_source="test_authorization_refresh",
+    )
     session.commit()
     assert candidate.id is not None and bound.id is not None
     return candidate.id, bound.id
@@ -183,6 +199,40 @@ def _write_payload(path: Path, payload: dict) -> Path:
     return path
 
 
+def _mirror_composition_history_tip(payload: dict, composition: dict) -> None:
+    stream = [
+        revision
+        for revision in payload["data"]["page_composition_revisions"]
+        if revision["page_composition_id"] == composition["id"]
+    ]
+    tip = max(stream, key=lambda value: value["composition_version"])
+    for field in (
+        "website_id",
+        "site_plan_id",
+        "planned_page_id",
+        "generated_page_id",
+        "composition_version",
+        "generated_components",
+        "operator_decisions",
+        "source_snapshot",
+        "source_hash",
+        "generated_at",
+        "decided_by",
+        "decided_at",
+    ):
+        tip[field] = deepcopy(composition[field])
+    hash_values = dict(tip)
+    for field in ("generated_at", "recorded_at"):
+        hash_values[field] = datetime.fromisoformat(
+            str(hash_values[field]).replace("Z", "+00:00")
+        )
+    if hash_values["decided_at"] is not None:
+        hash_values["decided_at"] = datetime.fromisoformat(
+            str(hash_values["decided_at"]).replace("Z", "+00:00")
+        )
+    tip["revision_hash"] = composition_revision_hash(hash_values)
+
+
 def test_backup_056_round_trips_remapped_scoped_authorization_lineage(
     tmp_path: Path,
 ) -> None:
@@ -195,8 +245,8 @@ def test_backup_056_round_trips_remapped_scoped_authorization_lineage(
     source_engine.dispose()
 
     loaded = load_backup(Path(exported["path"]))
-    assert BACKUP_VERSION == "0.58"
-    assert loaded["metadata"]["version"] == "0.58"
+    assert BACKUP_VERSION == "0.59"
+    assert loaded["metadata"]["version"] == "0.59"
     assert loaded["metadata"]["table_counts"]["scoped_media_authorizations"] == 2
     assert [
         record["authorization_version"]
@@ -230,6 +280,7 @@ def test_backup_056_round_trips_remapped_scoped_authorization_lineage(
     exported_composition["source_hash"] = _hash(
         exported_composition["source_snapshot"]
     )
+    _mirror_composition_history_tip(loaded, exported_composition)
     restore_path = _write_payload(tmp_path / "remapped-authorization-ids.json", loaded)
     loaded = load_backup(restore_path)
 
@@ -556,6 +607,7 @@ def test_restore_rejects_source_empty_history_over_target_authorization(
     ):
         binding.pop(field, None)
     composition["source_hash"] = _hash(composition["source_snapshot"])
+    _mirror_composition_history_tip(source_empty, composition)
     source_empty_path = _write_payload(
         tmp_path / "source-empty-authorization-history.json",
         source_empty,
@@ -970,6 +1022,11 @@ def test_backup_version_contract_fails_closed_for_missing_or_legacy_history(
 
     legacy = deepcopy(payload)
     legacy["metadata"]["version"] = "0.55"
+    legacy["data"].pop("page_composition_revisions", None)
+    legacy["metadata"]["table_counts"].pop(
+        "page_composition_revisions",
+        None,
+    )
     for image in legacy["data"]["image_metadata"]:
         image["usage_authorization_mode"] = "contract_default"
         image["required_authorization_terms"] = []

@@ -66,6 +66,10 @@ from app.services import form_submission_gateway as gateway
 from app.services.form_delivery_modes import create_form_delivery_mode_revision
 from app.services import page_export
 from app.services import page_qa as page_qa_service
+from app.services.page_composition_history import (
+    canonical_payload_hash,
+    create_initial_composition_revision,
+)
 from app.services import theme_activation_rehearsal
 from app.services import theme_configurations as theme_service
 from app.services import theme_delivery
@@ -1685,8 +1689,11 @@ def test_active_renderer_rejects_persisted_stale_composition(
 ) -> None:
     graph = _seed_v3(session, state="production_configured")
     _activate_production_graph(session, graph)
-    session.add(
-        PageComposition(
+    composition_snapshot = {
+        "fixture": "stale-v3-composition",
+        "draft_hash": canonical_payload_hash(graph.page.draft_content or {}),
+    }
+    composition = PageComposition(
             website_id=graph.website.id,
             site_plan_id=graph.planned.site_plan_id,
             planned_page_id=graph.planned.id,
@@ -1694,10 +1701,17 @@ def test_active_renderer_rejects_persisted_stale_composition(
             composition_version=1,
             generated_components=[],
             operator_decisions=[],
-            source_snapshot={"fixture": "stale-v3-composition"},
-            source_hash="a" * 64,
+            source_snapshot=composition_snapshot,
+            source_hash=canonical_payload_hash(composition_snapshot),
             status="stale",
-        )
+    )
+    session.add(composition)
+    session.flush()
+    create_initial_composition_revision(
+        session,
+        composition,
+        recorded_by="test:performance-local-v3-gateway",
+        record_source="test_fixture",
     )
     session.commit()
 
@@ -1727,8 +1741,11 @@ def test_active_renderer_and_explicit_export_reject_noncurrent_qa_before_package
         )
     assert blocked_renderer.value.code == "page_qa_not_ready"
 
-    session.add(
-        PageComposition(
+    composition_snapshot = {
+        "fixture": "current-v3-composition",
+        "draft_hash": canonical_payload_hash(graph.page.draft_content or {}),
+    }
+    composition = PageComposition(
             website_id=graph.website.id,
             site_plan_id=graph.planned.site_plan_id,
             planned_page_id=graph.planned.id,
@@ -1736,10 +1753,17 @@ def test_active_renderer_and_explicit_export_reject_noncurrent_qa_before_package
             composition_version=1,
             generated_components=[],
             operator_decisions=[],
-            source_snapshot={"fixture": "current-v3-composition"},
-            source_hash="b" * 64,
+            source_snapshot=composition_snapshot,
+            source_hash=canonical_payload_hash(composition_snapshot),
             status="current",
-        )
+    )
+    session.add(composition)
+    session.flush()
+    create_initial_composition_revision(
+        session,
+        composition,
+        recorded_by="test:performance-local-v3-gateway",
+        record_source="test_fixture",
     )
     session.commit()
     from app.services import page_composition as composition_service
@@ -2233,7 +2257,7 @@ def test_backup_057_round_trips_canonical_v3_draft_graph(
     graph = _seed_v3(session, state="rehearsal_ready")
     exported = export_backup(session, backup_dir=tmp_path)
     loaded = load_backup(Path(exported["path"]))
-    assert loaded["metadata"]["version"] == "0.58"
+    assert loaded["metadata"]["version"] == "0.59"
     assert loaded["metadata"]["table_counts"]["theme_family_versions"] == 2
 
     target_engine = create_engine(

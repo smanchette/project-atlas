@@ -12,16 +12,19 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.models import (
+    ApprovalAudit,
     Business,
     GeneratedPage,
     GeneratedPageQAResult,
     GeneratedPageRevision,
     ImageMetadata,
     PageComposition,
+    PageCompositionRevision,
     PageImageAssignment,
     PlannedPage,
     SitePlan,
     Website,
+    WordPressDraftAudit,
 )
 from app.schemas.entities import GeneratedPageUpdate
 from app.services import page_qa as page_qa_service
@@ -34,8 +37,20 @@ from app.services.page_qa import (
     historical_qa_payload_hash,
     qa_result_record_hash,
     reconcile_page_qa,
+    resolve_qa_composition_revision,
     save_page_qa,
 )
+from app.services.page_composition_history import (
+    advance_composition_revision,
+    canonical_payload_hash,
+    create_initial_composition_revision,
+    current_composition_revision,
+)
+from app.services.approval_audit import approve_page_with_audit
+from app.services.approval_queue import build_approval_queue
+from app.services.page_export import build_page_export_package
+from app.services.website_readiness import evaluate_website_readiness
+from app.services.wordpress_drafts import dry_run_wordpress_draft
 
 
 @pytest.fixture
@@ -157,6 +172,10 @@ def _scope(
     )
     session.add(planned)
     session.flush()
+    composition_snapshot = {
+        "fixture": suffix,
+        "draft_hash": page_qa_service._content_hash(page),
+    }
     composition = PageComposition(
         website_id=website.id,
         site_plan_id=plan.id,
@@ -165,11 +184,18 @@ def _scope(
         composition_version=1,
         generated_components=[],
         operator_decisions=[],
-        source_snapshot={"fixture": suffix},
-        source_hash="a" * 64,
+        source_snapshot=composition_snapshot,
+        source_hash=canonical_payload_hash(composition_snapshot),
         status="current",
     )
     session.add(composition)
+    session.flush()
+    create_initial_composition_revision(
+        session,
+        composition,
+        recorded_by="test:durable-page-qa-identity",
+        record_source="test_fixture",
+    )
     session.commit()
     return business, website, plan, planned, page, composition
 
@@ -181,6 +207,31 @@ def _current_record(session: Session, page_id: int) -> GeneratedPageQAResult:
             GeneratedPageQAResult.lifecycle_status == "current",
         )
     ).one()
+
+
+def _advance_fixture_composition(
+    session: Session,
+    composition: PageComposition,
+    *,
+    marker: str,
+) -> None:
+    snapshot = deepcopy(composition.source_snapshot)
+    snapshot["fixture_revision"] = marker
+    now = datetime.now(UTC)
+    advance_composition_revision(
+        session,
+        composition,
+        generated_components=composition.generated_components,
+        operator_decisions=composition.operator_decisions,
+        source_snapshot=snapshot,
+        source_hash=canonical_payload_hash(snapshot),
+        generated_at=now,
+        decided_by=composition.decided_by,
+        decided_at=composition.decided_at,
+        recorded_at=now,
+        recorded_by="test:durable-page-qa-identity",
+        record_source="test_successor",
+    )
 
 
 def _project_record(
@@ -285,7 +336,9 @@ def test_cross_website_current_result_fails_closed(db_session: Session) -> None:
 def test_newer_revision_makes_current_result_stale(db_session: Session) -> None:
     *_, page, _ = _scope(db_session, suffix="stale-revision")
     content_hash = authoritative_page_qa_state(db_session, page).content_hash
-    initial_time = datetime.now(UTC) - timedelta(seconds=2)
+    # These page revisions intentionally occur after the composition evidence;
+    # they must not be backdated into that immutable composition revision.
+    initial_time = datetime.now(UTC) + timedelta(seconds=1)
     first_revision = GeneratedPageRevision(
         generated_page_id=page.id,
         created_at=initial_time,
@@ -338,14 +391,136 @@ def test_content_change_makes_current_result_stale(db_session: Session) -> None:
 def test_composition_change_makes_current_result_stale(db_session: Session) -> None:
     *_, page, composition = _scope(db_session, suffix="stale-composition")
     save_page_qa(db_session, page.id)
-    composition.composition_version += 1
-    composition.source_hash = "b" * 64
-    db_session.add(composition)
-    db_session.flush()
+    bound_qa = _current_record(db_session, page.id)
+    _advance_fixture_composition(
+        db_session,
+        composition,
+        marker="stale-composition",
+    )
 
     state = effective_page_qa_state(db_session, page.id)
+    historical_revision = resolve_qa_composition_revision(db_session, bound_qa)
+    current_revision = current_composition_revision(db_session, composition)
 
     assert state.classification == "stale_composition"
+    assert historical_revision.composition_version == 1
+    assert current_revision.composition_version == 2
+    assert historical_revision.id != current_revision.id
+
+
+def test_malformed_composition_history_invalidates_all_downstream_qa_gates_without_writes(
+    db_session: Session,
+) -> None:
+    _, website, plan, planned, page, composition = _scope(
+        db_session,
+        suffix="malformed-history-gates",
+    )
+    saved = save_page_qa(db_session, page.id)
+    assert saved.readiness_status == "ready"
+    revision = db_session.exec(
+        select(PageCompositionRevision).where(
+            PageCompositionRevision.page_composition_id == composition.id,
+            PageCompositionRevision.composition_version
+            == composition.composition_version,
+        )
+    ).one()
+    revision.recorded_by = "tampered:durable-qa-gates"
+    db_session.add(revision)
+    db_session.flush()
+
+    qa_count_before = len(
+        db_session.exec(
+            select(GeneratedPageQAResult).where(
+                GeneratedPageQAResult.generated_page_id == page.id
+            )
+        ).all()
+    )
+    approval_count_before = len(
+        db_session.exec(
+            select(ApprovalAudit).where(ApprovalAudit.generated_page_id == page.id)
+        ).all()
+    )
+    wordpress_audit_count_before = len(
+        db_session.exec(
+            select(WordPressDraftAudit).where(
+                WordPressDraftAudit.generated_page_id == page.id
+            )
+        ).all()
+    )
+    page_before = (page.status, page.updated_at, deepcopy(page.qa_result))
+    composition_before = (
+        composition.status,
+        composition.composition_version,
+        composition.source_hash,
+    )
+
+    effective = effective_page_qa_state(db_session, page.id)
+    assert effective.classification == "otherwise_invalid"
+    assert effective.current is False
+    assert effective.ready is False
+    assert "immutable hash" in effective.reasons[0]
+
+    with pytest.raises(HTTPException) as exc_info:
+        approve_page_with_audit(
+            db_session,
+            page.id,
+            approved_by="History Gate Approver",
+        )
+    assert exc_info.value.status_code == 409
+    assert "immutable hash" in str(exc_info.value.detail)
+
+    queue = build_approval_queue(db_session, website_id=website.id)
+    queue_item = next(item for item in queue.items if item.page_id == page.id)
+    assert queue_item.is_ready_for_approval is False
+    assert queue_item.needs_manual_review is True
+    assert queue_item.qa_status == "not_run"
+
+    export = build_page_export_package(db_session, page.id)
+    assert export.export_ready is False
+    assert any(item.code == "qa_stale" for item in export.warnings)
+
+    readiness = evaluate_website_readiness(db_session, plan.id)
+    content = next(
+        item for item in readiness.categories if item.key == "content_readiness"
+    )
+    stale_qa = next(item for item in content.items if item.key == "page_qa_stale")
+    assert planned.id in stale_qa.affected_planned_page_ids
+
+    dry_run = dry_run_wordpress_draft(db_session, page.id)
+    gates = {item.code: item.passed for item in dry_run.gate_results}
+    assert dry_run.ready is False
+    assert gates["qa_ready"] is False
+    assert gates["qa_current"] is False
+    assert gates["export_clear"] is False
+
+    assert len(
+        db_session.exec(
+            select(GeneratedPageQAResult).where(
+                GeneratedPageQAResult.generated_page_id == page.id
+            )
+        ).all()
+    ) == qa_count_before
+    assert len(
+        db_session.exec(
+            select(ApprovalAudit).where(ApprovalAudit.generated_page_id == page.id)
+        ).all()
+    ) == approval_count_before
+    assert len(
+        db_session.exec(
+            select(WordPressDraftAudit).where(
+                WordPressDraftAudit.generated_page_id == page.id
+            )
+        ).all()
+    ) == wordpress_audit_count_before
+    db_session.refresh(page)
+    db_session.refresh(composition)
+    assert (page.status, page.updated_at, page.qa_result) == page_before
+    assert (
+        composition.status,
+        composition.composition_version,
+        composition.source_hash,
+    ) == composition_before
+    assert not db_session.new and not db_session.dirty and not db_session.deleted
 
 
 def test_algorithm_change_makes_current_result_stale(db_session: Session) -> None:
@@ -403,10 +578,11 @@ def test_generated_page_api_projection_uses_authoritative_effective_qa(
     assert current["qa_result"]["persisted"] is True
     assert current["qa_result"]["page_id"] == page.id
 
-    composition.composition_version += 1
-    composition.source_hash = "f" * 64
-    db_session.add(composition)
-    db_session.flush()
+    _advance_fixture_composition(
+        db_session,
+        composition,
+        marker="effective-read",
+    )
 
     stale = generated_page_with_effective_qa(db_session, page)
     assert stale["qa_status"] == "not_run"

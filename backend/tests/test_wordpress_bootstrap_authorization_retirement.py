@@ -352,7 +352,7 @@ def test_data_backup_039_serializes_retirement_and_renewals(db, monkeypatch, tmp
         result = export_backup(session, backup_dir=tmp_path)
         payload = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
         record = next(item for item in payload["data"]["wordpress_bootstrap_establishment_audits"] if item["id"] == audit_id)
-        assert payload["metadata"]["version"] == "0.58"
+        assert payload["metadata"]["version"] == "0.59"
         assert record["authorization_mode"] == "manual_upload"
         assert record["retirement_reason"] == establishment.RETIREMENT_REASON
         assert len(record["backup_renewals"]) == 2
@@ -371,6 +371,11 @@ def test_data_backup_038_record_defaults_remain_compatible(db, monkeypatch, tmp_
         path = Path(result["path"])
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["metadata"]["version"] = "0.38"
+        payload["data"].pop("page_composition_revisions", None)
+        payload["metadata"]["table_counts"].pop(
+            "page_composition_revisions",
+            None,
+        )
         for record in payload["data"]["wordpress_bootstrap_establishment_audits"]:
             record.pop("authorization_mode", None)
             record.pop("retirement_reason", None)

@@ -333,7 +333,7 @@ def test_0044_clean_upgrade_backfills_asset_mode_and_creates_exact_contract(
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260817_0047"
+        ).scalar_one() == "20260820_0048"
         assert connection.execute(
             text(
                 "SELECT usage_authorization_mode, required_authorization_terms "
@@ -362,7 +362,7 @@ def test_0044_adopts_only_the_exact_empty_model_created_table(
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260817_0047"
+        ).scalar_one() == "20260820_0048"
         assert connection.execute(
             text(f"SELECT COUNT(*) FROM {TABLE}")
         ).scalar_one() == 0
@@ -421,7 +421,7 @@ def test_0044_upgrades_the_exact_empty_task_local_scaffold_in_place(
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260817_0047"
+        ).scalar_one() == "20260820_0048"
         assert connection.execute(
             text(f"SELECT COUNT(*) FROM {TABLE}")
         ).scalar_one() == 0

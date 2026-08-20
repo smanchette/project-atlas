@@ -41,6 +41,10 @@ from app.services.form_submission_gateway import (
     is_explicit_disposable_database_name,
 )
 from app.services.page_qa import save_page_qa
+from app.services.page_composition_history import (
+    PageCompositionHistoryError,
+    current_composition_revision,
+)
 from app.services.theme_delivery import (
     ThemeDeliveryError,
     read_performance_local_rehearsal_delivery,
@@ -590,6 +594,7 @@ def rollback_theme_configuration_rehearsal(
                 .with_for_update()
             ).all()
         )
+        _require_valid_composition_heads(session, affected, lock=True)
         for composition in affected:
             composition.status = "stale"
             composition.updated_at = transitioned_at
@@ -1032,12 +1037,16 @@ def _replace_active_selection(
         updated_at=transitioned_at,
     )
     session.add(selection)
-    for composition in session.exec(
-        select(PageComposition)
-        .where(PageComposition.website_id == website.id)
-        .order_by(PageComposition.id)
-        .with_for_update()
-    ).all():
+    compositions = list(
+        session.exec(
+            select(PageComposition)
+            .where(PageComposition.website_id == website.id)
+            .order_by(PageComposition.id)
+            .with_for_update()
+        ).all()
+    )
+    _require_valid_composition_heads(session, compositions, lock=True)
+    for composition in compositions:
         if composition.status != "current":
             raise ThemeActivationRehearsalError(
                 "Only current compositions may be invalidated by the rehearsal selection.",
@@ -1063,6 +1072,7 @@ def _refresh_stale_compositions_and_qa(
             .order_by(PageComposition.id)
         ).all()
     )
+    _require_valid_composition_heads(session, rows)
     if {_id(item) for item in rows} != expected_composition_ids or any(
         item.status != "stale" for item in rows
     ):
@@ -1126,6 +1136,18 @@ def _composition_plan_blockers(
                 reason="The rehearsal may refresh only compositions made stale by its own Theme selection.",
             )
         )
+    for composition in compositions:
+        try:
+            current_composition_revision(session, composition)
+        except PageCompositionHistoryError as exc:
+            blockers.append(
+                FormReadinessItemRead(
+                    code="composition_history_invalid",
+                    field="page_compositions.history",
+                    reason=str(exc),
+                )
+            )
+            break
     return blockers
 
 
@@ -1632,7 +1654,24 @@ def _generated_page_ids_for_compositions(
             "The final QA ledger differs from the exact composition plan.",
             code="rehearsal_qa_ledger_mismatch",
         )
+    _require_valid_composition_heads(session, rows)
     return [item.generated_page_id for item in rows]
+
+
+def _require_valid_composition_heads(
+    session: Session,
+    compositions: list[PageComposition],
+    *,
+    lock: bool = False,
+) -> None:
+    for composition in compositions:
+        try:
+            current_composition_revision(session, composition, lock=lock)
+        except PageCompositionHistoryError as exc:
+            raise ThemeActivationRehearsalError(
+                str(exc),
+                code="rehearsal_composition_history_invalid",
+            ) from exc
 
 
 def _sole_active_selection(

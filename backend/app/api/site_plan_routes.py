@@ -58,6 +58,8 @@ from app.schemas.bulk_drafting import (
 from app.schemas.page_composition import (
     PageCompositionDecisionUpdate,
     PageCompositionRead,
+    PageCompositionRevisionRead,
+    PageCompositionRevisionSummary,
     SemanticComponentDefinitionRead,
     SitePlanCompositionRefreshResult,
 )
@@ -127,6 +129,12 @@ from app.services.page_composition import (
     refresh_site_plan_compositions,
     update_operator_composition_decisions,
 )
+from app.services.page_composition_history import (
+    PageCompositionHistoryError,
+    composition_revision_read_values,
+    list_composition_revisions,
+    read_composition_revision,
+)
 
 router = APIRouter(prefix="/site-plans", tags=["site plans"])
 
@@ -165,6 +173,47 @@ def edit_composition_decisions(
         session,
         composition_id,
         payload,
+    )
+
+
+@router.get(
+    "/compositions/{composition_id}/revisions",
+    response_model=list[PageCompositionRevisionSummary],
+)
+def read_composition_revision_history(
+    composition_id: int,
+    session: Session = Depends(get_session),
+):
+    revisions = _composition_call(
+        list_composition_revisions,
+        session,
+        composition_id,
+    )
+    return [
+        _composition_call(composition_revision_read_values, session, revision)
+        for revision in revisions
+    ]
+
+
+@router.get(
+    "/compositions/{composition_id}/revisions/{composition_version}",
+    response_model=PageCompositionRevisionRead,
+)
+def read_one_composition_revision(
+    composition_id: int,
+    composition_version: int,
+    session: Session = Depends(get_session),
+):
+    revision = _composition_call(
+        read_composition_revision,
+        session,
+        composition_id,
+        composition_version,
+    )
+    return _composition_call(
+        composition_revision_read_values,
+        session,
+        revision,
     )
 
 
@@ -752,5 +801,5 @@ def _bulk_drafting_call(function, *args, **kwargs):
 def _composition_call(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
-    except PageCompositionError as exc:
+    except (PageCompositionError, PageCompositionHistoryError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

@@ -24,6 +24,10 @@ from app.schemas.scoped_media_authorizations import (
     scoped_media_authorization_fingerprint,
     validate_scoped_media_authorization_policy_terms,
 )
+from app.services.page_composition_history import (
+    PageCompositionHistoryError,
+    current_composition_revision,
+)
 
 
 class ScopedMediaAuthorizationError(ValueError):
@@ -1191,6 +1195,10 @@ def _mark_composition_stale(session: Session, planned_page_id: int) -> None:
             PageComposition.status == "current",
         )
     ).all():
+        try:
+            current_composition_revision(session, composition)
+        except PageCompositionHistoryError as exc:
+            raise ScopedMediaAuthorizationError(str(exc)) from exc
         composition.status = "stale"
         composition.updated_at = datetime.now(UTC)
         session.add(composition)

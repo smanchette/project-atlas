@@ -14,6 +14,7 @@ from app.models import (
     GeneratedPage,
     ImageMetadata,
     PageComposition,
+    PageCompositionRevision,
     PlannedPage,
     SitePlan,
     Theme,
@@ -44,6 +45,10 @@ from app.services import theme_activation_rehearsal as rehearsal
 from app.services import theme_configurations as theme_service
 from app.services.form_submission_gateway import evaluate_form_readiness
 from app.services.themes import DEFAULT_THEME_TOKENS, canonical_token_hash
+from app.services.page_composition_history import (
+    canonical_payload_hash,
+    create_initial_composition_revision,
+)
 
 
 @pytest.fixture()
@@ -181,7 +186,12 @@ def _contract(component_key: str) -> dict:
     )
 
 
-def _seed_graph(session: Session, *, form_state: str) -> SimpleNamespace:
+def _seed_graph(
+    session: Session,
+    *,
+    form_state: str,
+    include_composition_history: bool = False,
+) -> SimpleNamespace:
     business = Business(
         company_name=f"Rehearsal {form_state}",
         business_type="synthetic test",
@@ -360,6 +370,64 @@ def _seed_graph(session: Session, *, form_state: str) -> SimpleNamespace:
             destination_component_configuration_id=form.id,
         ),
     )
+    composition = None
+    composition_revision = None
+    if include_composition_history:
+        plan = SitePlan(
+            website_id=website.id,
+            plan_key="primary",
+            plan_name="Rehearsal composition history plan",
+            status="active",
+        )
+        session.add(plan)
+        session.flush()
+        generated = GeneratedPage(
+            business_id=business.id,
+            website_id=website.id,
+            page_type="informational",
+            page_title="Rehearsal composition history",
+            page_slug="rehearsal-composition-history",
+            h1="Rehearsal composition history",
+            draft_content={"title": "Rehearsal composition history"},
+            generation_status="generated",
+            status="draft",
+        )
+        session.add(generated)
+        session.flush()
+        planned = PlannedPage(
+            website_id=website.id,
+            site_plan_id=plan.id,
+            page_type="informational",
+            working_name="Rehearsal composition history",
+            intended_slug=generated.page_slug,
+            generated_page_id=generated.id,
+        )
+        session.add(planned)
+        session.flush()
+        snapshot = {
+            "fixture": "theme-activation-history",
+            "draft_hash": "e" * 64,
+        }
+        composition = PageComposition(
+            website_id=website.id,
+            site_plan_id=plan.id,
+            planned_page_id=planned.id,
+            generated_page_id=generated.id,
+            generated_components=[],
+            operator_decisions=[],
+            source_snapshot=snapshot,
+            source_hash=canonical_payload_hash(snapshot),
+            status="current",
+        )
+        session.add(composition)
+        session.flush()
+        composition_revision = create_initial_composition_revision(
+            session,
+            composition,
+            recorded_by="test:theme-activation-rehearsal",
+            record_source="test_fixture",
+        )
+        session.commit()
     return SimpleNamespace(
         website=website,
         family=family,
@@ -370,6 +438,8 @@ def _seed_graph(session: Session, *, form_state: str) -> SimpleNamespace:
         sticky=sticky,
         current_theme=current_theme,
         current_selection=current_selection,
+        composition=composition,
+        composition_revision=composition_revision,
     )
 
 
@@ -439,6 +509,54 @@ def test_activation_planner_is_zero_write_and_reports_disabled_form_blockers(
     )
     assert _counts(session) == before
     assert not session.new and not session.dirty and not session.deleted
+
+
+def test_activation_planner_reports_tampered_composition_history_without_writes(
+    session: Session,
+) -> None:
+    graph = _seed_graph(
+        session,
+        form_state="rehearsal_ready",
+        include_composition_history=True,
+    )
+    assert graph.composition is not None
+    assert graph.composition_revision is not None
+    revision = session.get(
+        PageCompositionRevision,
+        graph.composition_revision.id,
+    )
+    assert revision is not None
+    revision.recorded_by = "tampered:theme-activation-history"
+    session.add(revision)
+    session.flush()
+    before = _counts(session)
+    pending_before = (
+        set(session.new),
+        set(session.dirty),
+        set(session.deleted),
+    )
+
+    plan = rehearsal.plan_theme_activation_rehearsal(
+        session,
+        graph.website.id,
+        graph.configuration.id,
+    )
+
+    blockers = [
+        item
+        for item in plan.publication_blockers
+        if item.code == "composition_history_invalid"
+    ]
+    assert len(blockers) == 1
+    assert blockers[0].field == "page_compositions.history"
+    assert "immutable hash" in blockers[0].reason
+    assert plan.write_count == 0
+    assert _counts(session) == before
+    assert (
+        set(session.new),
+        set(session.dirty),
+        set(session.deleted),
+    ) == pending_before
 
 
 def test_provider_disabled_real_draft_cannot_activate(
@@ -879,18 +997,28 @@ def test_full_site_audit_types_65_pages_and_exposes_page_media_evidence(
         )
         session.add(planned)
         session.flush()
-        session.add(
-            PageComposition(
+        composition_snapshot = {
+            "fixture": f"theme-activation-rehearsal-{index}",
+            "draft_hash": canonical_payload_hash(page.draft_content or {}),
+        }
+        composition = PageComposition(
                 website_id=graph.website.id,
                 site_plan_id=plan.id,
                 planned_page_id=planned.id,
                 generated_page_id=page.id,
                 composition_version=1,
                 generated_components=[],
-                source_snapshot={},
-                source_hash=f"{index:064x}",
+                source_snapshot=composition_snapshot,
+                source_hash=canonical_payload_hash(composition_snapshot),
                 status="current",
-            )
+        )
+        session.add(composition)
+        session.flush()
+        create_initial_composition_revision(
+            session,
+            composition,
+            recorded_by="test:theme-activation-rehearsal",
+            record_source="test_fixture",
         )
         if page.id != 7:
             session.add(

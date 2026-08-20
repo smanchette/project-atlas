@@ -7,7 +7,18 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.db.session import get_session
 from app.main import app
-from app.models import Brand, Business, Theme, Website, WebsiteThemeSelection
+from app.models import (
+    Brand,
+    Business,
+    GeneratedPage,
+    PageComposition,
+    PageCompositionRevision,
+    PlannedPage,
+    SitePlan,
+    Theme,
+    Website,
+    WebsiteThemeSelection,
+)
 from app.schemas.themes import ThemeCreate
 from app.services.themes import (
     DEFAULT_THEME_TOKENS,
@@ -19,6 +30,10 @@ from app.services.themes import (
     retire_theme,
     select_website_theme,
     validate_theme_accessibility,
+)
+from app.services.page_composition_history import (
+    canonical_payload_hash,
+    create_initial_composition_revision,
 )
 
 
@@ -102,6 +117,66 @@ def _same_business_website(session: Session, source: Website, suffix: str) -> We
     return website
 
 
+def _seed_current_composition(session: Session, website: Website) -> PageComposition:
+    plan = SitePlan(
+        website_id=website.id,
+        plan_key="primary",
+        plan_name="Theme history plan",
+        status="active",
+    )
+    session.add(plan)
+    session.flush()
+    page = GeneratedPage(
+        business_id=website.business_id,
+        website_id=website.id,
+        page_type="informational",
+        page_title="Theme history page",
+        page_slug="theme-history-page",
+        h1="Theme history page",
+        draft_content={"title": "Theme history page"},
+        generation_status="generated",
+        status="draft",
+    )
+    session.add(page)
+    session.flush()
+    planned = PlannedPage(
+        website_id=website.id,
+        site_plan_id=plan.id,
+        page_type="informational",
+        working_name="Theme history page",
+        intended_slug=page.page_slug,
+        generated_page_id=page.id,
+    )
+    session.add(planned)
+    session.flush()
+    snapshot = {
+        "fixture": "theme-selection-history",
+        "draft_hash": "d" * 64,
+    }
+    composition = PageComposition(
+        website_id=website.id,
+        site_plan_id=plan.id,
+        planned_page_id=planned.id,
+        generated_page_id=page.id,
+        generated_components=[],
+        operator_decisions=[],
+        source_snapshot=snapshot,
+        source_hash=canonical_payload_hash(snapshot),
+        status="current",
+    )
+    session.add(composition)
+    session.flush()
+    create_initial_composition_revision(
+        session,
+        composition,
+        recorded_by="test:theme-selection",
+        record_source="test_fixture",
+    )
+    session.commit()
+    session.refresh(composition)
+    return composition
+
+
 def test_neutral_fallback_is_deterministic_accessible_and_nonpersistent(session: Session) -> None:
     website = _website(session, "Fallback")
 
@@ -158,6 +233,72 @@ def test_theme_approval_selection_and_exact_retries_are_idempotent(session: Sess
         "selection_id": selection.id,
         "selection_version": 1,
     }
+
+
+def test_theme_selection_rejects_tampered_composition_history_before_mutation(
+    session: Session,
+) -> None:
+    website = _website(session, "HistoryTamper")
+    first = create_theme(session, website.id, _payload())
+    approve_theme(session, first.id, approved_by="Approver")
+    first_selection = select_website_theme(
+        session,
+        website.id,
+        theme_id=first.id,
+        selected_by="Selector A",
+        rationale="Select the first approved Theme.",
+    )
+    composition = _seed_current_composition(session, website)
+    replacement = create_theme(
+        session,
+        website.id,
+        _payload(replaces_theme_id=first.id),
+    )
+    approve_theme(session, replacement.id, approved_by="Approver")
+    composition_before = (
+        composition.status,
+        composition.composition_version,
+        composition.source_hash,
+    )
+    revision = session.exec(
+        select(PageCompositionRevision).where(
+            PageCompositionRevision.page_composition_id == composition.id,
+            PageCompositionRevision.composition_version
+            == composition.composition_version,
+        )
+    ).one()
+    revision.recorded_by = "tampered:theme-selection-history"
+    session.add(revision)
+    session.flush()
+
+    with pytest.raises(ThemeError, match="immutable hash") as exc_info:
+        select_website_theme(
+            session,
+            website.id,
+            theme_id=replacement.id,
+            selected_by="Selector B",
+            rationale="Select the approved replacement Theme.",
+        )
+
+    assert exc_info.value.code == "page_composition_invalid"
+    session.rollback()
+    selections = list(
+        session.exec(
+            select(WebsiteThemeSelection)
+            .where(WebsiteThemeSelection.website_id == website.id)
+            .order_by(WebsiteThemeSelection.version)
+        ).all()
+    )
+    assert [
+        (item.id, item.version, item.status, item.theme_id) for item in selections
+    ] == [(first_selection.id, 1, "active", first.id)]
+    restored_composition = session.get(PageComposition, composition.id)
+    assert restored_composition is not None
+    assert (
+        restored_composition.status,
+        restored_composition.composition_version,
+        restored_composition.source_hash,
+    ) == composition_before
 
 
 def test_replacement_history_retirement_and_website_isolation(session: Session) -> None:

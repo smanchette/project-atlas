@@ -9,6 +9,19 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _lower_sha256_sql(column_name: str) -> str:
+    """Return a SQLite/PostgreSQL-compatible lowercase SHA-256 predicate."""
+
+    stripped = column_name
+    for character in "0123456789abcdef":
+        stripped = f"replace({stripped}, '{character}', '')"
+    return (
+        f"length({column_name}) = 64 "
+        f"AND {column_name} = lower({column_name}) "
+        f"AND length({stripped}) = 0"
+    )
+
+
 class TimestampMixin(SQLModel):
     created_at: datetime = Field(default_factory=utc_now, nullable=False)
     updated_at: datetime = Field(default_factory=utc_now, nullable=False)
@@ -1702,9 +1715,24 @@ class PageComposition(TimestampMixin, table=True):
             "composition_version >= 1",
             name="ck_pagecomposition_version",
         ),
+        ForeignKeyConstraint(
+            ["id", "composition_version", "source_hash"],
+            [
+                "pagecompositionrevision.page_composition_id",
+                "pagecompositionrevision.composition_version",
+                "pagecompositionrevision.source_hash",
+            ],
+            name="fk_pagecomposition_current_revision",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
     )
 
-    id: int | None = Field(default=None, primary_key=True)
+    id: int | None = Field(
+        default=None,
+        primary_key=True,
+        sa_column_kwargs={"autoincrement": "ignore_fk"},
+    )
     website_id: int = Field(foreign_key="website.id", index=True)
     site_plan_id: int = Field(foreign_key="siteplan.id", index=True)
     planned_page_id: int = Field(foreign_key="plannedpage.id", index=True)
@@ -1727,6 +1755,163 @@ class PageComposition(TimestampMixin, table=True):
     generated_at: datetime = Field(default_factory=utc_now, nullable=False)
     decided_by: str | None = None
     decided_at: datetime | None = None
+
+
+class PageCompositionRevision(SQLModel, table=True):
+    """Immutable evidence for one Page Composition state that became current."""
+
+    __table_args__ = (
+        CheckConstraint(
+            "composition_version >= 1",
+            name="ck_pagecomprev_version",
+        ),
+        CheckConstraint(
+            f"({_lower_sha256_sql('content_hash')}) "
+            f"AND ({_lower_sha256_sql('source_hash')}) "
+            f"AND ({_lower_sha256_sql('revision_hash')}) "
+            "AND (supersedes_revision_hash IS NULL OR "
+            f"({_lower_sha256_sql('supersedes_revision_hash')}))",
+            name="ck_pagecomprev_hashes",
+        ),
+        CheckConstraint(
+            "(lineage_kind = 'initial' "
+            "AND composition_version = 1 "
+            "AND supersedes_revision_id IS NULL "
+            "AND supersedes_revision_hash IS NULL) "
+            "OR (lineage_kind = 'legacy_root' "
+            "AND supersedes_revision_id IS NULL "
+            "AND supersedes_revision_hash IS NULL) "
+            "OR (lineage_kind = 'successor' "
+            "AND composition_version > 1 "
+            "AND supersedes_revision_id IS NOT NULL "
+            "AND supersedes_revision_hash IS NOT NULL)",
+            name="ck_pagecomprev_lineage",
+        ),
+        CheckConstraint(
+            "supersedes_revision_id IS NULL OR supersedes_revision_id != id",
+            name="ck_pagecomprev_not_self",
+        ),
+        CheckConstraint(
+            "length(trim(recorded_by)) > 0 "
+            "AND length(trim(record_source)) > 0",
+            name="ck_pagecomprev_provenance",
+        ),
+        ForeignKeyConstraint(
+            ["page_composition_id"],
+            ["pagecomposition.id"],
+            name="fk_pagecomprev_composition",
+        ),
+        ForeignKeyConstraint(
+            ["website_id"],
+            ["website.id"],
+            name="fk_pagecomprev_website",
+        ),
+        ForeignKeyConstraint(
+            ["site_plan_id"],
+            ["siteplan.id"],
+            name="fk_pagecomprev_site_plan",
+        ),
+        ForeignKeyConstraint(
+            ["planned_page_id"],
+            ["plannedpage.id"],
+            name="fk_pagecomprev_planned_page",
+        ),
+        ForeignKeyConstraint(
+            ["generated_page_id"],
+            ["generatedpage.id"],
+            name="fk_pagecomprev_generated_page",
+        ),
+        ForeignKeyConstraint(
+            ["generated_page_revision_id"],
+            ["generatedpagerevision.id"],
+            name="fk_pagecomprev_generated_revision",
+        ),
+        ForeignKeyConstraint(
+            ["page_composition_id", "supersedes_revision_id"],
+            [
+                "pagecompositionrevision.page_composition_id",
+                "pagecompositionrevision.id",
+            ],
+            name="fk_pagecomprev_predecessor",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        UniqueConstraint(
+            "page_composition_id",
+            "id",
+            name="uq_pagecomprev_stream_id",
+        ),
+        UniqueConstraint(
+            "page_composition_id",
+            "composition_version",
+            name="uq_pagecomprev_stream_version",
+        ),
+        UniqueConstraint(
+            "page_composition_id",
+            "composition_version",
+            "source_hash",
+            name="uq_pagecomprev_identity",
+        ),
+        UniqueConstraint(
+            "page_composition_id",
+            "supersedes_revision_id",
+            name="uq_pagecomprev_successor",
+        ),
+        UniqueConstraint(
+            "page_composition_id",
+            "revision_hash",
+            name="uq_pagecomprev_stream_hash",
+        ),
+        Index(
+            "ix_pagecomprev_scope",
+            "website_id",
+            "site_plan_id",
+            "planned_page_id",
+        ),
+        Index(
+            "ix_pagecomprev_generated_revision",
+            "generated_page_revision_id",
+        ),
+        Index("ix_pagecomprev_source_hash", "source_hash"),
+        Index("ix_pagecomprev_revision_hash", "revision_hash"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    page_composition_id: int = Field(index=True)
+    website_id: int = Field(index=True)
+    site_plan_id: int = Field(index=True)
+    planned_page_id: int = Field(index=True)
+    generated_page_id: int = Field(index=True)
+    generated_page_revision_id: int | None = Field(default=None)
+    composition_version: int = Field(ge=1)
+    supersedes_revision_id: int | None = Field(default=None)
+    supersedes_revision_hash: str | None = Field(default=None, max_length=64)
+    lineage_kind: str = Field(max_length=24)
+    content_hash: str = Field(max_length=64)
+    generated_components: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    operator_decisions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False),
+    )
+    source_snapshot: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    source_hash: str = Field(max_length=64)
+    revision_hash: str = Field(max_length=64)
+    generated_at: datetime
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+    recorded_at: datetime = Field(
+        default_factory=utc_now,
+        sa_type=DateTime(timezone=True),
+        nullable=False,
+    )
+    recorded_by: str = Field(max_length=255)
+    record_source: str = Field(max_length=80)
 
 
 class WebsiteCoveragePlanningRecord(TimezoneTimestampMixin, table=True):
@@ -2376,6 +2561,21 @@ class GeneratedPageQAResult(TimestampMixin, table=True):
         CheckConstraint(
             "supersedes_qa_result_id IS NULL OR supersedes_qa_result_id != id",
             name="ck_generatedpageqaresult_not_self_superseding",
+        ),
+        ForeignKeyConstraint(
+            [
+                "page_composition_id",
+                "composition_version",
+                "composition_source_hash",
+            ],
+            [
+                "pagecompositionrevision.page_composition_id",
+                "pagecompositionrevision.composition_version",
+                "pagecompositionrevision.source_hash",
+            ],
+            name="fk_generatedpageqaresult_composition_revision",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         UniqueConstraint(
             "generated_page_id",

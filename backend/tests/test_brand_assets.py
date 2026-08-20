@@ -654,8 +654,8 @@ def test_backup_051_includes_asset_and_assignment_provenance(tmp_path: Path):
         assign_identity_asset(session, identity.id, asset_id=asset.id, slot="header_logo", assigned_by="Operator", rationale="Approved")
         result = export_backup(session, backup_dir=tmp_path)
     payload = load_backup(Path(result["path"]))
-    assert BACKUP_VERSION == "0.58"
-    assert payload["metadata"]["version"] == "0.58"
+    assert BACKUP_VERSION == "0.59"
+    assert payload["metadata"]["version"] == "0.59"
     assert payload["data"]["brand_assets"][0]["purpose"]
     assert payload["data"]["brand_assets"][0]["accessibility_description"]
     assert payload["data"]["brand_assets"][0]["provenance_notes"]
@@ -669,7 +669,7 @@ def test_backup_051_includes_asset_and_assignment_provenance(tmp_path: Path):
         restored_asset = target.exec(select(BrandAsset)).one()
         restored_assignment = target.exec(select(WebsiteIdentityAssetAssignment)).one()
         assert restored["status"] == "restored"
-        assert payload["metadata"]["version"] == "0.58"
+        assert payload["metadata"]["version"] == "0.59"
         assert restored_asset.checksum_sha256 == asset.checksum_sha256
         assert restored_asset.approved_usage == ["website_header"]
         assert restored_asset.restrictions == ["social_preview"]
@@ -1013,6 +1013,11 @@ def test_backup_050_rejects_active_assignment_to_retired_asset(tmp_path: Path):
 def test_backup_049_compatibility_does_not_require_brand_asset_groups(tmp_path: Path):
     payload, _ = _governed_backup_payload(tmp_path)
     payload["metadata"]["version"] = "0.49"
+    payload["data"].pop("page_composition_revisions", None)
+    payload["metadata"]["table_counts"].pop(
+        "page_composition_revisions",
+        None,
+    )
     for group in ("brand_assets", "website_identity_asset_assignments"):
         payload["metadata"]["table_counts"].pop(group)
         payload["data"].pop(group)

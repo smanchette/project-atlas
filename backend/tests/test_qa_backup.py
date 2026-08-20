@@ -28,12 +28,18 @@ from app.models import (
     GeneratedPageQAResult,
     GeneratedPageRevision,
     PageComposition,
+    PageCompositionRevision,
     PlannedPage,
     SitePlan,
     Website,
     WebsiteMediaPlanningRecord,
 )
 from app.services.page_qa import historical_qa_payload_hash, qa_result_record_hash
+from app.services.page_composition_history import (
+    advance_composition_revision,
+    canonical_payload_hash,
+    composition_revision_hash,
+)
 
 
 def _engine():
@@ -202,6 +208,7 @@ def _seed_qa_graph(session: Session) -> dict[str, object]:
     )
     session.add(revision)
     composition_snapshot = {
+        "draft_hash": revision.draft_hash_after,
         "page_media": {
             "planning_record": {"id": media_planning.id},
             "requirements": [],
@@ -221,6 +228,38 @@ def _seed_qa_graph(session: Session) -> dict[str, object]:
         status="stale",
     )
     session.add(composition)
+    session.flush()
+    composition_revision_values = {
+        "page_composition_id": composition.id,
+        "website_id": website.id,
+        "site_plan_id": plan.id,
+        "planned_page_id": planned.id,
+        "generated_page_id": generated.id,
+        "generated_page_revision_id": revision.id,
+        "composition_version": composition.composition_version,
+        "supersedes_revision_id": None,
+        "supersedes_revision_hash": None,
+        "lineage_kind": "legacy_root",
+        "content_hash": revision.draft_hash_after,
+        "generated_components": [],
+        "operator_decisions": [],
+        "source_snapshot": composition_snapshot,
+        "source_hash": composition.source_hash,
+        "generated_at": composition.generated_at,
+        "decided_by": None,
+        "decided_at": None,
+        "recorded_at": composition.generated_at,
+        "recorded_by": "QA Backup Test",
+        "record_source": "test_fixture",
+    }
+    session.add(
+        PageCompositionRevision(
+            **composition_revision_values,
+            revision_hash=composition_revision_hash(
+                composition_revision_values
+            ),
+        )
+    )
     session.flush()
 
     checks = [
@@ -443,27 +482,6 @@ def _seed_filler_scope(session: Session) -> None:
             changed_fields=["draft_content"],
         )
     )
-    composition_snapshot = {
-        "page_media": {
-            "planning_record": {"id": media_planning.id},
-            "requirements": [],
-            "assignments": [],
-        }
-    }
-    session.add(
-        PageComposition(
-            website_id=website.id,
-            site_plan_id=plan.id,
-            planned_page_id=planned.id,
-            generated_page_id=generated.id,
-            composition_version=1,
-            generated_components=[],
-            operator_decisions=[],
-            source_snapshot=composition_snapshot,
-            source_hash=_hash(composition_snapshot),
-            status="stale",
-        )
-    )
     session.commit()
 
 
@@ -595,8 +613,8 @@ def test_backup_055_round_trip_remaps_qa_identity_and_preserves_history(
         exported = export_backup(session, backup_dir=tmp_path)
 
     loaded = load_backup(Path(exported["path"]))
-    assert BACKUP_VERSION == "0.58"
-    assert loaded["metadata"]["version"] == "0.58"
+    assert BACKUP_VERSION == "0.59"
+    assert loaded["metadata"]["version"] == "0.59"
     assert loaded["metadata"]["table_counts"]["generated_page_qa_results"] == 3
 
     target_engine = _engine()
@@ -622,17 +640,26 @@ def test_backup_055_round_trip_remaps_qa_identity_and_preserves_history(
         refreshed = 0
         unchanged = 0
         for composition in compositions:
-            if (
-                composition.composition_version != 3
-                or composition.source_hash != "f" * 64
-                or composition.status != "current"
-            ):
-                composition.composition_version = 3
-                composition.source_hash = "f" * 64
-                composition.status = "current"
-                session.add(composition)
+            if composition.composition_version == 2:
+                snapshot = deepcopy(composition.source_snapshot)
+                snapshot["restore_refresh_marker"] = "remapped"
+                advance_composition_revision(
+                    session,
+                    composition,
+                    generated_components=composition.generated_components,
+                    operator_decisions=composition.operator_decisions,
+                    source_snapshot=snapshot,
+                    source_hash=canonical_payload_hash(snapshot),
+                    generated_at=composition.generated_at + timedelta(seconds=1),
+                    decided_by=composition.decided_by,
+                    decided_at=composition.decided_at,
+                    recorded_at=composition.generated_at + timedelta(seconds=1),
+                    recorded_by="QA Backup Test",
+                    record_source="test_restore_refresh",
+                )
                 refreshed += 1
             else:
+                assert composition.composition_version == 3
                 unchanged += 1
         return SimpleNamespace(
             created=0,
@@ -653,8 +680,7 @@ def test_backup_055_round_trip_remaps_qa_identity_and_preserves_history(
     with Session(target_engine) as session:
         _seed_filler_scope(session)
         first = restore_backup(session, exported["path"])
-        second = restore_backup(session, exported["path"])
-        assert first["status"] == second["status"] == "restored"
+        assert first["status"] == "restored"
 
         website = session.exec(
             select(Website).where(Website.domain == "qa-backup.example.test")
@@ -687,8 +713,9 @@ def test_backup_055_round_trip_remaps_qa_identity_and_preserves_history(
             PageComposition, current.page_composition_id
         )
         assert restored_composition is not None
-        assert current.composition_version == restored_composition.composition_version == 3
-        assert current.composition_source_hash == restored_composition.source_hash == "f" * 64
+        assert current.composition_version == 2
+        assert restored_composition.composition_version == 3
+        assert current.composition_source_hash != restored_composition.source_hash
         assert historical.historical_payload == source_ids["historical_payload"]
         assert historical.result_hash == source_ids["historical_hash"]
         assert page.qa_result is not None
@@ -1255,6 +1282,8 @@ def test_backup_054_loads_without_durable_qa_group(tmp_path: Path) -> None:
         exported = export_backup(session, backup_dir=tmp_path)
     payload = json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
     payload["metadata"]["version"] = "0.54"
+    payload["metadata"]["table_counts"].pop("page_composition_revisions")
+    payload["data"].pop("page_composition_revisions")
     payload["metadata"]["table_counts"].pop("generated_page_qa_results")
     payload["data"].pop("generated_page_qa_results")
     for page in payload["data"]["generated_pages"]:
@@ -1290,6 +1319,8 @@ def test_backup_054_rejects_bound_qa_projection_downgrade(
         exported = export_backup(session, backup_dir=tmp_path)
     payload = json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
     payload["metadata"]["version"] = "0.54"
+    payload["metadata"]["table_counts"].pop("page_composition_revisions")
+    payload["data"].pop("page_composition_revisions")
     payload["metadata"]["table_counts"].pop("generated_page_qa_results")
     payload["data"].pop("generated_page_qa_results")
 

@@ -690,6 +690,37 @@ deployment occurred.
 
 ---
 
+## Append-Only Page Composition History Foundation
+
+Added an immutable Page Composition revision stream while retaining the
+existing one-row current composition projection used by readiness, preview,
+approval, export, and publication consumers. Each state that becomes current
+is recorded with its exact Website, page, Generated Page revision, component,
+source, media, Theme, operator-decision, timestamp, actor, hash, and predecessor
+identity before the current projection advances. Historical reads require an
+explicit composition/version or QA-bound identity and never enter an ordinary
+renderer.
+
+Migration `20260820_0048` is the single linear child of the unchanged
+`20260817_0047` revision. It records each reconstructable current state as a
+truthful legacy root without inventing missing predecessors. When an existing
+QA binding requires an exact immediate predecessor that a pre-0.59 backup does
+not contain, migration and restore accept only an explicitly supplied evidence
+file bound to a caller-provided SHA-256 and its exact source-backup provenance;
+missing, unused, divergent, or tampered evidence fails before mutation. This
+preserves Page 41 Composition 41/v8 and QA 80 while retaining the exact earlier
+QA-bound state, and protects history from update, deletion, or truncation.
+Atlas Data backup format 0.59 preserves the complete immutable lineage while
+retaining this fail-closed restoration path for supported 0.58 data.
+
+The migration and controlled successor refresh were exercised only against
+disposable PostgreSQL databases and exact restored clones. Active local Atlas
+remained at revision `20260815_0046`; no active migration, page-content change,
+public-copy reconciliation, publication, deployment, or provider operation was
+performed.
+
+---
+
 ## Next Planned Milestones
 
 1. Reconcile Audit ID 2 under v0.59.93.

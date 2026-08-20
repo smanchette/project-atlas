@@ -63,7 +63,12 @@ def save_manual_draft(
     *,
     run_qa: bool = False,
 ) -> tuple[GeneratedPage, GeneratedPageRevision, PageQAResult | None]:
-    page = session.get(GeneratedPage, page_id)
+    page = session.exec(
+        select(GeneratedPage)
+        .where(GeneratedPage.id == page_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).one_or_none()
     if not page:
         raise HTTPException(status_code=404, detail="Generated page not found")
     if page.status != "draft":

@@ -67,6 +67,10 @@ from app.services.page_media_roles import (
     resolve_requirement_semantic_media_role,
     resolve_semantic_media_role,
 )
+from app.services.page_composition_history import (
+    PageCompositionHistoryError,
+    current_composition_revision,
+)
 from app.services.scoped_media_authorizations import (
     ScopedMediaAuthorizationError,
     bind_scoped_media_authorization_to_assignment,
@@ -1798,6 +1802,10 @@ def assign_media_batch_to_requirements(
             raise PageMediaPlanningError(
                 "Batch assignment crosses its exact Page Composition boundary."
             )
+        try:
+            current_composition_revision(session, composition, lock=True)
+        except PageCompositionHistoryError as exc:
+            raise PageMediaPlanningError(str(exc)) from exc
         if (
             composition.composition_version
             != payload.expected_composition_version
@@ -3202,6 +3210,10 @@ def _mark_composition_stale(session: Session, planned_page_id: int) -> None:
         select(PageComposition).where(PageComposition.planned_page_id == planned_page_id)
     ).first()
     if composition:
+        try:
+            current_composition_revision(session, composition)
+        except PageCompositionHistoryError as exc:
+            raise PageMediaPlanningError(str(exc)) from exc
         composition.status = "stale"
         composition.updated_at = datetime.now(UTC)
         session.add(composition)
@@ -3254,6 +3266,10 @@ def _exact_page_composition_instances(
             "Page Composition crosses its Website, Site Plan, Planned Page, "
             "or Generated Page boundary."
         )
+    try:
+        current_composition_revision(session, composition, lock=lock)
+    except PageCompositionHistoryError as exc:
+        raise PageMediaPlanningError(str(exc)) from exc
     if require_current and composition.status != "current":
         if not (
             allow_media_only_stale

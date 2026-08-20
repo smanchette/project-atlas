@@ -40,6 +40,11 @@ from app.services.page_composition import (
     PageCompositionError,
     read_composition_for_generated_page,
 )
+from app.services.page_composition_history import (
+    PageCompositionHistoryError,
+    current_composition_revision,
+    read_composition_revision,
+)
 from app.services.page_media_roles import (
     SemanticMediaRoleError,
     resolve_semantic_media_role,
@@ -470,11 +475,12 @@ def authoritative_page_qa_state(
     composition = current_compositions[0] if current_compositions else None
     if composition is not None:
         try:
+            current_composition_revision(session, composition)
             resolved_composition = read_composition_for_generated_page(
                 session,
                 page.id or 0,
             )
-        except PageCompositionError as exc:
+        except (PageCompositionError, PageCompositionHistoryError) as exc:
             raise ValueError(
                 f"Generated Page Composition is not authoritative: {exc}"
             ) from exc
@@ -501,6 +507,51 @@ def authoritative_page_qa_state(
         composition_source_hash=(composition.source_hash if composition else None),
         qa_ruleset_hash=evaluator_snapshot.qa_ruleset_hash,
     )
+
+
+def resolve_qa_composition_revision(
+    session: Session,
+    qa_result: GeneratedPageQAResult | int,
+):
+    """Resolve one bound QA row to only its exact immutable composition state."""
+
+    record = (
+        session.get(GeneratedPageQAResult, qa_result)
+        if isinstance(qa_result, int)
+        else qa_result
+    )
+    if record is None:
+        raise ValueError("Generated Page QA result was not found.")
+    binding = (
+        record.page_composition_id,
+        record.composition_version,
+        record.composition_source_hash,
+    )
+    if binding == (None, None, None):
+        raise ValueError("Generated Page QA result has no composition binding.")
+    if any(value is None for value in binding):
+        raise ValueError("Generated Page QA result has a partial composition binding.")
+    try:
+        revision = read_composition_revision(
+            session,
+            record.page_composition_id,
+            record.composition_version,
+            generated_page_id=record.generated_page_id,
+            website_id=record.website_id,
+        )
+    except PageCompositionHistoryError as exc:
+        raise ValueError(
+            f"Generated Page QA composition evidence is invalid: {exc}"
+        ) from exc
+    if (
+        revision.source_hash != record.composition_source_hash
+        or revision.site_plan_id != record.site_plan_id
+        or revision.planned_page_id != record.planned_page_id
+    ):
+        raise ValueError(
+            "Generated Page QA result crosses its exact historical composition scope."
+        )
+    return revision
 
 
 def _utc(value: datetime) -> datetime:

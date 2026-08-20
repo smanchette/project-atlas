@@ -57,6 +57,22 @@ def _migration_module():
     return module
 
 
+def _create_pre_0048_model_created_table(engine) -> None:
+    """Create the exact model scaffold that existed before history binding."""
+
+    table = GeneratedPageQAResult.__table__
+    history_fk = next(
+        constraint
+        for constraint in table.constraints
+        if constraint.name == "fk_generatedpageqaresult_composition_revision"
+    )
+    table.constraints.remove(history_fk)
+    try:
+        table.create(engine)
+    finally:
+        table.append_constraint(history_fk)
+
+
 def _replace_model_created_table_ddl(
     engine,
     *,
@@ -176,7 +192,7 @@ def test_0043_clean_upgrade_creates_empty_durable_qa_table(
         )
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260817_0047"
+        ).scalar_one() == "20260820_0048"
     engine.dispose()
     get_settings.cache_clear()
 
@@ -193,7 +209,7 @@ def test_0043_adopts_exact_empty_model_created_table(
         engine,
         qa_result={"page_id": 1, "readiness_status": "ready"},
     )
-    GeneratedPageQAResult.__table__.create(engine)
+    _create_pre_0048_model_created_table(engine)
     assert TABLE in inspect(engine).get_table_names()
     engine.dispose()
 
@@ -210,7 +226,7 @@ def test_0043_adopts_exact_empty_model_created_table(
         ).scalar_one() == "historical_unbound"
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260817_0047"
+        ).scalar_one() == "20260820_0048"
     inspector = inspect(engine)
     assert "uq_generatedpageqaresult_current_page" in {
         item["name"] for item in inspector.get_indexes(TABLE)
@@ -227,7 +243,7 @@ def test_0043_refuses_same_named_nonunique_current_index(
     config = _config(monkeypatch, database)
     command.upgrade(config, REVISION_0042)
     engine = create_engine(f"sqlite:///{database.as_posix()}")
-    GeneratedPageQAResult.__table__.create(engine)
+    _create_pre_0048_model_created_table(engine)
     with engine.begin() as connection:
         connection.execute(text(f"DROP INDEX {CURRENT_INDEX}"))
         connection.execute(
@@ -281,7 +297,7 @@ def test_0043_refuses_semantically_malformed_same_named_check_contract(
     config = _config(monkeypatch, database)
     command.upgrade(config, REVISION_0042)
     engine = create_engine(f"sqlite:///{database.as_posix()}")
-    GeneratedPageQAResult.__table__.create(engine)
+    _create_pre_0048_model_created_table(engine)
     _replace_model_created_table_ddl(engine, old=old, new=new)
     engine.dispose()
 
@@ -302,7 +318,7 @@ def test_0043_refuses_malformed_foreign_key_contract(
     config = _config(monkeypatch, database)
     command.upgrade(config, REVISION_0042)
     engine = create_engine(f"sqlite:///{database.as_posix()}")
-    GeneratedPageQAResult.__table__.create(engine)
+    _create_pre_0048_model_created_table(engine)
     _replace_model_created_table_ddl(
         engine,
         old="FOREIGN KEY(website_id) REFERENCES website (id)",
@@ -382,7 +398,7 @@ def test_0043_refuses_unnamed_or_duplicate_check_contract(
     config = _config(monkeypatch, database)
     command.upgrade(config, REVISION_0042)
     engine = create_engine(f"sqlite:///{database.as_posix()}")
-    GeneratedPageQAResult.__table__.create(engine)
+    _create_pre_0048_model_created_table(engine)
     identity_constraint = (
         "CONSTRAINT uq_generatedpageqaresult_page_result_hash "
         "UNIQUE (generated_page_id, result_hash)"
@@ -411,7 +427,7 @@ def test_0043_refuses_partial_predicate_on_noncurrent_index(
     config = _config(monkeypatch, database)
     command.upgrade(config, REVISION_0042)
     engine = create_engine(f"sqlite:///{database.as_posix()}")
-    GeneratedPageQAResult.__table__.create(engine)
+    _create_pre_0048_model_created_table(engine)
     index_name = "ix_generatedpageqaresult_website_id"
     with engine.begin() as connection:
         connection.execute(text(f"DROP INDEX {index_name}"))
@@ -449,7 +465,7 @@ def test_0043_refuses_to_adopt_nonempty_model_created_table(
     command.upgrade(config, REVISION_0042)
     engine = create_engine(f"sqlite:///{database.as_posix()}")
     _, _, _, page_id = _seed_0042_page(engine, qa_result=None)
-    GeneratedPageQAResult.__table__.create(engine)
+    _create_pre_0048_model_created_table(engine)
     now = datetime(2026, 8, 9, 12, 0)
     with engine.begin() as connection:
         connection.execute(

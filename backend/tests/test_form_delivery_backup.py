@@ -537,8 +537,8 @@ def test_backup_058_round_trip_preserves_complete_form_delivery_graph(
     tmp_path: Path,
 ) -> None:
     source_path, source_payload, _ = _export_complete_payload(tmp_path)
-    assert BACKUP_VERSION == "0.58"
-    assert source_payload["metadata"]["version"] == "0.58"
+    assert BACKUP_VERSION == "0.59"
+    assert source_payload["metadata"]["version"] == "0.59"
     assert {
         group: source_payload["metadata"]["table_counts"][group]
         for group in FORM_DELIVERY_BACKUP_GROUPS
@@ -963,6 +963,11 @@ def test_backup_057_is_accepted_only_with_empty_form_delivery_groups(
     _, payload, _ = _export_complete_payload(tmp_path)
     legacy = deepcopy(payload)
     legacy["metadata"]["version"] = "0.57"
+    legacy["data"].pop("page_composition_revisions", None)
+    legacy["metadata"]["table_counts"].pop(
+        "page_composition_revisions",
+        None,
+    )
     for group in FORM_DELIVERY_BACKUP_GROUPS:
         legacy["data"][group] = []
         legacy["metadata"]["table_counts"][group] = 0
@@ -991,7 +996,7 @@ def test_backup_058_exports_empty_form_groups_from_exact_0046_schema(
         loaded = load_backup(Path(exported["path"]))
     engine.dispose()
 
-    assert loaded["metadata"]["version"] == "0.58"
+    assert loaded["metadata"]["version"] == "0.59"
     assert all(not loaded["data"][group] for group in FORM_DELIVERY_BACKUP_GROUPS)
     assert all(
         loaded["metadata"]["table_counts"][group] == 0
@@ -1027,6 +1032,11 @@ def test_backup_057_restores_into_exact_0046_schema_without_form_tables(
         legacy = json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
     source_engine.dispose()
     legacy["metadata"]["version"] = "0.57"
+    legacy["data"].pop("page_composition_revisions", None)
+    legacy["metadata"]["table_counts"].pop(
+        "page_composition_revisions",
+        None,
+    )
     for group in FORM_DELIVERY_BACKUP_GROUPS:
         legacy["data"].pop(group)
         legacy["metadata"]["table_counts"].pop(group)

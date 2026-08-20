@@ -29,6 +29,10 @@ from app.models import (
     WebsiteMediaPlanningRecord,
 )
 from app.services.page_media_roles import resolve_semantic_media_role
+from app.services.page_composition_history import (
+    canonical_payload_hash,
+    create_initial_composition_revision,
+)
 
 
 def _engine():
@@ -426,7 +430,10 @@ def _seed_governed_graph(
             }
         ],
     }
-    composition_snapshot = {"page_media": media_snapshot}
+    composition_snapshot = {
+        "draft_hash": canonical_payload_hash(generated.draft_content or {}),
+        "page_media": media_snapshot,
+    }
     composition = PageComposition(
         website_id=website.id,
         site_plan_id=plan.id,
@@ -468,6 +475,13 @@ def _seed_governed_graph(
         status="stale",
     )
     session.add(composition)
+    session.flush()
+    create_initial_composition_revision(
+        session,
+        composition,
+        recorded_by="test:page-media-planning-backup",
+        record_source="test_fixture",
+    )
     session.commit()
     return {
         "business_id": business.id,
@@ -489,8 +503,8 @@ def test_backup_055_round_trip_remaps_complete_page_media_graph_and_is_idempoten
         exported = export_backup(session, backup_dir=tmp_path)
 
     loaded = load_backup(Path(exported["path"]))
-    assert BACKUP_VERSION == "0.58"
-    assert loaded["metadata"]["version"] == "0.58"
+    assert BACKUP_VERSION == "0.59"
+    assert loaded["metadata"]["version"] == "0.59"
     assert loaded["metadata"]["table_counts"]["website_media_planning_records"] == 2
     assert loaded["metadata"]["table_counts"]["planned_page_media_requirements"] == 2
     exported_assignment = next(
@@ -646,6 +660,9 @@ def test_backup_056_restores_historical_composition_without_preset_diagnostics(
         exported = export_backup(session, backup_dir=tmp_path)
 
     payload = json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
+    payload["metadata"]["version"] = "0.56"
+    payload["data"].pop("page_composition_revisions")
+    payload["metadata"]["table_counts"].pop("page_composition_revisions")
     composition = payload["data"]["page_compositions"][0]
     binding = composition["source_snapshot"]["page_media"]["assignments"][0]
     binding.pop("stored_display_preset")
@@ -706,6 +723,11 @@ def test_backup_052_defaults_new_groups_empty_without_inventing_governance(
         exported = export_backup(session, backup_dir=tmp_path)
     payload = json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
     payload["metadata"]["version"] = "0.52"
+    payload["data"].pop("page_composition_revisions", None)
+    payload["metadata"]["table_counts"].pop(
+        "page_composition_revisions",
+        None,
+    )
     for group in (
         "website_media_planning_records",
         "planned_page_media_requirements",

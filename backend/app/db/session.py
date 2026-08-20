@@ -28,6 +28,12 @@ ALEMBIC_OWNED_FORM_DELIVERY_TABLES = frozenset(
         "formdeliveryconfigurationaudit",
     }
 )
+ALEMBIC_OWNED_PAGE_COMPOSITION_TABLES = frozenset(
+    {
+        "pagecomposition",
+        "pagecompositionrevision",
+    }
+)
 ALEMBIC_OWNED_RUNTIME_TABLES = frozenset(
     {
         "wordpressmetadatastate",
@@ -38,6 +44,7 @@ ALEMBIC_OWNED_RUNTIME_TABLES = frozenset(
 ALEMBIC_OWNED_TABLES = (
     ALEMBIC_OWNED_DURABLE_THEME_TABLES
     | ALEMBIC_OWNED_FORM_DELIVERY_TABLES
+    | ALEMBIC_OWNED_PAGE_COMPOSITION_TABLES
     | ALEMBIC_OWNED_RUNTIME_TABLES
 )
 

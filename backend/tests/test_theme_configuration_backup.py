@@ -570,7 +570,7 @@ def _retire_theme_graph(
 def test_backup_057_round_trip_preserves_inactive_theme_graph_exactly_and_replays(
     tmp_path: Path,
 ) -> None:
-    assert BACKUP_VERSION == "0.58"
+    assert BACKUP_VERSION == "0.59"
     source_engine = _engine()
     SQLModel.metadata.create_all(source_engine)
     with Session(source_engine) as session:
@@ -579,7 +579,7 @@ def test_backup_057_round_trip_preserves_inactive_theme_graph_exactly_and_replay
         exported = export_backup(session, backup_dir=tmp_path)
         loaded = load_backup(Path(exported["path"]))
 
-    assert loaded["metadata"]["version"] == "0.58"
+    assert loaded["metadata"]["version"] == "0.59"
     expected_theme_counts = {
         "theme_families": 1,
         "theme_family_versions": 1,
@@ -1516,6 +1516,11 @@ def test_backup_056_loads_with_empty_durable_theme_groups(tmp_path: Path) -> Non
         exported = export_backup(session, backup_dir=tmp_path)
     payload = json.loads(Path(exported["path"]).read_text(encoding="utf-8"))
     payload["metadata"]["version"] = "0.56"
+    payload["data"].pop("page_composition_revisions", None)
+    payload["metadata"]["table_counts"].pop(
+        "page_composition_revisions",
+        None,
+    )
     for group in (
         "theme_families",
         "theme_family_versions",

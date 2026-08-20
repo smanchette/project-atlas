@@ -39,6 +39,7 @@ LOCAL_POSTGRES_HOSTS = {"127.0.0.1", "::1", "localhost", "postgres"}
 SOURCE_REVISION = "20260813_0045"
 HEAD_REVISION = "20260815_0046"
 FORM_DELIVERY_REVISION = "20260817_0047"
+HISTORY_REVISION = "20260820_0048"
 FORM_DELIVERY_TABLES = frozenset(
     {
         "websiteformdeliverymoderevision",
@@ -1323,7 +1324,7 @@ def test_postgresql_current_active_0046_clone_upgrades_to_0047_without_drift(
     )
 
 
-def test_postgresql_backup_057_restores_to_0046_then_upgrades_to_0047(
+def test_postgresql_backup_057_restores_to_0046_then_upgrades_to_0048(
     postgres_plan: _PostgresPlan,
     migration: Any,
     accepted_backup_media_settings: None,
@@ -1332,6 +1333,7 @@ def test_postgresql_backup_057_restores_to_0046_then_upgrades_to_0047(
 ) -> None:
     from app.db.backup import (
         BACKUP_VERSION,
+        BackupValidationError,
         _restore_managed_tables_are_empty,
         export_backup,
         load_backup,
@@ -1340,7 +1342,7 @@ def test_postgresql_backup_057_restores_to_0046_then_upgrades_to_0047(
     _require_frozen_success_digests(migration)
     backup_path = _backup_path()
     payload = load_backup(backup_path)
-    assert BACKUP_VERSION == "0.58"
+    assert BACKUP_VERSION == "0.59"
     assert payload["metadata"]["version"] == "0.57"
     assert sum(payload["metadata"]["table_counts"].values()) == (
         EXPECTED_APPLICATION_ROWS
@@ -1421,12 +1423,11 @@ def test_postgresql_backup_057_restores_to_0046_then_upgrades_to_0047(
     _assert_accepted_application_identities(database.engine)
 
     with Session(database.engine) as session:
-        exported = export_backup(session, backup_dir=tmp_path)
-    exported_payload = load_backup(Path(exported["path"]))
-    assert exported_payload["metadata"]["version"] == "0.58"
-    assert exported_payload["metadata"]["table_counts"] == payload["metadata"][
-        "table_counts"
-    ]
+        with pytest.raises(
+            BackupValidationError,
+            match="requires the Page Composition history migration",
+        ):
+            export_backup(session, backup_dir=tmp_path)
     assert _data_fingerprints(database.engine) == first_data
     assert _sequence_state(database.engine) == first_sequences
 
@@ -1446,6 +1447,29 @@ def test_postgresql_backup_057_restores_to_0046_then_upgrades_to_0047(
     assert _data_fingerprints(database.engine) == after_first_0047
     assert _sequence_state(database.engine) == after_first_0047_sequences
 
+    _upgrade(database, HISTORY_REVISION)
+    assert _revision(database.engine) == HISTORY_REVISION
+    after_0048 = _data_fingerprints(database.engine)
+    after_0048_sequences = _sequence_state(database.engine)
+    assert after_0048["pagecompositionrevision"][0] == first_data[
+        "pagecomposition"
+    ][0]
+    assert _application_row_count(after_0048) == (
+        EXPECTED_APPLICATION_ROWS + first_data["pagecomposition"][0]
+    )
+
+    with Session(database.engine) as session:
+        exported = export_backup(session, backup_dir=tmp_path)
+    exported_payload = load_backup(Path(exported["path"]))
+    assert exported_payload["metadata"]["version"] == "0.59"
+    for group, count in payload["metadata"]["table_counts"].items():
+        assert exported_payload["metadata"]["table_counts"][group] == count
+    assert exported_payload["metadata"]["table_counts"][
+        "page_composition_revisions"
+    ] == payload["metadata"]["table_counts"]["page_compositions"]
+    assert _data_fingerprints(database.engine) == after_0048
+    assert _sequence_state(database.engine) == after_0048_sequences
+
     from app import main as app_main
     from app.db import session as db_session
 
@@ -1457,6 +1481,7 @@ def test_postgresql_backup_057_restores_to_0046_then_upgrades_to_0047(
         assert client.get("/health").json()["status"] == "ok"
     after_first_start_data = _data_fingerprints(database.engine)
     after_first_start_sequences = _sequence_state(database.engine)
+    assert _revision(database.engine) == HISTORY_REVISION
     _assert_0047_surface_and_empty(database)
     _assert_accepted_application_identities(database.engine)
 

@@ -25,6 +25,7 @@ from app.models import (
     NavigationItem,
     NavigationSet,
     PageComposition,
+    PageCompositionRevision,
     PageImageAssignment,
     PlannedPage,
     PlannedPageMediaRequirement,
@@ -64,6 +65,10 @@ from app.api.page_media_routes import (
 )
 from app.services import page_media_planning as media_planning
 from app.services import page_composition as composition_service
+from app.services.page_composition_history import (
+    advance_composition_revision,
+    create_initial_composition_revision,
+)
 from app.services.crud import delete_record, update_record
 from app.services.page_media_planning import (
     PAGE_TYPE_MEDIA_CONTRACTS,
@@ -404,7 +409,7 @@ def _scope(
             )
         )
         pages.append((planned, generated))
-    session.commit()
+    session.flush()
     _refresh_test_compositions(session, plan, pages)
     return business, website, plan, pages
 
@@ -428,10 +433,13 @@ def _refresh_test_compositions(
             planned,
             generated,
         )
-        composition.source_snapshot = snapshot
-        composition.source_hash = media_planning._hash(snapshot)
-        composition.status = "current"
-        session.add(composition)
+        _record_test_composition_state(
+            session,
+            composition,
+            generated_components=composition.generated_components,
+            source_snapshot=snapshot,
+            source_hash=media_planning._hash(snapshot),
+        )
     session.commit()
 
 
@@ -516,12 +524,74 @@ def _refresh_authoritative_test_compositions(
             generated,
             operator_decisions=composition.operator_decisions,
         )
-        composition.source_snapshot = snapshot
-        composition.source_hash = composition_service._hash(snapshot)
-        composition.generated_components = components
+        _record_test_composition_state(
+            session,
+            composition,
+            generated_components=components,
+            source_snapshot=snapshot,
+            source_hash=composition_service._hash(snapshot),
+        )
+    session.commit()
+
+
+def _record_test_composition_state(
+    session: Session,
+    composition: PageComposition,
+    *,
+    generated_components: list[dict],
+    source_snapshot: dict,
+    source_hash: str,
+    operator_decisions: list[dict] | None = None,
+) -> None:
+    target_decisions = deepcopy(
+        composition.operator_decisions
+        if operator_decisions is None
+        else operator_decisions
+    )
+    history_exists = session.exec(
+        select(PageCompositionRevision).where(
+            PageCompositionRevision.page_composition_id == composition.id
+        )
+    ).first()
+    if history_exists is None:
+        composition.generated_components = deepcopy(generated_components)
+        composition.operator_decisions = target_decisions
+        composition.source_snapshot = deepcopy(source_snapshot)
+        composition.source_hash = source_hash
         composition.status = "current"
         session.add(composition)
-    session.commit()
+        session.flush()
+        create_initial_composition_revision(
+            session,
+            composition,
+            recorded_by="test:page-media-planning",
+            record_source="test_fixture",
+        )
+        return
+    if (
+        composition.generated_components == generated_components
+        and composition.operator_decisions == target_decisions
+        and composition.source_snapshot == source_snapshot
+        and composition.source_hash == source_hash
+    ):
+        composition.status = "current"
+        session.add(composition)
+        return
+    now = datetime.now(UTC)
+    advance_composition_revision(
+        session,
+        composition,
+        generated_components=generated_components,
+        operator_decisions=target_decisions,
+        source_snapshot=source_snapshot,
+        source_hash=source_hash,
+        generated_at=now,
+        decided_by=composition.decided_by,
+        decided_at=composition.decided_at,
+        recorded_at=now,
+        recorded_by="test:page-media-planning",
+        record_source="test_refresh",
+    )
 
 
 def _decision(
@@ -1227,6 +1297,73 @@ def test_refresh_creates_versioned_suggestions_without_operator_decisions_for_al
         assert len(session.exec(select(WebsiteMediaPlanningRecord)).all()) == 1
 
 
+def test_suggestion_refresh_rejects_tampered_composition_history_before_mutation():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _, _, plan, pages = _scope(session, "tampered-composition-history")
+        refresh_site_plan_media_suggestions(session, plan.id)
+        _refresh_test_compositions(session, plan, pages)
+
+        composition = session.exec(
+            select(PageComposition).where(
+                PageComposition.planned_page_id == pages[0][0].id
+            )
+        ).one()
+        revision = session.exec(
+            select(PageCompositionRevision).where(
+                PageCompositionRevision.page_composition_id == composition.id,
+                PageCompositionRevision.composition_version
+                == composition.composition_version,
+            )
+        ).one()
+        planning_before = [
+            (
+                item.id,
+                item.version,
+                item.source_hash,
+                deepcopy(item.generated_media_suggestions),
+            )
+            for item in session.exec(
+                select(WebsiteMediaPlanningRecord).order_by(
+                    WebsiteMediaPlanningRecord.id
+                )
+            ).all()
+        ]
+        composition_before = (
+            composition.status,
+            composition.composition_version,
+            composition.source_hash,
+        )
+        revision.recorded_by = "tampered:page-media-history"
+        session.add(revision)
+        session.flush()
+
+        with pytest.raises(PageMediaPlanningError, match="immutable hash"):
+            refresh_site_plan_media_suggestions(session, plan.id)
+
+        assert [
+            (
+                item.id,
+                item.version,
+                item.source_hash,
+                item.generated_media_suggestions,
+            )
+            for item in session.exec(
+                select(WebsiteMediaPlanningRecord).order_by(
+                    WebsiteMediaPlanningRecord.id
+                )
+            ).all()
+        ] == planning_before
+        session.refresh(composition)
+        assert (
+            composition.status,
+            composition.composition_version,
+            composition.source_hash,
+        ) == composition_before
+        assert not session.new and not session.dirty and not session.deleted
+
+
 def test_suggestion_and_decision_writes_can_share_one_rollback_safe_transaction():
     engine = _engine()
     SQLModel.metadata.create_all(engine)
@@ -1293,12 +1430,18 @@ def test_every_page_type_requires_target_in_its_exact_composition_before_decisio
                 PageComposition.planned_page_id == pages[0][0].id
             )
         ).one()
-        composition.generated_components = [
+        generated_components = [
             item
             for item in composition.generated_components
             if item.get("component_key") != target
         ]
-        session.add(composition)
+        _record_test_composition_state(
+            session,
+            composition,
+            generated_components=generated_components,
+            source_snapshot=composition.source_snapshot,
+            source_hash=composition.source_hash,
+        )
         session.commit()
 
         with pytest.raises(
@@ -1344,7 +1487,7 @@ def test_media_planning_rejects_a_target_when_all_exact_instances_are_suppressed
             if item.get("component_key") == target
         ]
         assert target_instances
-        composition.operator_decisions = [
+        operator_decisions = [
             {
                 "instance_key": instance_key,
                 "action": "suppress",
@@ -1353,7 +1496,14 @@ def test_media_planning_rejects_a_target_when_all_exact_instances_are_suppressed
             }
             for instance_key in target_instances
         ]
-        session.add(composition)
+        _record_test_composition_state(
+            session,
+            composition,
+            generated_components=composition.generated_components,
+            source_snapshot=composition.source_snapshot,
+            source_hash=composition.source_hash,
+            operator_decisions=operator_decisions,
+        )
         session.commit()
         _refresh_test_compositions(session, plan, pages)
 
@@ -1398,7 +1548,7 @@ def test_existing_media_decision_fails_readiness_after_its_target_is_suppressed(
                 PageComposition.planned_page_id == pages[0][0].id
             )
         ).one()
-        composition.operator_decisions = [
+        operator_decisions = [
             {
                 "instance_key": item["instance_key"],
                 "action": "suppress",
@@ -1408,7 +1558,16 @@ def test_existing_media_decision_fails_readiness_after_its_target_is_suppressed(
             for item in composition.generated_components
             if item.get("component_key") == target
         ]
-        assert composition.operator_decisions
+        assert operator_decisions
+        _record_test_composition_state(
+            session,
+            composition,
+            generated_components=composition.generated_components,
+            source_snapshot=composition.source_snapshot,
+            source_hash=composition.source_hash,
+            operator_decisions=operator_decisions,
+        )
+        composition.status = "stale"
         session.add(composition)
         session.commit()
 
@@ -2381,7 +2540,7 @@ def test_governed_semantic_role_reaches_every_page_and_wordpress_consumer(
                 PageComposition.planned_page_id == pages[0][0].id
             )
         ).one()
-        composition_row.generated_components = [
+        generated_components = [
             *composition_row.generated_components,
             {
                 "instance_key": f"media_placement:requirement-{requirement.id}",
@@ -2402,7 +2561,13 @@ def test_governed_semantic_role_reaches_every_page_and_wordpress_consumer(
                 "position": len(composition_row.generated_components),
             },
         ]
-        session.add(composition_row)
+        _record_test_composition_state(
+            session,
+            composition_row,
+            generated_components=generated_components,
+            source_snapshot=composition_row.source_snapshot,
+            source_hash=composition_row.source_hash,
+        )
         session.commit()
         _refresh_authoritative_test_compositions(
             session,
@@ -3150,7 +3315,7 @@ def test_v2_selector_changes_manifest_fingerprint_and_planning_currentness(
                 PageComposition.planned_page_id == pages[0][0].id
             )
         ).one()
-        composition.generated_components = [
+        generated_components = [
             *composition.generated_components,
             {
                 "instance_key": "content_section:alternate_service_area",
@@ -3158,10 +3323,13 @@ def test_v2_selector_changes_manifest_fingerprint_and_planning_currentness(
                 "position": len(composition.generated_components),
             },
         ]
-        session.add(composition)
-        session.commit()
-        composition.status = "current"
-        session.add(composition)
+        _record_test_composition_state(
+            session,
+            composition,
+            generated_components=generated_components,
+            source_snapshot=composition.source_snapshot,
+            source_hash=composition.source_hash,
+        )
         session.commit()
 
         # Composition order and extra same-component instances do not change
@@ -3237,15 +3405,18 @@ def test_v2_exact_selector_survives_reorder_and_same_component_instances() -> No
             item["component_key"] == "content_section"
             for item in composition.generated_components
         ) == 2
-        composition.generated_components = list(
-            reversed(composition.generated_components)
+        generated_components = deepcopy(
+            list(reversed(composition.generated_components))
         )
-        for position, item in enumerate(composition.generated_components):
+        for position, item in enumerate(generated_components):
             item["position"] = position
-        session.add(composition)
-        session.commit()
-        composition.status = "current"
-        session.add(composition)
+        _record_test_composition_state(
+            session,
+            composition,
+            generated_components=generated_components,
+            source_snapshot=composition.source_snapshot,
+            source_hash=composition.source_hash,
+        )
         session.commit()
 
         unchanged = refresh_site_plan_media_suggestions(session, plan.id)
@@ -3331,11 +3502,17 @@ def test_v2_duplicate_exact_composition_instance_fails_before_suggestion_refresh
             for item in composition.generated_components
             if item["instance_key"] == "content_section:service_area"
         )
-        composition.generated_components = [
+        generated_components = [
             *composition.generated_components,
             dict(original),
         ]
-        session.add(composition)
+        _record_test_composition_state(
+            session,
+            composition,
+            generated_components=generated_components,
+            source_snapshot=composition.source_snapshot,
+            source_hash=composition.source_hash,
+        )
         session.commit()
 
         with pytest.raises(

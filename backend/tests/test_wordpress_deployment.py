@@ -382,6 +382,7 @@ def test_v030_backup_compatibility_and_unknown_future_version(tmp_path):
     with TestClient(app):
         with Session(app_engine) as session: exported=export_backup(session,backup_dir=tmp_path)
     payload=json.loads(Path(exported["path"]).read_text(encoding="utf-8"));payload["metadata"]["version"]="0.30"
+    payload["data"].pop("page_composition_revisions",None);payload["metadata"]["table_counts"].pop("page_composition_revisions",None)
     for group in ("wordpress_deployment_audits","wordpress_deployment_nonces","wordpress_deployment_transitions"):
         payload["data"].pop(group,None);payload["metadata"]["table_counts"].pop(group,None)
     legacy=tmp_path/"v030.json";legacy.write_text(json.dumps(payload),encoding="utf-8")

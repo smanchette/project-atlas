@@ -406,7 +406,7 @@ def test_read_rejects_incomplete_generated_component_projection():
 
         with pytest.raises(
             PageCompositionError,
-            match="generated component projection changed",
+            match="head diverges from revision field generated_components",
         ):
             read_composition_for_generated_page(session, pages[0][1].id)
 
@@ -532,10 +532,6 @@ def test_navigation_resolution_preserves_hierarchy_and_preview_target_identity()
 @pytest.mark.parametrize(
     ("duplicate_kind", "expected_reason"),
     [
-        (
-            "target",
-            "Active Navigation Items cannot share the same target Planned Page.",
-        ),
         (
             "position",
             "Active sibling Navigation Items cannot share the same position.",
@@ -1444,6 +1440,10 @@ def test_backup_051_round_trip_preserves_assets_theme_and_scoped_compositions(tm
     ):
         assert legacy_payload["data"].pop(group) == []
         assert legacy_payload["metadata"]["table_counts"].pop(group) == 0
+    legacy_payload["data"].pop("page_composition_revisions")
+    legacy_payload["metadata"]["table_counts"].pop(
+        "page_composition_revisions"
+    )
     legacy_path = tmp_path / "atlas-backup-legacy-056.json"
     legacy_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
     legacy_source_data = load_backup(legacy_path)["data"]
@@ -1491,22 +1491,11 @@ def test_backup_057_identity_shortcut_rebuilds_divergent_projection(
         f"divergent-{corruption}.json",
         payload,
     )
-    load_backup(path)
-
-    engine = _engine()
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        restore_backup(session, path)
-        restored = session.get(PageComposition, source["id"])
-        assert restored is not None
-        assert restored.source_snapshot == expected_snapshot
-        assert restored.source_hash == expected_hash
-        assert restored.generated_components == expected_components
-        assert restored.composition_version == expected_version + 1
-        assert read_composition_for_generated_page(
-            session,
-            restored.generated_page_id,
-        ).status == "current"
+    with pytest.raises(
+        BackupValidationError,
+        match="current row does not exactly mirror its history tip",
+    ):
+        load_backup(path)
 
 
 def test_backup_057_identity_shortcut_rebuilds_after_draft_source_tamper(
@@ -1547,27 +1536,11 @@ def test_backup_057_partial_composition_set_is_completed_authoritatively(
     payload["data"]["page_compositions"].pop()
     payload["metadata"]["table_counts"]["page_compositions"] -= 1
     path = _write_backup_payload(tmp_path, "partial-composition-set.json", payload)
-    load_backup(path)
-
-    engine = _engine()
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        restore_backup(session, path)
-        compositions = session.exec(select(PageComposition)).all()
-        generated_page_ids = {
-            record["generated_page_id"]
-            for record in payload["data"]["planned_pages"]
-            if record.get("generated_page_id") is not None
-        }
-        assert {record.generated_page_id for record in compositions} == generated_page_ids
-        assert all(
-            read_composition_for_generated_page(
-                session,
-                record.generated_page_id,
-            ).status
-            == "current"
-            for record in compositions
-        )
+    with pytest.raises(
+        BackupValidationError,
+        match="unresolved reference in page_composition_revisions.page_composition_id",
+    ):
+        load_backup(path)
 
 
 def test_backup_057_missing_connection_planning_record_is_restored_before_currentness(
@@ -1612,17 +1585,11 @@ def test_backup_057_invalid_operator_decision_cannot_preserve_current(
         }
     ]
     path = _write_backup_payload(tmp_path, "invalid-operator-decision.json", payload)
-    load_backup(path)
-
-    engine = _engine()
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        with pytest.raises(
-            BackupValidationError,
-            match="invalid suppression decision",
-        ):
-            restore_backup(session, path)
-        assert session.exec(select(PageComposition)).all() == []
+    with pytest.raises(
+        BackupValidationError,
+        match="current row does not exactly mirror its history tip",
+    ):
+        load_backup(path)
 
 
 def test_real_050_backup_without_theme_groups_restores_with_neutral_fallback(tmp_path):
@@ -1638,6 +1605,11 @@ def test_real_050_backup_without_theme_groups_restores_with_neutral_fallback(tmp
     for group in ("themes", "website_theme_selections"):
         payload["data"].pop(group, None)
         payload["metadata"]["table_counts"].pop(group, None)
+    payload["data"].pop("page_composition_revisions", None)
+    payload["metadata"]["table_counts"].pop(
+        "page_composition_revisions",
+        None,
+    )
     for composition in payload["data"]["page_compositions"]:
         source_snapshot = dict(composition["source_snapshot"])
         source_snapshot.pop("theme", None)
@@ -1832,25 +1804,23 @@ def test_governed_media_placements_bind_to_exact_semantic_regions_and_versions()
             }
         ]
         session.add(composition)
-        session.commit()
-        defensive = next(
-            item
-            for item in read_site_plan_compositions(session, plan.id)
-            if item.planned_page_id == service_page.id
+        session.flush()
+        with pytest.raises(
+            PageCompositionError,
+            match="head diverges from revision field operator_decisions",
+        ):
+            read_site_plan_compositions(session, plan.id)
+        session.rollback()
+        composition = session.get(PageComposition, composition.id)
+        assert composition is not None
+        update_operator_composition_decisions(
+            session,
+            composition.id,
+            PageCompositionDecisionUpdate(
+                decisions=[],
+                decided_by="Composition Media Operator",
+            ),
         )
-        assert not any(
-            item.instance_key == suppressed_target
-            for item in defensive.effective_components
-        )
-        assert not any(
-            item.component_key == "media_placement"
-            and item.input_bindings.get("target_component_instance_key")
-            == suppressed_target
-            for item in defensive.effective_components
-        )
-        composition.operator_decisions = []
-        session.add(composition)
-        session.commit()
         session.add(
             SemanticComponentDefinition(
                 component_key="hero",

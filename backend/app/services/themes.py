@@ -18,6 +18,10 @@ from app.schemas.themes import (
     WebsiteThemeSelectionRead,
     WebsiteThemeStateRead,
 )
+from app.services.page_composition_history import (
+    PageCompositionHistoryError,
+    current_composition_revision,
+)
 
 
 THEME_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
@@ -421,6 +425,10 @@ def select_website_theme(
     for composition in session.exec(
         select(PageComposition).where(PageComposition.website_id == website.id)
     ).all():
+        try:
+            current_composition_revision(session, composition)
+        except PageCompositionHistoryError as exc:
+            raise ThemeError(str(exc), code="page_composition_invalid") from exc
         composition.status = "stale"
         composition.updated_at = now
         session.add(composition)

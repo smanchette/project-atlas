@@ -14,12 +14,23 @@ from sqlalchemy import inspect as sa_inspect, text
 from sqlmodel import Session, SQLModel, select
 
 from app.core.config import get_settings
+from app.db.page_composition_history_evidence import (
+    PageCompositionHistoryEvidenceError,
+    load_page_composition_history_evidence,
+    stable_qa_result_projection,
+)
 from app.db.session import create_db_and_tables, engine
 from app.services.media_display_presets import (
     DisplayPresetError,
     effective_assignment_display_preset,
 )
 from app.services.page_qa import historical_qa_payload_hash, qa_result_record_hash
+from app.services.page_composition_history import (
+    PageCompositionHistoryError,
+    canonical_payload_hash,
+    composition_content_hash,
+    composition_revision_hash,
+)
 from app.models import (
     ApprovalAudit,
     Brand,
@@ -44,6 +55,7 @@ from app.models import (
     NavigationItem,
     NavigationSet,
     PageComposition,
+    PageCompositionRevision,
     PageImageAssignment,
     PlannedPage,
     PlannedPageMediaRequirement,
@@ -102,7 +114,7 @@ from app.schemas.scoped_media_authorizations import (
 )
 
 APP_NAME = "Project Atlas"
-BACKUP_VERSION = "0.58"
+BACKUP_VERSION = "0.59"
 BRAND_ASSET_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
 BRAND_ASSET_MIME_EXTENSIONS = {
     "image/jpeg": {".jpg", ".jpeg"},
@@ -152,6 +164,7 @@ SUPPORTED_BACKUP_VERSIONS = {
     "0.56",
     "0.57",
     "0.58",
+    "0.59",
 }
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_DIR = BACKEND_ROOT / "backups"
@@ -203,6 +216,7 @@ BACKUP_MODELS: dict[str, type[SQLModel]] = {
     "internal_link_intents": InternalLinkIntent,
     "semantic_component_definitions": SemanticComponentDefinition,
     "page_compositions": PageComposition,
+    "page_composition_revisions": PageCompositionRevision,
     "theme_families": ThemeFamily,
     "theme_family_versions": ThemeFamilyVersion,
     "website_theme_configurations": WebsiteThemeConfiguration,
@@ -342,6 +356,21 @@ _FORM_DELIVERY_UTC_MODEL_FIELDS = {
     for group, fields in _FORM_DELIVERY_UTC_TIMESTAMP_FIELDS.items()
 }
 
+_PAGE_COMPOSITION_HISTORY_UTC_TIMESTAMP_FIELDS = {
+    "page_composition_revisions": (
+        "generated_at",
+        "decided_at",
+        "recorded_at",
+    ),
+}
+_PAGE_COMPOSITION_HISTORY_UTC_MODEL_FIELDS = {
+    BACKUP_MODELS[group]: fields
+    for group, fields in _PAGE_COMPOSITION_HISTORY_UTC_TIMESTAMP_FIELDS.items()
+}
+
+_BACKUP_LEGACY_ROOT_ACTOR = "atlas:backup_restore"
+_BACKUP_LEGACY_ROOT_SOURCE = "backup_0_58_restore"
+
 
 class BackupValidationError(ValueError):
     pass
@@ -393,6 +422,7 @@ def export_backup(
     created_at: datetime | None = None,
 ) -> dict[str, Any]:
     form_delivery_tables_available = _form_delivery_export_tables_available(session)
+    _require_page_composition_history_export_table(session)
     destination = backup_dir or BACKUP_DIR
     destination.mkdir(parents=True, exist_ok=True)
     timestamp = (created_at or datetime.now(UTC)).astimezone(UTC)
@@ -413,6 +443,7 @@ def export_backup(
     _canonicalize_navigation_decision_timestamps(data)
     _canonicalize_converged_utc_timestamps(data)
     _canonicalize_form_delivery_utc_timestamps(data)
+    _canonicalize_page_composition_history_timestamps(data)
     table_counts = {group: len(records) for group, records in data.items()}
     payload = {
         "metadata": {
@@ -477,6 +508,18 @@ def _form_delivery_export_tables_available(session: Session) -> bool:
     return present_tables == expected_tables
 
 
+def _require_page_composition_history_export_table(session: Session) -> None:
+    """Fail clearly until the migration that makes Backup 0.59 truthful is active."""
+
+    table_key = PageCompositionRevision.__table__.key
+    available_tables = set(sa_inspect(session.connection()).get_table_names())
+    if table_key not in available_tables:
+        raise BackupValidationError(
+            "Backup 0.59 requires the Page Composition history migration; "
+            f"managed table '{table_key}' is not available."
+        )
+
+
 def list_backups(*, backup_dir: Path | None = None) -> list[dict[str, Any]]:
     destination = backup_dir or BACKUP_DIR
     if not destination.exists():
@@ -508,10 +551,195 @@ def list_backups(*, backup_dir: Path | None = None) -> list[dict[str, Any]]:
     return backups
 
 
-def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
+def _prepare_page_composition_history_evidence(
+    *,
+    data: dict[str, list[dict[str, Any]]],
+    backup_version: str,
+    evidence_path: str | Path | None,
+    evidence_sha256: str | None,
+) -> dict[tuple[int, int, str], dict[str, Any]]:
+    """Validate an explicit pre-0.59 recovery sidecar before restore mutates state."""
+
+    if (evidence_path is None) != (evidence_sha256 is None):
+        raise BackupValidationError(
+            "Page Composition history evidence path and SHA256 must be supplied together."
+        )
+    if evidence_path is None or evidence_sha256 is None:
+        return {}
+    if backup_version == "0.59":
+        raise BackupValidationError(
+            "Backup 0.59 already contains complete Page Composition history and cannot use legacy evidence."
+        )
+    try:
+        evidence = load_page_composition_history_evidence(
+            evidence_path,
+            evidence_sha256,
+        )
+    except PageCompositionHistoryEvidenceError as exc:
+        raise BackupValidationError(str(exc)) from exc
+
+    compositions = {
+        record["id"]: record for record in data.get("page_compositions", [])
+    }
+    head_identities = {
+        (
+            record["id"],
+            record["composition_version"],
+            record["source_hash"],
+        )
+        for record in compositions.values()
+    }
+    required_qa_by_identity: dict[
+        tuple[int, int, str], list[dict[str, Any]]
+    ] = {}
+    for record in data.get("generated_page_qa_results", []):
+        composition_id = record.get("page_composition_id")
+        if (
+            not isinstance(composition_id, int)
+            or record.get("lifecycle_status") == "historical_unbound"
+        ):
+            continue
+        identity = (
+            composition_id,
+            record.get("composition_version"),
+            record.get("composition_source_hash"),
+        )
+        if identity not in head_identities:
+            required_qa_by_identity.setdefault(identity, []).append(
+                stable_qa_result_projection(record)
+            )
+    for qa_results in required_qa_by_identity.values():
+        qa_results.sort(key=lambda value: value["id"])
+
+    evidence_by_identity: dict[tuple[int, int, str], dict[str, Any]] = {}
+    evidence_composition_ids: set[int] = set()
+    for record in evidence.records:
+        revision = record["revision"]
+        composition_id = revision["page_composition_id"]
+        if composition_id in evidence_composition_ids:
+            raise BackupValidationError(
+                "Page Composition history evidence cannot recover more than one root for a composition."
+            )
+        evidence_composition_ids.add(composition_id)
+        identity = (
+            composition_id,
+            revision["composition_version"],
+            revision["source_hash"],
+        )
+        evidence_by_identity[identity] = record
+
+    if set(evidence_by_identity) != set(required_qa_by_identity):
+        raise BackupValidationError(
+            "Page Composition history evidence does not exactly equal the otherwise-unreconstructable QA-bound revision set."
+        )
+
+    generated_revisions = data.get("page_revisions", [])
+    for identity, record in evidence_by_identity.items():
+        revision = record["revision"]
+        composition = compositions.get(revision["page_composition_id"])
+        if composition is None:
+            raise BackupValidationError(
+                "Page Composition history evidence references a missing restore composition."
+            )
+        if (
+            revision["composition_version"] + 1
+            != composition.get("composition_version")
+            or any(
+                revision.get(field) != composition.get(field)
+                for field in (
+                    "website_id",
+                    "site_plan_id",
+                    "planned_page_id",
+                    "generated_page_id",
+                )
+            )
+        ):
+            raise BackupValidationError(
+                "Page Composition history evidence v1 is not the exact same-scope immediate predecessor of the restore head."
+            )
+        historical_generated_at = _datetime_value(
+            revision["generated_at"],
+            "page_composition_history_evidence.revision.generated_at",
+        )
+        head_generated_at = _datetime_value(
+            composition.get("generated_at"),
+            "page_compositions.generated_at",
+        )
+        if _comparable_datetime(historical_generated_at) > _comparable_datetime(
+            head_generated_at
+        ):
+            raise BackupValidationError(
+                "Page Composition history evidence has a derivation or recording time after its successor."
+            )
+
+        expected_qa_results = required_qa_by_identity[identity]
+        if record["qa_results"] != expected_qa_results:
+            raise BackupValidationError(
+                "Page Composition history evidence QA results do not exactly match the source backup requirements."
+            )
+
+        eligible_generated_revisions = [
+            candidate
+            for candidate in generated_revisions
+            if candidate.get("generated_page_id")
+            == revision["generated_page_id"]
+            and _comparable_datetime(
+                _datetime_value(
+                    candidate.get("created_at"),
+                    "page_revisions.created_at",
+                )
+            )
+            <= _comparable_datetime(historical_generated_at)
+        ]
+        expected_generated_revision = (
+            max(
+                eligible_generated_revisions,
+                key=lambda candidate: (
+                    _comparable_datetime(
+                        _datetime_value(
+                            candidate.get("created_at"),
+                            "page_revisions.created_at",
+                        )
+                    ),
+                    candidate["id"],
+                ),
+            )
+            if eligible_generated_revisions
+            else None
+        )
+        if expected_generated_revision is None:
+            anchor_matches = revision.get("generated_page_revision_id") is None
+        else:
+            anchor_matches = (
+                revision.get("generated_page_revision_id")
+                == expected_generated_revision.get("id")
+                and revision.get("content_hash")
+                == expected_generated_revision.get("draft_hash_after")
+            )
+        if not anchor_matches:
+            raise BackupValidationError(
+                "Page Composition history evidence loses the exact latest Generated Page revision available when derived."
+            )
+
+    return evidence_by_identity
+
+
+def restore_backup(
+    session: Session,
+    backup_file: str | Path,
+    *,
+    page_composition_history_evidence_path: str | Path | None = None,
+    page_composition_history_evidence_sha256: str | None = None,
+) -> dict[str, Any]:
     backup_path = resolve_backup_path(backup_file)
     payload = load_backup(backup_path)
     data = payload["data"]
+    legacy_history_evidence = _prepare_page_composition_history_evidence(
+        data=data,
+        backup_version=payload["metadata"]["version"],
+        evidence_path=page_composition_history_evidence_path,
+        evidence_sha256=page_composition_history_evidence_sha256,
+    )
 
     try:
         preserve_source_ids = _restore_managed_tables_are_empty(
@@ -519,9 +747,11 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
         ) or _restore_managed_tables_match_backup(session, data)
         preserve_current_composition_identity = bool(
             preserve_source_ids
-            and payload["metadata"]["version"] in {"0.57", "0.58"}
+            and payload["metadata"]["version"] in {"0.57", "0.58", "0.59"}
         )
     except Exception as exc:
+        if isinstance(exc, BackupValidationError):
+            raise
         raise BackupValidationError(
             "Restore could not prove whether every managed target table is empty."
         ) from exc
@@ -2724,6 +2954,39 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 )
             session.add(composition)
 
+        composition_revision_bindings = _restore_page_composition_history(
+            session,
+            data=data,
+            backup_version=payload["metadata"]["version"],
+            preserve_exact_bindings=composition_bindings_preserve_source_ids,
+            page_composition_ids=page_composition_ids,
+            generated_page_revision_ids=generated_page_revision_ids,
+            legacy_history_evidence=legacy_history_evidence,
+            binding_maps={
+                "website_ids": website_ids,
+                "business_ids": business_ids,
+                "website_identity_ids": website_identity_ids,
+                "site_plan_ids": site_plan_ids,
+                "planned_page_ids": planned_page_ids,
+                "generated_page_ids": generated_page_ids,
+                "service_ids": service_ids,
+                "city_ids": city_ids,
+                "county_ids": county_ids,
+                "navigation_set_ids": navigation_set_ids,
+                "navigation_item_ids": navigation_item_ids,
+                "internal_link_intent_ids": internal_link_intent_ids,
+                "brand_asset_ids": brand_asset_ids,
+                "planning_record_ids": website_media_planning_record_ids,
+                "requirement_ids": planned_page_media_requirement_ids,
+                "assignment_ids": page_image_assignment_ids,
+                "image_ids": image_metadata_ids,
+                "authorization_ids": scoped_media_authorization_ids,
+                "authorization_fingerprints": (
+                    scoped_media_authorization_fingerprints
+                ),
+            },
+        )
+
         # Rebuild every composition that the backup claimed was current before
         # restoring durable QA.  A restore can remap navigation, media,
         # identity-asset, and page IDs, so the authoritative restored
@@ -2739,9 +3002,6 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
         )
         session.flush()
 
-        source_compositions = {
-            record["id"]: record for record in data.get("page_compositions", [])
-        }
         generated_page_qa_result_ids: dict[int, int] = {}
         generated_page_qa_result_hashes: dict[str, str] = {}
         pending_qa_supersession: list[
@@ -2754,7 +3014,6 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
         ):
             old_result_id = _record_id(record, "generated_page_qa_results")
             restored_record = _restore_generated_page_qa_result_payload(
-                session,
                 record,
                 website_ids=website_ids,
                 site_plan_ids=site_plan_ids,
@@ -2762,7 +3021,7 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 generated_page_ids=generated_page_ids,
                 generated_page_revision_ids=generated_page_revision_ids,
                 page_composition_ids=page_composition_ids,
-                source_compositions=source_compositions,
+                composition_revision_bindings=composition_revision_bindings,
             )
             prepared_qa_records.append((old_result_id, record, restored_record))
 
@@ -3014,10 +3273,11 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
                 ) or {}
                 if qa_snapshot.get("lifecycle_status") == "candidate":
                     restored_snapshot = _rehash_restored_candidate_qa_projection(
-                        session,
                         qa_snapshot,
                         restored_snapshot,
-                        source_compositions=source_compositions,
+                        composition_revision_bindings=(
+                            composition_revision_bindings
+                        ),
                     )
                 restored_audit.qa_result_snapshot = restored_snapshot
             session.add(restored_audit)
@@ -3351,6 +3611,466 @@ def restore_backup(session: Session, backup_file: str | Path) -> dict[str, Any]:
     }
 
 
+def _restore_page_composition_history(
+    session: Session,
+    *,
+    data: dict[str, list[dict[str, Any]]],
+    backup_version: str,
+    preserve_exact_bindings: bool,
+    page_composition_ids: dict[int, int],
+    generated_page_revision_ids: dict[int, int],
+    legacy_history_evidence: dict[
+        tuple[int, int, str], dict[str, Any]
+    ],
+    binding_maps: dict[str, dict[Any, Any]],
+) -> dict[tuple[int, int, str], tuple[int, int, str]]:
+    """Restore immutable composition lineage before QA resolves historical tuples."""
+
+    source_records = data.get("page_composition_revisions", [])
+    if backup_version == "0.59":
+        pending = sorted(
+            source_records,
+            key=lambda value: (
+                value["page_composition_id"],
+                value["composition_version"],
+            ),
+        )
+    else:
+        pending = []
+
+    restored_ids: dict[int, int] = {}
+    restored_hashes: dict[int, str] = {}
+    bindings: dict[tuple[int, int, str], tuple[int, int, str]] = {}
+    restored_by_composition: dict[int, list[PageCompositionRevision]] = {}
+
+    for source in pending:
+        source_id = _record_id(source, "page_composition_revisions")
+        source_composition_id = source["page_composition_id"]
+        restored_composition_id = _mapped_id(
+            page_composition_ids,
+            source_composition_id,
+            "page_composition_revisions.page_composition_id",
+        )
+        if preserve_exact_bindings:
+            restored_values = deepcopy(source)
+        else:
+            restored_components = _restore_composition_component_bindings(
+                source["generated_components"],
+                website_ids=binding_maps["website_ids"],
+                navigation_set_ids=binding_maps["navigation_set_ids"],
+                generated_page_ids=binding_maps["generated_page_ids"],
+                planned_page_ids=binding_maps["planned_page_ids"],
+                internal_link_intent_ids=binding_maps["internal_link_intent_ids"],
+                requirement_ids=binding_maps["requirement_ids"],
+                assignment_ids=binding_maps["assignment_ids"],
+            )
+            restored_decisions = _restore_composition_component_bindings(
+                source["operator_decisions"],
+                website_ids=binding_maps["website_ids"],
+                navigation_set_ids=binding_maps["navigation_set_ids"],
+                generated_page_ids=binding_maps["generated_page_ids"],
+                planned_page_ids=binding_maps["planned_page_ids"],
+                internal_link_intent_ids=binding_maps["internal_link_intent_ids"],
+                requirement_ids=binding_maps["requirement_ids"],
+                assignment_ids=binding_maps["assignment_ids"],
+            )
+            restored_snapshot = _restore_composition_source_binding(
+                session,
+                source["source_snapshot"],
+                **binding_maps,
+            )
+            generated_at = _datetime_value(
+                source["generated_at"],
+                "page_composition_revisions.generated_at",
+            )
+            decided_at = (
+                _datetime_value(
+                    source["decided_at"],
+                    "page_composition_revisions.decided_at",
+                )
+                if source.get("decided_at") is not None
+                else None
+            )
+            recorded_at = _datetime_value(
+                source["recorded_at"],
+                "page_composition_revisions.recorded_at",
+            )
+            predecessor_id = source.get("supersedes_revision_id")
+            restored_values = {
+                **source,
+                "page_composition_id": restored_composition_id,
+                "website_id": _mapped_id(
+                    binding_maps["website_ids"],
+                    source["website_id"],
+                    "page_composition_revisions.website_id",
+                ),
+                "site_plan_id": _mapped_id(
+                    binding_maps["site_plan_ids"],
+                    source["site_plan_id"],
+                    "page_composition_revisions.site_plan_id",
+                ),
+                "planned_page_id": _mapped_id(
+                    binding_maps["planned_page_ids"],
+                    source["planned_page_id"],
+                    "page_composition_revisions.planned_page_id",
+                ),
+                "generated_page_id": _mapped_id(
+                    binding_maps["generated_page_ids"],
+                    source["generated_page_id"],
+                    "page_composition_revisions.generated_page_id",
+                ),
+                "generated_page_revision_id": _mapped_optional_id(
+                    generated_page_revision_ids,
+                    source.get("generated_page_revision_id"),
+                    "page_composition_revisions.generated_page_revision_id",
+                ),
+                "supersedes_revision_id": _mapped_optional_id(
+                    restored_ids,
+                    predecessor_id,
+                    "page_composition_revisions.supersedes_revision_id",
+                ),
+                "supersedes_revision_hash": (
+                    restored_hashes[predecessor_id]
+                    if predecessor_id is not None
+                    else None
+                ),
+                "generated_components": restored_components,
+                "operator_decisions": restored_decisions,
+                "source_snapshot": restored_snapshot,
+                "source_hash": canonical_payload_hash(restored_snapshot),
+                "content_hash": composition_content_hash(restored_snapshot),
+                "generated_at": generated_at,
+                "decided_at": decided_at,
+                "recorded_at": recorded_at,
+            }
+            restored_values["revision_hash"] = composition_revision_hash(
+                restored_values
+            )
+
+        restored = _restore_immutable_record(
+            session,
+            PageCompositionRevision,
+            select(PageCompositionRevision).where(
+                PageCompositionRevision.page_composition_id
+                == restored_composition_id,
+                PageCompositionRevision.composition_version
+                == source["composition_version"],
+            ),
+            restored_values,
+            label="Page Composition revision",
+        )
+        restored_id = _required_id(restored)
+        restored_ids[source_id] = restored_id
+        restored_hashes[source_id] = restored.revision_hash
+        bindings[
+            (
+                source_composition_id,
+                source["composition_version"],
+                source["source_hash"],
+            )
+        ] = (
+            restored.page_composition_id,
+            restored.composition_version,
+            restored.source_hash,
+        )
+        restored_by_composition.setdefault(
+            restored.page_composition_id, []
+        ).append(restored)
+
+    legacy_predecessors: dict[int, PageCompositionRevision] = {}
+    if backup_version != "0.59":
+        for evidence_record in sorted(
+            legacy_history_evidence.values(),
+            key=lambda value: (
+                value["revision"]["page_composition_id"],
+                value["revision"]["composition_version"],
+            ),
+        ):
+            source = evidence_record["revision"]
+            source_composition_id = source["page_composition_id"]
+            restored_composition_id = _mapped_id(
+                page_composition_ids,
+                source_composition_id,
+                "page_composition_history_evidence.page_composition_id",
+            )
+            if preserve_exact_bindings:
+                restored_values = deepcopy(source)
+            else:
+                restored_components = _restore_composition_component_bindings(
+                    source["generated_components"],
+                    website_ids=binding_maps["website_ids"],
+                    navigation_set_ids=binding_maps["navigation_set_ids"],
+                    generated_page_ids=binding_maps["generated_page_ids"],
+                    planned_page_ids=binding_maps["planned_page_ids"],
+                    internal_link_intent_ids=binding_maps[
+                        "internal_link_intent_ids"
+                    ],
+                    requirement_ids=binding_maps["requirement_ids"],
+                    assignment_ids=binding_maps["assignment_ids"],
+                )
+                restored_decisions = _restore_composition_component_bindings(
+                    source["operator_decisions"],
+                    website_ids=binding_maps["website_ids"],
+                    navigation_set_ids=binding_maps["navigation_set_ids"],
+                    generated_page_ids=binding_maps["generated_page_ids"],
+                    planned_page_ids=binding_maps["planned_page_ids"],
+                    internal_link_intent_ids=binding_maps[
+                        "internal_link_intent_ids"
+                    ],
+                    requirement_ids=binding_maps["requirement_ids"],
+                    assignment_ids=binding_maps["assignment_ids"],
+                )
+                restored_snapshot = _restore_composition_source_binding(
+                    session,
+                    source["source_snapshot"],
+                    **binding_maps,
+                )
+                restored_values = {
+                    **source,
+                    "page_composition_id": restored_composition_id,
+                    "website_id": _mapped_id(
+                        binding_maps["website_ids"],
+                        source["website_id"],
+                        "page_composition_history_evidence.website_id",
+                    ),
+                    "site_plan_id": _mapped_id(
+                        binding_maps["site_plan_ids"],
+                        source["site_plan_id"],
+                        "page_composition_history_evidence.site_plan_id",
+                    ),
+                    "planned_page_id": _mapped_id(
+                        binding_maps["planned_page_ids"],
+                        source["planned_page_id"],
+                        "page_composition_history_evidence.planned_page_id",
+                    ),
+                    "generated_page_id": _mapped_id(
+                        binding_maps["generated_page_ids"],
+                        source["generated_page_id"],
+                        "page_composition_history_evidence.generated_page_id",
+                    ),
+                    "generated_page_revision_id": _mapped_optional_id(
+                        generated_page_revision_ids,
+                        source.get("generated_page_revision_id"),
+                        "page_composition_history_evidence.generated_page_revision_id",
+                    ),
+                    "generated_components": restored_components,
+                    "operator_decisions": restored_decisions,
+                    "source_snapshot": restored_snapshot,
+                    "source_hash": canonical_payload_hash(restored_snapshot),
+                    "content_hash": composition_content_hash(
+                        restored_snapshot
+                    ),
+                    "generated_at": _datetime_value(
+                        source["generated_at"],
+                        "page_composition_history_evidence.generated_at",
+                    ),
+                    "decided_at": (
+                        _datetime_value(
+                            source["decided_at"],
+                            "page_composition_history_evidence.decided_at",
+                        )
+                        if source.get("decided_at") is not None
+                        else None
+                    ),
+                    "recorded_at": _datetime_value(
+                        source["recorded_at"],
+                        "page_composition_history_evidence.recorded_at",
+                    ),
+                }
+                restored_values["revision_hash"] = composition_revision_hash(
+                    restored_values
+                )
+
+            restored = _restore_immutable_record(
+                session,
+                PageCompositionRevision,
+                select(PageCompositionRevision).where(
+                    PageCompositionRevision.page_composition_id
+                    == restored_composition_id,
+                    PageCompositionRevision.composition_version
+                    == source["composition_version"],
+                ),
+                restored_values,
+                label="legacy Page Composition evidence revision",
+                generate_identity=True,
+            )
+            bindings[
+                (
+                    source_composition_id,
+                    source["composition_version"],
+                    source["source_hash"],
+                )
+            ] = (
+                restored.page_composition_id,
+                restored.composition_version,
+                restored.source_hash,
+            )
+            restored_by_composition.setdefault(
+                restored.page_composition_id, []
+            ).append(restored)
+            legacy_predecessors[source_composition_id] = restored
+
+    if backup_version != "0.59":
+        for source in data.get("page_compositions", []):
+            source_composition_id = _record_id(source, "page_compositions")
+            restored_composition_id = _mapped_id(
+                page_composition_ids,
+                source_composition_id,
+                "page_compositions.id",
+            )
+            composition = session.get(PageComposition, restored_composition_id)
+            if composition is None:
+                raise BackupValidationError(
+                    "Legacy Page Composition could not be restored before history synthesis."
+                )
+            try:
+                content_hash = composition_content_hash(composition.source_snapshot)
+            except PageCompositionHistoryError as exc:
+                raise BackupValidationError(
+                    "Legacy Page Composition cannot synthesize truthful history: "
+                    f"{exc}"
+                ) from exc
+            generated_revisions = list(
+                session.exec(
+                    select(GeneratedPageRevision).where(
+                        GeneratedPageRevision.generated_page_id
+                        == composition.generated_page_id
+                    )
+                ).all()
+            )
+            eligible_revisions = [
+                revision
+                for revision in generated_revisions
+                if _comparable_datetime(revision.created_at)
+                <= _comparable_datetime(composition.generated_at)
+            ]
+            latest_revision = (
+                max(
+                    eligible_revisions,
+                    key=lambda revision: (
+                        _comparable_datetime(revision.created_at),
+                        _required_id(revision),
+                    ),
+                )
+                if eligible_revisions
+                else None
+            )
+            if latest_revision is not None and (
+                latest_revision.draft_hash_after != content_hash
+            ):
+                raise BackupValidationError(
+                    "Legacy Page Composition content is not represented by its latest revision."
+                )
+            generated_at = composition.generated_at
+            predecessor = legacy_predecessors.get(source_composition_id)
+            # A pre-0.59 backup has no distinct history-recording instant.
+            # Reuse the exact derivation instant as reconstructed legacy
+            # evidence time so repeated restore is deterministic and does not
+            # fabricate a later event that the backup never observed.
+            values: dict[str, Any] = {
+                "page_composition_id": restored_composition_id,
+                "website_id": composition.website_id,
+                "site_plan_id": composition.site_plan_id,
+                "planned_page_id": composition.planned_page_id,
+                "generated_page_id": composition.generated_page_id,
+                "generated_page_revision_id": (
+                    latest_revision.id if latest_revision is not None else None
+                ),
+                "composition_version": composition.composition_version,
+                "supersedes_revision_id": (
+                    predecessor.id if predecessor is not None else None
+                ),
+                "supersedes_revision_hash": (
+                    predecessor.revision_hash
+                    if predecessor is not None
+                    else None
+                ),
+                "lineage_kind": (
+                    "successor" if predecessor is not None else "legacy_root"
+                ),
+                "content_hash": content_hash,
+                "generated_components": deepcopy(composition.generated_components),
+                "operator_decisions": deepcopy(composition.operator_decisions),
+                "source_snapshot": deepcopy(composition.source_snapshot),
+                "source_hash": composition.source_hash,
+                "generated_at": generated_at,
+                "decided_by": composition.decided_by,
+                "decided_at": composition.decided_at,
+                "recorded_at": generated_at,
+                "recorded_by": _BACKUP_LEGACY_ROOT_ACTOR,
+                "record_source": _BACKUP_LEGACY_ROOT_SOURCE,
+            }
+            values["revision_hash"] = composition_revision_hash(values)
+            restored = _restore_immutable_record(
+                session,
+                PageCompositionRevision,
+                select(PageCompositionRevision).where(
+                    PageCompositionRevision.page_composition_id
+                    == restored_composition_id,
+                    PageCompositionRevision.composition_version
+                    == composition.composition_version,
+                ),
+                values,
+                label="legacy Page Composition revision",
+                generate_identity=True,
+            )
+            bindings[
+                (
+                    source_composition_id,
+                    source["composition_version"],
+                    source["source_hash"],
+                )
+            ] = (
+                restored.page_composition_id,
+                restored.composition_version,
+                restored.source_hash,
+            )
+            restored_by_composition.setdefault(
+                restored.page_composition_id, []
+            ).append(restored)
+
+    for composition_id, revisions in restored_by_composition.items():
+        accepted_ids = {_required_id(revision) for revision in revisions}
+        observed_ids = {
+            _required_id(revision)
+            for revision in session.exec(
+                select(PageCompositionRevision).where(
+                    PageCompositionRevision.page_composition_id
+                    == composition_id
+                )
+            ).all()
+        }
+        if observed_ids != accepted_ids:
+            raise BackupValidationError(
+                "Target Page Composition history contains divergent, disconnected, "
+                "or newer immutable revisions; restore was refused."
+            )
+        tip = max(revisions, key=lambda value: value.composition_version)
+        composition = session.get(PageComposition, composition_id)
+        if composition is None:
+            raise BackupValidationError(
+                "Page Composition history lost its current materialized owner."
+            )
+        for field in (
+            "website_id",
+            "site_plan_id",
+            "planned_page_id",
+            "generated_page_id",
+            "composition_version",
+            "generated_components",
+            "operator_decisions",
+            "source_snapshot",
+            "source_hash",
+            "generated_at",
+            "decided_by",
+            "decided_at",
+        ):
+            setattr(composition, field, deepcopy(getattr(tip, field)))
+        session.add(composition)
+    session.flush()
+    return bindings
+
+
 def _refresh_restored_current_compositions(
     session: Session,
     *,
@@ -3431,7 +4151,7 @@ def _refresh_restored_current_compositions(
         ]
         graph_ready = (
             payload["metadata"]["version"]
-            in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}
+            in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58", "0.59"}
             and read_site_connection_plan(session, restored_plan_id).ready
         )
         claims_current = bool(backed_compositions) and all(
@@ -3694,12 +4414,12 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.43", "0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58", "0.59"}:
         for group in ("site_plans", "planned_pages", "planning_records"):
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.44", "0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58", "0.59"}:
         for group in (
             "site_connection_planning_records",
             "navigation_sets",
@@ -3709,7 +4429,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.45", "0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58", "0.59"}:
         for group in (
             "website_coverage_planning_records",
             "website_service_coverage_decisions",
@@ -3720,7 +4440,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.46", "0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58", "0.59"}:
         for group in (
             "drafting_eligibility_assessments",
             "drafting_eligibility_dispositions",
@@ -3728,7 +4448,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.47", "0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58", "0.59"}:
         for group in (
             "supporting_page_authorizations",
             "pre_draft_distinctness_briefs",
@@ -3736,7 +4456,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
             if group not in data:
                 data[group] = []
                 counts[group] = 0
-    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.48", "0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58", "0.59"}:
         for group in (
             "website_draft_generation_runs",
             "website_draft_generation_items",
@@ -3747,36 +4467,36 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     if "website_service_county_coverage_decisions" not in data:
         data.setdefault("website_service_county_coverage_decisions", [])
         counts.setdefault("website_service_county_coverage_decisions", 0)
-    if backup_version not in {"0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.49", "0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58", "0.59"}:
         for group in ("semantic_component_definitions", "page_compositions"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.50", "0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58", "0.59"}:
         for group in ("brand_assets", "website_identity_asset_assignments"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.51", "0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58", "0.59"}:
         for group in ("themes", "website_theme_selections"):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.53", "0.54", "0.55", "0.56", "0.57", "0.58", "0.59"}:
         for group in (
             "website_media_planning_records",
             "planned_page_media_requirements",
         ):
             data.setdefault(group, [])
             counts.setdefault(group, 0)
-    if backup_version not in {"0.55", "0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.55", "0.56", "0.57", "0.58", "0.59"}:
         data.setdefault("generated_page_qa_results", [])
         counts.setdefault("generated_page_qa_results", 0)
-    if backup_version not in {"0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.56", "0.57", "0.58", "0.59"}:
         data.setdefault("scoped_media_authorizations", [])
         counts.setdefault("scoped_media_authorizations", 0)
         for record in data.get("image_metadata", []):
             if isinstance(record, dict):
                 record.setdefault("usage_authorization_mode", "contract_default")
                 record.setdefault("required_authorization_terms", [])
-    if backup_version not in {"0.57", "0.58"}:
+    if backup_version not in {"0.57", "0.58", "0.59"}:
         for group in (
             "theme_families",
             "theme_family_versions",
@@ -3790,7 +4510,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
                     f"Legacy backup version cannot contain '{group}' records."
                 )
             counts.setdefault(group, 0)
-    if backup_version != "0.58":
+    if backup_version not in {"0.58", "0.59"}:
         for group in FORM_DELIVERY_BACKUP_GROUPS:
             records = data.setdefault(group, [])
             if records:
@@ -3798,6 +4518,13 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
                     f"Legacy backup version cannot contain '{group}' records."
                 )
             counts.setdefault(group, 0)
+    if backup_version != "0.59":
+        records = data.setdefault("page_composition_revisions", [])
+        if records:
+            raise BackupValidationError(
+                "Legacy backup version cannot contain Page Composition history."
+            )
+        counts.setdefault("page_composition_revisions", 0)
 
     for group in BACKUP_MODELS:
         records = data.get(group)
@@ -3810,6 +4537,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
 
     _canonicalize_navigation_decision_timestamps(data)
     _canonicalize_form_delivery_utc_timestamps(data)
+    _canonicalize_page_composition_history_timestamps(data)
 
     valid_asset_statuses = {"draft", "pending_review", "approved", "rejected", "retired"}
     valid_asset_types = {
@@ -4097,6 +4825,7 @@ def load_backup(backup_path: Path) -> dict[str, Any]:
     _validate_theme_ownership(data)
     _validate_page_media_ownership(data, backup_version)
     _validate_scoped_media_authorizations(data, backup_version)
+    _validate_page_composition_history(data, backup_version)
     _validate_generated_page_qa_results(data, backup_version)
     return payload
 
@@ -4258,6 +4987,7 @@ def _restore_managed_tables_match_backup(
         _canonicalize_navigation_decision_timestamps(comparable)
         _canonicalize_converged_utc_timestamps(comparable)
         _canonicalize_form_delivery_utc_timestamps(comparable)
+        _canonicalize_page_composition_history_timestamps(comparable)
     return observed == expected
 
 
@@ -4363,7 +5093,11 @@ def _normalize_converged_utc_restore_values(
 ) -> dict[str, Any]:
     """Bind legacy UTC-naive values to TIMESTAMPTZ without session dependence."""
 
-    fields = _CONVERGED_UTC_MODEL_FIELDS.get(model) or _FORM_DELIVERY_UTC_MODEL_FIELDS.get(model)
+    fields = (
+        _CONVERGED_UTC_MODEL_FIELDS.get(model)
+        or _FORM_DELIVERY_UTC_MODEL_FIELDS.get(model)
+        or _PAGE_COMPOSITION_HISTORY_UTC_MODEL_FIELDS.get(model)
+    )
     if fields is None:
         return payload
     normalized = dict(payload)
@@ -4387,6 +5121,7 @@ def _restore_immutable_record(
     payload: dict[str, Any],
     *,
     label: str,
+    generate_identity: bool = False,
 ) -> SQLModel:
     """Insert a durable record or reuse one exact immutable match."""
 
@@ -4408,7 +5143,11 @@ def _restore_immutable_record(
             )
         return existing
 
-    values = _restore_insert_values(session, model, normalized)
+    values = (
+        normalized.model_dump(exclude={"id"})
+        if generate_identity
+        else _restore_insert_values(session, model, normalized)
+    )
     record = model(**values)
     session.add(record)
     session.flush()
@@ -5467,6 +6206,23 @@ def _canonicalize_form_delivery_utc_timestamps(
                 record[field] = parsed.astimezone(UTC).isoformat()
 
 
+def _canonicalize_page_composition_history_timestamps(
+    data: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Serialize every hash-bound history instant as explicit canonical UTC."""
+
+    for group, fields in _PAGE_COMPOSITION_HISTORY_UTC_TIMESTAMP_FIELDS.items():
+        for record in data.get(group, []):
+            for field in fields:
+                value = record.get(field)
+                if value is None:
+                    continue
+                parsed = _datetime_value(value, f"{group}.{field}")
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=UTC)
+                record[field] = parsed.astimezone(UTC).isoformat()
+
+
 def _canonical_theme_datetime(value: Any, field: str) -> str | None:
     if value is None:
         return None
@@ -5820,7 +6576,6 @@ def _restore_qa_page_identity(
 
 
 def _restore_generated_page_qa_result_payload(
-    session: Session,
     record: dict[str, Any],
     *,
     website_ids: dict[int, int],
@@ -5829,7 +6584,9 @@ def _restore_generated_page_qa_result_payload(
     generated_page_ids: dict[int, int],
     generated_page_revision_ids: dict[int, int],
     page_composition_ids: dict[int, int],
-    source_compositions: dict[int, dict[str, Any]],
+    composition_revision_bindings: dict[
+        tuple[int, int, str], tuple[int, int, str]
+    ],
 ) -> dict[str, Any]:
     """Remap one immutable QA record and re-hash its restored identity."""
 
@@ -5886,28 +6643,21 @@ def _restore_generated_page_qa_result_payload(
 
     old_composition_id = record.get("page_composition_id")
     if isinstance(old_composition_id, int):
-        source_composition = source_compositions[old_composition_id]
-        restored_composition = session.get(
-            PageComposition,
-            restored["page_composition_id"],
+        source_binding = (
+            old_composition_id,
+            record.get("composition_version"),
+            record.get("composition_source_hash"),
         )
-        if restored_composition is None:
+        restored_binding = composition_revision_bindings.get(source_binding)
+        if restored_binding is None:
             raise BackupValidationError(
-                "Backup QA result composition could not be restored."
+                "Backup QA result does not resolve an exact restored Page Composition revision."
             )
-        # A QA result bound to the exported current composition can follow the
-        # composition's deterministic ID-remap hash. An already-stale historical
-        # binding remains unchanged and therefore remains stale after restore.
-        if (
-            record.get("composition_version")
-            == source_composition.get("composition_version")
-            and record.get("composition_source_hash")
-            == source_composition.get("source_hash")
-        ):
-            restored["composition_version"] = (
-                restored_composition.composition_version
-            )
-            restored["composition_source_hash"] = restored_composition.source_hash
+        (
+            restored["page_composition_id"],
+            restored["composition_version"],
+            restored["composition_source_hash"],
+        ) = restored_binding
 
     if restored.get("lifecycle_status") == "historical_unbound":
         restored["result_hash"] = historical_qa_payload_hash(
@@ -5960,30 +6710,30 @@ def _qa_hash_values_from_projection(
 
 
 def _rehash_restored_candidate_qa_projection(
-    session: Session,
     source: dict[str, Any],
     restored: dict[str, Any],
     *,
-    source_compositions: dict[int, dict[str, Any]],
+    composition_revision_bindings: dict[
+        tuple[int, int, str], tuple[int, int, str]
+    ],
 ) -> dict[str, Any]:
     old_composition_id = source.get("page_composition_id")
     if isinstance(old_composition_id, int):
-        source_composition = source_compositions[old_composition_id]
-        restored_composition = session.get(
-            PageComposition,
-            restored.get("page_composition_id"),
+        source_binding = (
+            old_composition_id,
+            source.get("composition_version"),
+            source.get("composition_source_hash"),
         )
-        if restored_composition is None:
+        restored_binding = composition_revision_bindings.get(source_binding)
+        if restored_binding is None:
             raise BackupValidationError(
-                "Backup candidate QA composition could not be restored."
+                "Backup candidate QA does not resolve an exact restored Page Composition revision."
             )
-        if (
-            source.get("composition_version")
-            == source_composition.get("composition_version")
-            and source.get("composition_source_hash")
-            == source_composition.get("source_hash")
-        ):
-            restored["composition_source_hash"] = restored_composition.source_hash
+        (
+            restored["page_composition_id"],
+            restored["composition_version"],
+            restored["composition_source_hash"],
+        ) = restored_binding
     evaluated_at = _datetime_value(
         restored.get("checked_at"),
         "approval_audits.qa_result_snapshot.checked_at",
@@ -6047,7 +6797,7 @@ def _validate_site_connection_decision_provenance(
     data: dict[str, list[dict[str, Any]]],
     backup_version: str,
 ) -> None:
-    if backup_version in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
+    if backup_version in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58", "0.59"}:
         _validate_052_site_connection_provenance_fields(data)
 
     planning_by_plan = {
@@ -6118,7 +6868,7 @@ def _validate_site_connection_decision_provenance(
                 "Backup Internal Link Intent crosses a Website, Site Plan, or page boundary."
             )
 
-    if backup_version not in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.52", "0.53", "0.54", "0.55", "0.56", "0.57", "0.58", "0.59"}:
         return
 
     _validate_052_composition_connection_bindings(
@@ -6555,7 +7305,7 @@ def _validate_nested_qa_page_identities(
 ) -> None:
     """Reject QA projections that claim a page other than their owner."""
 
-    require_identity = backup_version in {"0.55", "0.56", "0.57", "0.58"}
+    require_identity = backup_version in {"0.55", "0.56", "0.57", "0.58", "0.59"}
     for record in data["generated_pages"]:
         qa_result = record.get("qa_result")
         if qa_result is None:
@@ -6616,7 +7366,7 @@ def _validate_theme_configuration_graph(
         "website_theme_component_configurations",
         "theme_configuration_audits",
     )
-    if backup_version not in {"0.57", "0.58"}:
+    if backup_version not in {"0.57", "0.58", "0.59"}:
         if any(data[group] for group in groups):
             raise BackupValidationError(
                 "Legacy backup contains unsupported durable Theme configuration records."
@@ -7658,9 +8408,9 @@ def _validate_form_delivery_graph(
     data: dict[str, list[dict[str, Any]]],
     backup_version: str,
 ) -> None:
-    """Reject unsafe or inconsistent Backup 0.58 form-delivery graphs."""
+    """Reject unsafe or inconsistent Backup 0.58+ form-delivery graphs."""
 
-    if backup_version != "0.58":
+    if backup_version not in {"0.58", "0.59"}:
         if any(data[group] for group in FORM_DELIVERY_BACKUP_GROUPS):
             raise BackupValidationError(
                 "Legacy backup contains unsupported form-delivery records."
@@ -8727,6 +9477,10 @@ def _validate_unique_records(data: dict[str, list[dict[str, Any]]]) -> None:
         ),
         "semantic_component_definitions": ("component_key", "contract_version"),
         "page_compositions": ("planned_page_id",),
+        "page_composition_revisions": (
+            "page_composition_id",
+            "composition_version",
+        ),
         "theme_families": ("family_key",),
         "theme_family_versions": ("theme_family_id", "version"),
         "website_theme_configurations": (
@@ -9122,6 +9876,23 @@ def _validate_backup_references(data: dict[str, list[dict[str, Any]]]) -> None:
             ("site_plan_id", "site_plans", False),
             ("planned_page_id", "planned_pages", False),
             ("generated_page_id", "generated_pages", False),
+        ),
+        "page_composition_revisions": (
+            ("page_composition_id", "page_compositions", False),
+            ("website_id", "websites", False),
+            ("site_plan_id", "site_plans", False),
+            ("planned_page_id", "planned_pages", False),
+            ("generated_page_id", "generated_pages", False),
+            (
+                "generated_page_revision_id",
+                "page_revisions",
+                True,
+            ),
+            (
+                "supersedes_revision_id",
+                "page_composition_revisions",
+                True,
+            ),
         ),
         "image_metadata": (
             ("business_id", "businesses", False),
@@ -9817,7 +10588,7 @@ def _validate_page_media_ownership(
             raise BackupValidationError(
                 "Backup Image Metadata has an invalid usage-authorization mode."
             )
-        if backup_version not in {"0.56", "0.57", "0.58"} and authorization_mode != "contract_default":
+        if backup_version not in {"0.56", "0.57", "0.58", "0.59"} and authorization_mode != "contract_default":
             raise BackupValidationError(
                 "Legacy backups cannot claim scoped-required Image Metadata."
             )
@@ -10302,7 +11073,7 @@ def _validate_page_media_ownership(
                     "Backup Page Composition generated media component crosses its governed placement binding."
                 )
 
-    if backup_version not in {"0.53", "0.54", "0.55", "0.56", "0.57", "0.58"} and (planning_records or requirements):
+    if backup_version not in {"0.53", "0.54", "0.55", "0.56", "0.57", "0.58", "0.59"} and (planning_records or requirements):
         raise BackupValidationError(
             "Legacy backup versions cannot claim Page Media planning governance."
         )
@@ -10338,7 +11109,7 @@ def _validate_composition_media_authorization_binding(
     present = fields.intersection(binding)
     if not present:
         if (
-            backup_version in {"0.56", "0.57", "0.58"}
+            backup_version in {"0.56", "0.57", "0.58", "0.59"}
             and composition.get("status") == "current"
             and assignment.get("status") == "active"
             and image.get("usage_authorization_mode") == "scoped_required"
@@ -10404,7 +11175,7 @@ def _validate_scoped_media_authorizations(
     """Validate exact authorization scope, approval, assignment, and lineage."""
 
     records = data["scoped_media_authorizations"]
-    if backup_version not in {"0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.56", "0.57", "0.58", "0.59"}:
         if records:
             raise BackupValidationError(
                 "Legacy backup versions cannot claim scoped-media authorizations."
@@ -11026,6 +11797,333 @@ def _validate_candidate_qa_projection(
         )
 
 
+def _validate_page_composition_history(
+    data: dict[str, list[dict[str, Any]]],
+    backup_version: str,
+) -> None:
+    """Validate complete immutable lineage and every exact QA history binding."""
+
+    records = data.get("page_composition_revisions", [])
+    if backup_version != "0.59":
+        if records:
+            raise BackupValidationError(
+                "Legacy backups cannot claim Page Composition history."
+            )
+        return
+
+    expected_fields = set(PageCompositionRevision.model_fields)
+    compositions = {
+        record["id"]: record for record in data.get("page_compositions", [])
+    }
+    generated_revisions = {
+        record["id"]: record for record in data.get("page_revisions", [])
+    }
+    records_by_id = {record["id"]: record for record in records}
+    by_composition: dict[int, list[dict[str, Any]]] = {}
+    exact_identities: set[tuple[int, int, str]] = set()
+
+    if len(records_by_id) != len(records):
+        raise BackupValidationError(
+            "Backup contains duplicate Page Composition revision identities."
+        )
+
+    for record in records:
+        if set(record) != expected_fields:
+            raise BackupValidationError(
+                "Backup Page Composition revision does not match the exact 0.59 field contract."
+            )
+        try:
+            PageCompositionRevision.model_validate(
+                _normalize_converged_utc_restore_values(
+                    PageCompositionRevision,
+                    record,
+                )
+            )
+        except Exception as exc:
+            raise BackupValidationError(
+                "Backup Page Composition revision has invalid field values."
+            ) from exc
+        for field in (
+            "id",
+            "page_composition_id",
+            "website_id",
+            "site_plan_id",
+            "planned_page_id",
+            "generated_page_id",
+            "composition_version",
+        ):
+            if not _is_positive_int(record.get(field)):
+                raise BackupValidationError(
+                    f"Backup Page Composition revision has invalid {field}."
+                )
+        composition = compositions.get(record["page_composition_id"])
+        if composition is None or any(
+            record.get(field) != composition.get(field)
+            for field in (
+                "website_id",
+                "site_plan_id",
+                "planned_page_id",
+                "generated_page_id",
+            )
+        ):
+            raise BackupValidationError(
+                "Backup Page Composition revision crosses its exact ownership boundary."
+            )
+        if (
+            not isinstance(record.get("generated_components"), list)
+            or not all(
+                isinstance(value, dict)
+                for value in record["generated_components"]
+            )
+            or not isinstance(record.get("operator_decisions"), list)
+            or not all(
+                isinstance(value, dict)
+                for value in record["operator_decisions"]
+            )
+            or not isinstance(record.get("source_snapshot"), dict)
+        ):
+            raise BackupValidationError(
+                "Backup Page Composition revision payload is malformed."
+            )
+        if (
+            record.get("source_hash")
+            != canonical_payload_hash(record["source_snapshot"])
+            or not _is_lower_sha256(record.get("content_hash"))
+            or not _is_lower_sha256(record.get("revision_hash"))
+        ):
+            raise BackupValidationError(
+                "Backup Page Composition revision source or immutable hash is invalid."
+            )
+        try:
+            expected_content_hash = composition_content_hash(
+                record["source_snapshot"]
+            )
+        except PageCompositionHistoryError as exc:
+            raise BackupValidationError(str(exc)) from exc
+        if record["content_hash"] != expected_content_hash:
+            raise BackupValidationError(
+                "Backup Page Composition revision content hash does not match its source snapshot."
+            )
+        actor = record.get("recorded_by")
+        source = record.get("record_source")
+        if (
+            not isinstance(actor, str)
+            or actor != actor.strip()
+            or not actor
+            or len(actor) > 255
+            or not isinstance(source, str)
+            or source != source.strip()
+            or not source
+            or len(source) > 80
+        ):
+            raise BackupValidationError(
+                "Backup Page Composition revision lacks normalized provenance."
+            )
+        generated_at = _datetime_value(
+            record.get("generated_at"),
+            "page_composition_revisions.generated_at",
+        )
+        recorded_at = _datetime_value(
+            record.get("recorded_at"),
+            "page_composition_revisions.recorded_at",
+        )
+        decided_at = (
+            _datetime_value(
+                record.get("decided_at"),
+                "page_composition_revisions.decided_at",
+            )
+            if record.get("decided_at") is not None
+            else None
+        )
+        hash_values = {
+            **record,
+            "generated_at": generated_at,
+            "decided_at": decided_at,
+            "recorded_at": recorded_at,
+        }
+        try:
+            expected_revision_hash = composition_revision_hash(hash_values)
+        except PageCompositionHistoryError as exc:
+            raise BackupValidationError(str(exc)) from exc
+        if record["revision_hash"] != expected_revision_hash:
+            raise BackupValidationError(
+                "Backup Page Composition revision immutable hash does not match its evidence."
+            )
+        available_generated_revisions = [
+            candidate
+            for candidate in generated_revisions.values()
+            if candidate.get("generated_page_id") == record["generated_page_id"]
+            and _comparable_datetime(
+                _datetime_value(
+                    candidate.get("created_at"),
+                    "page_revisions.created_at",
+                )
+            )
+            <= _comparable_datetime(generated_at)
+        ]
+        expected_generated_revision = (
+            max(
+                available_generated_revisions,
+                key=lambda candidate: (
+                    _comparable_datetime(
+                        _datetime_value(
+                            candidate.get("created_at"),
+                            "page_revisions.created_at",
+                        )
+                    ),
+                    candidate["id"],
+                ),
+            )
+            if available_generated_revisions
+            else None
+        )
+        generated_revision_id = record.get("generated_page_revision_id")
+        if expected_generated_revision is None:
+            if generated_revision_id is not None:
+                raise BackupValidationError(
+                    "Backup Page Composition revision claims a Generated Page revision that did not exist when derived."
+                )
+        elif (
+            generated_revision_id != expected_generated_revision["id"]
+            or expected_generated_revision.get("draft_hash_after")
+            != record["content_hash"]
+        ):
+            raise BackupValidationError(
+                "Backup Page Composition revision loses the exact latest Generated Page revision available when derived."
+            )
+        predecessor_id = record.get("supersedes_revision_id")
+        predecessor_hash = record.get("supersedes_revision_hash")
+        if predecessor_id is not None and (
+            not _is_positive_int(predecessor_id)
+            or not _is_lower_sha256(predecessor_hash)
+        ):
+            raise BackupValidationError(
+                "Backup Page Composition revision predecessor identity is malformed."
+            )
+        if predecessor_id is None and predecessor_hash is not None:
+            raise BackupValidationError(
+                "Backup Page Composition revision has a partial predecessor identity."
+            )
+        by_composition.setdefault(record["page_composition_id"], []).append(
+            record
+        )
+        identity = (
+            record["page_composition_id"],
+            record["composition_version"],
+            record["source_hash"],
+        )
+        if identity in exact_identities:
+            raise BackupValidationError(
+                "Backup duplicates an exact Page Composition history identity."
+            )
+        exact_identities.add(identity)
+
+    if set(by_composition) != set(compositions):
+        raise BackupValidationError(
+            "Backup 0.59 must contain one complete history stream for every Page Composition."
+        )
+
+    for composition_id, stream in by_composition.items():
+        stream.sort(key=lambda value: value["composition_version"])
+        root = stream[0]
+        if (
+            root.get("supersedes_revision_id") is not None
+            or root.get("supersedes_revision_hash") is not None
+            or root.get("lineage_kind") not in {"initial", "legacy_root"}
+            or (
+                root.get("lineage_kind") == "initial"
+                and root["composition_version"] != 1
+            )
+        ):
+            raise BackupValidationError(
+                "Backup Page Composition history has an invalid or untruthful root."
+            )
+        for predecessor, successor in zip(stream, stream[1:], strict=False):
+            if (
+                successor["composition_version"]
+                != predecessor["composition_version"] + 1
+                or successor.get("lineage_kind") != "successor"
+                or successor.get("supersedes_revision_id") != predecessor["id"]
+                or successor.get("supersedes_revision_hash")
+                != predecessor["revision_hash"]
+            ):
+                raise BackupValidationError(
+                    "Backup Page Composition history is branched, disconnected, or non-contiguous."
+                )
+        tip = stream[-1]
+        composition = compositions[composition_id]
+        if any(
+            composition.get(field) != tip.get(field)
+            for field in (
+                "website_id",
+                "site_plan_id",
+                "planned_page_id",
+                "generated_page_id",
+                "composition_version",
+                "generated_components",
+                "operator_decisions",
+                "source_snapshot",
+                "source_hash",
+                "decided_by",
+            )
+        ):
+            raise BackupValidationError(
+                "Backup Page Composition current row does not exactly mirror its history tip."
+            )
+        for field in ("generated_at", "decided_at"):
+            left = composition.get(field)
+            right = tip.get(field)
+            if left is None or right is None:
+                matches = left is None and right is None
+            else:
+                matches = _comparable_datetime(
+                    _datetime_value(left, f"page_compositions.{field}")
+                ) == _comparable_datetime(
+                    _datetime_value(right, f"page_composition_revisions.{field}")
+                )
+            if not matches:
+                raise BackupValidationError(
+                    f"Backup Page Composition current row diverges from tip field {field}."
+                )
+
+    for qa_record in data.get("generated_page_qa_results", []):
+        composition_id = qa_record.get("page_composition_id")
+        if composition_id is None:
+            continue
+        identity = (
+            composition_id,
+            qa_record.get("composition_version"),
+            qa_record.get("composition_source_hash"),
+        )
+        if identity not in exact_identities:
+            raise BackupValidationError(
+                "Backup Generated Page QA result does not resolve an exact Page Composition revision."
+            )
+
+    projected_qa_values = [
+        record.get("qa_result")
+        for record in data.get("generated_pages", [])
+    ] + [
+        record.get("qa_result_snapshot")
+        for record in data.get("approval_audits", [])
+    ]
+    for projection in projected_qa_values:
+        if not isinstance(projection, dict):
+            continue
+        composition_id = projection.get("page_composition_id")
+        if composition_id is None:
+            continue
+        identity = (
+            composition_id,
+            projection.get("composition_version"),
+            projection.get("composition_source_hash"),
+        )
+        if identity not in exact_identities:
+            raise BackupValidationError(
+                "Backup QA projection does not resolve an exact Page Composition revision."
+            )
+
+
 def _validate_generated_page_qa_results(
     data: dict[str, list[dict[str, Any]]],
     backup_version: str,
@@ -11033,7 +12131,7 @@ def _validate_generated_page_qa_results(
     """Validate immutable QA identity, outcome integrity, and lineage."""
 
     records = data["generated_page_qa_results"]
-    if backup_version not in {"0.55", "0.56", "0.57", "0.58"}:
+    if backup_version not in {"0.55", "0.56", "0.57", "0.58", "0.59"}:
         if records:
             raise BackupValidationError(
                 "Legacy backup versions cannot claim durable Generated Page QA results."
@@ -11551,6 +12649,14 @@ def main() -> None:
     subparsers.add_parser("export", help="Export all Atlas data to the backups folder.")
     restore_parser = subparsers.add_parser("restore", help="Restore a JSON backup with non-destructive upserts.")
     restore_parser.add_argument("backup_file", help="Path or file name of the backup to restore.")
+    restore_parser.add_argument(
+        "--page-composition-history-evidence-path",
+        help="Explicit path to a sealed pre-0.59 Page Composition history evidence sidecar.",
+    )
+    restore_parser.add_argument(
+        "--page-composition-history-evidence-sha256",
+        help="Caller-verified lowercase SHA256 of the selected history evidence sidecar.",
+    )
     args = parser.parse_args()
 
     try:
@@ -11559,7 +12665,13 @@ def main() -> None:
             # Validate the complete raw contract before the restore-only schema
             # opt-in mutates an otherwise empty target database.
             restore_path = resolve_backup_path(args.backup_file)
-            load_backup(restore_path)
+            restore_payload = load_backup(restore_path)
+            _prepare_page_composition_history_evidence(
+                data=restore_payload["data"],
+                backup_version=restore_payload["metadata"]["version"],
+                evidence_path=args.page_composition_history_evidence_path,
+                evidence_sha256=args.page_composition_history_evidence_sha256,
+            )
         include_alembic_owned = bool(
             args.command == "restore"
             and _restore_target_requires_metadata_bootstrap(engine)
@@ -11578,7 +12690,16 @@ def main() -> None:
                     raise BackupValidationError(
                         "Restore path resolution did not complete."
                     )
-                result = restore_backup(session, restore_path)
+                result = restore_backup(
+                    session,
+                    restore_path,
+                    page_composition_history_evidence_path=(
+                        args.page_composition_history_evidence_path
+                    ),
+                    page_composition_history_evidence_sha256=(
+                        args.page_composition_history_evidence_sha256
+                    ),
+                )
     except (BackupValidationError, OSError) as exc:
         parser.exit(1, f"Backup error: {exc}\n")
     print(json.dumps(result, indent=2))

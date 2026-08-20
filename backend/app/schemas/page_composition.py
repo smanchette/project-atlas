@@ -62,6 +62,50 @@ class PageCompositionRead(SQLModel):
     decided_at: datetime | None = None
 
 
+class PageCompositionRevisionSummary(SQLModel):
+    id: int
+    page_composition_id: int
+    composition_version: int
+    source_hash: str
+    revision_hash: str
+    lineage_kind: Literal["initial", "legacy_root", "successor"]
+    supersedes_revision_id: int | None = None
+    generated_page_revision_id: int | None = None
+    recorded_at: datetime
+    recorded_by: str
+    record_source: str
+    is_head_revision: bool
+    head_status: str | None = None
+
+
+class PageCompositionRevisionRead(SQLModel):
+    id: int
+    page_composition_id: int
+    website_id: int
+    site_plan_id: int
+    planned_page_id: int
+    generated_page_id: int
+    generated_page_revision_id: int | None = None
+    composition_version: int
+    supersedes_revision_id: int | None = None
+    supersedes_revision_hash: str | None = None
+    lineage_kind: Literal["initial", "legacy_root", "successor"]
+    content_hash: str
+    generated_components: list[dict[str, Any]]
+    operator_decisions: list[dict[str, Any]]
+    source_snapshot: dict[str, Any]
+    source_hash: str
+    revision_hash: str
+    generated_at: datetime
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+    recorded_at: datetime
+    recorded_by: str
+    record_source: str
+    is_head_revision: bool
+    head_status: str | None = None
+
+
 class SitePlanCompositionRefreshResult(SQLModel):
     website_id: int
     site_plan_id: int
