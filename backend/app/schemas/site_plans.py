@@ -4,6 +4,8 @@ from typing import Any, Literal
 from pydantic import Field
 from sqlmodel import SQLModel
 
+from app.schemas.public_copy import PublicDestinationCopy
+
 
 PageType = Literal[
     "home",
@@ -96,6 +98,7 @@ class PlannedPageDraftContent(SQLModel):
     image_placements: list[dict[str, str]] = Field(default_factory=list)
     related_pages: list[dict[str, str]] = Field(default_factory=list)
     call_to_action: str
+    public_destination_copy: list[PublicDestinationCopy] = Field(default_factory=list)
     internal_notes: str
     planning_record_id: int
     planning_generated_at: datetime

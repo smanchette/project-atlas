@@ -11,6 +11,7 @@ from app.models import (
     GeneratedPageRevision,
     PlannedPage,
     PlanningRecord,
+    Service,
     SitePlan,
     Website,
     WebsiteIdentity,
@@ -83,7 +84,10 @@ def _scope(session: Session):
         main_city="Orlando",
         state="FL",
         license_number=f"TEST-{suffix}",
-        description="A factual test business description.",
+        description=(
+            "A factual test business description. "
+            "Call 407-555-0100 to discuss service."
+        ),
     )
     session.add(business)
     session.flush()
@@ -104,6 +108,14 @@ def _scope(session: Session):
     )
     session.add(website)
     session.flush()
+    session.add(
+        Service(
+            business_id=business.id,
+            service_name=f"Readiness Service {suffix}",
+            service_slug=f"readiness-service-{suffix}",
+            status="active",
+        )
+    )
     session.add(
         WebsiteIdentity(
             website_id=website.id,
@@ -173,6 +185,10 @@ def _cleanup(session: Session, website_id: int, business_id: int) -> None:
         brand = session.get(Brand, brand_id)
         if brand:
             session.delete(brand)
+    for service in session.exec(
+        select(Service).where(Service.business_id == business_id)
+    ).all():
+        session.delete(service)
     business = session.get(Business, business_id)
     if business:
         session.delete(business)

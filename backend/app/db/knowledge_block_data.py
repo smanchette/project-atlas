@@ -107,9 +107,7 @@ KNOWLEDGE_BLOCKS = [
             "the structure at the time of treatment."
         ),
         "long_answer": (
-            "Structural fumigation targets active infestations inside the structure at the time of treatment. "
-            "Flo-Zone's public service wording focuses on active drywood termite infestations unless broader pest "
-            "claims are separately reviewed and approved for use."
+            "Structural fumigation targets active infestations inside the structure at the time of treatment."
         ),
         "category": "vikane",
         "customer_type": "general",

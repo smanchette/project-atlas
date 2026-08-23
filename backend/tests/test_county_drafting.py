@@ -70,7 +70,10 @@ def _website_scope(
         service_name=f"Termite Tenting {suffix}",
         service_slug=f"termite-tenting-{suffix}",
         short_description="Approved tenting service description.",
-        long_description="Approved detailed tenting service information.",
+        long_description=(
+            "Approved detailed tenting service information. "
+            "Call 407-555-0100 to discuss service."
+        ),
         status="active",
     )
     session.add_all([website, service])
@@ -302,6 +305,36 @@ def test_county_draft_integrates_edit_qa_preview_contract_and_export_readiness(
             session, "lifecycle", county_names=("Orange",)
         )
         page = county_pages[0]
+        # Public destination projections intentionally fail closed unless every
+        # related Planned Page has an exact Generated Page identity. Active Atlas
+        # already satisfies that invariant; establish the same lifecycle state in
+        # this isolated integration fixture without drafting the related pages.
+        related_pages = list(
+            session.exec(
+                select(PlannedPage).where(
+                    PlannedPage.site_plan_id == plan.id,
+                    PlannedPage.id != page.id,
+                )
+            ).all()
+        )
+        for related in related_pages:
+            generated_target = GeneratedPage(
+                business_id=website.business_id,
+                website_id=website.id,
+                service_id=related.service_id,
+                city_id=related.city_id,
+                county_id=related.county_id,
+                page_type=related.page_type,
+                page_title=related.working_name,
+                page_slug=related.intended_slug,
+                draft_content={},
+                generation_status="not_generated",
+            )
+            session.add(generated_target)
+            session.flush()
+            related.generated_page_id = generated_target.id
+            session.add(related)
+        session.commit()
         assess_site_plan(session, plan.id)
         generated, readiness = draft_planned_page(
             session, page.id, expected_website_id=website.id

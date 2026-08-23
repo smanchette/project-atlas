@@ -954,7 +954,15 @@ def evaluate_page_qa(session: Session, page_id: int) -> PageQAResult:
 
 
 def save_page_qa(session: Session, page_id: int, *, commit: bool = True) -> PageQAResult:
-    page = session.get(GeneratedPage, page_id)
+    # Serialize durable QA replacement with full-draft reconciliation and every
+    # other canonical writer for this Generated Page.  Without this lock, two
+    # sessions can both observe the same current QA row and race to supersede it.
+    page = session.exec(
+        select(GeneratedPage)
+        .where(GeneratedPage.id == page_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).one_or_none()
     if not page:
         raise HTTPException(status_code=404, detail="Generated page not found")
     result = evaluate_page_qa(session, page_id)

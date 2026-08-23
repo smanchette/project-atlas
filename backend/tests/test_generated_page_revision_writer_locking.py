@@ -12,7 +12,8 @@ from app.schemas.page_editor import (
     ManualDraftSaveRequest,
 )
 from app.services.approved_page_repair import repair_approved_page
-from app.services.page_editor import save_manual_draft
+from app.services.page_editor import save_full_draft_revision, save_manual_draft
+from app.services.page_qa import save_page_qa
 
 
 class _SingleRowResult:
@@ -82,5 +83,38 @@ def test_approved_repair_writer_locks_exact_page_before_state_validation() -> No
         )
 
     assert exc_info.value.status_code == 409
+    assert len(session.statements) == 1
+    _assert_exact_generated_page_lock(session.statements[0], page_id)
+
+
+def test_full_draft_revision_writer_locks_exact_page_before_state_validation() -> None:
+    page_id = 703
+    session = _CaptureFirstStatementSession(
+        SimpleNamespace(id=page_id, status="approved")
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        save_full_draft_revision(
+            session,  # type: ignore[arg-type]
+            page_id,
+            {},
+            expected_current_hash="0" * 64,
+            created_by="test:writer-lock",
+            reason="Verify exact first-statement lock.",
+        )
+
+    assert exc_info.value.status_code == 409
+    assert len(session.statements) == 1
+    _assert_exact_generated_page_lock(session.statements[0], page_id)
+
+
+def test_qa_writer_locks_exact_page_before_missing_state_rejection() -> None:
+    page_id = 704
+    session = _CaptureFirstStatementSession(None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        save_page_qa(session, page_id)  # type: ignore[arg-type]
+
+    assert exc_info.value.status_code == 404
     assert len(session.statements) == 1
     _assert_exact_generated_page_lock(session.statements[0], page_id)

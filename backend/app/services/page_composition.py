@@ -56,6 +56,14 @@ from app.services.scoped_media_authorizations import (
     current_scoped_media_authorization,
 )
 from app.services.website_context import build_website_context
+from app.services.public_destination_copy import (
+    PUBLIC_COPY_RULESET_HASH,
+    PUBLIC_COPY_RULESET_IDENTITY,
+    PUBLIC_COPY_RULESET_KEY,
+    PUBLIC_COPY_RULESET_VERSION,
+    PublicDestinationCopyError,
+    require_public_destination_copy,
+)
 from app.services.website_media_safety import (
     is_image_metadata_excluded,
 )
@@ -552,6 +560,15 @@ def _generate_components(
     approved_links = _approved_links(session, plan, planned)
     draft_related_pages = _approved_draft_related_pages(session, plan, planned, generated)
     if approved_links or draft_related_pages:
+        try:
+            public_destination_copy = require_public_destination_copy(
+                session,
+                plan,
+                planned,
+                generated,
+            )
+        except PublicDestinationCopyError as exc:
+            raise PageCompositionError(str(exc)) from exc
         key = "destination_cards" if planned.page_type in {"service", "county", "city_service"} else "related_page_links"
         add(
             key,
@@ -559,6 +576,16 @@ def _generate_components(
             {
                 "internal_link_intent_ids": [item.id for item in approved_links],
                 "draft_related_page_ids": [item.id for item in draft_related_pages],
+                "public_destination_copy": [
+                    item.model_dump(mode="json")
+                    for item in public_destination_copy
+                ],
+                "public_copy_ruleset": {
+                    "key": PUBLIC_COPY_RULESET_KEY,
+                    "version": PUBLIC_COPY_RULESET_VERSION,
+                    "identity": PUBLIC_COPY_RULESET_IDENTITY,
+                    "hash": PUBLIC_COPY_RULESET_HASH,
+                },
             },
         )
     faq_items = draft.get("faq_items") if isinstance(draft, dict) else None
@@ -1454,6 +1481,40 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
         else:
             data = next(value for value in draft.get("image_placements", []) if value.get("key") == bindings["placement_key"])
     elif key in {"related_page_links", "destination_cards"}:
+        plan = session.get(SitePlan, composition.site_plan_id)
+        source_planned = session.get(PlannedPage, composition.planned_page_id)
+        if plan is None or source_planned is None:
+            raise PageCompositionError(
+                "Public destination copy cannot resolve its Site Plan or source Planned Page."
+            )
+        try:
+            public_copy = require_public_destination_copy(
+                session,
+                plan,
+                source_planned,
+                generated,
+            )
+        except PublicDestinationCopyError as exc:
+            raise PageCompositionError(str(exc)) from exc
+        copy_by_source = {
+            (item.source_kind, item.source_record_id): item
+            for item in public_copy
+        }
+        bound_public_copy = bindings.get("public_destination_copy")
+        expected_bound_copy = [item.model_dump(mode="json") for item in public_copy]
+        if bound_public_copy != expected_bound_copy:
+            raise PageCompositionError(
+                "Related-page component public copy is not bound to its exact generated revision."
+            )
+        if bindings.get("public_copy_ruleset") != {
+            "key": PUBLIC_COPY_RULESET_KEY,
+            "version": PUBLIC_COPY_RULESET_VERSION,
+            "identity": PUBLIC_COPY_RULESET_IDENTITY,
+            "hash": PUBLIC_COPY_RULESET_HASH,
+        }:
+            raise PageCompositionError(
+                "Related-page component public-copy ruleset identity is missing or stale."
+            )
         links = _resolved_internal_links(
             session,
             website_id=composition.website_id,
@@ -1461,17 +1522,28 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
             source_planned_page_id=composition.planned_page_id,
             internal_link_intent_ids=bindings.get("internal_link_intent_ids", []),
         )
-        resolved_links = [
-            {
-                "target_planned_page_id": target.id,
-                "target_generated_page_id": target.generated_page_id,
-                "label": target.working_name,
-                "slug": target.intended_slug,
-                "purpose": link.purpose,
-                "relationship_type": link.relationship_type,
-            }
-            for link, target in links
-        ]
+        resolved_links = []
+        for link, target in links:
+            public_item = copy_by_source.get(
+                ("internal_link_intent", link.id or 0)
+            )
+            if (
+                public_item is None
+                or public_item.target_planned_page_id != target.id
+            ):
+                raise PageCompositionError(
+                    "Internal-link destination lacks one exact public-copy binding."
+                )
+            resolved_links.append(
+                {
+                    "target_planned_page_id": public_item.target_planned_page_id,
+                    "target_generated_page_id": public_item.target_generated_page_id,
+                    "label": public_item.label,
+                    "slug": public_item.slug,
+                    "purpose": public_item.description,
+                    "relationship_type": link.relationship_type,
+                }
+            )
         seen_targets = {
             link.target_planned_page_id
             for link, _ in links
@@ -1485,12 +1557,22 @@ def _resolve_instance(session: Session, composition: PageComposition, generated:
         )
         for target in draft_related:
             if target.id not in seen_targets:
+                public_item = copy_by_source.get(
+                    ("draft_related_page", target.id or 0)
+                )
+                if (
+                    public_item is None
+                    or public_item.target_planned_page_id != target.id
+                ):
+                    raise PageCompositionError(
+                        "Draft-related destination lacks one exact public-copy binding."
+                    )
                 resolved_links.append({
-                    "target_planned_page_id": target.id,
-                    "target_generated_page_id": target.generated_page_id,
-                    "label": target.working_name,
-                    "slug": target.intended_slug,
-                    "purpose": "Explore approved related service information.",
+                    "target_planned_page_id": public_item.target_planned_page_id,
+                    "target_generated_page_id": public_item.target_generated_page_id,
+                    "label": public_item.label,
+                    "slug": public_item.slug,
+                    "purpose": public_item.description,
                     "relationship_type": "approved_draft_relationship",
                 })
                 seen_targets.add(target.id)
@@ -1573,6 +1655,15 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
         for assignment in assignments
     }
     context = build_website_context(session, page_id=generated.id)
+    try:
+        public_destination_copy = require_public_destination_copy(
+            session,
+            plan,
+            planned,
+            generated,
+        )
+    except PublicDestinationCopyError as exc:
+        raise PageCompositionError(str(exc)) from exc
     identity_assets = _active_identity_assets(session, plan.website_id)
     resolved_theme = _resolved_theme(session, plan.website_id)
     snapshot = {
@@ -1622,6 +1713,9 @@ def _source_snapshot(session: Session, plan: SitePlan, planned: PlannedPage, gen
                 "updated_at": canonical_utc_timestamp(item.updated_at),
             }
             for item in links
+        ],
+        "public_destination_copy": [
+            item.model_dump(mode="json") for item in public_destination_copy
         ],
         "draft_related_targets": draft_related_targets,
         "media_assignments": [

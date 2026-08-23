@@ -1,3 +1,4 @@
+from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,9 +23,16 @@ from app.schemas.site_plans import PlannedPageCreate
 from app.schemas.entities import GeneratedPageCreate
 from app.services.crud import create_record
 from app.services.planned_page_drafting import (
+    _INTERNAL_KNOWLEDGE_SENTENCE,
+    _public_knowledge_text,
+    _remove_internal_knowledge_sentence,
     PlannedPageDraftingError,
     draft_planned_page,
     evaluate_draft_readiness,
+)
+from app.services.public_destination_copy import (
+    PublicDestinationCopyError,
+    build_public_copy_reconciled_draft,
 )
 from app.services.site_planning import (
     create_planned_page,
@@ -191,8 +199,152 @@ def test_core_page_types_create_common_reviewable_drafts(
         assert draft["planning_record_id"]
         assert {section["key"] for section in draft["sections"]} == expected_sections
         assert generated.content_body.startswith(draft["intro"])
+        if page_type == "about":
+            company_story = next(
+                section["body"]
+                for section in draft["sections"]
+                if section["key"] == "company_story"
+            )
+            assert draft["intro"] != company_story
+            assert draft["intro"].startswith("Learn about Flo-Zone Tenting and its ")
+            assert "service across Central Florida." in draft["intro"]
         if page_type == "faq":
             assert draft["faq_items"]
+
+
+@pytest.mark.parametrize(
+    ("page_type", "section_key"),
+    (("contact", "ways_to_contact"), ("faq", "contact")),
+)
+def test_contact_sections_reconcile_exact_legacy_url_and_reject_custom_copy(
+    drafting_scope: str,
+    page_type: str,
+    section_key: str,
+) -> None:
+    _seed()
+    with Session(engine) as session:
+        _, website, _, plan = _flo(session)
+        planned = _planned(
+            session,
+            website=website,
+            plan=plan,
+            suffix=f"{drafting_scope}-{page_type}-contact-copy",
+            page_type=page_type,
+        )
+        generated, _ = draft_planned_page(
+            session,
+            planned.id,
+            expected_website_id=website.id,
+        )
+        current = deepcopy(generated.draft_content)
+        section = next(
+            item for item in current["sections"] if item["key"] == section_key
+        )
+        safe_contact = section["body"]
+        section["body"] = f"{safe_contact} Website: {website.public_url}."
+
+        reconciled = build_public_copy_reconciled_draft(
+            session,
+            planned,
+            current,
+        )
+        reconciled_section = next(
+            item
+            for item in reconciled["sections"]
+            if item["key"] == section_key
+        )
+        assert reconciled_section["body"] == safe_contact
+        assert "Website:" not in reconciled_section["body"]
+
+        custom = deepcopy(current)
+        next(
+            item for item in custom["sections"] if item["key"] == section_key
+        )["body"] = "Operator-authored contact copy."
+        with pytest.raises(
+            PublicDestinationCopyError,
+            match="neither the exact authorized before nor after value",
+        ):
+            build_public_copy_reconciled_draft(
+                session,
+                planned,
+                custom,
+            )
+
+
+@pytest.mark.parametrize(
+    ("page_type", "section_key"),
+    [
+        ("service", "approved_guidance"),
+        ("county", "customer_expectations"),
+        ("county", "customer_expectations"),
+        ("county", "customer_expectations"),
+        ("county", "customer_expectations"),
+        ("county", "customer_expectations"),
+    ],
+    ids=[
+        "service",
+        "county-1",
+        "county-2",
+        "county-3",
+        "county-4",
+        "county-5",
+    ],
+)
+def test_all_technical_page_candidates_omit_internal_sentence_without_orphan_space(
+    page_type: str,
+    section_key: str,
+) -> None:
+    before = (
+        "### What Tenting Targets\n"
+        "Structural fumigation targets active infestations inside the structure "
+        f"at the time of treatment. {_INTERNAL_KNOWLEDGE_SENTENCE}\n\n"
+        "### Limits of Tenting\n"
+        "Preserved technical guidance."
+    )
+    expected = (
+        "### What Tenting Targets\n"
+        "Structural fumigation targets active infestations inside the structure "
+        "at the time of treatment.\n\n"
+        "### Limits of Tenting\n"
+        "Preserved technical guidance."
+    )
+    draft = {
+        "page_type": page_type,
+        "sections": [
+            {
+                "key": section_key,
+                "heading": "What Customers Should Know",
+                "body": before,
+            }
+        ],
+    }
+
+    _remove_internal_knowledge_sentence(draft, section_key)
+
+    assert draft["sections"][0]["body"] == expected
+    assert _public_knowledge_text(before) == expected
+    assert "treatment. \n\n" not in draft["sections"][0]["body"]
+
+
+def test_technical_candidate_rejects_duplicate_internal_sentence() -> None:
+    draft = {
+        "sections": [
+            {
+                "key": "approved_guidance",
+                "heading": "What Customers Should Know",
+                "body": (
+                    f"Public technical sentence. {_INTERNAL_KNOWLEDGE_SENTENCE}\n\n"
+                    f"Repeated instruction. {_INTERNAL_KNOWLEDGE_SENTENCE}"
+                ),
+            }
+        ]
+    }
+
+    with pytest.raises(
+        PublicDestinationCopyError,
+        match="contains the internal sentence more than once",
+    ):
+        _remove_internal_knowledge_sentence(draft, "approved_guidance")
 
 
 def test_refresh_uses_effective_planning_record_and_preserves_override(
@@ -216,7 +368,9 @@ def test_refresh_uses_effective_planning_record_and_preserves_override(
             planned.id,
             expected_website_id=website.id,
         )
-        assert generated.draft_content["intro"] == override
+        assert generated.draft_content["intro"] == (
+            f"Learn more about {planned.working_name}."
+        )
         assert generated.draft_content["operator_override_keys"] == ["purpose"]
 
         refreshed, _ = draft_planned_page(
@@ -230,7 +384,9 @@ def test_refresh_uses_effective_planning_record_and_preserves_override(
         ).one()
         assert refreshed.id == generated.id
         assert record.operator_overrides == {"purpose": override}
-        assert refreshed.draft_content["intro"] == override
+        assert refreshed.draft_content["intro"] == (
+            f"Learn more about {planned.working_name}."
+        )
 
 
 def test_readiness_blocks_absent_required_approved_information(

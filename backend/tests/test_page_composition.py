@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -53,6 +54,7 @@ from app.services.page_composition import (
     update_operator_composition_decisions,
 )
 from app.services.page_qa import effective_page_qa_state, get_page_qa, save_page_qa
+from app.services.public_destination_copy import build_public_destination_copy
 from app.services import page_composition as composition_service
 from app.services.page_media_planning import (
     decide_media_placement,
@@ -229,6 +231,21 @@ def _scope(session: Session, *, suffix: str | None = None, phone: str | None = "
         decision_version=1,
         decided_at=decided_at,
     ))
+    session.flush()
+    for planned, generated in pages:
+        projection = build_public_destination_copy(
+            session,
+            plan,
+            planned,
+            generated,
+        )
+        generated.draft_content = {
+            **generated.draft_content,
+            "public_destination_copy": [
+                item.model_dump(mode="json") for item in projection
+            ],
+        }
+        session.add(generated)
     session.commit()
     return website, plan, pages
 
@@ -430,7 +447,7 @@ def test_refresh_builds_fact_free_suggestions_and_resolves_approved_inputs():
             "target_generated_page_id": pages[1][1].id,
             "label": pages[1][0].working_name,
             "slug": pages[1][0].intended_slug,
-            "purpose": "Continue to approved contact options.",
+            "purpose": f"Contact Brand {website.domain.split('.')[0]}.",
             "relationship_type": "conversion",
         }]
         assert any(item.component_key == "media_placement" for item in service.effective_components)
@@ -442,6 +459,39 @@ def test_refresh_builds_fact_free_suggestions_and_resolves_approved_inputs():
         ).one().source_snapshot
         assert service.source_snapshot["theme"]["mode"] == "neutral_fallback"
         assert service.resolved_theme["fallback_used"] is True
+
+
+def test_related_component_rejects_tampered_bound_public_copy_ruleset():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_registry(session)
+        _, plan, pages = _scope(session, suffix="public-copy-binding")
+        result = refresh_site_plan_compositions(session, plan.id)
+        assert result.blocked == []
+        composition = session.exec(
+            select(PageComposition).where(
+                PageComposition.generated_page_id == pages[0][1].id
+            )
+        ).one()
+        generated_item = next(
+            item
+            for item in composition.generated_components
+            if item["component_key"] == "destination_cards"
+        )
+        tampered = deepcopy(generated_item)
+        tampered["input_bindings"]["public_copy_ruleset"]["hash"] = "0" * 64
+
+        with pytest.raises(
+            PageCompositionError,
+            match="ruleset identity is missing or stale",
+        ):
+            composition_service._resolve_instance(
+                session,
+                composition,
+                pages[0][1],
+                tampered,
+            )
 
 
 def test_navigation_resolution_preserves_hierarchy_and_preview_target_identity():
@@ -482,6 +532,20 @@ def test_navigation_resolution_preserves_hierarchy_and_preview_target_identity()
         rejected_link.decision_version = None
         rejected_link.decided_at = None
         session.add(rejected_link)
+        source_planned, source_generated = pages[0]
+        source_projection = build_public_destination_copy(
+            session,
+            plan,
+            source_planned,
+            source_generated,
+        )
+        source_generated.draft_content = {
+            **source_generated.draft_content,
+            "public_destination_copy": [
+                item.model_dump(mode="json") for item in source_projection
+            ],
+        }
+        session.add(source_generated)
         session.commit()
 
         result = refresh_site_plan_compositions(session, plan.id)
@@ -633,7 +697,24 @@ def test_navigation_target_identity_change_stales_and_rebinds_compositions():
 
         target.working_name = "Updated Contact Destination"
         target.intended_slug = "updated-contact-destination"
+        target_generated = pages[1][1]
+        target_generated.page_slug = target.intended_slug
+        source_planned, source_generated = pages[0]
+        source_projection = build_public_destination_copy(
+            session,
+            plan,
+            source_planned,
+            source_generated,
+        )
+        source_generated.draft_content = {
+            **source_generated.draft_content,
+            "public_destination_copy": [
+                item.model_dump(mode="json") for item in source_projection
+            ],
+        }
         session.add(target)
+        session.add(target_generated)
+        session.add(source_generated)
         session.commit()
         with pytest.raises(PageCompositionError, match="stale"):
             read_composition_for_generated_page(session, pages[0][1].id)
@@ -939,6 +1020,20 @@ def test_legacy_city_service_draft_composes_without_rewriting_content():
             "call_to_action": "Call for approved service.",
         }
         planned.page_type = "city_service"; generated.page_type = "city_service"; generated.draft_content = legacy
+        generated.draft_content = {
+            **legacy,
+            "public_destination_copy": [
+                item.model_dump(mode="json")
+                for item in build_public_destination_copy(
+                    session,
+                    plan,
+                    planned,
+                    generated,
+                    draft_content=legacy,
+                )
+            ],
+        }
+        legacy = generated.draft_content
         session.add(planned); session.add(generated); session.commit()
         refresh_site_plan_compositions(session, plan.id)
         composition = read_composition_for_generated_page(session, generated.id)
@@ -958,6 +1053,19 @@ def test_approved_draft_related_pages_render_without_creating_link_decisions():
             **generated.draft_content,
             "related_pages": [{"label": target.working_name, "slug": target.intended_slug}],
         }
+        generated.draft_content = {
+            **generated.draft_content,
+            "public_destination_copy": [
+                item.model_dump(mode="json")
+                for item in build_public_destination_copy(
+                    session,
+                    plan,
+                    planned,
+                    generated,
+                    draft_content=generated.draft_content,
+                )
+            ],
+        }
         session.add(generated); session.commit()
 
         result = refresh_site_plan_compositions(session, plan.id)
@@ -972,7 +1080,7 @@ def test_approved_draft_related_pages_render_without_creating_link_decisions():
             "target_generated_page_id": target.generated_page_id,
             "label": target.working_name,
             "slug": target.intended_slug,
-            "purpose": "Explore approved related service information.",
+            "purpose": "Contact Brand draft-links.",
             "relationship_type": "approved_draft_relationship",
         }]
         assert session.exec(select(InternalLinkIntent)).all() == []

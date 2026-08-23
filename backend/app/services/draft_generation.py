@@ -14,6 +14,7 @@ from app.models import (
     PlannedPage,
     Service,
     Setting,
+    SitePlan,
 )
 from app.schemas.generation import BatchCandidate, BatchPreviewResponse, DraftContent, FAQItem
 from app.schemas.website_context import WebsiteContextRead
@@ -25,6 +26,7 @@ from app.services.drafting_eligibility import (
     read_manifest,
     require_effective_drafting_eligibility,
 )
+from app.services.public_destination_copy import build_public_destination_copy
 
 FORBIDDEN_PHRASES = (
     "100% guaranteed",
@@ -206,13 +208,13 @@ class DeterministicMockProvider:
         intro_suffix = website_config_value(
             website,
             "draft_intro_suffix",
-            "Service recommendations and scope depend on the property and the approved service plan.",
+            "Service recommendations and scope depend on the property and service plan.",
         )
         process_template = website_config_value(
             website,
             "draft_process_template",
             "A {service_lower} project begins with assessment, planning, and clear customer instructions. "
-            "Timing and access requirements depend on the approved service plan.",
+            "Timing and access requirements depend on the property and service plan.",
         )
         realtor_template = website_config_value(
             website,
@@ -235,7 +237,7 @@ class DeterministicMockProvider:
                 website_config_value(website, "why_knowledge_slug"),
                 (
                     f"{service} can address service needs identified during assessment. "
-                    "The appropriate scope depends on the property and the approved service plan."
+                    "The appropriate scope depends on the property and service plan."
                 ),
             ),
             signs_section=_knowledge_answer(
@@ -317,6 +319,26 @@ def generate_page_draft(
     prompt = assemble_generation_prompt(context)
     selected_provider = provider or get_draft_provider()
     draft = selected_provider.generate(context, prompt)
+    planned_page = session.exec(
+        select(PlannedPage).where(PlannedPage.generated_page_id == context.page.id)
+    ).one_or_none()
+    if planned_page is None:
+        raise DraftGenerationError(
+            "Public destination copy requires one exact Planned Page owner."
+        )
+    plan = session.get(SitePlan, planned_page.site_plan_id)
+    if plan is None:
+        raise DraftGenerationError(
+            "Public destination copy requires one exact Site Plan owner."
+        )
+    projection = build_public_destination_copy(
+        session,
+        plan,
+        planned_page,
+        context.page,
+        draft_content=draft.model_dump(mode="json"),
+    )
+    draft = draft.model_copy(update={"public_destination_copy": projection})
     validate_safe_content(draft.model_dump(mode="json"))
 
     page = context.page

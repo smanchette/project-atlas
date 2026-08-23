@@ -56,7 +56,7 @@ def upsert_business(session: Session) -> Business:
         "certified_operator": "Jordan Ward",
         "description": (
             "Drywood termite tenting provider serving homeowners, realtors, property managers, "
-            "commercial clients, and investors across Central Florida target counties."
+            "commercial clients, and investors across Central Florida."
         ),
     }
     if business:
@@ -81,7 +81,10 @@ def upsert_website_foundation(session: Session, business: Business) -> Website:
         "business_id": business.id,
         "brand_name": "Flo-Zone",
         "tagline": "Drywood termite specialists",
-        "description": "Public-facing brand for Flo-Zone Pest And Termite Solutions Inc.",
+        "description": (
+            "Flo-Zone Tenting is the brand name used by "
+            "Flo-Zone Pest And Termite Solutions Inc."
+        ),
         "identity_settings": {"brand_mark": "FZ"},
         "status": "active",
     }

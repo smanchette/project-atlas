@@ -2,6 +2,8 @@ from typing import Any
 
 from sqlmodel import Field, SQLModel
 
+from app.schemas.public_copy import PublicDestinationCopy
+
 
 class FAQItem(SQLModel):
     question: str
@@ -21,6 +23,7 @@ class DraftContent(SQLModel):
     realtor_property_manager_section: str
     faq_items: list[FAQItem]
     call_to_action: str
+    public_destination_copy: list[PublicDestinationCopy] = Field(default_factory=list)
     internal_notes: str
     status: str = "draft"
 
