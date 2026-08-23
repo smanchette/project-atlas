@@ -11291,3 +11291,499 @@ th {
     animation-iteration-count: 1 !important;
   }
 }
+
+/* Performance Local V5 City-Service: approved top conversion and over-photo hero preview. */
+.performanceLocalV5CityServicePreview {
+  --plv5-city-phone-height: 44px;
+  --plv5-city-action-height: 52px;
+  --plv5-city-safe-top: env(safe-area-inset-top, 0px);
+  --plv5-city-stack-height: calc(
+    var(--plv5-city-phone-height) +
+    var(--plv5-city-action-height) +
+    var(--plv5-city-safe-top)
+  );
+  min-width: 0;
+  background: var(--atlas-color-background, #fff);
+  font-family: var(--atlas-font-body, Inter, ui-sans-serif, system-ui, sans-serif);
+  scroll-padding-block-start: var(--plv5-city-stack-height);
+}
+
+.performanceLocalV5TopConversionStack {
+  position: sticky;
+  z-index: 130;
+  top: 0;
+  display: grid;
+  width: 100%;
+  height: var(--plv5-city-stack-height);
+  grid-template-rows:
+    calc(var(--plv5-city-phone-height) + var(--plv5-city-safe-top))
+    var(--plv5-city-action-height);
+  color: #fff;
+  box-shadow: 0 10px 28px rgb(2 14 8 / 22%);
+  transition: opacity 140ms ease, transform 140ms ease, visibility 140ms ease;
+}
+
+.performanceLocalV5TopConversionStack[data-v5-top-action-enabled="false"] {
+  height: calc(var(--plv5-city-phone-height) + var(--plv5-city-safe-top));
+  grid-template-rows: calc(var(--plv5-city-phone-height) + var(--plv5-city-safe-top));
+}
+
+.performanceLocalV5StickyPhoneBar,
+.performanceLocalV5StickyActionBanner {
+  min-width: 0;
+  margin: 0;
+}
+
+.performanceLocalV5StickyPhoneBar {
+  padding-top: var(--plv5-city-safe-top);
+  background: #081a11;
+}
+
+.performanceLocalV5StickyPhoneBar a,
+.performanceLocalV5StickyActionBanner a {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: inherit;
+  font-weight: 900;
+  line-height: 1.1;
+  text-align: center;
+  text-decoration: none;
+}
+
+.performanceLocalV5StickyPhoneBar a {
+  min-height: var(--plv5-city-phone-height);
+  padding-inline: max(18px, env(safe-area-inset-left)) max(18px, env(safe-area-inset-right));
+  font-size: 0.9rem;
+  letter-spacing: 0.015em;
+}
+
+.performanceLocalV5StickyPhoneBar svg {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  color: var(--atlas-color-accent, #8fcf32);
+}
+
+.performanceLocalV5StickyActionBanner {
+  background:
+    linear-gradient(110deg, rgb(255 255 255 / 8%), transparent 34%, rgb(255 255 255 / 12%) 72%, transparent),
+    var(--atlas-color-primary, #28783e);
+  color: var(--atlas-color-primary-foreground, #fff);
+}
+
+.performanceLocalV5StickyActionBanner a {
+  min-height: var(--plv5-city-action-height);
+  padding-inline: max(20px, env(safe-area-inset-left)) max(20px, env(safe-area-inset-right));
+  font-size: 1rem;
+  letter-spacing: 0.018em;
+}
+
+.performanceLocalV5StickyPhoneBar a:hover,
+.performanceLocalV5StickyActionBanner a:hover {
+  background: rgb(255 255 255 / 10%);
+}
+
+.performanceLocalV5StickyPhoneBar a:focus-visible,
+.performanceLocalV5StickyActionBanner a:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: -5px;
+  box-shadow: inset 0 0 0 6px rgb(0 32 14 / 58%);
+}
+
+.performanceLocalV5CityServicePreview:has(.performanceLocalSite[data-mobile-menu-open="true"]) .performanceLocalV5TopConversionStack,
+.performanceLocalV5CityServicePreview:has(.performanceLocalEstimateForm:focus-within) .performanceLocalV5TopConversionStack {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-100%);
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalSite {
+  min-height: 0;
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalSkipLink {
+  z-index: 180;
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHeader {
+  position: absolute;
+  z-index: 80;
+  top: 0;
+  right: 0;
+  left: 0;
+  border-bottom-color: rgb(255 255 255 / 20%);
+  background: linear-gradient(180deg, rgb(3 15 9 / 88%), rgb(3 15 9 / 58%));
+  box-shadow: none;
+  backdrop-filter: blur(9px);
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalDrawerBackdrop {
+  z-index: 170;
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHeader:has(.performanceLocalDrawerBackdrop) {
+  backdrop-filter: none;
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHero {
+  min-height: clamp(840px, 62vw, 920px);
+  background: #07150d;
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHero::before {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgb(2 13 7 / 58%) 0%, rgb(2 13 7 / 20%) 39%, rgb(2 13 7 / 34%) 100%),
+    linear-gradient(90deg, rgb(2 14 8 / 86%) 0%, rgb(2 14 8 / 58%) 44%, rgb(2 14 8 / 8%) 74%),
+    linear-gradient(0deg, rgb(2 14 8 / 62%) 0%, transparent 42%);
+  content: "";
+  pointer-events: none;
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHero::after {
+  display: none;
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHeroGrid {
+  display: block;
+  position: relative;
+  width: 100%;
+  max-width: none;
+  min-height: clamp(840px, 62vw, 920px);
+  margin: 0;
+  padding: 0;
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHeroContent {
+  position: relative;
+  z-index: 3;
+  display: grid;
+  width: var(--performance-local-max);
+  max-width: 100%;
+  min-height: clamp(840px, 62vw, 920px);
+  margin-inline: auto;
+  padding-block: clamp(142px, 11vw, 166px) 58px;
+  grid-template-columns: minmax(0, 0.92fr) minmax(360px, 0.72fr);
+  grid-template-rows: auto auto 1fr;
+  column-gap: clamp(42px, 6vw, 86px);
+  align-items: start;
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalEyebrow {
+  grid-column: 1;
+  grid-row: 1;
+  margin: 0 0 13px;
+  color: var(--atlas-color-accent, #a7df39);
+  text-shadow: 0 2px 18px rgb(0 0 0 / 82%);
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHero h1 {
+  grid-column: 1;
+  grid-row: 2;
+  max-width: 16ch;
+  margin: 0 0 22px;
+  font-size: clamp(3rem, 4.65vw, 4.25rem);
+  line-height: 0.99;
+  letter-spacing: -0.035em;
+  text-shadow: 0 3px 24px rgb(0 0 0 / 88%);
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHeroSummary {
+  grid-column: 2;
+  grid-row: 1 / 4;
+  align-self: end;
+  max-width: 54ch;
+  margin: 0 0 12px;
+  padding: 22px 24px;
+  border: 1px solid rgb(255 255 255 / 25%);
+  border-radius: 18px;
+  background: rgb(3 18 10 / 72%);
+  color: #fff;
+  box-shadow: 0 18px 44px rgb(0 0 0 / 22%);
+  font-size: clamp(1rem, 1.22vw, 1.12rem);
+  line-height: 1.62;
+  text-shadow: 0 1px 10px rgb(0 0 0 / 64%);
+  backdrop-filter: blur(5px);
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHeroActions {
+  grid-column: 1;
+  grid-row: 3;
+  align-self: start;
+  width: min(270px, 100%);
+  min-height: 48px;
+  margin: 0;
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHeroActions .performanceLocalButton {
+  width: 100%;
+  min-width: 0;
+  box-shadow: 0 12px 26px rgb(0 0 0 / 24%);
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHeroActions .performanceLocalButtonSecondary {
+  background: rgb(4 22 12 / 54%);
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHeroMedia {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHeroMedia::before {
+  display: none;
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHeroMedia .performanceLocalMediaFrame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: #07150d;
+  box-shadow: none;
+  aspect-ratio: auto;
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHeroMedia img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover !important;
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalHeroMedia figcaption {
+  position: absolute;
+  z-index: 4;
+  right: max(14px, env(safe-area-inset-right));
+  bottom: 14px;
+  max-width: min(44ch, calc(100% - 28px));
+  margin: 0;
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: rgb(2 13 7 / 68%);
+  color: rgb(255 255 255 / 82%);
+  font-size: 0.72rem;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.performanceLocalV5CityServicePreview #main-content,
+.performanceLocalV5CityServicePreview .performanceLocalEstimateForm,
+.performanceLocalV5CityServicePreview .performanceLocalEstimateForm :where(input, textarea, button) {
+  scroll-margin-block-start: calc(var(--plv5-city-stack-height) + 16px);
+}
+
+.performanceLocalV5CityServicePreview .performanceLocalStickyActions {
+  display: none !important;
+}
+
+@media (max-width: 1100px) {
+  .performanceLocalV5CityServicePreview .performanceLocalHero,
+  .performanceLocalV5CityServicePreview .performanceLocalHeroGrid,
+  .performanceLocalV5CityServicePreview .performanceLocalHeroContent {
+    min-height: 940px;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHero::before {
+    background:
+      linear-gradient(180deg, rgb(2 13 7 / 72%) 0%, rgb(2 13 7 / 18%) 46%, rgb(2 13 7 / 48%) 100%),
+      linear-gradient(90deg, rgb(2 14 8 / 84%) 0%, rgb(2 14 8 / 50%) 47%, rgb(2 14 8 / 10%) 76%);
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroContent {
+    width: min(calc(100% - 40px), 920px);
+    padding-block: 126px 48px;
+    grid-template-columns: minmax(0, 0.9fr) minmax(330px, 1.1fr);
+    column-gap: 32px;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHero h1 {
+    max-width: 14ch;
+    font-size: clamp(2.7rem, 6.1vw, 3.75rem);
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroSummary {
+    padding: 19px 20px;
+    font-size: 0.98rem;
+    line-height: 1.57;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroActions {
+    width: auto;
+    margin-left: 220px;
+    grid-column: 1 / -1;
+    align-items: center;
+    flex-direction: row;
+    flex-wrap: nowrap;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroActions .performanceLocalButton {
+    width: auto;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroMedia img {
+    object-position: 43% 50% !important;
+  }
+}
+
+@media (max-width: 760px) {
+  .performanceLocalV5CityServicePreview {
+    --plv5-city-phone-height: 46px;
+    --plv5-city-action-height: 54px;
+  }
+
+  .performanceLocalV5StickyPhoneBar a {
+    font-size: 0.84rem;
+  }
+
+  .performanceLocalV5StickyActionBanner a {
+    font-size: 0.94rem;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeader {
+    background: linear-gradient(180deg, rgb(3 15 9 / 94%), rgb(3 15 9 / 66%));
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHero,
+  .performanceLocalV5CityServicePreview .performanceLocalHeroGrid,
+  .performanceLocalV5CityServicePreview .performanceLocalHeroContent {
+    min-height: 0;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHero::before {
+    display: none;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHero {
+    background: #f3f7f1;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroGrid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows:
+      [visual-start] 108px
+      [eyebrow-start] auto
+      [heading-start] auto
+      [actions-start] auto
+      [visual-fill] minmax(clamp(40px, 10vw, 64px), 1fr)
+      [visual-end intro-start] auto
+      [intro-end];
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroContent {
+    display: contents;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalEyebrow {
+    z-index: 3;
+    width: min(60%, 288px);
+    max-width: 60%;
+    margin: 0 0 10px max(14px, env(safe-area-inset-left));
+    grid-column: 1;
+    grid-row: eyebrow-start / heading-start;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHero h1 {
+    z-index: 3;
+    width: min(60%, 288px);
+    max-width: 60%;
+    margin: 0 0 18px max(14px, env(safe-area-inset-left));
+    font-size: clamp(2.35rem, 10.8vw, 3rem);
+    line-height: 0.98;
+    grid-column: 1;
+    grid-row: heading-start / actions-start;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroSummary {
+    z-index: 3;
+    width: min(calc(100% - 28px), 480px);
+    max-width: 480px;
+    margin: 22px auto 26px;
+    padding: 19px 20px;
+    border-color: rgb(31 84 46 / 18%);
+    background: #fff;
+    color: #16231b;
+    box-shadow: 0 14px 34px rgb(16 54 29 / 12%);
+    font-size: 0.94rem;
+    line-height: 1.58;
+    text-shadow: none;
+    backdrop-filter: none;
+    grid-column: 1;
+    grid-row: intro-start / intro-end;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroActions {
+    z-index: 3;
+    width: min(60%, 288px);
+    margin: 0 0 0 max(14px, env(safe-area-inset-left));
+    align-items: stretch;
+    flex-direction: column;
+    flex-wrap: wrap;
+    grid-column: 1;
+    grid-row: actions-start / visual-fill;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroActions .performanceLocalButton {
+    width: 100%;
+    min-width: 0;
+    padding-inline: 12px;
+    font-size: 0.9rem;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroMedia {
+    position: relative;
+    z-index: 0;
+    inset: auto;
+    overflow: hidden;
+    grid-column: 1;
+    grid-row: visual-start / visual-end;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroMedia::before {
+    display: block;
+    position: absolute;
+    z-index: 2;
+    inset: 0;
+    background:
+      linear-gradient(180deg, rgb(2 13 7 / 88%) 0%, rgb(2 13 7 / 60%) 49%, rgb(2 13 7 / 16%) 72%, rgb(2 13 7 / 42%) 100%),
+      linear-gradient(90deg, rgb(2 14 8 / 84%) 0%, rgb(2 14 8 / 50%) 63%, rgb(2 14 8 / 7%) 86%);
+    content: "";
+    pointer-events: none;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroMedia .performanceLocalMediaFrame {
+    position: absolute;
+    z-index: 1;
+    inset: 0;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroMedia img {
+    object-position: 10% 50% !important;
+  }
+
+  .performanceLocalV5CityServicePreview .performanceLocalHeroMedia figcaption {
+    display: none;
+    right: 10px;
+    bottom: 10px;
+    max-width: 58%;
+    font-size: 0.66rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .performanceLocalV5TopConversionStack {
+    transition: none;
+  }
+}

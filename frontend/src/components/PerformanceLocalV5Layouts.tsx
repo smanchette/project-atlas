@@ -44,6 +44,16 @@ import type {
 
 export type PerformanceLocalV5ReviewMode = "truthful" | "structural_demo";
 
+export type PerformanceLocalV5TopAction =
+  | Readonly<{
+      destination: string;
+      label: string;
+      mode: "special" | "request_estimate" | "service_promotion";
+    }>
+  | Readonly<{
+      mode: "disabled";
+    }>;
+
 export type PerformanceLocalV5RegionPlan = Readonly<{
   regionKey: string;
   requirement: "required" | "optional";
@@ -1064,6 +1074,43 @@ export function PerformanceLocalV5CampaignBanner({ campaign }: { campaign: Perfo
         </div>
       )}
     </aside>
+  );
+}
+
+export function PerformanceLocalV5TopConversionStack({
+  action,
+  callLabel,
+  contact,
+}: {
+  action: PerformanceLocalV5TopAction;
+  callLabel: string;
+  contact: PerformanceLocalGovernedContact | null;
+}) {
+  const resolvedAction = action.mode !== "disabled" && action.destination.trim() && action.label.trim()
+    ? action
+    : null;
+  if (!contact && !resolvedAction) return null;
+  return (
+    <div
+      className="performanceLocalV5TopConversionStack"
+      data-v5-top-conversion-stack="true"
+      data-v5-top-action-mode={action.mode}
+      data-v5-top-action-enabled={resolvedAction ? "true" : "false"}
+    >
+      {contact ? (
+        <div className="performanceLocalV5StickyPhoneBar">
+          <a href={contact.callDestination} aria-label={`${callLabel} ${contact.phoneDisplay}`}>
+            <Phone aria-hidden="true" />
+            <span>{callLabel} <strong>{contact.phoneDisplay}</strong></span>
+          </a>
+        </div>
+      ) : null}
+      {resolvedAction ? (
+        <aside className="performanceLocalV5StickyActionBanner" aria-label={resolvedAction.label}>
+          <a href={resolvedAction.destination}>{resolvedAction.label}</a>
+        </aside>
+      ) : null}
+    </div>
   );
 }
 

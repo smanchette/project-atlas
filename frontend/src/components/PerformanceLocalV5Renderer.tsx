@@ -22,7 +22,9 @@ import {
   PerformanceLocalV5SiteFooter,
   PerformanceLocalV5SiteHeader,
   PerformanceLocalV5StickyActions,
+  PerformanceLocalV5TopConversionStack,
   type PerformanceLocalV5ReviewMode,
+  type PerformanceLocalV5TopAction,
 } from "./PerformanceLocalV5Layouts";
 import type {
   GeneratedPage,
@@ -83,24 +85,42 @@ export function PerformanceLocalV5Renderer({
   }
 
   if (pageType === "city_service") {
+    const estimateDestination = `#${performanceLocalFormDomId(v3Configuration.estimateForm.componentConfigurationId)}`;
+    const topAction = performanceLocalV5CityServiceTopAction(v3Configuration, estimateDestination);
+    const topStackActive = Boolean(v3Configuration.governedContact) || topAction.mode !== "disabled";
+    const legacyStickyActions = topStackActive
+      ? { ...v3Configuration.stickyActions, desktopHeaderActionsEnabled: false }
+      : v3Configuration.stickyActions;
     return (
       <div
+        className="performanceLocalV5CityServicePreview"
         data-v5-site-root="true"
-        data-v5-preservation-control="true"
+        data-v5-preservation-control="below-hero-legacy-subtree"
+        data-v5-top-preview="hero-and-conversion-stack"
         data-v5-page-type={pageType}
         data-v5-layout-key={layoutKey}
         data-v5-layout-ready="true"
       >
+        <PerformanceLocalV5TopConversionStack
+          action={topAction}
+          callLabel={v3Configuration.stickyActions.callLabel}
+          contact={v3Configuration.governedContact}
+        />
         <PerformanceLocalRenderer
           page={page}
           composition={composition}
-          campaign={campaignBannerEnabled ? v3Configuration.campaign : null}
+          campaign={null}
           estimateForm={v3Configuration.estimateForm}
           formSubmission={v3Configuration.formSubmission}
           governedContact={v3Configuration.governedContact}
           rendererIdentity={v3Configuration.rendererIdentity}
-          stickyActions={v3Configuration.stickyActions}
-          toggles={{ ...v3Configuration.toggles, campaignBanner: campaignBannerEnabled }}
+          stickyActions={legacyStickyActions}
+          toggles={{
+            ...v3Configuration.toggles,
+            campaignBanner: false,
+            stickyActionBar: false,
+            trustStrip: false,
+          }}
           previewedAt={previewedAt}
         />
       </div>
@@ -118,6 +138,26 @@ export function PerformanceLocalV5Renderer({
       v3Configuration={v3Configuration}
     />
   );
+}
+
+export function performanceLocalV5CityServiceTopAction(
+  configuration: PerformanceLocalDeliveryConfiguration,
+  estimateDestination: string,
+): PerformanceLocalV5TopAction {
+  const campaign = configuration.campaign;
+  if (
+    campaign?.enabled &&
+    campaign.intent === "evergreen_conversion" &&
+    campaign.ctaDestination === estimateDestination &&
+    campaign.campaignLabel.trim()
+  ) {
+    return Object.freeze({
+      destination: estimateDestination,
+      label: campaign.campaignLabel,
+      mode: "request_estimate" as const,
+    });
+  }
+  return Object.freeze({ mode: "disabled" as const });
 }
 
 function PerformanceLocalV5PurposeBuiltRenderer({

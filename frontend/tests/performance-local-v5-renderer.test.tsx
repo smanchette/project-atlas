@@ -8,10 +8,13 @@ import { StaticRouter } from "react-router-dom/server";
 
 import {
   PerformanceLocalV5LayoutBody,
+  PerformanceLocalV5TopConversionStack,
   type PerformanceLocalV5LayoutBodyProps,
   type PerformanceLocalV5RegionPlan,
+  type PerformanceLocalV5TopAction,
 } from "../src/components/PerformanceLocalV5Layouts";
 import PerformanceLocalV5Renderer, {
+  performanceLocalV5CityServiceTopAction,
   performanceLocalV5FooterBoundaryReached,
   type PerformanceLocalV5ReadinessProjection,
 } from "../src/components/PerformanceLocalV5Renderer";
@@ -40,7 +43,7 @@ test("all six non-city layouts use one contained inert five-field final conversi
     assert.equal(count(markup, 'data-field-key="'), 5, pageType);
     assert.equal(count(markup, "readonly=\"\""), 5, pageType);
     assert.match(markup, /<button type="submit" disabled="">Request Estimate<\/button>/, pageType);
-    assert.match(markup, /href="tel:\+15550100200"/, pageType);
+    assert.match(markup, /href="tel:5550100200"/, pageType);
     assert.match(markup, /href="#performance-local-estimate-form-91"/, pageType);
     const finalIndex = markup.indexOf('data-v5-shared-final-conversion="true"');
     assert.ok(markup.indexOf("<form", finalIndex) > finalIndex, pageType);
@@ -161,30 +164,56 @@ test("non-city V5 renderer is statically isolated from all V4 presenters and cla
   assert.match(layouts, /closeMenu\(\{ restoreFocus: true \}\)/);
 });
 
-test("City-Service delegates a byte-identical legacy subtree for both banner states", () => {
+test("City-Service changes only the governed top presentation and preserves the configured legacy subtree", () => {
   const page = cityServicePage();
   const composition = cityServiceComposition();
   const audit = cityServiceAudit();
   const configuration = cityServiceConfiguration();
   const previewedAt = new Date("2026-08-17T12:00:00Z");
+  const suppressedStickyActions = { ...configuration.stickyActions, desktopHeaderActionsEnabled: false };
+  const suppressedToggles = {
+    ...configuration.toggles,
+    campaignBanner: false,
+    stickyActionBar: false,
+    trustStrip: false,
+  };
+  const legacyCapabilities = renderToStaticMarkup(
+    <StaticRouter location="/theme-lab/performance-local/v5/generated-pages/41">
+      <PerformanceLocalRenderer
+        page={page}
+        composition={composition}
+        campaign={null}
+        estimateForm={configuration.estimateForm}
+        formSubmission={configuration.formSubmission}
+        governedContact={configuration.governedContact}
+        rendererIdentity={configuration.rendererIdentity}
+        stickyActions={configuration.stickyActions}
+        toggles={{ ...configuration.toggles, campaignBanner: false, stickyActionBar: false }}
+        previewedAt={previewedAt}
+      />
+    </StaticRouter>,
+  );
+  assert.match(legacyCapabilities, /class="performanceLocalTrustStrip"/);
+  assert.equal(count(legacyCapabilities, "JB360566"), 2);
+  assert.match(legacyCapabilities, /Jordan Ward/);
+  assert.match(legacyCapabilities, /class="performanceLocalButton performanceLocalHeaderEstimate"/);
+  const direct = renderToStaticMarkup(
+    <StaticRouter location="/theme-lab/performance-local/v5/generated-pages/41">
+      <PerformanceLocalRenderer
+        page={page}
+        composition={composition}
+        campaign={null}
+        estimateForm={configuration.estimateForm}
+        formSubmission={configuration.formSubmission}
+        governedContact={configuration.governedContact}
+        rendererIdentity={configuration.rendererIdentity}
+        stickyActions={suppressedStickyActions}
+        toggles={suppressedToggles}
+        previewedAt={previewedAt}
+      />
+    </StaticRouter>,
+  );
   for (const campaignBannerEnabled of [true, false]) {
-    const toggles = { ...configuration.toggles, campaignBanner: campaignBannerEnabled };
-    const direct = renderToStaticMarkup(
-      <StaticRouter location="/theme-lab/performance-local/v5/generated-pages/41">
-        <PerformanceLocalRenderer
-          page={page}
-          composition={composition}
-          campaign={campaignBannerEnabled ? configuration.campaign : null}
-          estimateForm={configuration.estimateForm}
-          formSubmission={configuration.formSubmission}
-          governedContact={configuration.governedContact}
-          rendererIdentity={configuration.rendererIdentity}
-          stickyActions={configuration.stickyActions}
-          toggles={toggles}
-          previewedAt={previewedAt}
-        />
-      </StaticRouter>,
-    );
     const wrapped = renderToStaticMarkup(
       <StaticRouter location="/theme-lab/performance-local/v5/generated-pages/41">
         <PerformanceLocalV5Renderer
@@ -199,13 +228,78 @@ test("City-Service delegates a byte-identical legacy subtree for both banner sta
         />
       </StaticRouter>,
     );
-    assert.match(wrapped, /data-v5-preservation-control="true"/);
-    assert.doesNotMatch(wrapped.slice(0, wrapped.indexOf('<div class="performanceLocalSite"')), /performanceLocalV5Site/);
+    assert.match(wrapped, /class="performanceLocalV5CityServicePreview"/);
+    assert.match(wrapped, /data-v5-preservation-control="below-hero-legacy-subtree"/);
+    assert.match(wrapped, /data-v5-top-preview="hero-and-conversion-stack"/);
+    assert.match(wrapped, /data-v5-top-action-mode="request_estimate"/);
+    assert.match(wrapped, /href="tel:5550100200"[^>]*aria-label="Call \(555\) 010-0200"/);
+    assert.match(wrapped, /<strong>\(555\) 010-0200<\/strong>/);
+    assert.match(wrapped, /class="performanceLocalV5StickyActionBanner"[^>]*aria-label="Request an Estimate"/);
+    assert.match(wrapped, /href="#performance-local-form-config-91">Request an Estimate<\/a>/);
+    assert.doesNotMatch(wrapped, /class="performanceLocalCampaign/);
+    assert.doesNotMatch(wrapped, /class="performanceLocalStickyActions/);
+    assert.doesNotMatch(wrapped, /class="performanceLocalTrustStrip"/);
+    assert.doesNotMatch(wrapped, /Jordan Ward/);
+    assert.equal(count(wrapped, "JB360566"), 1);
+    assert.match(wrapped, /class="performanceLocalFooterContact"[\s\S]*?<span>License JB360566<\/span>/);
+    assert.equal(count(wrapped, "Exact governed Page 41 introductory paragraph for the focused top presentation."), 1);
+    const headerStart = wrapped.indexOf('<header class="performanceLocalHeader"');
+    const headerEnd = wrapped.indexOf("</header>", headerStart);
+    assert.ok(headerStart >= 0 && headerEnd > headerStart, wrapped);
+    const headerMarkup = wrapped.slice(headerStart, headerEnd);
+    assert.doesNotMatch(headerMarkup, /performanceLocalPhone|performanceLocalHeaderEstimate|href="tel:/);
+    assert.match(headerMarkup, /class="performanceLocalMenuTrigger"/);
+    const heroStart = wrapped.indexOf('<section class="performanceLocalHero"');
+    const heroEnd = wrapped.indexOf("</section>", heroStart);
+    assert.ok(heroStart >= 0 && heroEnd > heroStart, wrapped);
+    const heroMarkup = wrapped.slice(heroStart, heroEnd);
+    assert.match(heroMarkup, /href="tel:5550100200"/);
+    assert.match(heroMarkup, /href="#performance-local-form-config-91">Request an Estimate<\/a>/);
+    assert.equal(count(wrapped, "2326ac885a03490482e47dcc26d0eca3-optimized.webp"), 1);
+    assert.equal(count(wrapped, 'data-source-instance-key="media_placement:hero"'), 1);
+    assert.match(wrapped, /alt="Flo-Zone technician outside a branded tented Orlando property"/);
+    assert.match(wrapped, /object-position:50% 50%/);
     const start = wrapped.indexOf('<div class="performanceLocalSite"');
     assert.ok(start >= 0, wrapped);
     const delegatedSubtree = wrapped.slice(start, -"</div>".length);
     assert.equal(delegatedSubtree, direct);
   }
+});
+
+test("top conversion presenter supports all permanent action modes and fails closed when disabled", () => {
+  const destination = "#performance-local-form-config-91";
+  const enabledModes: readonly PerformanceLocalV5TopAction[] = [
+    { mode: "special", label: "Exact governed special", destination },
+    { mode: "request_estimate", label: "Request an Estimate", destination },
+    { mode: "service_promotion", label: "Exact governed service promotion", destination },
+  ];
+  for (const action of enabledModes) {
+    const markup = renderToStaticMarkup(
+      <PerformanceLocalV5TopConversionStack action={action} callLabel="Call" contact={governedContact} />,
+    );
+    assert.match(markup, new RegExp(`data-v5-top-action-mode="${action.mode}"`));
+    assert.match(markup, /data-v5-top-action-enabled="true"/);
+    assert.equal(count(markup, "performanceLocalV5StickyActionBanner"), 1);
+    assert.match(markup, new RegExp(`href="${destination}"`));
+  }
+  const disabled = renderToStaticMarkup(
+    <PerformanceLocalV5TopConversionStack action={{ mode: "disabled" }} callLabel="Call" contact={governedContact} />,
+  );
+  assert.match(disabled, /data-v5-top-action-mode="disabled"/);
+  assert.match(disabled, /data-v5-top-action-enabled="false"/);
+  assert.doesNotMatch(disabled, /performanceLocalV5StickyActionBanner/);
+  assert.match(disabled, /href="tel:5550100200"/);
+
+  const configured = cityServiceConfiguration();
+  const exactDestination = `#${performanceLocalFormDomId(configured.estimateForm.componentConfigurationId)}`;
+  assert.deepEqual(performanceLocalV5CityServiceTopAction(configured, exactDestination), {
+    destination: exactDestination,
+    label: "Request an Estimate",
+    mode: "request_estimate",
+  });
+  assert.deepEqual(performanceLocalV5CityServiceTopAction({ ...configured, campaign: null }, exactDestination), {
+    mode: "disabled",
+  });
 });
 
 test("V5 styles are additive, namespace-only, responsive, and never target the screenshot attribute", () => {
@@ -225,6 +319,21 @@ test("V5 styles are additive, namespace-only, responsive, and never target the s
   assert.match(v5, /\.performanceLocalV5StructuredBody\[data-v5-structured-group-count="1"\] > :only-child[\s\S]*?grid-column:\s*1 \/ -1/);
   assert.match(v5, /@media \(max-width:\s*900px\)[\s\S]*?\.performanceLocalV5FinalGrid[\s\S]*?\.performanceLocalV5FormGrid[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)/);
   assert.match(v5, /\.performanceLocalV5FormCompact[\s\S]*?padding:\s*clamp\(/);
+  assert.match(v5, /\.performanceLocalV5TopConversionStack[\s\S]*?position:\s*sticky[\s\S]*?height:\s*var\(--plv5-city-stack-height\)/);
+  assert.match(v5, /--plv5-city-stack-height:\s*calc\(/);
+  assert.match(v5, /\.performanceLocalV5CityServicePreview \.performanceLocalHeader[\s\S]*?position:\s*absolute/);
+  assert.match(v5, /\.performanceLocalV5CityServicePreview \.performanceLocalHeroMedia[\s\S]*?position:\s*absolute/);
+  assert.match(v5, /\.performanceLocalV5CityServicePreview \.performanceLocalHeroMedia img[\s\S]*?object-fit:\s*cover !important/);
+  assert.match(v5, /\.performanceLocalEstimateForm[\s\S]*?scroll-margin-block-start:\s*calc\(var\(--plv5-city-stack-height\) \+ 16px\)/);
+  assert.match(v5, /\.performanceLocalHeader:has\(\.performanceLocalDrawerBackdrop\)[\s\S]*?backdrop-filter:\s*none/);
+  assert.match(v5, /@media \(max-width:\s*1100px\)[\s\S]*?object-position:\s*43% 50% !important/);
+  assert.match(v5, /@media \(max-width:\s*760px\)[\s\S]*?object-position:\s*10% 50% !important/);
+  assert.match(v5, /@media \(max-width:\s*760px\)[\s\S]*?\.performanceLocalHeroGrid[\s\S]*?grid-template-rows:[\s\S]*?\[visual-start\][\s\S]*?\[visual-end intro-start\]/);
+  assert.match(v5, /@media \(max-width:\s*760px\)[\s\S]*?\.performanceLocalHeroContent[\s\S]*?display:\s*contents/);
+  assert.match(v5, /@media \(max-width:\s*760px\)[\s\S]*?\.performanceLocalHeroSummary[\s\S]*?grid-row:\s*intro-start \/ intro-end/);
+  assert.match(v5, /@media \(max-width:\s*760px\)[\s\S]*?\.performanceLocalHeroMedia[\s\S]*?grid-row:\s*visual-start \/ visual-end/);
+  assert.match(v5, /@media \(max-width:\s*760px\)[\s\S]*?\.performanceLocalHeroMedia figcaption[\s\S]*?display:\s*none/);
+  assert.doesNotMatch(v5, /@media \(max-width:\s*760px\)[\s\S]*?min-height:\s*1220px/);
 });
 
 test("footer collision boundary is fail-closed and deterministic", () => {
@@ -482,7 +591,7 @@ function notApplicableCounty(): PerformanceLocalV5CountyCityPresentation {
 }
 
 const governedContact: PerformanceLocalGovernedContact = {
-  callDestination: "tel:+15550100200",
+  callDestination: "tel:5550100200",
   phoneDisplay: "(555) 010-0200",
   websiteId: 1,
 };
@@ -514,6 +623,41 @@ function cityServicePage(): GeneratedPage {
 }
 
 function cityServiceComposition(): PageComposition {
+  const header = component("website_header", "website_header", {
+    display_name: "Flo-Zone",
+    tagline: "Drywood Termite Solution",
+  });
+  const hero = component("hero", "hero", {
+    page_type: "city_service",
+    title: "Drywood Termite Tenting in Orlando, Florida",
+    intro: "Exact governed Page 41 introductory paragraph for the focused top presentation.",
+  });
+  const heroMedia = component("media_placement:hero", "media_placement", {
+    asset_url: "/media/optimized/2326ac885a03490482e47dcc26d0eca3-optimized.webp",
+    alt_text: "Flo-Zone technician outside a branded tented Orlando property",
+    caption: "Exact governed Page 41 hero caption.",
+    display_preset: "hero_desktop",
+    focal_x: 0.5,
+    focal_y: 0.5,
+    image_role: "hero",
+    image_title: "Exact governed Page 41 hero",
+  }, {
+    target_component_instance_key: hero.instance_key,
+    target_component_key: hero.component_key,
+    target_region: "main",
+  });
+  const finalCta = component("final_cta", "final_cta", {
+    heading: "Exact governed final conversion",
+    body: "Exact governed final conversion body.",
+  });
+  const trust = component("trust_license", "trust_license", {
+    license_number: "JB360566",
+    certified_operator: "Jordan Ward",
+  });
+  const footer = component("website_footer", "website_footer", {
+    display_name: "Flo-Zone",
+    license_number: "JB360566",
+  });
   return {
     id: 801,
     website_id: 1,
@@ -521,9 +665,9 @@ function cityServiceComposition(): PageComposition {
     planned_page_id: 1001,
     generated_page_id: 41,
     composition_version: 8,
-    generated_components: [],
+    generated_components: [header, hero, heroMedia, trust, finalCta, footer],
     operator_decisions: [],
-    effective_components: [],
+    effective_components: [header, hero, heroMedia, trust, finalCta, footer],
     source_snapshot: { page_type: "city_service" },
     source_hash: "a".repeat(64),
     resolved_theme: selectedTheme(1),
@@ -544,14 +688,18 @@ function cityServiceAudit(): PerformanceLocalV5LayoutAudit {
 }
 
 function cityServiceConfiguration(): PerformanceLocalDeliveryConfiguration {
-  const form = estimateForm();
+  const form = {
+    ...estimateForm(),
+    ctaLabel: "Request an Estimate",
+    submitLabel: "Request an Estimate",
+  };
   const fields = form.fields as readonly PerformanceLocalEstimateField[];
   return {
     campaign: {
       approvalIdentity: "approved-campaign",
       campaignLabel: "Request an Estimate",
       ctaDestination: `#${performanceLocalFormDomId(form.componentConfigurationId)}`,
-      ctaLabel: "Request Estimate",
+      ctaLabel: "Request an Estimate",
       destinationComponentConfigurationId: form.componentConfigurationId,
       enabled: true,
       intent: "evergreen_conversion",
@@ -591,7 +739,7 @@ function cityServiceConfiguration(): PerformanceLocalDeliveryConfiguration {
       desktopHeaderActionsEnabled: true,
       destinationComponentConfigurationId: form.componentConfigurationId,
       enabled: true,
-      estimateLabel: "Request Estimate",
+      estimateLabel: "Request an Estimate",
       mobileStickyActionsEnabled: true,
     },
     toggles: {

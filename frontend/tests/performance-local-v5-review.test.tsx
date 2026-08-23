@@ -98,7 +98,11 @@ test("operator controls and diagnostics remain outside the stable site root", ()
   assert.ok(diagnosticIndex > previewIndex);
   assert.match(renderer, /className="performanceLocalV5Site"[\s\S]*?data-v5-site-root="true"/);
   assert.doesNotMatch(renderer, /data-v5-diagnostic-panel|performanceLocalV5DiagnosticPanel/);
-  assert.match(renderer, /data-v5-site-root="true"[\s\S]*?data-v5-preservation-control="true"/);
+  assert.match(
+    renderer,
+    /data-v5-site-root="true"[\s\S]*?data-v5-preservation-control="below-hero-legacy-subtree"/,
+  );
+  assert.match(renderer, /data-v5-top-preview="hero-and-conversion-stack"/);
 });
 
 test("diagnostics separate layout, media, QA, form, activation, export, and publication readiness", () => {
