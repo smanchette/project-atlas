@@ -11787,3 +11787,223 @@ th {
     transition: none;
   }
 }
+/* Performance Local V5 conditional Special and Estimate destination previews. */
+.performanceLocalV5CityServicePreview[data-v5-top-action-enabled="false"],
+.performanceLocalV5ConditionalPage[data-v5-top-action-enabled="false"] {
+  --plv5-city-action-height: 0px;
+}
+
+.performanceLocalV5ConditionalPage {
+  --plv5-city-phone-height: 44px;
+  --plv5-city-action-height: 52px;
+  --plv5-city-safe-top: env(safe-area-inset-top, 0px);
+  --plv5-city-stack-height: calc(
+    var(--plv5-city-phone-height) +
+    var(--plv5-city-action-height) +
+    var(--plv5-city-safe-top)
+  );
+  min-width: 0;
+  background: var(--plv5-cream);
+  scroll-padding-block-start: calc(var(--plv5-city-stack-height) + 94px);
+}
+
+.performanceLocalV5ConditionalPage .performanceLocalV5SkipLink {
+  z-index: 180;
+}
+
+.performanceLocalV5ConditionalPage .performanceLocalV5Header {
+  z-index: 120;
+  top: var(--plv5-city-stack-height);
+}
+
+.performanceLocalV5ConditionalPage[data-v5-menu-open="true"] .performanceLocalV5TopConversionStack,
+.performanceLocalV5ConditionalPage[data-v5-form-focus-risk="true"] .performanceLocalV5TopConversionStack {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-100%);
+}
+
+.performanceLocalV5ConditionalPage[data-v5-menu-open="true"] .performanceLocalV5Header,
+.performanceLocalV5ConditionalPage[data-v5-form-focus-risk="true"] .performanceLocalV5Header {
+  top: 0;
+}
+
+.performanceLocalV5ConditionalPage #performance-local-v5-conditional-main,
+.performanceLocalV5ConditionalPage .performanceLocalV5Form,
+.performanceLocalV5ConditionalPage .performanceLocalV5Form :where(input, textarea, button) {
+  scroll-margin-block-start: calc(var(--plv5-city-stack-height) + 94px);
+}
+
+.performanceLocalV5ConditionalMain {
+  min-width: 0;
+  padding-block: clamp(64px, 8vw, 112px);
+}
+
+.performanceLocalV5ConditionalContent,
+.performanceLocalV5EstimatePageGrid {
+  display: grid;
+  min-width: 0;
+  gap: clamp(34px, 6vw, 88px);
+  align-items: center;
+}
+
+.performanceLocalV5ConditionalContent {
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.55fr);
+}
+
+.performanceLocalV5ConditionalContent:not(:has(.performanceLocalV5SpecialDetails)) {
+  grid-template-columns: minmax(0, 760px);
+  justify-content: center;
+}
+
+.performanceLocalV5EstimatePageGrid {
+  grid-template-columns: minmax(280px, 0.78fr) minmax(440px, 1.12fr);
+}
+
+.performanceLocalV5ConditionalLead {
+  min-width: 0;
+}
+
+.performanceLocalV5ConditionalLead h1 {
+  max-width: 14ch;
+  margin: 0;
+  color: var(--plv5-forest-deep);
+  font-family: var(--atlas-font-heading, Inter, ui-sans-serif, system-ui, sans-serif);
+  font-size: clamp(3rem, 6vw, 5.4rem);
+  font-weight: var(--atlas-font-weight-heading, 900);
+  line-height: 0.98;
+  letter-spacing: -0.045em;
+}
+
+.performanceLocalV5ConditionalEyebrow {
+  margin: 0 0 14px;
+  color: var(--plv5-forest);
+  font-size: 0.78rem;
+  font-weight: 950;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.performanceLocalV5ConditionalIntroduction {
+  max-width: 62ch;
+  margin: 24px 0 0;
+  color: var(--plv5-muted);
+  font-size: clamp(1.05rem, 1.8vw, 1.25rem);
+  line-height: 1.7;
+}
+
+.performanceLocalV5ConditionalLead .performanceLocalV5ActionRow {
+  margin-top: 30px;
+}
+
+.performanceLocalV5SpecialPage {
+  min-height: clamp(610px, 64vw, 760px);
+  background:
+    radial-gradient(circle at 88% 12%, color-mix(in srgb, var(--plv5-lime) 24%, transparent), transparent 31%),
+    linear-gradient(135deg, var(--plv5-cream), color-mix(in srgb, var(--plv5-lime) 10%, var(--plv5-surface)));
+}
+
+.performanceLocalV5SpecialPage .performanceLocalV5ConditionalLead {
+  padding: clamp(30px, 5vw, 58px);
+  border: 1px solid color-mix(in srgb, var(--plv5-forest) 18%, transparent);
+  border-radius: 28px;
+  background: rgb(255 255 255 / 86%);
+  box-shadow: 0 28px 80px rgb(14 52 31 / 13%);
+}
+
+.performanceLocalV5SpecialPage .performanceLocalV5ConditionalLead h1 {
+  max-width: 15ch;
+  font-size: clamp(2.7rem, 5.2vw, 4.8rem);
+}
+
+.performanceLocalV5SpecialDetails {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+  padding: 28px;
+  border-radius: 22px;
+  background: var(--plv5-forest-deep);
+  color: var(--plv5-secondary-foreground);
+  box-shadow: 0 24px 64px rgb(6 28 17 / 20%);
+}
+
+.performanceLocalV5SpecialDetails section,
+.performanceLocalV5SpecialDetails h2,
+.performanceLocalV5SpecialDetails p,
+.performanceLocalV5SpecialDetails ul {
+  margin: 0;
+}
+
+.performanceLocalV5SpecialDetails h2 {
+  color: var(--plv5-lime);
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.performanceLocalV5EstimatePage {
+  background:
+    linear-gradient(120deg, color-mix(in srgb, var(--plv5-lime) 7%, var(--plv5-cream)), var(--plv5-cream) 48%, var(--plv5-surface));
+}
+
+.performanceLocalV5EstimatePage .performanceLocalV5Form {
+  border-color: color-mix(in srgb, var(--plv5-forest) 14%, var(--plv5-surface));
+  box-shadow: 0 28px 78px rgb(12 48 28 / 15%);
+}
+
+@media (max-width: 900px) {
+  .performanceLocalV5ConditionalContent,
+  .performanceLocalV5EstimatePageGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .performanceLocalV5ConditionalContent {
+    justify-content: stretch;
+  }
+}
+
+@media (max-width: 760px) {
+  .performanceLocalV5ConditionalPage {
+    --plv5-city-phone-height: 46px;
+    --plv5-city-action-height: 54px;
+  }
+
+  .performanceLocalV5ConditionalMain {
+    padding-block: 44px 54px;
+  }
+
+  .performanceLocalV5ConditionalLead h1,
+  .performanceLocalV5SpecialPage .performanceLocalV5ConditionalLead h1 {
+    max-width: none;
+    font-size: clamp(2.45rem, 12vw, 3.35rem);
+  }
+
+  .performanceLocalV5SpecialPage {
+    min-height: 0;
+  }
+
+  .performanceLocalV5SpecialPage .performanceLocalV5ConditionalLead {
+    padding: 26px 22px;
+    border-radius: 20px;
+  }
+
+  .performanceLocalV5ConditionalIntroduction {
+    margin-top: 18px;
+    font-size: 1rem;
+    line-height: 1.6;
+  }
+
+  .performanceLocalV5ConditionalLead .performanceLocalV5ActionRow {
+    margin-top: 24px;
+  }
+
+  .performanceLocalV5EstimatePageGrid {
+    gap: 30px;
+  }
+
+  .performanceLocalV5EstimatePage .performanceLocalV5Form {
+    padding: 22px 18px;
+    border-radius: 18px;
+  }
+}

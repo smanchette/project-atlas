@@ -28,6 +28,11 @@ import {
   PERFORMANCE_LOCAL_V5_DEMO_MEDIA_LABEL,
 } from "./performanceLocalThemeV5";
 import type {
+  PerformanceLocalV5EstimatePageConfiguration,
+  PerformanceLocalV5SpecialPageConfiguration,
+  PerformanceLocalV5TopAction,
+} from "./performanceLocalV5Actions";
+import type {
   PerformanceLocalV5CountyCityPresentation,
   PerformanceLocalV5DestinationConsumptionRecord,
   PerformanceLocalV5HomeServicePresentation,
@@ -44,15 +49,7 @@ import type {
 
 export type PerformanceLocalV5ReviewMode = "truthful" | "structural_demo";
 
-export type PerformanceLocalV5TopAction =
-  | Readonly<{
-      destination: string;
-      label: string;
-      mode: "special" | "request_estimate" | "service_promotion";
-    }>
-  | Readonly<{
-      mode: "disabled";
-    }>;
+export type { PerformanceLocalV5TopAction } from "./performanceLocalV5Actions";
 
 export type PerformanceLocalV5RegionPlan = Readonly<{
   regionKey: string;
@@ -648,7 +645,7 @@ function SharedFinalConversion({
           </div>
         </div>
         {props.estimateForm ? (
-          <ProviderDisabledForm
+          <PerformanceLocalV5ProviderDisabledForm
             compact={compactForm}
             configuration={props.estimateForm}
             onFormFocusRiskChange={props.onFormFocusRiskChange}
@@ -979,7 +976,7 @@ function PhoneAction({
   );
 }
 
-function ProviderDisabledForm({
+export function PerformanceLocalV5ProviderDisabledForm({
   compact,
   configuration,
   onFormFocusRiskChange,
@@ -1051,6 +1048,86 @@ function ProviderDisabledForm({
   );
 }
 
+export function PerformanceLocalV5SpecialPageLayout({
+  callLabel,
+  configuration,
+  contact,
+  estimateDestination,
+  estimateLabel,
+}: {
+  callLabel: string;
+  configuration: Extract<PerformanceLocalV5SpecialPageConfiguration, { enabled: true }>;
+  contact: PerformanceLocalGovernedContact;
+  estimateDestination: string | null;
+  estimateLabel: string | null;
+}) {
+  const eligibleServices = configuration.eligibleServiceReferences ?? [];
+  return (
+    <section className="performanceLocalV5ConditionalMain performanceLocalV5SpecialPage" data-v5-conditional-layout="special">
+      <div className="performanceLocalV5Container performanceLocalV5ConditionalContent">
+        <div className="performanceLocalV5ConditionalLead">
+          <p className="performanceLocalV5ConditionalEyebrow">Special</p>
+          <h1>{configuration.headline}</h1>
+          <p className="performanceLocalV5ConditionalIntroduction">{configuration.description}</p>
+          <div className="performanceLocalV5ActionRow">
+            <PhoneAction contact={contact} label={callLabel} />
+            {configuration.estimateActionEnabled && estimateDestination && estimateLabel ? (
+              <a className="performanceLocalV5Button performanceLocalV5ButtonSecondary" href={estimateDestination}>
+                {estimateLabel}
+              </a>
+            ) : null}
+          </div>
+        </div>
+        {eligibleServices.length || configuration.terms || configuration.expiresAt ? (
+          <aside className="performanceLocalV5SpecialDetails" aria-label="Special details">
+            {eligibleServices.length ? (
+              <section>
+                <h2>Eligible services</h2>
+                <ul>{eligibleServices.map((service) => <li key={service}>{service}</li>)}</ul>
+              </section>
+            ) : null}
+            {configuration.terms ? <section><h2>Terms</h2><p>{configuration.terms}</p></section> : null}
+            {configuration.expiresAt ? (
+              <section><h2>Expiration</h2><p><time dateTime={configuration.expiresAt}>{configuration.expiresAt}</time></p></section>
+            ) : null}
+          </aside>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+export function PerformanceLocalV5EstimatePageLayout({
+  configuration,
+  contact,
+  estimateForm,
+  onFormFocusRiskChange,
+}: {
+  configuration: Extract<PerformanceLocalV5EstimatePageConfiguration, { enabled: true }>;
+  contact: PerformanceLocalGovernedContact | null;
+  estimateForm: PerformanceLocalEstimateFormConfiguration;
+  onFormFocusRiskChange: (focused: boolean) => void;
+}) {
+  return (
+    <section className="performanceLocalV5ConditionalMain performanceLocalV5EstimatePage" data-v5-conditional-layout="estimate">
+      <div className="performanceLocalV5Container performanceLocalV5EstimatePageGrid">
+        <div className="performanceLocalV5ConditionalLead">
+          <h1>{configuration.heading}</h1>
+          <p className="performanceLocalV5ConditionalIntroduction">{configuration.introduction}</p>
+          {configuration.phoneAlternativeEnabled && contact ? (
+            <div className="performanceLocalV5ActionRow"><PhoneAction contact={contact} /></div>
+          ) : null}
+        </div>
+        <PerformanceLocalV5ProviderDisabledForm
+          compact={false}
+          configuration={estimateForm}
+          onFormFocusRiskChange={onFormFocusRiskChange}
+        />
+      </div>
+    </section>
+  );
+}
+
 export function PerformanceLocalV5CampaignBanner({ campaign }: { campaign: PerformanceLocalCampaign }) {
   const singleAction = campaign.intent === "evergreen_conversion" &&
     performanceLocalActionCopyEquivalent(campaign.campaignLabel, campaign.ctaLabel);
@@ -1106,8 +1183,8 @@ export function PerformanceLocalV5TopConversionStack({
         </div>
       ) : null}
       {resolvedAction ? (
-        <aside className="performanceLocalV5StickyActionBanner" aria-label={resolvedAction.label}>
-          <a href={resolvedAction.destination}>{resolvedAction.label}</a>
+        <aside className="performanceLocalV5StickyActionBanner" aria-label={resolvedAction.accessibilityLabel ?? resolvedAction.label}>
+          <a href={resolvedAction.destination} aria-label={resolvedAction.accessibilityLabel}>{resolvedAction.label}</a>
         </aside>
       ) : null}
     </div>

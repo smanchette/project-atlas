@@ -38,14 +38,19 @@ test("the V5 operator review is loopback-only and fails closed elsewhere", () =>
   }
 });
 
-test("App exposes exactly one lazy local V5 route", () => {
+test("App exposes exactly four explicit lazy local V5 preview routes", () => {
   const app = source("src/App.tsx");
   assert.match(app, /lazy\(\s*\(\) => import\("\.\/pages\/PerformanceLocalV5ReviewPage"\)/);
   assert.match(
     app,
-    /path="\/theme-lab\/performance-local\/v5\/generated-pages\/:id"\s*element=\{<ThemeLabRoute><PerformanceLocalV5ReviewPage \/><\/ThemeLabRoute>\}/,
+    /path="\/theme-lab\/performance-local\/v5\/generated-pages\/:id"\s*element=\{<ThemeLabRoute><PerformanceLocalV5ReviewPage previewSurface="generated_page" \/><\/ThemeLabRoute>\}/,
   );
-  assert.equal(count(app, "/theme-lab/performance-local/v5/generated-pages/:id"), 1);
+  assert.match(app, /path="\/theme-lab\/performance-local\/v5\/generated-pages\/:id\/special"[\s\S]*?previewSurface="special"/);
+  assert.match(app, /path="\/theme-lab\/performance-local\/v5\/generated-pages\/:id\/request-an-estimate"[\s\S]*?previewSurface="estimate"/);
+  assert.match(app, /path="\/theme-lab\/performance-local\/v5\/generated-pages\/:id\/sticky-disabled"[\s\S]*?previewSurface="sticky_disabled"/);
+  assert.equal(count(app, "/theme-lab/performance-local/v5/generated-pages/:id"), 4);
+  assert.equal(count(app, "/theme-lab/performance-local/v5/generated-pages/:id/"), 3);
+  assert.doesNotMatch(app, /performance-local\/v5\/generated-pages\/:id\/(?:\*|:surface|:variant)/);
 });
 
 test("the review exposes the exact draft label, representative selector, modes, V4 control, and banner toggle", () => {
@@ -71,6 +76,11 @@ test("review data access is read-only, exact-scope, and uses governed V3 convers
   assert.match(review, /sameCanonicalJson\(requestedPage, delivery\.page\)/);
   assert.doesNotMatch(review, /method:\s*["'](?:POST|PUT|PATCH|DELETE)["']/);
   assert.doesNotMatch(review, /localStorage|sessionStorage|indexedDB|document\.cookie/);
+  assert.match(review, /DEMO SPECIAL — NOT SITE CONTENT/);
+  assert.match(review, /demoSpecialEnabled = previewSurface === "special" \|\| previewSurface === "estimate"/);
+  assert.match(review, /previewSurface === "sticky_disabled"/);
+  assert.match(review, /plannedPage\.planning_record\.effective_answers\.primary_action/);
+  assert.doesNotMatch(review, /introduction:\s*configuration\.estimateForm\.previewNotice|resolved_data\.tagline/);
 });
 
 test("direct governed targets may be nonrepresentative but must remain current, supported, and in Website scope", () => {

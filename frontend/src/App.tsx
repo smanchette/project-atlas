@@ -209,8 +209,20 @@ function App() {
         element={<ThemeLabRoute><PerformanceLocalV4ReviewPage /></ThemeLabRoute>}
       />
       <Route
+        path="/theme-lab/performance-local/v5/generated-pages/:id/special"
+        element={<ThemeLabRoute><PerformanceLocalV5ReviewPage previewSurface="special" /></ThemeLabRoute>}
+      />
+      <Route
+        path="/theme-lab/performance-local/v5/generated-pages/:id/request-an-estimate"
+        element={<ThemeLabRoute><PerformanceLocalV5ReviewPage previewSurface="estimate" /></ThemeLabRoute>}
+      />
+      <Route
+        path="/theme-lab/performance-local/v5/generated-pages/:id/sticky-disabled"
+        element={<ThemeLabRoute><PerformanceLocalV5ReviewPage previewSurface="sticky_disabled" /></ThemeLabRoute>}
+      />
+      <Route
         path="/theme-lab/performance-local/v5/generated-pages/:id"
-        element={<ThemeLabRoute><PerformanceLocalV5ReviewPage /></ThemeLabRoute>}
+        element={<ThemeLabRoute><PerformanceLocalV5ReviewPage previewSurface="generated_page" /></ThemeLabRoute>}
       />
       <Route
         path="/theme-lab/performance-local/components"

@@ -36,9 +36,12 @@ import {
 } from "../components/performanceLocalV5LayoutContract";
 import PerformanceLocalV4Renderer from "../components/PerformanceLocalV4Renderer";
 import PerformanceLocalV5Renderer, {
+  type PerformanceLocalV5PreviewSurface,
   type PerformanceLocalV5ReadinessProjection,
 } from "../components/PerformanceLocalV5Renderer";
 import type { PerformanceLocalV5ReviewMode } from "../components/PerformanceLocalV5Layouts";
+import type { PerformanceLocalV5ActionConfiguration } from "../components/performanceLocalV5Actions";
+import { performanceLocalFormDomId } from "../components/PerformanceLocalRenderer";
 import {
   PERFORMANCE_LOCAL_V5_DEMO_MEDIA_LABEL,
   PERFORMANCE_LOCAL_V5_PREVIEW_LABEL,
@@ -86,7 +89,11 @@ const PAGE_TYPE_ORDER: readonly PerformanceLocalV5PageType[] = Object.freeze([
   "city_service",
 ]);
 
-export function PerformanceLocalV5ReviewPage() {
+export function PerformanceLocalV5ReviewPage({
+  previewSurface = "generated_page",
+}: {
+  previewSurface?: PerformanceLocalV5PreviewSurface;
+}) {
   const hostname = typeof window === "undefined" ? "localhost" : window.location.hostname;
   if (!isLoopbackThemeLabHost(hostname)) {
     return (
@@ -97,14 +104,18 @@ export function PerformanceLocalV5ReviewPage() {
       </main>
     );
   }
-  return <PerformanceLocalV5ReviewContent />;
+  return <PerformanceLocalV5ReviewContent previewSurface={previewSurface} />;
 }
 
-function PerformanceLocalV5ReviewContent() {
+function PerformanceLocalV5ReviewContent({
+  previewSurface,
+}: {
+  previewSurface: PerformanceLocalV5PreviewSurface;
+}) {
   const { id } = useParams();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const requestKey = id ?? "missing";
+  const requestKey = `${id ?? "missing"}:${previewSurface}`;
   const [data, setData] = useState<ReviewData | null>(null);
   const [requestStateKey, setRequestStateKey] = useState("");
   const [loading, setLoading] = useState(true);
@@ -228,6 +239,12 @@ function PerformanceLocalV5ReviewContent() {
   const governedPresentation = resolvedThemePresentation(delivery, viewportWidth);
   if (!governedPresentation) return <ReviewState message="The governed Theme presentation is invalid for this V5 review." error />;
   const stickyConfigured = Boolean(configuration.stickyActions.enabled && configuration.stickyActions.mobileStickyActionsEnabled);
+  const actionConfiguration = performanceLocalV5ThemeLabActionConfiguration(
+    configuration,
+    delivery.page.id,
+    plannedPage,
+    previewSurface,
+  );
   const selectedRepresentativeId = representatives.some((candidate) => candidate.generatedPageId === delivery.page.id)
     ? delivery.page.id
     : "";
@@ -294,6 +311,7 @@ function PerformanceLocalV5ReviewContent() {
       >
         {rendererSelection === "v5" ? (
           <PerformanceLocalV5Renderer
+            actionConfiguration={actionConfiguration}
             audit={v5Audit}
             campaignBannerEnabled={campaignBannerEnabled}
             composition={delivery.composition}
@@ -301,6 +319,7 @@ function PerformanceLocalV5ReviewContent() {
             previewedAt={previewedAt}
             readiness={readiness}
             reviewMode={reviewMode}
+            previewSurface={previewSurface}
             v3Configuration={configuration}
           />
         ) : (
@@ -482,6 +501,75 @@ function deliveryReadinessProjection(delivery: PerformanceLocalDeliveryRead): Pe
   const qaReady = delivery.page.qa_status === "ready" && !delivery.blockers.some((blocker) => blocker.category === "qa");
   const formReady = delivery.form_readiness.status === "ready" && delivery.form_readiness.can_submit === true;
   return Object.freeze({ mediaReady, qaReady, formReady, activationReady: false, exportReady: false, publicationReady: false });
+}
+
+export function performanceLocalV5ThemeLabActionConfiguration(
+  configuration: PerformanceLocalDeliveryConfiguration,
+  generatedPageId: number,
+  plannedPage: PlannedPage,
+  previewSurface: PerformanceLocalV5PreviewSurface,
+): PerformanceLocalV5ActionConfiguration {
+  const baseRoute = `/theme-lab/performance-local/v5/generated-pages/${generatedPageId}`;
+  const estimateRoute = `${baseRoute}/request-an-estimate`;
+  const specialRoute = `${baseRoute}/special`;
+  const formIdentity = {
+    componentConfigurationId: configuration.estimateForm.componentConfigurationId,
+    componentInstanceKey: configuration.estimateForm.componentInstanceKey,
+    destination: `#${performanceLocalFormDomId(configuration.estimateForm.componentConfigurationId)}`,
+  };
+  const campaign = configuration.campaign;
+  const approvedPrimaryAction = plannedPage.planning_record.effective_answers.primary_action;
+  const governedEstimateIntroduction = typeof approvedPrimaryAction === "string"
+    ? approvedPrimaryAction
+    : "";
+  const estimateEnabled = Boolean(
+    campaign?.enabled &&
+    campaign.intent === "evergreen_conversion" &&
+    campaign.campaignLabel === "Request an Estimate" &&
+    campaign.ctaLabel === "Request an Estimate" &&
+    campaign.ctaDestination === formIdentity.destination &&
+    configuration.estimateForm.ctaLabel === "Request an Estimate",
+  );
+  const estimate: PerformanceLocalV5ActionConfiguration["estimate"] = estimateEnabled ? {
+    enabled: true,
+    formIdentity,
+    heading: "Request an Estimate",
+    introduction: governedEstimateIntroduction,
+    phoneAlternativeEnabled: Boolean(configuration.governedContact),
+    route: estimateRoute,
+  } : { enabled: false };
+  const demoSpecialEnabled = previewSurface === "special" || previewSurface === "estimate";
+  const demoSpecialLabel = "DEMO SPECIAL — NOT SITE CONTENT";
+  const special: PerformanceLocalV5ActionConfiguration["special"] = demoSpecialEnabled ? {
+    callActionEnabled: true,
+    description: "No public Special is configured. This local Theme Lab preview demonstrates the optional Special-page layout only.",
+    enabled: true,
+    estimateActionEnabled: true,
+    expiresAt: null,
+    headline: demoSpecialLabel,
+    route: specialRoute,
+  } : { enabled: false };
+  const sticky: PerformanceLocalV5ActionConfiguration["sticky"] = previewSurface === "sticky_disabled"
+    ? { mode: "disabled" }
+    : demoSpecialEnabled
+      ? {
+          accessibilityLabel: demoSpecialLabel,
+          destination: specialRoute,
+          mode: "special",
+          publicLabel: demoSpecialLabel,
+        }
+      : {
+          accessibilityLabel: "Request an Estimate",
+          destination: estimateRoute,
+          mode: "estimate",
+          publicLabel: "Request an Estimate",
+        };
+  return Object.freeze({
+    authorizedServicePromotionDestinations: Object.freeze([]),
+    estimate,
+    special,
+    sticky,
+  });
 }
 
 function resolvedThemePresentation(delivery: PerformanceLocalDeliveryRead, viewportWidth: number): ThemePresentation | null {

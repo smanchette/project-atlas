@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
@@ -14,7 +15,6 @@ import {
   type PerformanceLocalV5TopAction,
 } from "../src/components/PerformanceLocalV5Layouts";
 import PerformanceLocalV5Renderer, {
-  performanceLocalV5CityServiceTopAction,
   performanceLocalV5FooterBoundaryReached,
   type PerformanceLocalV5ReadinessProjection,
 } from "../src/components/PerformanceLocalV5Renderer";
@@ -25,6 +25,11 @@ import PerformanceLocalRenderer, {
   PerformanceLocalGovernedContact,
 } from "../src/components/PerformanceLocalRenderer";
 import type { PerformanceLocalDeliveryConfiguration } from "../src/components/performanceLocalDelivery";
+import {
+  resolvePerformanceLocalV5TopAction,
+  type PerformanceLocalV5ActionConfiguration,
+  type PerformanceLocalV5FormIdentity,
+} from "../src/components/performanceLocalV5Actions";
 import type {
   PerformanceLocalV5CountyCityPresentation,
   PerformanceLocalV5DestinationConsumptionRecord,
@@ -177,6 +182,7 @@ test("City-Service changes only the governed top presentation and preserves the 
     stickyActionBar: false,
     trustStrip: false,
   };
+  const actionConfiguration = cityServiceActionConfiguration(configuration, "generated_page");
   const legacyCapabilities = renderToStaticMarkup(
     <StaticRouter location="/theme-lab/performance-local/v5/generated-pages/41">
       <PerformanceLocalRenderer
@@ -217,6 +223,7 @@ test("City-Service changes only the governed top presentation and preserves the 
     const wrapped = renderToStaticMarkup(
       <StaticRouter location="/theme-lab/performance-local/v5/generated-pages/41">
         <PerformanceLocalV5Renderer
+          actionConfiguration={actionConfiguration}
           audit={audit}
           campaignBannerEnabled={campaignBannerEnabled}
           composition={composition}
@@ -224,6 +231,7 @@ test("City-Service changes only the governed top presentation and preserves the 
           previewedAt={previewedAt}
           readiness={cityServiceReadiness}
           reviewMode="truthful"
+          previewSurface="generated_page"
           v3Configuration={configuration}
         />
       </StaticRouter>,
@@ -231,11 +239,11 @@ test("City-Service changes only the governed top presentation and preserves the 
     assert.match(wrapped, /class="performanceLocalV5CityServicePreview"/);
     assert.match(wrapped, /data-v5-preservation-control="below-hero-legacy-subtree"/);
     assert.match(wrapped, /data-v5-top-preview="hero-and-conversion-stack"/);
-    assert.match(wrapped, /data-v5-top-action-mode="request_estimate"/);
+    assert.match(wrapped, /data-v5-top-action-mode="estimate"/);
     assert.match(wrapped, /href="tel:5550100200"[^>]*aria-label="Call \(555\) 010-0200"/);
     assert.match(wrapped, /<strong>\(555\) 010-0200<\/strong>/);
     assert.match(wrapped, /class="performanceLocalV5StickyActionBanner"[^>]*aria-label="Request an Estimate"/);
-    assert.match(wrapped, /href="#performance-local-form-config-91">Request an Estimate<\/a>/);
+    assert.match(wrapped, /href="\/theme-lab\/performance-local\/v5\/generated-pages\/41\/request-an-estimate"[^>]*>Request an Estimate<\/a>/);
     assert.doesNotMatch(wrapped, /class="performanceLocalCampaign/);
     assert.doesNotMatch(wrapped, /class="performanceLocalStickyActions/);
     assert.doesNotMatch(wrapped, /class="performanceLocalTrustStrip"/);
@@ -259,6 +267,7 @@ test("City-Service changes only the governed top presentation and preserves the 
     assert.equal(count(wrapped, 'data-source-instance-key="media_placement:hero"'), 1);
     assert.match(wrapped, /alt="Flo-Zone technician outside a branded tented Orlando property"/);
     assert.match(wrapped, /object-position:50% 50%/);
+    assert.doesNotMatch(wrapped, /DEMO SPECIAL — NOT SITE CONTENT/);
     const start = wrapped.indexOf('<div class="performanceLocalSite"');
     assert.ok(start >= 0, wrapped);
     const delegatedSubtree = wrapped.slice(start, -"</div>".length);
@@ -270,7 +279,7 @@ test("top conversion presenter supports all permanent action modes and fails clo
   const destination = "#performance-local-form-config-91";
   const enabledModes: readonly PerformanceLocalV5TopAction[] = [
     { mode: "special", label: "Exact governed special", destination },
-    { mode: "request_estimate", label: "Request an Estimate", destination },
+    { accessibilityLabel: "Request an Estimate page", mode: "estimate", label: "Request an Estimate", destination },
     { mode: "service_promotion", label: "Exact governed service promotion", destination },
   ];
   for (const action of enabledModes) {
@@ -281,6 +290,7 @@ test("top conversion presenter supports all permanent action modes and fails clo
     assert.match(markup, /data-v5-top-action-enabled="true"/);
     assert.equal(count(markup, "performanceLocalV5StickyActionBanner"), 1);
     assert.match(markup, new RegExp(`href="${destination}"`));
+    if (action.mode === "estimate") assert.match(markup, /aria-label="Request an Estimate page"/);
   }
   const disabled = renderToStaticMarkup(
     <PerformanceLocalV5TopConversionStack action={{ mode: "disabled" }} callLabel="Call" contact={governedContact} />,
@@ -289,17 +299,236 @@ test("top conversion presenter supports all permanent action modes and fails clo
   assert.match(disabled, /data-v5-top-action-enabled="false"/);
   assert.doesNotMatch(disabled, /performanceLocalV5StickyActionBanner/);
   assert.match(disabled, /href="tel:5550100200"/);
+});
 
-  const configured = cityServiceConfiguration();
-  const exactDestination = `#${performanceLocalFormDomId(configured.estimateForm.componentConfigurationId)}`;
-  assert.deepEqual(performanceLocalV5CityServiceTopAction(configured, exactDestination), {
-    destination: exactDestination,
-    label: "Request an Estimate",
-    mode: "request_estimate",
+test("the centralized resolver authorizes exact Estimate destinations and rejects unsafe or unbound configuration", () => {
+  const delivery = cityServiceConfiguration();
+  const exactFormIdentity = cityServiceFormIdentity(delivery);
+  const configured = cityServiceActionConfiguration(delivery, "generated_page");
+  const evaluatedAt = new Date("2026-08-23T18:00:00Z");
+  const exactRoute = resolvePerformanceLocalV5TopAction({
+    configuration: configured,
+    currentRoute: "/theme-lab/performance-local/v5/generated-pages/41",
+    currentSurface: "site",
+    evaluatedAt,
+    exactFormIdentity,
   });
-  assert.deepEqual(performanceLocalV5CityServiceTopAction({ ...configured, campaign: null }, exactDestination), {
-    mode: "disabled",
+  assert.deepEqual(exactRoute, {
+    action: {
+      accessibilityLabel: "Request an Estimate",
+      destination: "/theme-lab/performance-local/v5/generated-pages/41/request-an-estimate",
+      label: "Request an Estimate",
+      mode: "estimate",
+    },
+    reason: "configured_action",
   });
+
+  const exactAnchor = resolvePerformanceLocalV5TopAction({
+    configuration: {
+      ...configured,
+      sticky: { destination: exactFormIdentity.destination, mode: "estimate", publicLabel: "Request an Estimate" },
+    },
+    currentRoute: "/theme-lab/performance-local/v5/generated-pages/41",
+    currentSurface: "site",
+    evaluatedAt,
+    exactFormIdentity,
+  });
+  assert.equal(exactAnchor.action.mode === "estimate" ? exactAnchor.action.destination : null, exactFormIdentity.destination);
+
+  for (const configuration of [
+    { ...configured, sticky: { destination: "https://example.test/estimate", mode: "estimate", publicLabel: "Request an Estimate" } },
+    { ...configured, sticky: { destination: "//example.test/estimate", mode: "estimate", publicLabel: "Request an Estimate" } },
+    { ...configured, sticky: { destination: "/unauthorized-estimate", mode: "estimate", publicLabel: "Request an Estimate" } },
+    { ...configured, estimate: { enabled: false } },
+    { ...configured, estimate: configured.estimate.enabled ? { ...configured.estimate, introduction: " " } : configured.estimate },
+  ] as readonly PerformanceLocalV5ActionConfiguration[]) {
+    assert.deepEqual(resolvePerformanceLocalV5TopAction({
+      configuration,
+      currentRoute: "/theme-lab/performance-local/v5/generated-pages/41",
+      currentSurface: "site",
+      evaluatedAt,
+      exactFormIdentity,
+    }).action, { mode: "disabled" });
+  }
+});
+
+test("Special expiration, fallback, and self-link decisions are deterministic and fail closed", () => {
+  const delivery = cityServiceConfiguration();
+  const exactFormIdentity = cityServiceFormIdentity(delivery);
+  const configured = cityServiceActionConfiguration(delivery, "special");
+  assert.equal(configured.special.enabled, true);
+  const evaluatedAt = new Date("2026-08-23T18:00:00Z");
+  const siteInput = {
+    currentRoute: "/theme-lab/performance-local/v5/generated-pages/41",
+    currentSurface: "site" as const,
+    evaluatedAt,
+    exactFormIdentity,
+  };
+  const active = resolvePerformanceLocalV5TopAction({ configuration: configured, ...siteInput });
+  assert.equal(active.action.mode, "special");
+
+  const expired: PerformanceLocalV5ActionConfiguration = {
+    ...configured,
+    special: configured.special.enabled ? { ...configured.special, expiresAt: "2026-08-23T17:59:59Z" } : configured.special,
+  };
+  const expiredResult = resolvePerformanceLocalV5TopAction({ configuration: expired, ...siteInput });
+  assert.equal(expiredResult.reason, "estimate_fallback");
+  assert.equal(expiredResult.action.mode, "estimate");
+
+  for (const sticky of [
+    { destination: configured.special.enabled ? configured.special.route : "/invalid", mode: "special", publicLabel: " " },
+    { accessibilityLabel: " ", destination: configured.special.enabled ? configured.special.route : "/invalid", mode: "special", publicLabel: "Exact governed special" },
+    { destination: "/unauthorized-special", mode: "special", publicLabel: "Exact governed special" },
+  ] as const) {
+    const invalidExpired: PerformanceLocalV5ActionConfiguration = { ...expired, sticky };
+    const invalidExpiredResult = resolvePerformanceLocalV5TopAction({ configuration: invalidExpired, ...siteInput });
+    assert.equal(invalidExpiredResult.reason, "invalid_configuration");
+    assert.deepEqual(invalidExpiredResult.action, { mode: "disabled" });
+  }
+
+  const exactBoundary: PerformanceLocalV5ActionConfiguration = {
+    ...configured,
+    special: configured.special.enabled ? { ...configured.special, expiresAt: "2026-08-23T18:00:00Z" } : configured.special,
+  };
+  assert.equal(resolvePerformanceLocalV5TopAction({ configuration: exactBoundary, ...siteInput }).reason, "estimate_fallback");
+
+  const invalidExpiration: PerformanceLocalV5ActionConfiguration = {
+    ...configured,
+    special: configured.special.enabled ? { ...configured.special, expiresAt: "August eventually" } : configured.special,
+  };
+  const invalidResult = resolvePerformanceLocalV5TopAction({ configuration: invalidExpiration, ...siteInput });
+  assert.equal(invalidResult.reason, "invalid_configuration");
+  assert.deepEqual(invalidResult.action, { mode: "disabled" });
+
+  const noFallback: PerformanceLocalV5ActionConfiguration = { ...expired, estimate: { enabled: false } };
+  assert.equal(resolvePerformanceLocalV5TopAction({ configuration: noFallback, ...siteInput }).reason, "expired_without_fallback");
+
+  const specialSelfLink = resolvePerformanceLocalV5TopAction({
+    configuration: configured,
+    currentRoute: configured.special.enabled ? configured.special.route : "/invalid",
+    currentSurface: "special",
+    evaluatedAt,
+    exactFormIdentity,
+  });
+  assert.equal(specialSelfLink.reason, "self_link_switched_to_estimate");
+  assert.equal(specialSelfLink.action.mode, "estimate");
+
+  const specialWithoutBodyEstimate = configured.special.enabled ? {
+    ...configured,
+    special: { ...configured.special, estimateActionEnabled: false },
+  } : configured;
+  const specialWithoutBodyEstimateSelfLink = resolvePerformanceLocalV5TopAction({
+    configuration: specialWithoutBodyEstimate,
+    currentRoute: specialWithoutBodyEstimate.special.enabled ? specialWithoutBodyEstimate.special.route : "/invalid",
+    currentSurface: "special",
+    evaluatedAt,
+    exactFormIdentity,
+  });
+  assert.equal(specialWithoutBodyEstimateSelfLink.reason, "self_link_switched_to_estimate");
+  assert.equal(specialWithoutBodyEstimateSelfLink.action.mode, "estimate");
+
+  const identicalRoutes: PerformanceLocalV5ActionConfiguration = configured.estimate.enabled && configured.special.enabled ? {
+    ...configured,
+    special: { ...configured.special, route: configured.estimate.route },
+    sticky: {
+      destination: configured.estimate.route,
+      mode: "special",
+      publicLabel: "Exact governed special",
+    },
+  } : configured;
+  const identicalRouteResult = resolvePerformanceLocalV5TopAction({ configuration: identicalRoutes, ...siteInput });
+  assert.equal(identicalRouteResult.reason, "invalid_configuration");
+  assert.deepEqual(identicalRouteResult.action, { mode: "disabled" });
+
+  const estimateSticky: PerformanceLocalV5ActionConfiguration = configured.estimate.enabled ? {
+    ...configured,
+    sticky: {
+      destination: configured.estimate.route,
+      mode: "estimate",
+      publicLabel: "Request an Estimate",
+    },
+  } : configured;
+  const estimateSelfLink = resolvePerformanceLocalV5TopAction({
+    configuration: estimateSticky,
+    currentRoute: estimateSticky.estimate.enabled ? estimateSticky.estimate.route : "/invalid",
+    currentSurface: "estimate",
+    evaluatedAt,
+    exactFormIdentity,
+  });
+  assert.equal(estimateSelfLink.reason, "self_link_switched_to_special");
+  assert.equal(estimateSelfLink.action.mode, "special");
+});
+
+test("service promotion mode accepts only an explicitly authorized internal route", () => {
+  const delivery = cityServiceConfiguration();
+  const exactFormIdentity = cityServiceFormIdentity(delivery);
+  const base = cityServiceActionConfiguration(delivery, "generated_page");
+  const evaluatedAt = new Date("2026-08-23T18:00:00Z");
+  const route = "/theme-lab/performance-local/v5/generated-pages/73";
+  const configured: PerformanceLocalV5ActionConfiguration = {
+    ...base,
+    authorizedServicePromotionDestinations: [route],
+    sticky: { destination: route, mode: "service_promotion", publicLabel: "Drywood Termite Tenting" },
+  };
+  assert.equal(resolvePerformanceLocalV5TopAction({
+    configuration: configured,
+    currentRoute: "/theme-lab/performance-local/v5/generated-pages/41",
+    currentSurface: "site",
+    evaluatedAt,
+    exactFormIdentity,
+  }).action.mode, "service_promotion");
+  for (const destination of ["/not-allowlisted", "https://example.test/service", "//example.test/service"]) {
+    const rejected: PerformanceLocalV5ActionConfiguration = {
+      ...configured,
+      sticky: { ...configured.sticky, destination } as PerformanceLocalV5ActionConfiguration["sticky"],
+    };
+    assert.deepEqual(resolvePerformanceLocalV5TopAction({
+      configuration: rejected,
+      currentRoute: "/theme-lab/performance-local/v5/generated-pages/41",
+      currentSurface: "site",
+      evaluatedAt,
+      exactFormIdentity,
+    }).action, { mode: "disabled" });
+  }
+});
+
+test("conditional Special and Estimate surfaces reuse the shared shell and the one inert governed form", () => {
+  const special = renderCityServiceSurface("special");
+  assert.match(special, /class="performanceLocalV5Site performanceLocalV5ConditionalPage"/);
+  assert.match(special, /data-v5-conditional-surface="special"/);
+  assert.match(special, /data-v5-action-resolution="self_link_switched_to_estimate"/);
+  assert.match(special, /data-v5-top-action-mode="estimate"/);
+  assert.equal(count(special, "DEMO SPECIAL — NOT SITE CONTENT"), 1);
+  assert.match(special, /No public Special is configured\. This local Theme Lab preview demonstrates the optional Special-page layout only\./);
+  assert.match(special, /href="tel:5550100200"/);
+  assert.match(special, /href="\/theme-lab\/performance-local\/v5\/generated-pages\/41\/request-an-estimate"/);
+  assert.doesNotMatch(special, /performanceLocalV5SpecialDetails|<form/);
+  assert.match(special, /class="performanceLocalV5Header"/);
+  assert.match(special, /class="performanceLocalV5Footer"/);
+  assert.doesNotMatch(special, /performanceLocalV5StickyActions/);
+
+  const estimate = renderCityServiceSurface("estimate");
+  assert.match(estimate, /data-v5-conditional-surface="estimate"/);
+  assert.match(estimate, /data-v5-top-action-mode="special"/);
+  assert.equal(count(estimate, "DEMO SPECIAL — NOT SITE CONTENT"), 3);
+  assert.equal(count(estimate, "<form"), 1);
+  assert.equal(count(estimate, 'data-field-key="'), 5);
+  assert.equal(count(estimate, "readonly=\"\""), 5);
+  assert.equal(count(estimate, "Preview only. Information entered here is not submitted or saved."), 1);
+  assert.match(estimate, /class="performanceLocalV5ConditionalIntroduction">Request an estimate for the service in this area\.<\/p>/);
+  assert.match(estimate, /data-v5-maximum-field-count="6"/);
+  assert.match(estimate, /data-provider-configured="false"/);
+  assert.match(estimate, /data-collects-data="false"/);
+  assert.match(estimate, /<button type="submit" disabled="">Request an Estimate<\/button>/);
+  assert.equal(count(estimate, `id="${performanceLocalFormDomId(91)}"`), 1);
+  assert.doesNotMatch(estimate, /performanceLocalV5StickyActions/);
+
+  const disabled = renderCityServiceSurface("sticky_disabled");
+  assert.match(disabled, /class="performanceLocalV5CityServicePreview"/);
+  assert.match(disabled, /data-v5-top-action-enabled="false"/);
+  assert.match(disabled, /data-v5-top-action-mode="disabled"/);
+  assert.doesNotMatch(disabled, /performanceLocalV5StickyActionBanner/);
+  assert.match(disabled, /performanceLocalV5StickyPhoneBar/);
 });
 
 test("V5 styles are additive, namespace-only, responsive, and never target the screenshot attribute", () => {
@@ -334,6 +563,13 @@ test("V5 styles are additive, namespace-only, responsive, and never target the s
   assert.match(v5, /@media \(max-width:\s*760px\)[\s\S]*?\.performanceLocalHeroMedia[\s\S]*?grid-row:\s*visual-start \/ visual-end/);
   assert.match(v5, /@media \(max-width:\s*760px\)[\s\S]*?\.performanceLocalHeroMedia figcaption[\s\S]*?display:\s*none/);
   assert.doesNotMatch(v5, /@media \(max-width:\s*760px\)[\s\S]*?min-height:\s*1220px/);
+  const cityMarker = css.indexOf("/* Performance Local V5 City-Service: approved top conversion and over-photo hero preview. */");
+  const conditionalMarker = css.indexOf("/* Performance Local V5 conditional Special and Estimate destination previews. */");
+  assert.ok(cityMarker > 0 && conditionalMarker > cityMarker);
+  assert.equal(
+    createHash("sha256").update(css.slice(cityMarker, conditionalMarker)).digest("hex"),
+    "faab9fa07f79266de787dee4f5a3e3d507e3240ceee3fc7b8a23c52234246164",
+  );
 });
 
 test("footer collision boundary is fail-closed and deterministic", () => {
@@ -627,6 +863,23 @@ function cityServiceComposition(): PageComposition {
     display_name: "Flo-Zone",
     tagline: "Drywood Termite Solution",
   });
+  const primaryNavigation = component("primary_navigation", "primary_navigation", {
+    label: "Primary Navigation",
+    items: [{
+      label: "Home",
+      navigation_item_id: 1,
+      parent_navigation_item_id: null,
+      position: 0,
+      slug: "home",
+      status: "active",
+      target_generated_page_id: 69,
+      target_planned_page_id: 79,
+    }],
+  });
+  const utilityNavigation = component("utility_navigation", "utility_navigation", {
+    label: "Utility Navigation",
+    items: [],
+  });
   const hero = component("hero", "hero", {
     page_type: "city_service",
     title: "Drywood Termite Tenting in Orlando, Florida",
@@ -658,6 +911,21 @@ function cityServiceComposition(): PageComposition {
     display_name: "Flo-Zone",
     license_number: "JB360566",
   });
+  const footerNavigation = component("footer_navigation", "footer_navigation", {
+    label: "Footer Navigation",
+    items: [],
+  });
+  const components = [
+    header,
+    primaryNavigation,
+    utilityNavigation,
+    hero,
+    heroMedia,
+    trust,
+    finalCta,
+    footerNavigation,
+    footer,
+  ];
   return {
     id: 801,
     website_id: 1,
@@ -665,9 +933,9 @@ function cityServiceComposition(): PageComposition {
     planned_page_id: 1001,
     generated_page_id: 41,
     composition_version: 8,
-    generated_components: [header, hero, heroMedia, trust, finalCta, footer],
+    generated_components: components,
     operator_decisions: [],
-    effective_components: [header, hero, heroMedia, trust, finalCta, footer],
+    effective_components: components,
     source_snapshot: { page_type: "city_service" },
     source_hash: "a".repeat(64),
     resolved_theme: selectedTheme(1),
@@ -684,6 +952,28 @@ function cityServiceAudit(): PerformanceLocalV5LayoutAudit {
     layoutReady: true,
     layoutKey: "performance-local-v5-city-service",
     pageType: "city_service",
+    blockers: [],
+    consumption: [
+      "website_header",
+      "primary_navigation",
+      "utility_navigation",
+      "hero",
+      "media_placement:hero",
+      "trust_license",
+      "final_cta",
+      "footer_navigation",
+      "website_footer",
+    ].map((instanceKey) => ({ instanceKey })),
+    regions: [
+      {
+        regionKey: "site_header",
+        sourceInstanceKeys: ["website_header", "primary_navigation", "utility_navigation"],
+      },
+      {
+        regionKey: "site_footer",
+        sourceInstanceKeys: ["footer_navigation", "website_footer"],
+      },
+    ],
   } as PerformanceLocalV5LayoutAudit;
 }
 
@@ -753,6 +1043,86 @@ function cityServiceConfiguration(): PerformanceLocalDeliveryConfiguration {
       trustStrip: true,
     },
   } as PerformanceLocalDeliveryConfiguration;
+}
+
+function cityServiceFormIdentity(
+  configuration: PerformanceLocalDeliveryConfiguration,
+): PerformanceLocalV5FormIdentity {
+  return {
+    componentConfigurationId: configuration.estimateForm.componentConfigurationId,
+    componentInstanceKey: configuration.estimateForm.componentInstanceKey,
+    destination: `#${performanceLocalFormDomId(configuration.estimateForm.componentConfigurationId)}`,
+  };
+}
+
+function cityServiceActionConfiguration(
+  configuration: PerformanceLocalDeliveryConfiguration,
+  surface: "estimate" | "generated_page" | "special" | "sticky_disabled",
+): PerformanceLocalV5ActionConfiguration {
+  const baseRoute = "/theme-lab/performance-local/v5/generated-pages/41";
+  const estimateRoute = `${baseRoute}/request-an-estimate`;
+  const specialRoute = `${baseRoute}/special`;
+  const specialEnabled = surface === "special" || surface === "estimate";
+  return {
+    authorizedServicePromotionDestinations: [],
+    estimate: {
+      enabled: true,
+      formIdentity: cityServiceFormIdentity(configuration),
+      heading: "Request an Estimate",
+      introduction: "Request an estimate for the service in this area.",
+      phoneAlternativeEnabled: true,
+      route: estimateRoute,
+    },
+    special: specialEnabled ? {
+      callActionEnabled: true,
+      description: "No public Special is configured. This local Theme Lab preview demonstrates the optional Special-page layout only.",
+      enabled: true,
+      estimateActionEnabled: true,
+      expiresAt: null,
+      headline: "DEMO SPECIAL — NOT SITE CONTENT",
+      route: specialRoute,
+    } : { enabled: false },
+    sticky: surface === "sticky_disabled" ? { mode: "disabled" } : specialEnabled ? {
+      accessibilityLabel: "DEMO SPECIAL — NOT SITE CONTENT",
+      destination: specialRoute,
+      mode: "special",
+      publicLabel: "DEMO SPECIAL — NOT SITE CONTENT",
+    } : {
+      accessibilityLabel: "Request an Estimate",
+      destination: estimateRoute,
+      mode: "estimate",
+      publicLabel: "Request an Estimate",
+    },
+  };
+}
+
+function renderCityServiceSurface(
+  surface: "estimate" | "generated_page" | "special" | "sticky_disabled",
+): string {
+  const configuration = cityServiceConfiguration();
+  const suffix = surface === "special"
+    ? "/special"
+    : surface === "estimate"
+      ? "/request-an-estimate"
+      : surface === "sticky_disabled"
+        ? "/sticky-disabled"
+        : "";
+  return renderToStaticMarkup(
+    <StaticRouter location={`/theme-lab/performance-local/v5/generated-pages/41${suffix}`}>
+      <PerformanceLocalV5Renderer
+        actionConfiguration={cityServiceActionConfiguration(configuration, surface)}
+        audit={cityServiceAudit()}
+        campaignBannerEnabled={false}
+        composition={cityServiceComposition()}
+        page={cityServicePage()}
+        previewedAt={new Date("2026-08-23T18:00:00Z")}
+        readiness={cityServiceReadiness}
+        reviewMode="truthful"
+        previewSurface={surface}
+        v3Configuration={configuration}
+      />
+    </StaticRouter>,
+  );
 }
 
 function estimateForm(): PerformanceLocalEstimateFormConfiguration {

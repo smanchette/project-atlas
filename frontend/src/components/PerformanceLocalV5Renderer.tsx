@@ -18,14 +18,22 @@ import type { PerformanceLocalV5LayoutAudit } from "./performanceLocalV5LayoutCo
 import {
   PerformanceLocalV5BackToTop,
   PerformanceLocalV5CampaignBanner,
+  PerformanceLocalV5EstimatePageLayout,
   PerformanceLocalV5LayoutBody,
   PerformanceLocalV5SiteFooter,
   PerformanceLocalV5SiteHeader,
+  PerformanceLocalV5SpecialPageLayout,
   PerformanceLocalV5StickyActions,
   PerformanceLocalV5TopConversionStack,
   type PerformanceLocalV5ReviewMode,
-  type PerformanceLocalV5TopAction,
 } from "./PerformanceLocalV5Layouts";
+import {
+  performanceLocalV5EstimatePageIsRenderable,
+  performanceLocalV5SpecialPageState,
+  resolvePerformanceLocalV5TopAction,
+  type PerformanceLocalV5ActionConfiguration,
+  type PerformanceLocalV5FormIdentity,
+} from "./performanceLocalV5Actions";
 import type {
   GeneratedPage,
   PageComponentInstance,
@@ -42,6 +50,7 @@ export type PerformanceLocalV5ReadinessProjection = Readonly<{
 }>;
 
 export type PerformanceLocalV5RendererProps = Readonly<{
+  actionConfiguration: PerformanceLocalV5ActionConfiguration;
   audit: PerformanceLocalV5LayoutAudit;
   campaignBannerEnabled: boolean;
   composition: PageComposition;
@@ -49,8 +58,11 @@ export type PerformanceLocalV5RendererProps = Readonly<{
   previewedAt?: Date;
   readiness: PerformanceLocalV5ReadinessProjection;
   reviewMode: PerformanceLocalV5ReviewMode;
+  previewSurface: PerformanceLocalV5PreviewSurface;
   v3Configuration: PerformanceLocalDeliveryConfiguration;
 }>;
+
+export type PerformanceLocalV5PreviewSurface = "estimate" | "generated_page" | "special" | "sticky_disabled";
 
 export function performanceLocalV5FooterBoundaryReached(input: Readonly<{
   footerTop: number;
@@ -61,6 +73,7 @@ export function performanceLocalV5FooterBoundaryReached(input: Readonly<{
 }
 
 export function PerformanceLocalV5Renderer({
+  actionConfiguration,
   audit,
   campaignBannerEnabled,
   composition,
@@ -68,6 +81,7 @@ export function PerformanceLocalV5Renderer({
   previewedAt = new Date(),
   readiness,
   reviewMode,
+  previewSurface,
   v3Configuration,
 }: PerformanceLocalV5RendererProps) {
   const layoutKey = audit.layoutKey;
@@ -84,9 +98,30 @@ export function PerformanceLocalV5Renderer({
     return <PerformanceLocalV5Unavailable audit={audit} conversionBlocked />;
   }
 
+  if (previewSurface === "special" || previewSurface === "estimate") {
+    if (pageType !== "city_service") return <PerformanceLocalV5Unavailable audit={audit} conversionBlocked />;
+    return (
+      <PerformanceLocalV5ConditionalRenderer
+        actionConfiguration={actionConfiguration}
+        audit={audit}
+        composition={composition}
+        page={page}
+        previewedAt={previewedAt}
+        previewSurface={previewSurface}
+        v3Configuration={v3Configuration}
+      />
+    );
+  }
+
   if (pageType === "city_service") {
-    const estimateDestination = `#${performanceLocalFormDomId(v3Configuration.estimateForm.componentConfigurationId)}`;
-    const topAction = performanceLocalV5CityServiceTopAction(v3Configuration, estimateDestination);
+    const exactFormIdentity = performanceLocalV5ExactFormIdentity(v3Configuration);
+    const topAction = resolvePerformanceLocalV5TopAction({
+      configuration: actionConfiguration,
+      currentRoute: `/theme-lab/performance-local/v5/generated-pages/${page.id}`,
+      currentSurface: "site",
+      evaluatedAt: previewedAt,
+      exactFormIdentity,
+    }).action;
     const topStackActive = Boolean(v3Configuration.governedContact) || topAction.mode !== "disabled";
     const legacyStickyActions = topStackActive
       ? { ...v3Configuration.stickyActions, desktopHeaderActionsEnabled: false }
@@ -100,6 +135,7 @@ export function PerformanceLocalV5Renderer({
         data-v5-page-type={pageType}
         data-v5-layout-key={layoutKey}
         data-v5-layout-ready="true"
+        data-v5-top-action-enabled={topAction.mode === "disabled" ? "false" : "true"}
       >
         <PerformanceLocalV5TopConversionStack
           action={topAction}
@@ -140,24 +176,116 @@ export function PerformanceLocalV5Renderer({
   );
 }
 
-export function performanceLocalV5CityServiceTopAction(
-  configuration: PerformanceLocalDeliveryConfiguration,
-  estimateDestination: string,
-): PerformanceLocalV5TopAction {
-  const campaign = configuration.campaign;
+function PerformanceLocalV5ConditionalRenderer({
+  actionConfiguration,
+  audit,
+  composition,
+  page,
+  previewedAt,
+  previewSurface,
+  v3Configuration,
+}: Readonly<{
+  actionConfiguration: PerformanceLocalV5ActionConfiguration;
+  audit: PerformanceLocalV5LayoutAudit;
+  composition: PageComposition;
+  page: GeneratedPage;
+  previewedAt: Date;
+  previewSurface: "estimate" | "special";
+  v3Configuration: PerformanceLocalDeliveryConfiguration;
+}>) {
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [formFocusRisk, setFormFocusRisk] = useState(false);
+  const componentByInstanceKey = useMemo(
+    () => auditedComponentIndex(audit, composition),
+    [audit, composition],
+  );
+  const headerRegion = audit.regions.find((item) => item.regionKey === "site_header") ?? null;
+  const footerRegion = audit.regions.find((item) => item.regionKey === "site_footer") ?? null;
+  const header = exactRegionComponent(headerRegion, componentByInstanceKey, "website_header");
+  const primaryNavigation = exactRegionComponent(headerRegion, componentByInstanceKey, "primary_navigation");
+  const utilityNavigation = exactRegionComponent(headerRegion, componentByInstanceKey, "utility_navigation");
+  const footer = exactRegionComponent(footerRegion, componentByInstanceKey, "website_footer");
+  const footerNavigation = exactRegionComponent(footerRegion, componentByInstanceKey, "footer_navigation");
+  const governedContact = v3Configuration.governedContact;
+  const exactFormIdentity = performanceLocalV5ExactFormIdentity(v3Configuration);
+  const estimateReady = performanceLocalV5EstimatePageIsRenderable(actionConfiguration.estimate, exactFormIdentity);
+  const specialReady = performanceLocalV5SpecialPageState(actionConfiguration.special, previewedAt) === "active";
+  const currentRoute = previewSurface === "special" && actionConfiguration.special.enabled
+    ? actionConfiguration.special.route
+    : previewSurface === "estimate" && actionConfiguration.estimate.enabled
+      ? actionConfiguration.estimate.route
+      : "";
+  const actionResolution = resolvePerformanceLocalV5TopAction({
+    configuration: actionConfiguration,
+    currentRoute,
+    currentSurface: previewSurface,
+    evaluatedAt: previewedAt,
+    exactFormIdentity,
+  });
+  const destinationForGeneratedPageId = (generatedPageId: number) =>
+    `/theme-lab/performance-local/v5/generated-pages/${generatedPageId}`;
+
   if (
-    campaign?.enabled &&
-    campaign.intent === "evergreen_conversion" &&
-    campaign.ctaDestination === estimateDestination &&
-    campaign.campaignLabel.trim()
-  ) {
-    return Object.freeze({
-      destination: estimateDestination,
-      label: campaign.campaignLabel,
-      mode: "request_estimate" as const,
-    });
-  }
-  return Object.freeze({ mode: "disabled" as const });
+    !header ||
+    !footer ||
+    !governedContact ||
+    (previewSurface === "estimate" && !estimateReady) ||
+    (previewSurface === "special" && !specialReady)
+  ) return <PerformanceLocalV5Unavailable audit={audit} conversionBlocked />;
+
+  return (
+    <div
+      className="performanceLocalV5Site performanceLocalV5ConditionalPage"
+      data-v5-site-root="true"
+      data-v5-conditional-surface={previewSurface}
+      data-v5-top-action-enabled={actionResolution.action.mode === "disabled" ? "false" : "true"}
+      data-v5-action-resolution={actionResolution.reason}
+      data-v5-menu-open={mobileMenuOpen ? "true" : "false"}
+      data-v5-form-focus-risk={formFocusRisk ? "true" : "false"}
+    >
+      <a className="performanceLocalV5SkipLink" href="#performance-local-v5-conditional-main">Skip to main content</a>
+      <PerformanceLocalV5TopConversionStack
+        action={actionResolution.action}
+        callLabel={v3Configuration.stickyActions.callLabel}
+        contact={governedContact}
+      />
+      <PerformanceLocalV5SiteHeader
+        component={header}
+        contact={null}
+        destinationForGeneratedPageId={destinationForGeneratedPageId}
+        estimateDestination={null}
+        estimateLabel={v3Configuration.estimateForm.ctaLabel}
+        menuOpen={mobileMenuOpen}
+        onMenuOpenChange={setMobileMenuOpen}
+        primaryNavigation={primaryNavigation}
+        utilityNavigation={utilityNavigation}
+      />
+      <main id="performance-local-v5-conditional-main">
+        {previewSurface === "special" && actionConfiguration.special.enabled ? (
+          <PerformanceLocalV5SpecialPageLayout
+            callLabel={v3Configuration.stickyActions.callLabel}
+            configuration={actionConfiguration.special}
+            contact={governedContact}
+            estimateDestination={estimateReady && actionConfiguration.estimate.enabled ? actionConfiguration.estimate.route : null}
+            estimateLabel={estimateReady && actionConfiguration.estimate.enabled ? actionConfiguration.estimate.heading : null}
+          />
+        ) : previewSurface === "estimate" && actionConfiguration.estimate.enabled ? (
+          <PerformanceLocalV5EstimatePageLayout
+            configuration={actionConfiguration.estimate}
+            contact={governedContact}
+            estimateForm={v3Configuration.estimateForm}
+            onFormFocusRiskChange={setFormFocusRisk}
+          />
+        ) : null}
+      </main>
+      <PerformanceLocalV5SiteFooter
+        component={footer}
+        contact={governedContact}
+        destinationForGeneratedPageId={destinationForGeneratedPageId}
+        navigation={footerNavigation}
+      />
+    </div>
+  );
 }
 
 function PerformanceLocalV5PurposeBuiltRenderer({
@@ -168,7 +296,7 @@ function PerformanceLocalV5PurposeBuiltRenderer({
   readiness,
   reviewMode,
   v3Configuration,
-}: Omit<PerformanceLocalV5RendererProps, "previewedAt">) {
+}: Omit<PerformanceLocalV5RendererProps, "actionConfiguration" | "previewSurface" | "previewedAt">) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [formFocusRisk, setFormFocusRisk] = useState(false);
@@ -392,6 +520,16 @@ function exactRegionComponent(
     .map((instanceKey) => components.get(instanceKey))
     .filter((component): component is PageComponentInstance => component?.component_key === componentKey);
   return matches.length === 1 ? matches[0] : null;
+}
+
+function performanceLocalV5ExactFormIdentity(
+  configuration: PerformanceLocalDeliveryConfiguration,
+): PerformanceLocalV5FormIdentity {
+  return {
+    componentConfigurationId: configuration.estimateForm.componentConfigurationId,
+    componentInstanceKey: configuration.estimateForm.componentInstanceKey,
+    destination: `#${performanceLocalFormDomId(configuration.estimateForm.componentConfigurationId)}`,
+  };
 }
 
 function useMobileViewport(): boolean {
