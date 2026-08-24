@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   isCurrentSupportedPerformanceLocalV5Page,
+  performanceLocalV5ThemeLabOptionalModuleFixture,
   PerformanceLocalV5ReviewPage,
 } from "../src/pages/PerformanceLocalV5ReviewPage";
 import { isLoopbackThemeLabHost } from "../src/pages/UniversalFormModesReviewPage";
@@ -38,7 +39,7 @@ test("the V5 operator review is loopback-only and fails closed elsewhere", () =>
   }
 });
 
-test("App exposes exactly four explicit lazy local V5 preview routes", () => {
+test("App exposes exactly seven explicit lazy local V5 preview routes", () => {
   const app = source("src/App.tsx");
   assert.match(app, /lazy\(\s*\(\) => import\("\.\/pages\/PerformanceLocalV5ReviewPage"\)/);
   assert.match(
@@ -48,9 +49,50 @@ test("App exposes exactly four explicit lazy local V5 preview routes", () => {
   assert.match(app, /path="\/theme-lab\/performance-local\/v5\/generated-pages\/:id\/special"[\s\S]*?previewSurface="special"/);
   assert.match(app, /path="\/theme-lab\/performance-local\/v5\/generated-pages\/:id\/request-an-estimate"[\s\S]*?previewSurface="estimate"/);
   assert.match(app, /path="\/theme-lab\/performance-local\/v5\/generated-pages\/:id\/sticky-disabled"[\s\S]*?previewSurface="sticky_disabled"/);
-  assert.equal(count(app, "/theme-lab/performance-local/v5/generated-pages/:id"), 4);
-  assert.equal(count(app, "/theme-lab/performance-local/v5/generated-pages/:id/"), 3);
+  assert.match(app, /path="\/theme-lab\/performance-local\/v5\/generated-pages\/:id\/review-trust"[\s\S]*?previewSurface="review_trust"/);
+  assert.match(app, /path="\/theme-lab\/performance-local\/v5\/generated-pages\/:id\/location-map"[\s\S]*?previewSurface="location_map"/);
+  assert.match(app, /path="\/theme-lab\/performance-local\/v5\/generated-pages\/:id\/review-trust-location-map"[\s\S]*?previewSurface="review_trust_location_map"/);
+  assert.equal(count(app, "/theme-lab/performance-local/v5/generated-pages/:id"), 7);
+  assert.equal(count(app, "/theme-lab/performance-local/v5/generated-pages/:id/"), 6);
   assert.doesNotMatch(app, /performance-local\/v5\/generated-pages\/:id\/(?:\*|:surface|:variant)/);
+});
+
+test("Theme Lab optional-module fixtures are Page 41-scoped, independent, and absent by default", () => {
+  const trust = performanceLocalV5ThemeLabOptionalModuleFixture(41, "review_trust");
+  assert.ok(trust.configuration.reviewTrust);
+  assert.equal(trust.configuration.locationMap, undefined);
+  assert.equal(trust.configuration.reviewTrust?.sources?.length, 3);
+
+  const location = performanceLocalV5ThemeLabOptionalModuleFixture(41, "location_map");
+  assert.equal(location.configuration.reviewTrust, undefined);
+  const locationMap = location.configuration.locationMap;
+  assert.ok(locationMap);
+  assert.equal(locationMap.mode, "city_service_area");
+  assert.equal(locationMap.mode === "city_service_area" ? locationMap.targetCity : null, "Orlando");
+  assert.equal(locationMap.mode === "city_service_area" ? locationMap.targetState : null, "Florida");
+  assert.equal(locationMap.mode === "city_service_area" ? locationMap.sectionHeading : null, "Serving Orlando, Florida");
+  assert.equal(Object.prototype.hasOwnProperty.call(locationMap, "approvedLocationName"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(locationMap, "approvedAddressLines"), false);
+  assert.equal(location.governedTargetCity, "Orlando");
+  assert.equal(location.governedTargetState, "Florida");
+
+  const both = performanceLocalV5ThemeLabOptionalModuleFixture(41, "review_trust_location_map");
+  assert.ok(both.configuration.reviewTrust);
+  assert.ok(both.configuration.locationMap);
+  assert.equal(both.configuration.locationMap?.mode, "city_service_area");
+  assert.equal(both.presentation, "theme_lab_demo");
+
+  for (const surface of ["generated_page", "special", "estimate", "sticky_disabled"] as const) {
+    const disabled = performanceLocalV5ThemeLabOptionalModuleFixture(41, surface);
+    assert.deepEqual(disabled.configuration, {});
+    assert.deepEqual(disabled.approvedLocalImages, {});
+    assert.equal(disabled.governedTargetCity, null);
+    assert.equal(disabled.governedTargetState, null);
+  }
+  assert.deepEqual(
+    performanceLocalV5ThemeLabOptionalModuleFixture(42, "review_trust_location_map").configuration,
+    {},
+  );
 });
 
 test("the review exposes the exact draft label, representative selector, modes, V4 control, and banner toggle", () => {
@@ -143,6 +185,22 @@ test("truthful and demo state are visibly separated and placeholders remain oper
   assert.match(layouts, /if \(reviewMode !== "structural_demo" \|\| !component\) return null/);
   assert.match(layouts, /data-v5-demo-target-instance-key=\{targetInstanceKey\}/);
   assert.doesNotMatch(layouts, /fetch\(|apiRequest\(|XMLHttpRequest|WebSocket/);
+});
+
+test("optional module demos are inert local fixtures and never become a website-wide default", () => {
+  const review = source("src/pages/PerformanceLocalV5ReviewPage.tsx");
+  const renderer = source("src/components/PerformanceLocalV5Renderer.tsx");
+  const layouts = source("src/components/PerformanceLocalV5Layouts.tsx");
+  assert.match(review, /DEMO TRUST SOURCE — NOT SITE CONTENT/);
+  assert.match(review, /Serving Orlando, Florida/);
+  assert.doesNotMatch(review, /DEMO APPROVED ADDRESS — NOT SITE CONTENT|DEMO LOCATION — NOT SITE CONTENT/);
+  assert.match(layouts, /DEMO BADGE — NOT SITE CONTENT/);
+  assert.match(review, /generatedPageId !== PERFORMANCE_LOCAL_V5_PAGE_41_EXPECTATION\.generatedPageId/);
+  assert.match(review, /previewSurface === "review_trust" \|\| previewSurface === "review_trust_location_map"/);
+  assert.match(review, /previewSurface === "location_map" \|\| previewSurface === "review_trust_location_map"/);
+  assert.doesNotMatch(review, /<iframe|fetch\(|XMLHttpRequest|WebSocket|google\.maps\.|maps\.googleapis\.com/);
+  assert.match(renderer, /optionalModuleConfiguration = Object\.freeze\(\{\}\)/);
+  assert.doesNotMatch(renderer, /PERFORMANCE_LOCAL_V5_PAGE_41_EXPECTATION|\bid\s*===\s*41/);
 });
 
 test("the review CSS is responsive and keeps the preview canvas free of diagnostic styling", () => {

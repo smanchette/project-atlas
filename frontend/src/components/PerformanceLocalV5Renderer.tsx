@@ -20,6 +20,8 @@ import {
   PerformanceLocalV5CampaignBanner,
   PerformanceLocalV5EstimatePageLayout,
   PerformanceLocalV5LayoutBody,
+  PerformanceLocalV5LocationMapSection,
+  PerformanceLocalV5ReviewTrustSection,
   PerformanceLocalV5SiteFooter,
   PerformanceLocalV5SiteHeader,
   PerformanceLocalV5SpecialPageLayout,
@@ -34,6 +36,12 @@ import {
   type PerformanceLocalV5ActionConfiguration,
   type PerformanceLocalV5FormIdentity,
 } from "./performanceLocalV5Actions";
+import {
+  resolvePerformanceLocalV5OptionalModules,
+  type PerformanceLocalV5OptionalModulePageConfiguration,
+  type PerformanceLocalV5OptionalModulePresentation,
+  type PerformanceLocalV5OptionalModulesResolution,
+} from "./performanceLocalV5OptionalModules";
 import type {
   GeneratedPage,
   PageComponentInstance,
@@ -55,6 +63,11 @@ export type PerformanceLocalV5RendererProps = Readonly<{
   campaignBannerEnabled: boolean;
   composition: PageComposition;
   page: GeneratedPage;
+  optionalModuleApprovedLocalImages?: Readonly<Record<string, string>>;
+  optionalModuleConfiguration?: PerformanceLocalV5OptionalModulePageConfiguration;
+  optionalModuleGovernedTargetCity?: string | null;
+  optionalModuleGovernedTargetState?: string | null;
+  optionalModulePresentation?: PerformanceLocalV5OptionalModulePresentation;
   previewedAt?: Date;
   readiness: PerformanceLocalV5ReadinessProjection;
   reviewMode: PerformanceLocalV5ReviewMode;
@@ -62,7 +75,14 @@ export type PerformanceLocalV5RendererProps = Readonly<{
   v3Configuration: PerformanceLocalDeliveryConfiguration;
 }>;
 
-export type PerformanceLocalV5PreviewSurface = "estimate" | "generated_page" | "special" | "sticky_disabled";
+export type PerformanceLocalV5PreviewSurface =
+  | "estimate"
+  | "generated_page"
+  | "location_map"
+  | "review_trust"
+  | "review_trust_location_map"
+  | "special"
+  | "sticky_disabled";
 
 export function performanceLocalV5FooterBoundaryReached(input: Readonly<{
   footerTop: number;
@@ -77,6 +97,11 @@ export function PerformanceLocalV5Renderer({
   audit,
   campaignBannerEnabled,
   composition,
+  optionalModuleApprovedLocalImages = Object.freeze({}),
+  optionalModuleConfiguration = Object.freeze({}),
+  optionalModuleGovernedTargetCity = null,
+  optionalModuleGovernedTargetState = null,
+  optionalModulePresentation = "public",
   page,
   previewedAt = new Date(),
   readiness,
@@ -97,6 +122,15 @@ export function PerformanceLocalV5Renderer({
   if (!v3Configuration || !exactV3ConversionInputForV5(v3Configuration, composition)) {
     return <PerformanceLocalV5Unavailable audit={audit} conversionBlocked />;
   }
+
+  const optionalModules = resolvePerformanceLocalV5OptionalModules(optionalModuleConfiguration, {
+    approvedLocalImages: optionalModuleApprovedLocalImages,
+    governedPhoneDisplay: v3Configuration.governedContact?.phoneDisplay ?? null,
+    governedTargetCity: optionalModuleGovernedTargetCity,
+    governedTargetState: optionalModuleGovernedTargetState,
+    pageType,
+    presentation: optionalModulePresentation,
+  });
 
   if (previewSurface === "special" || previewSurface === "estimate") {
     if (pageType !== "city_service") return <PerformanceLocalV5Unavailable audit={audit} conversionBlocked />;
@@ -143,6 +177,15 @@ export function PerformanceLocalV5Renderer({
           contact={v3Configuration.governedContact}
         />
         <PerformanceLocalRenderer
+          afterHeroContent={optionalModules.reviewTrust ? (
+            <PerformanceLocalV5ReviewTrustSection resolution={optionalModules.reviewTrust} />
+          ) : null}
+          beforeFinalConversionContent={optionalModules.locationMap ? (
+            <PerformanceLocalV5LocationMapSection
+              governedContact={v3Configuration.governedContact}
+              resolution={optionalModules.locationMap}
+            />
+          ) : null}
           page={page}
           composition={composition}
           campaign={null}
@@ -171,6 +214,7 @@ export function PerformanceLocalV5Renderer({
       page={page}
       readiness={readiness}
       reviewMode={reviewMode}
+      optionalModules={optionalModules}
       v3Configuration={v3Configuration}
     />
   );
@@ -295,8 +339,19 @@ function PerformanceLocalV5PurposeBuiltRenderer({
   page,
   readiness,
   reviewMode,
+  optionalModules,
   v3Configuration,
-}: Omit<PerformanceLocalV5RendererProps, "actionConfiguration" | "previewSurface" | "previewedAt">) {
+}: Omit<
+  PerformanceLocalV5RendererProps,
+  | "actionConfiguration"
+  | "optionalModuleApprovedLocalImages"
+  | "optionalModuleConfiguration"
+  | "optionalModuleGovernedTargetCity"
+  | "optionalModuleGovernedTargetState"
+  | "optionalModulePresentation"
+  | "previewSurface"
+  | "previewedAt"
+> & Readonly<{ optionalModules: PerformanceLocalV5OptionalModulesResolution }>) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [formFocusRisk, setFormFocusRisk] = useState(false);
@@ -445,6 +500,7 @@ function PerformanceLocalV5PurposeBuiltRenderer({
           homeServicePresentation={audit.homeServicePresentation}
           layoutKey={audit.layoutKey!}
           onFormFocusRiskChange={setFormFocusRisk}
+          optionalModules={optionalModules}
           pageType={pageType}
           regions={audit.regions}
           reviewMode={reviewMode}

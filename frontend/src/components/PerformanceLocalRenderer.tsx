@@ -226,8 +226,12 @@ export type PerformanceLocalRenderedComponentAttributes = Readonly<Partial<
 >>;
 
 export type PerformanceLocalRendererProps = {
+  /** Default-empty compatibility seam used only by the V5 page-scoped optional-module adapter. */
+  afterHeroContent?: ReactNode;
   /** Local Theme Lab-only visual direction; accepts opaque #RRGGBB and is never persisted. */
   brandAccent?: string | null;
+  /** Default-empty compatibility seam used only by the V5 page-scoped optional-module adapter. */
+  beforeFinalConversionContent?: ReactNode;
   campaign?: PerformanceLocalCampaign | null;
   composition: PageComposition;
   estimateForm?: PerformanceLocalEstimateFormConfiguration | null;
@@ -283,7 +287,9 @@ const CANONICAL_PROCESS_SECTION_KEYS = Object.freeze([
 ] as const);
 
 export function PerformanceLocalRenderer({
+  afterHeroContent = null,
   brandAccent = null,
+  beforeFinalConversionContent = null,
   campaign = null,
   composition,
   estimateForm = null,
@@ -548,6 +554,7 @@ export function PerformanceLocalRenderer({
             conversionRef={heroActionRef}
           />
         )}
+        {afterHeroContent}
         {trustVisible && trust && trustState?.attributes && trustFeatureState?.attributes && (
           <TrustStrip
             component={trust}
@@ -571,6 +578,7 @@ export function PerformanceLocalRenderer({
             destinationForGeneratedPageId={rendererIdentity.destinationForGeneratedPageId}
           />
         ))}
+        {beforeFinalConversionContent}
         {finalCtaVisible && finalCta && finalState?.attributes && (
           <FinalConversionSection
             component={finalCta}

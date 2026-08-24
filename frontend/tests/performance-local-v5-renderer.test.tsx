@@ -16,6 +16,7 @@ import {
 } from "../src/components/PerformanceLocalV5Layouts";
 import PerformanceLocalV5Renderer, {
   performanceLocalV5FooterBoundaryReached,
+  type PerformanceLocalV5PreviewSurface,
   type PerformanceLocalV5ReadinessProjection,
 } from "../src/components/PerformanceLocalV5Renderer";
 import PerformanceLocalRenderer, {
@@ -36,6 +37,15 @@ import type {
   PerformanceLocalV5HomeServicePresentation,
   PerformanceLocalV5LayoutAudit,
 } from "../src/components/performanceLocalV5LayoutContract";
+import {
+  isPerformanceLocalV5SafeGoogleMapsEmbedUrl,
+  isPerformanceLocalV5SafeHttpsDestination,
+  isPerformanceLocalV5SafeLocalImageUrl,
+  resolvePerformanceLocalV5GoogleMapsEmbedInput,
+  resolvePerformanceLocalV5OptionalModules,
+  type PerformanceLocalV5OptionalModulePageConfiguration,
+  type PerformanceLocalV5OptionalModulePresentation,
+} from "../src/components/performanceLocalV5OptionalModules";
 import type { GeneratedPage, PageComponentInstance, PageComposition } from "../src/types";
 import { selectedTheme } from "./theme-fixtures";
 
@@ -531,6 +541,301 @@ test("conditional Special and Estimate surfaces reuse the shared shell and the o
   assert.match(disabled, /performanceLocalV5StickyPhoneBar/);
 });
 
+test("optional module resolver is page-scoped, independent, exact-keyed, and fail-closed", () => {
+  const valid = optionalModuleConfiguration("both");
+  const resolved = resolveOptionalModules(valid);
+  assert.equal(resolved.reviewTrust?.sources.length, 3);
+  assert.equal(resolved.locationMap?.mode, "business_location");
+  assert.equal(resolved.locationMap?.sectionHeading, "Our Location");
+  assert.equal(resolved.locationMap?.mode === "business_location" ? resolved.locationMap.approvedAddressLines.length : 0, 2);
+
+  const cityServiceArea = resolveOptionalModules({ locationMap: validCityServiceAreaConfiguration() });
+  assert.equal(cityServiceArea.locationMap?.mode, "city_service_area");
+  assert.equal(cityServiceArea.locationMap?.sectionHeading, "Serving Orlando, Florida");
+  assert.equal(cityServiceArea.locationMap?.mode === "city_service_area" ? cityServiceArea.locationMap.targetCity : null, "Orlando");
+  assert.equal(cityServiceArea.locationMap?.mode === "city_service_area" ? cityServiceArea.locationMap.targetState : null, "Florida");
+  assert.equal(
+    resolveOptionalModules({ locationMap: validCityServiceAreaConfiguration() }, { pageType: "service" }).locationMap?.mode,
+    "city_service_area",
+  );
+
+  for (const pageType of ["home", "county", "about", "contact", "faq", "special", "estimate", null]) {
+    assert.deepEqual(resolveOptionalModules(valid, { pageType }), { locationMap: null, reviewTrust: null }, String(pageType));
+  }
+  assert.deepEqual(resolveOptionalModules(undefined), { locationMap: null, reviewTrust: null });
+  assert.deepEqual(resolveOptionalModules({}), { locationMap: null, reviewTrust: null });
+  assert.deepEqual(resolveOptionalModules({ reviewTrust: { enabled: false } }), { locationMap: null, reviewTrust: null });
+  assert.deepEqual(resolveOptionalModules({ locationMap: { mode: "disabled" } }), { locationMap: null, reviewTrust: null });
+  assert.deepEqual(resolveOptionalModules({ locationMap: { mode: "disabled", extra: true } } as unknown), { locationMap: null, reviewTrust: null });
+  assert.deepEqual(resolveOptionalModules({ locationMap: { enabled: true } } as unknown), { locationMap: null, reviewTrust: null });
+  assert.deepEqual(resolveOptionalModules({ locationMap: { mode: "unknown" } } as unknown), { locationMap: null, reviewTrust: null });
+  assert.deepEqual(resolveOptionalModules({ reviewTrust: valid.reviewTrust, surprise: true }), { locationMap: null, reviewTrust: null });
+
+  const sources = validReviewTrustConfiguration().sources!;
+  for (const reviewTrust of [
+    { ...validReviewTrustConfiguration(), sources: [...sources, sources[0]] },
+    { ...validReviewTrustConfiguration(), sources: [sources[0], { ...sources[1], sourceKey: sources[0].sourceKey }] },
+    { ...validReviewTrustConfiguration(), unknown: true },
+    { ...validReviewTrustConfiguration(), heading: " " },
+  ]) {
+    const result = resolveOptionalModules({ locationMap: validBusinessLocationConfiguration(), reviewTrust } as unknown);
+    assert.equal(result.reviewTrust, null);
+    assert.ok(result.locationMap);
+  }
+
+  const partiallyInvalid = resolveOptionalModules({
+    reviewTrust: {
+      ...validReviewTrustConfiguration(),
+      sources: [
+        sources[0],
+        { ...sources[1], enabled: false },
+        { ...sources[2], imageAltText: "" },
+      ],
+    },
+  });
+  assert.equal(partiallyInvalid.reviewTrust?.sources.length, 1);
+  assert.equal(partiallyInvalid.reviewTrust?.sources[0].sourceKey, "approved-source-one");
+
+  const unknownKeySource = resolveOptionalModules({
+    reviewTrust: {
+      ...validReviewTrustConfiguration(),
+      sources: [sources[0], { ...sources[1], extra: "unknown" }],
+    },
+  });
+  assert.equal(unknownKeySource.reviewTrust?.sources.length, 1);
+  assert.equal(unknownKeySource.reviewTrust?.sources[0].sourceKey, "approved-source-one");
+
+  for (const source of [
+    { ...sources[0], badgeImageReference: "missing-reference" },
+    { ...sources[0], publicName: "" },
+    { ...sources[0], description: "" },
+    { ...sources[0], imageAltText: "" },
+    { ...sources[0], profileDestination: "javascript:alert(1)" },
+    { ...sources[0], verifiedRatingText: " " },
+    { ...sources[0], extra: "unknown" },
+  ]) {
+    assert.equal(resolveOptionalModules({ reviewTrust: { enabled: true, sources: [source] } }).reviewTrust, null);
+  }
+});
+
+test("optional URL, image, and Google embed gates accept only explicit safe shapes", () => {
+  for (const value of [
+    "https://reviews.example.com/flo-zone",
+    "https://maps.example.com/directions?to=approved",
+  ]) assert.equal(isPerformanceLocalV5SafeHttpsDestination(value), true, value);
+  for (const value of [
+    "http://reviews.example.com/flo-zone",
+    "//reviews.example.com/flo-zone",
+    "javascript:alert(1)",
+    "data:text/html,unsafe",
+    "file:///private",
+    "mailto:review@example.com",
+    "https://localhost/review",
+    "https://0.0.0.0/review",
+    "https://100.64.0.1/review",
+    "https://[::1]/review",
+    "https://[fc00::1]/review",
+    "https://[fe80::1]/review",
+    "https://router.home.arpa/review",
+    "https://user:pass@example.com/review",
+    "not a url",
+  ]) assert.equal(isPerformanceLocalV5SafeHttpsDestination(value), false, value);
+
+  for (const value of [
+    "/assets/review-source.svg",
+    "/media/review-source.webp",
+    "/api/media/files/review-source.png",
+  ]) assert.equal(isPerformanceLocalV5SafeLocalImageUrl(value), true, value);
+  for (const value of [
+    "https://example.com/review.svg",
+    "//example.com/review.svg",
+    "/public/review.svg",
+    "/assets/review.svg?version=1",
+    "/assets/%2e%2e%2fprivate.svg",
+    "/assets/review.txt",
+    "data:image/svg+xml,unsafe",
+  ]) assert.equal(isPerformanceLocalV5SafeLocalImageUrl(value), false, value);
+
+  for (const value of [
+    "https://www.google.com/maps/embed?pb=approved-binding",
+    "https://www.google.com/maps/embed/v1/place?key=approved-key&q=approved-location",
+    "https://www.google.com/maps/embed/v1/directions?key=approved-key&origin=approved-origin&destination=approved-destination",
+    "https://www.google.com/maps/embed/v1/view?key=approved-key&center=28.5,-81.4&zoom=11",
+    "https://www.google.com/maps/embed/v1/streetview?key=approved-key&location=28.5,-81.4",
+  ]) assert.equal(isPerformanceLocalV5SafeGoogleMapsEmbedUrl(value), true, value);
+  for (const value of [
+    "http://www.google.com/maps/embed?pb=unsafe",
+    "//www.google.com/maps/embed?pb=unsafe",
+    "https://google.com/maps/embed?pb=wrong-origin",
+    "https://maps.google.com/maps/embed?pb=wrong-origin",
+    "https://www.google.com/maps/search/?api=1&query=ordinary-search",
+    "https://www.google.com/maps/embed",
+    "https://www.google.com/maps/embed/v1/place?key=approved-key",
+    "https://www.google.com/maps/embed/v1/view?key=approved-key&location=28.5,-81.4",
+    "https://www.google.com/maps/embed/v1/streetview?key=approved-key&center=28.5,-81.4",
+    "https://maps.app.goo.gl/shortened",
+    "https://www.google.com.evil.example/maps/embed?pb=lookalike",
+  ]) assert.equal(isPerformanceLocalV5SafeGoogleMapsEmbedUrl(value), false, value);
+
+  const copiedEmbedUrl = "https://www.google.com/maps/embed/v1/place?key=approved-key&q=Orlando%2C+Florida";
+  const copiedEmbedCode = `<iframe src="https://www.google.com/maps/embed/v1/place?key=approved-key&amp;q=Orlando%2C+Florida" width="600" height="450" style="border:0" allowfullscreen="" loading="eager" referrerpolicy="unsafe-url" onload="ignored()"></iframe>`;
+  assert.equal(resolvePerformanceLocalV5GoogleMapsEmbedInput(copiedEmbedUrl), copiedEmbedUrl);
+  assert.equal(resolvePerformanceLocalV5GoogleMapsEmbedInput(copiedEmbedCode), copiedEmbedUrl);
+  for (const value of [
+    `<iframe src="http://www.google.com/maps/embed?pb=unsafe"></iframe>`,
+    `<iframe src="https://www.google.com/maps/search/?api=1&q=unsafe"></iframe>`,
+    `<iframe data-src="https://www.google.com/maps/embed?pb=missing-src"></iframe>`,
+    `<iframe src=https://www.google.com/maps/embed?pb=unquoted></iframe>`,
+    `<iframe src="https://www.google.com/maps/embed?pb=one" src="https://www.google.com/maps/embed?pb=two"></iframe>`,
+    `<iframe src="https://www.google.com/maps/embed?pb=body">not empty</iframe>`,
+    `<div><iframe src="https://www.google.com/maps/embed?pb=wrapped"></iframe></div>`,
+    `<iframe src="https://www.google.com/maps/embed?pb=unclosed">`,
+    `<script>unsafe()</script>`,
+    `<iframe src="https://www.google.com/maps/embed?pb=${"x".repeat(16_384)}"></iframe>`,
+  ]) assert.equal(resolvePerformanceLocalV5GoogleMapsEmbedInput(value), null, value.slice(0, 100));
+
+  for (const locationMap of [
+    { ...validBusinessLocationConfiguration(), approvedAddressLines: [] },
+    { ...validBusinessLocationConfiguration(), approvedAddressLines: ["1", "2", "3", "4"] },
+    { ...validBusinessLocationConfiguration(), approvedAddressLines: ["Private residence"] },
+    { ...validBusinessLocationConfiguration(), approvedLocationName: "" },
+    { ...validBusinessLocationConfiguration(), mapTitle: "" },
+    { ...validBusinessLocationConfiguration(), governedPhoneDisplay: "(555) 999-9999" },
+    { ...validBusinessLocationConfiguration(), directionsDestination: "mailto:unsafe@example.com" },
+    { ...validBusinessLocationConfiguration(), googleMapsEmbedInput: "https://www.google.com/maps/search/?api=1&q=unsafe" },
+    { ...validBusinessLocationConfiguration(), targetCity: "Orlando" },
+    { ...validBusinessLocationConfiguration(), unknown: true },
+    { ...validCityServiceAreaConfiguration(), targetCity: "Tampa" },
+    { ...validCityServiceAreaConfiguration(), targetState: "Georgia" },
+    { ...validCityServiceAreaConfiguration(), sectionHeading: "Our Location" },
+    { ...validCityServiceAreaConfiguration(), sectionHeading: "Our Orlando Location" },
+    { ...validCityServiceAreaConfiguration(), sectionHeading: "Orlando Office" },
+    { ...validCityServiceAreaConfiguration(), description: "Visit our office in this service area." },
+    { ...validCityServiceAreaConfiguration(), description: "Visit us at 123 Main Street." },
+    { ...validCityServiceAreaConfiguration(), approvedAddressLines: ["123 Not Allowed Street"] },
+    { ...validCityServiceAreaConfiguration(), googleMapsEmbedInput: "https://www.google.com/maps/search/?api=1&q=unsafe" },
+    { ...validCityServiceAreaConfiguration(), unknown: true },
+  ]) {
+    const result = resolveOptionalModules({ locationMap, reviewTrust: validReviewTrustConfiguration() } as unknown);
+    assert.equal(result.locationMap, null);
+    assert.ok(result.reviewTrust);
+  }
+
+  assert.equal(
+    resolveOptionalModules(
+      { locationMap: validCityServiceAreaConfiguration() },
+      { governedTargetCity: null, governedTargetState: null },
+    ).locationMap,
+    null,
+  );
+});
+
+test("Service and City-Service render the two demo modules only at their approved seams", () => {
+  const configuration = optionalModuleConfiguration("both", true);
+  const demoResolution = resolveOptionalModules(configuration, { presentation: "theme_lab_demo" });
+  const service = staticMarkup({
+    ...layoutProps("service", "truthful"),
+    optionalModules: demoResolution,
+  });
+  const serviceHeroEnd = service.indexOf("</section>", service.indexOf('data-v5-region="hero"'));
+  const serviceTrust = service.indexOf('data-v5-optional-module="review-trust"');
+  const serviceOverview = service.indexOf("Exact service overview");
+  const serviceFaq = service.indexOf("Exact service FAQ?");
+  const serviceLocation = service.indexOf('data-v5-optional-module="location-map"');
+  const serviceFinal = service.indexOf('data-v5-shared-final-conversion="true"');
+  assert.ok(serviceHeroEnd < serviceTrust && serviceTrust < serviceOverview);
+  assert.ok(serviceFaq < serviceLocation && serviceLocation < serviceFinal);
+  assert.equal(count(service, "<h1"), 1);
+
+  const city = renderCityServiceSurface("review_trust_location_map", {
+    configuration,
+    presentation: "theme_lab_demo",
+  });
+  const cityHeroEnd = city.indexOf("</section>", city.indexOf('class="performanceLocalHero"'));
+  const cityTrust = city.indexOf('data-v5-optional-module="review-trust"');
+  const cityLocation = city.indexOf('data-v5-optional-module="location-map"');
+  const cityFinal = city.indexOf('class="performanceLocalFinalCta"');
+  assert.ok(cityHeroEnd < cityTrust && cityTrust < cityLocation && cityLocation < cityFinal);
+  assert.equal(count(city, "DEMO TRUST SOURCE — NOT SITE CONTENT"), 3);
+  assert.equal(count(city, "DEMO BADGE — NOT SITE CONTENT"), 3);
+  assert.equal(count(city, 'data-v5-demo-trust-optional-fields="true"'), 3);
+  assert.equal(count(city, "Optional rating / count"), 3);
+  assert.equal(count(city, "Optional profile link"), 3);
+  assert.equal(count(city, "DEMO MAP — NOT SITE CONTENT"), 1);
+  assert.equal(count(city, "Serving Orlando, Florida"), 1);
+  assert.equal(count(city, "<h1"), 1);
+  assert.equal(count(city, "<iframe"), 0);
+  assert.doesNotMatch(city.slice(cityLocation, cityFinal), /<address|Approved public location|Our Location|DEMO LOCATION|DEMO APPROVED ADDRESS|Get directions|performanceLocalV5LocationActions/);
+  assert.doesNotMatch(city.slice(cityTrust, cityLocation), /<img|verifiedRating|verifiedReviewCount|href="https:/);
+  assert.doesNotMatch(city.slice(cityTrust, cityLocation), /<a\b/);
+  assert.doesNotMatch(city.slice(cityTrust, cityLocation), />0[123]</);
+  assert.doesNotMatch(city, /performanceLocalStickyActions|performanceLocalV5StickyActions/);
+
+  const ordinary = renderCityServiceSurface("generated_page");
+  assert.doesNotMatch(ordinary, /data-v5-optional-module|performanceLocalV5OptionalModule|DEMO MAP|DEMO TRUST/);
+  const special = renderCityServiceSurface("special", { configuration, presentation: "theme_lab_demo" });
+  const estimate = renderCityServiceSurface("estimate", { configuration, presentation: "theme_lab_demo" });
+  assert.doesNotMatch(special, /data-v5-optional-module/);
+  assert.doesNotMatch(estimate, /data-v5-optional-module/);
+});
+
+test("public optional modules contain only approved local images and the allowlisted lazy map embed", () => {
+  const publicMarkup = renderCityServiceSurface("generated_page", {
+    configuration: optionalModuleConfiguration("both"),
+    presentation: "public",
+  });
+  const trustStart = publicMarkup.indexOf('data-v5-optional-module="review-trust"');
+  const locationStart = publicMarkup.indexOf('data-v5-optional-module="location-map"');
+  const trustMarkup = publicMarkup.slice(trustStart, locationStart);
+  const locationMarkup = publicMarkup.slice(locationStart, publicMarkup.indexOf('class="performanceLocalFinalCta"'));
+  assert.match(trustMarkup, /<img alt="Approved source one" decoding="async" loading="lazy" src="\/assets\/review-source-one\.svg"/);
+  assert.match(trustMarkup, /href="https:\/\/reviews\.example\.com\/source-one" rel="noopener noreferrer" target="_blank"/);
+  assert.match(trustMarkup, /4\.9 out of 5/);
+  assert.match(trustMarkup, /127 public reviews/);
+  assert.match(locationMarkup, /Approved public office/);
+  assert.match(locationMarkup, /Our Location/);
+  assert.match(publicMarkup, /data-v5-location-mode="business_location"/);
+  assert.match(locationMarkup, /123 Approved Avenue/);
+  assert.match(locationMarkup, /href="tel:5550100200"/);
+  assert.match(locationMarkup, /href="https:\/\/maps\.example\.com\/directions\?to=approved" rel="noopener noreferrer" target="_blank"/);
+  assert.match(locationMarkup, /<iframe loading="lazy" referrerPolicy="strict-origin-when-cross-origin" src="https:\/\/www\.google\.com\/maps\/embed\?pb=approved-binding" title="Approved public office map"><\/iframe>/);
+  assert.doesNotMatch(locationMarkup, / allow=|allowFullScreen|sandbox=/);
+});
+
+test("iframe-code input is reduced to one safe source and city-service-area output has no office shell", () => {
+  const codeInput = `<iframe src="https://www.google.com/maps/embed/v1/place?key=approved-key&amp;q=Approved+Office" width="600" height="450" style="border:0" allowfullscreen="" loading="eager" referrerpolicy="unsafe-url" onload="ignored()"></iframe>`;
+  const publicBusiness = renderCityServiceSurface("generated_page", {
+    configuration: {
+      locationMap: {
+        ...validBusinessLocationConfiguration(),
+        googleMapsEmbedInput: codeInput,
+      },
+    },
+    presentation: "public",
+  });
+  const businessLocation = publicBusiness.slice(
+    publicBusiness.indexOf('data-v5-optional-module="location-map"'),
+    publicBusiness.indexOf('class="performanceLocalFinalCta"'),
+  );
+  assert.match(businessLocation, /src="https:\/\/www\.google\.com\/maps\/embed\/v1\/place\?key=approved-key&amp;q=Approved\+Office"/);
+  assert.match(businessLocation, /loading="lazy"/);
+  assert.match(businessLocation, /referrerPolicy="strict-origin-when-cross-origin"/);
+  assert.doesNotMatch(businessLocation, /onload|style=|width="600"|height="450"|unsafe-url|allowFullScreen| allow=/);
+
+  const publicCityArea = renderCityServiceSurface("generated_page", {
+    configuration: { locationMap: validCityServiceAreaConfiguration() },
+    presentation: "public",
+  });
+  const cityLocation = publicCityArea.slice(
+    publicCityArea.indexOf('data-v5-optional-module="location-map"'),
+    publicCityArea.indexOf('class="performanceLocalFinalCta"'),
+  );
+  assert.match(publicCityArea, /data-v5-location-mode="city_service_area"/);
+  assert.match(publicCityArea, /data-v5-service-area-city="Orlando"/);
+  assert.match(cityLocation, /Serving Orlando, Florida/);
+  assert.doesNotMatch(cityLocation, /<address|Our Office|Our Orlando Location|Our Location|storefront|Google Business Profile|Get directions|performanceLocalV5LocationActions/);
+});
+
 test("V5 styles are additive, namespace-only, responsive, and never target the screenshot attribute", () => {
   const css = source("src/styles.css");
   const marker = css.indexOf("/* Performance Local V5:");
@@ -563,12 +868,26 @@ test("V5 styles are additive, namespace-only, responsive, and never target the s
   assert.match(v5, /@media \(max-width:\s*760px\)[\s\S]*?\.performanceLocalHeroMedia[\s\S]*?grid-row:\s*visual-start \/ visual-end/);
   assert.match(v5, /@media \(max-width:\s*760px\)[\s\S]*?\.performanceLocalHeroMedia figcaption[\s\S]*?display:\s*none/);
   assert.doesNotMatch(v5, /@media \(max-width:\s*760px\)[\s\S]*?min-height:\s*1220px/);
+  assert.match(v5, /\.performanceLocalV5ReviewTrustGrid[\s\S]*?grid-template-columns:\s*repeat\(3,/);
+  assert.match(v5, /\.performanceLocalV5ReviewTrustGrid\[data-v5-source-count="1"\][\s\S]*?width:\s*min\(100%, 420px\)/);
+  assert.match(v5, /\.performanceLocalV5OptionalLink[\s\S]*?min-height:\s*44px/);
+  assert.match(v5, /\.performanceLocalV5ReviewTrustBadge img[\s\S]*?object-fit:\s*contain/);
+  assert.match(v5, /\.performanceLocalV5ReviewTrustBadgeDemo span[\s\S]*?width:\s*min\(100%, 230px\)[\s\S]*?border-radius:\s*9px/);
+  assert.doesNotMatch(v5, /\.performanceLocalV5ReviewTrustBadgeDemo span[\s\S]*?border-radius:\s*50%/);
+  assert.match(v5, /\.performanceLocalV5MapFrame[\s\S]*?height:\s*clamp\(380px, 34vw, 480px\)/);
+  assert.match(v5, /@media \(max-width:\s*760px\)[\s\S]*?\.performanceLocalV5MapFrame[\s\S]*?height:\s*clamp\(240px, 68vw, 300px\)/);
+  assert.match(v5, /@media \(max-width:\s*760px\)[\s\S]*?\.performanceLocalV5ReviewTrustGrid[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)/);
   const cityMarker = css.indexOf("/* Performance Local V5 City-Service: approved top conversion and over-photo hero preview. */");
   const conditionalMarker = css.indexOf("/* Performance Local V5 conditional Special and Estimate destination previews. */");
-  assert.ok(cityMarker > 0 && conditionalMarker > cityMarker);
+  const optionalModuleMarker = css.indexOf("/* Performance Local V5 page-scoped optional Review/Trust and Location/Map modules. */");
+  assert.ok(cityMarker > 0 && conditionalMarker > cityMarker && optionalModuleMarker > conditionalMarker);
   assert.equal(
     createHash("sha256").update(css.slice(cityMarker, conditionalMarker)).digest("hex"),
     "faab9fa07f79266de787dee4f5a3e3d507e3240ceee3fc7b8a23c52234246164",
+  );
+  assert.equal(
+    createHash("sha256").update(css.slice(conditionalMarker, optionalModuleMarker)).digest("hex"),
+    "dafebebae01b635ccca23b645003cdfac5b239ba55f8ca0ec58a9dd859d03853",
   );
 });
 
@@ -1057,7 +1376,7 @@ function cityServiceFormIdentity(
 
 function cityServiceActionConfiguration(
   configuration: PerformanceLocalDeliveryConfiguration,
-  surface: "estimate" | "generated_page" | "special" | "sticky_disabled",
+  surface: PerformanceLocalV5PreviewSurface,
 ): PerformanceLocalV5ActionConfiguration {
   const baseRoute = "/theme-lab/performance-local/v5/generated-pages/41";
   const estimateRoute = `${baseRoute}/request-an-estimate`;
@@ -1097,7 +1416,11 @@ function cityServiceActionConfiguration(
 }
 
 function renderCityServiceSurface(
-  surface: "estimate" | "generated_page" | "special" | "sticky_disabled",
+  surface: PerformanceLocalV5PreviewSurface,
+  optionalModules: Readonly<{
+    configuration: PerformanceLocalV5OptionalModulePageConfiguration;
+    presentation: PerformanceLocalV5OptionalModulePresentation;
+  }> | null = null,
 ): string {
   const configuration = cityServiceConfiguration();
   const suffix = surface === "special"
@@ -1106,6 +1429,12 @@ function renderCityServiceSurface(
       ? "/request-an-estimate"
       : surface === "sticky_disabled"
         ? "/sticky-disabled"
+        : surface === "review_trust"
+          ? "/review-trust"
+          : surface === "location_map"
+            ? "/location-map"
+            : surface === "review_trust_location_map"
+              ? "/review-trust-location-map"
         : "";
   return renderToStaticMarkup(
     <StaticRouter location={`/theme-lab/performance-local/v5/generated-pages/41${suffix}`}>
@@ -1114,6 +1443,11 @@ function renderCityServiceSurface(
         audit={cityServiceAudit()}
         campaignBannerEnabled={false}
         composition={cityServiceComposition()}
+        optionalModuleApprovedLocalImages={APPROVED_OPTIONAL_MODULE_IMAGES}
+        optionalModuleConfiguration={optionalModules?.configuration}
+        optionalModuleGovernedTargetCity="Orlando"
+        optionalModuleGovernedTargetState="Florida"
+        optionalModulePresentation={optionalModules?.presentation}
         page={cityServicePage()}
         previewedAt={new Date("2026-08-23T18:00:00Z")}
         readiness={cityServiceReadiness}
@@ -1123,6 +1457,121 @@ function renderCityServiceSurface(
       />
     </StaticRouter>,
   );
+}
+
+const APPROVED_OPTIONAL_MODULE_IMAGES = Object.freeze({
+  "approved-source-1": "/assets/review-source-one.svg",
+  "approved-source-2": "/assets/review-source-two.svg",
+  "approved-source-3": "/assets/review-source-three.svg",
+});
+
+function validReviewTrustConfiguration(demo = false) {
+  const publicNames = demo
+    ? [
+        "DEMO TRUST SOURCE — NOT SITE CONTENT",
+        "DEMO TRUST SOURCE — NOT SITE CONTENT",
+        "DEMO TRUST SOURCE — NOT SITE CONTENT",
+      ]
+    : ["Approved source one", "Approved source two", "Approved source three"];
+  return {
+    enabled: true,
+    heading: "Review and trust sources",
+    sources: [
+      {
+        badgeImageReference: "approved-source-1",
+        description: demo ? "Structural preview for one approved source." : "Exact approved source description one.",
+        enabled: true,
+        imageAltText: demo ? "Demo trust source structure one" : "Approved source one",
+        ...(demo ? {} : {
+          profileDestination: "https://reviews.example.com/source-one",
+          verifiedRatingText: "4.9 out of 5",
+          verifiedReviewCountText: "127 public reviews",
+        }),
+        publicName: publicNames[0],
+        sourceKey: "approved-source-one",
+      },
+      {
+        badgeImageReference: "approved-source-2",
+        description: demo ? "Structural preview for a second approved source." : "Exact approved source description two.",
+        enabled: true,
+        imageAltText: demo ? "Demo trust source structure two" : "Approved source two",
+        publicName: publicNames[1],
+        sourceKey: "approved-source-two",
+      },
+      {
+        badgeImageReference: "approved-source-3",
+        description: demo ? "Structural preview for a third approved source." : "Exact approved source description three.",
+        enabled: true,
+        imageAltText: demo ? "Demo trust source structure three" : "Approved source three",
+        publicName: publicNames[2],
+        sourceKey: "approved-source-three",
+      },
+    ],
+  };
+}
+
+function validBusinessLocationConfiguration() {
+  return {
+    approvedAddressLines: ["123 Approved Avenue", "Orlando, FL 32801"],
+    approvedLocationName: "Approved public office",
+    description: "Exact approved public location description.",
+    directionsDestination: "https://maps.example.com/directions?to=approved",
+    googleMapsEmbedInput: "https://www.google.com/maps/embed?pb=approved-binding",
+    governedPhoneDisplay: "(555) 010-0200",
+    mapTitle: "Approved public office map",
+    mode: "business_location" as const,
+  };
+}
+
+function validCityServiceAreaConfiguration(demo = false) {
+  return {
+    description: demo
+      ? "Synthetic preview of a manually approved city service-area map."
+      : "Exact manually approved service-area description.",
+    googleMapsEmbedInput: demo
+      ? "https://www.google.com/maps/embed?pb=theme-lab-demo"
+      : "https://www.google.com/maps/embed?pb=approved-orlando-service-area",
+    mapTitle: demo ? "Orlando service-area demo map — not site content" : "Orlando service-area map",
+    mode: "city_service_area" as const,
+    sectionHeading: "Serving Orlando, Florida",
+    targetCity: "Orlando",
+    targetState: "Florida",
+  };
+}
+
+function optionalModuleConfiguration(
+  mode: "both" | "location" | "review",
+  demo = false,
+): PerformanceLocalV5OptionalModulePageConfiguration {
+  return {
+    ...(mode === "both" || mode === "location" ? {
+      locationMap: demo ? validCityServiceAreaConfiguration(true) : validBusinessLocationConfiguration(),
+    } : {}),
+    ...(mode === "both" || mode === "review" ? { reviewTrust: validReviewTrustConfiguration(demo) } : {}),
+  };
+}
+
+function resolveOptionalModules(
+  raw: unknown,
+  overrides: Partial<{
+    governedTargetCity: string | null;
+    governedTargetState: string | null;
+    pageType: unknown;
+    presentation: PerformanceLocalV5OptionalModulePresentation;
+  }> = {},
+) {
+  return resolvePerformanceLocalV5OptionalModules(raw, {
+    approvedLocalImages: APPROVED_OPTIONAL_MODULE_IMAGES,
+    governedPhoneDisplay: governedContact.phoneDisplay,
+    governedTargetCity: Object.prototype.hasOwnProperty.call(overrides, "governedTargetCity")
+      ? overrides.governedTargetCity ?? null
+      : "Orlando",
+    governedTargetState: Object.prototype.hasOwnProperty.call(overrides, "governedTargetState")
+      ? overrides.governedTargetState ?? null
+      : "Florida",
+    pageType: Object.prototype.hasOwnProperty.call(overrides, "pageType") ? overrides.pageType : "city_service",
+    presentation: overrides.presentation ?? "public",
+  });
 }
 
 function estimateForm(): PerformanceLocalEstimateFormConfiguration {

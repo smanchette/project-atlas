@@ -41,6 +41,10 @@ import PerformanceLocalV5Renderer, {
 } from "../components/PerformanceLocalV5Renderer";
 import type { PerformanceLocalV5ReviewMode } from "../components/PerformanceLocalV5Layouts";
 import type { PerformanceLocalV5ActionConfiguration } from "../components/performanceLocalV5Actions";
+import type {
+  PerformanceLocalV5OptionalModulePageConfiguration,
+  PerformanceLocalV5OptionalModulePresentation,
+} from "../components/performanceLocalV5OptionalModules";
 import { performanceLocalFormDomId } from "../components/PerformanceLocalRenderer";
 import {
   PERFORMANCE_LOCAL_V5_DEMO_MEDIA_LABEL,
@@ -77,6 +81,14 @@ type ReviewData = Readonly<{
   requestKey: string;
   v4Audit: PerformanceLocalV4LayoutAudit;
   v5Audit: PerformanceLocalV5LayoutAudit;
+}>;
+
+export type PerformanceLocalV5ThemeLabOptionalModuleFixture = Readonly<{
+  approvedLocalImages: Readonly<Record<string, string>>;
+  configuration: PerformanceLocalV5OptionalModulePageConfiguration;
+  governedTargetCity: string | null;
+  governedTargetState: string | null;
+  presentation: PerformanceLocalV5OptionalModulePresentation;
 }>;
 
 const PAGE_TYPE_ORDER: readonly PerformanceLocalV5PageType[] = Object.freeze([
@@ -245,6 +257,10 @@ function PerformanceLocalV5ReviewContent({
     plannedPage,
     previewSurface,
   );
+  const optionalModuleFixture = performanceLocalV5ThemeLabOptionalModuleFixture(
+    delivery.page.id,
+    previewSurface,
+  );
   const selectedRepresentativeId = representatives.some((candidate) => candidate.generatedPageId === delivery.page.id)
     ? delivery.page.id
     : "";
@@ -315,6 +331,11 @@ function PerformanceLocalV5ReviewContent({
             audit={v5Audit}
             campaignBannerEnabled={campaignBannerEnabled}
             composition={delivery.composition}
+            optionalModuleApprovedLocalImages={optionalModuleFixture.approvedLocalImages}
+            optionalModuleConfiguration={optionalModuleFixture.configuration}
+            optionalModuleGovernedTargetCity={optionalModuleFixture.governedTargetCity}
+            optionalModuleGovernedTargetState={optionalModuleFixture.governedTargetState}
+            optionalModulePresentation={optionalModuleFixture.presentation}
             page={delivery.page}
             previewedAt={previewedAt}
             readiness={readiness}
@@ -569,6 +590,83 @@ export function performanceLocalV5ThemeLabActionConfiguration(
     estimate,
     special,
     sticky,
+  });
+}
+
+const EMPTY_THEME_LAB_OPTIONAL_MODULE_FIXTURE: PerformanceLocalV5ThemeLabOptionalModuleFixture = Object.freeze({
+  approvedLocalImages: Object.freeze({}),
+  configuration: Object.freeze({}),
+  governedTargetCity: null,
+  governedTargetState: null,
+  presentation: "theme_lab_demo",
+});
+
+const THEME_LAB_OPTIONAL_MODULE_APPROVED_IMAGES = Object.freeze({
+  "theme-lab-trust-source-1": "/assets/performance-local-v5/demo-trust-source-1.svg",
+  "theme-lab-trust-source-2": "/assets/performance-local-v5/demo-trust-source-2.svg",
+  "theme-lab-trust-source-3": "/assets/performance-local-v5/demo-trust-source-3.svg",
+});
+
+const THEME_LAB_REVIEW_TRUST_CONFIGURATION = Object.freeze({
+  enabled: true,
+  heading: "Review and trust sources",
+  sources: Object.freeze([
+    Object.freeze({
+      badgeImageReference: "theme-lab-trust-source-1",
+      description: "Structural preview for one manually approved public source.",
+      enabled: true,
+      imageAltText: "Demo trust source structure one",
+      publicName: "DEMO TRUST SOURCE — NOT SITE CONTENT",
+      sourceKey: "theme-lab-source-one",
+    }),
+    Object.freeze({
+      badgeImageReference: "theme-lab-trust-source-2",
+      description: "Structural preview for a second manually approved public source.",
+      enabled: true,
+      imageAltText: "Demo trust source structure two",
+      publicName: "DEMO TRUST SOURCE — NOT SITE CONTENT",
+      sourceKey: "theme-lab-source-two",
+    }),
+    Object.freeze({
+      badgeImageReference: "theme-lab-trust-source-3",
+      description: "Structural preview for a third manually approved public source.",
+      enabled: true,
+      imageAltText: "Demo trust source structure three",
+      publicName: "DEMO TRUST SOURCE — NOT SITE CONTENT",
+      sourceKey: "theme-lab-source-three",
+    }),
+  ]),
+});
+
+const THEME_LAB_LOCATION_MAP_CONFIGURATION = Object.freeze({
+  description: "Synthetic preview of a manually approved city service-area map.",
+  googleMapsEmbedInput: "https://www.google.com/maps/embed?pb=theme-lab-demo",
+  mapTitle: "Orlando service-area demo map — not site content",
+  mode: "city_service_area",
+  sectionHeading: "Serving Orlando, Florida",
+  targetCity: "Orlando",
+  targetState: "Florida",
+});
+
+export function performanceLocalV5ThemeLabOptionalModuleFixture(
+  generatedPageId: number,
+  previewSurface: PerformanceLocalV5PreviewSurface,
+): PerformanceLocalV5ThemeLabOptionalModuleFixture {
+  if (generatedPageId !== PERFORMANCE_LOCAL_V5_PAGE_41_EXPECTATION.generatedPageId) {
+    return EMPTY_THEME_LAB_OPTIONAL_MODULE_FIXTURE;
+  }
+  const reviewTrust = previewSurface === "review_trust" || previewSurface === "review_trust_location_map";
+  const locationMap = previewSurface === "location_map" || previewSurface === "review_trust_location_map";
+  if (!reviewTrust && !locationMap) return EMPTY_THEME_LAB_OPTIONAL_MODULE_FIXTURE;
+  return Object.freeze({
+    approvedLocalImages: THEME_LAB_OPTIONAL_MODULE_APPROVED_IMAGES,
+    configuration: Object.freeze({
+      ...(locationMap ? { locationMap: THEME_LAB_LOCATION_MAP_CONFIGURATION } : {}),
+      ...(reviewTrust ? { reviewTrust: THEME_LAB_REVIEW_TRUST_CONFIGURATION } : {}),
+    }),
+    governedTargetCity: locationMap ? "Orlando" : null,
+    governedTargetState: locationMap ? "Florida" : null,
+    presentation: "theme_lab_demo",
   });
 }
 

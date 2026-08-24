@@ -37,6 +37,11 @@ import type {
   PerformanceLocalV5DestinationConsumptionRecord,
   PerformanceLocalV5HomeServicePresentation,
 } from "./performanceLocalV5LayoutContract";
+import type {
+  PerformanceLocalV5OptionalModulesResolution,
+  PerformanceLocalV5ResolvedLocationMap,
+  PerformanceLocalV5ResolvedReviewTrust,
+} from "./performanceLocalV5OptionalModules";
 import {
   buildNavigationTree,
   resolvePageMediaDisplayPreset,
@@ -75,6 +80,7 @@ export type PerformanceLocalV5LayoutBodyProps = Readonly<{
   homeServicePresentation: PerformanceLocalV5HomeServicePresentation;
   layoutKey: string;
   onFormFocusRiskChange: (focused: boolean) => void;
+  optionalModules?: PerformanceLocalV5OptionalModulesResolution;
   pageType: NonCityPageType;
   regions: readonly PerformanceLocalV5RegionPlan[];
   reviewMode: PerformanceLocalV5ReviewMode;
@@ -131,6 +137,9 @@ function ServiceLayout(props: PerformanceLocalV5LayoutBodyProps) {
   return (
     <LayoutRoot props={props} layoutClass="performanceLocalV5LayoutService">
       <HeroRegion props={props} regionPlan={region(props, "hero")} />
+      {props.optionalModules?.reviewTrust ? (
+        <PerformanceLocalV5ReviewTrustSection resolution={props.optionalModules.reviewTrust} />
+      ) : null}
       <TrustRegion props={props} regionPlan={region(props, "trust")} />
       <AuthorityRegion props={props} regionPlan={region(props, "service_overview")} emphasis="overview" />
       <DisclosureBodyRegion props={props} regionPlan={region(props, "approved_guidance")} kind="guidance" />
@@ -140,8 +149,167 @@ function ServiceLayout(props: PerformanceLocalV5LayoutBodyProps) {
         regions={[region(props, "service_area_discovery"), region(props, "related_discovery")]}
       />
       <FaqRegion props={props} regionPlan={region(props, "faq")} />
+      {props.optionalModules?.locationMap ? (
+        <PerformanceLocalV5LocationMapSection
+          governedContact={props.governedContact}
+          resolution={props.optionalModules.locationMap}
+        />
+      ) : null}
       <SharedFinalConversion props={props} regionPlan={region(props, "final_conversion")} />
     </LayoutRoot>
+  );
+}
+
+export function PerformanceLocalV5ReviewTrustSection({
+  resolution,
+}: {
+  resolution: PerformanceLocalV5ResolvedReviewTrust;
+}) {
+  return (
+    <section
+      className="performanceLocalV5OptionalModule performanceLocalV5ReviewTrust"
+      data-v5-optional-module="review-trust"
+      data-v5-optional-presentation={resolution.presentation}
+    >
+      <div className="performanceLocalV5OptionalContainer">
+        <div className="performanceLocalV5OptionalHeading">
+          <p>Independent public sources</p>
+          <h2>{resolution.heading ?? "Review and trust sources"}</h2>
+        </div>
+        <div
+          className="performanceLocalV5ReviewTrustGrid"
+          data-v5-source-count={resolution.sources.length}
+        >
+          {resolution.sources.map((source) => (
+            <article className="performanceLocalV5ReviewTrustCard" key={source.sourceKey}>
+              {resolution.presentation === "theme_lab_demo" ? (
+                <div
+                  aria-label={source.imageAltText}
+                  className="performanceLocalV5ReviewTrustBadge performanceLocalV5ReviewTrustBadgeDemo"
+                  data-v5-demo-trust-badge="true"
+                  role="img"
+                >
+                  <span>DEMO BADGE — NOT SITE CONTENT</span>
+                </div>
+              ) : (
+                <div className="performanceLocalV5ReviewTrustBadge">
+                  <img alt={source.imageAltText} decoding="async" loading="lazy" src={source.badgeImageUrl} />
+                </div>
+              )}
+              <div className="performanceLocalV5ReviewTrustCopy">
+                <h3>{source.publicName}</h3>
+                <p>{source.description}</p>
+                {resolution.presentation === "theme_lab_demo" ? (
+                  <div
+                    aria-label="Demo-only optional source fields"
+                    className="performanceLocalV5ReviewTrustDemoStructure"
+                    data-v5-demo-trust-optional-fields="true"
+                  >
+                    <span>Optional rating / count</span>
+                    <span>Optional profile link</span>
+                  </div>
+                ) : null}
+                {source.verifiedRatingText || source.verifiedReviewCountText ? (
+                  <p className="performanceLocalV5ReviewTrustVerification">
+                    {source.verifiedRatingText ? <span>{source.verifiedRatingText}</span> : null}
+                    {source.verifiedReviewCountText ? <span>{source.verifiedReviewCountText}</span> : null}
+                  </p>
+                ) : null}
+                {source.profileDestination ? (
+                  <a
+                    className="performanceLocalV5OptionalLink"
+                    href={source.profileDestination}
+                    rel="noopener noreferrer"
+                    target="_blank"
+                  >
+                    View {source.publicName}
+                  </a>
+                ) : null}
+              </div>
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function PerformanceLocalV5LocationMapSection({
+  governedContact,
+  resolution,
+}: {
+  governedContact: PerformanceLocalGovernedContact | null;
+  resolution: PerformanceLocalV5ResolvedLocationMap;
+}) {
+  const exactGovernedContact = resolution.mode === "business_location" &&
+    resolution.governedPhoneDisplay &&
+    governedContact?.phoneDisplay === resolution.governedPhoneDisplay
+    ? governedContact
+    : null;
+  return (
+    <section
+      className="performanceLocalV5OptionalModule performanceLocalV5LocationMap"
+      data-v5-location-mode={resolution.mode}
+      data-v5-optional-module="location-map"
+      data-v5-optional-presentation={resolution.presentation}
+      {...(resolution.mode === "city_service_area" ? {
+        "data-v5-service-area-city": resolution.targetCity,
+        "data-v5-service-area-state": resolution.targetState,
+      } : {})}
+    >
+      <div className="performanceLocalV5OptionalContainer performanceLocalV5LocationMapLayout">
+        <div className="performanceLocalV5LocationDetails">
+          <h2>{resolution.sectionHeading}</h2>
+          {resolution.mode === "business_location" ? (
+            <>
+              <h3>{resolution.approvedLocationName}</h3>
+              <address>
+                {resolution.approvedAddressLines.map((line) => <span key={line}>{line}</span>)}
+              </address>
+            </>
+          ) : null}
+          {resolution.description ? <p>{resolution.description}</p> : null}
+          {resolution.mode === "business_location" && (exactGovernedContact || resolution.directionsDestination) ? (
+            <div className="performanceLocalV5LocationActions">
+              {exactGovernedContact ? (
+                <a className="performanceLocalV5OptionalLink" href={exactGovernedContact.callDestination}>
+                  <Phone aria-hidden="true" /> Call {exactGovernedContact.phoneDisplay}
+                </a>
+              ) : null}
+              {resolution.directionsDestination ? (
+                <a
+                  className="performanceLocalV5OptionalLink"
+                  href={resolution.directionsDestination}
+                  rel="noopener noreferrer"
+                  target="_blank"
+                >
+                  Get directions
+                </a>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        {resolution.presentation === "theme_lab_demo" ? (
+          <div
+            aria-label={resolution.mapTitle}
+            className="performanceLocalV5MapFrame performanceLocalV5MapFrameDemo"
+            data-v5-demo-map="true"
+            role="img"
+          >
+            <span>DEMO MAP — NOT SITE CONTENT</span>
+          </div>
+        ) : (
+          <div className="performanceLocalV5MapFrame" data-v5-map-embed="google">
+            <iframe
+              loading="lazy"
+              referrerPolicy="strict-origin-when-cross-origin"
+              src={resolution.googleMapsEmbedUrl}
+              title={resolution.mapTitle}
+            />
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 

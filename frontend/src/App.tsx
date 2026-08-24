@@ -221,6 +221,18 @@ function App() {
         element={<ThemeLabRoute><PerformanceLocalV5ReviewPage previewSurface="sticky_disabled" /></ThemeLabRoute>}
       />
       <Route
+        path="/theme-lab/performance-local/v5/generated-pages/:id/review-trust"
+        element={<ThemeLabRoute><PerformanceLocalV5ReviewPage previewSurface="review_trust" /></ThemeLabRoute>}
+      />
+      <Route
+        path="/theme-lab/performance-local/v5/generated-pages/:id/location-map"
+        element={<ThemeLabRoute><PerformanceLocalV5ReviewPage previewSurface="location_map" /></ThemeLabRoute>}
+      />
+      <Route
+        path="/theme-lab/performance-local/v5/generated-pages/:id/review-trust-location-map"
+        element={<ThemeLabRoute><PerformanceLocalV5ReviewPage previewSurface="review_trust_location_map" /></ThemeLabRoute>}
+      />
+      <Route
         path="/theme-lab/performance-local/v5/generated-pages/:id"
         element={<ThemeLabRoute><PerformanceLocalV5ReviewPage previewSurface="generated_page" /></ThemeLabRoute>}
       />
