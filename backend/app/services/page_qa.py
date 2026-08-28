@@ -1,9 +1,12 @@
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 import hashlib
+import ipaddress
 import json
 import re
+import unicodedata
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 from sqlmodel import Session, select
@@ -72,6 +75,94 @@ PAGE_QA_ALGORITHM_KEY = "atlas-page-qa"
 PAGE_QA_ALGORITHM_VERSION = "2"
 PAGE_QA_RULESET_KEY = "atlas-page-qa-rules"
 PAGE_QA_RULESET_VERSION = "2"
+
+# This is the exact accepted ruleset identity carried by the active legacy
+# City-Service QA rows.  It is intentionally frozen: the automatic CTA refresh
+# may recognize it only as an immutable predecessor, never as current QA.
+LEGACY_CITY_SERVICE_QA_RULESET_HASH = (
+    "9ed072fc1adbc09300a8f62583ef15ad0659f409407c24d8f78dabd9741f2c55"
+)
+LEGACY_CITY_SERVICE_QA_CHECK_KEYS = (
+    "title",
+    "meta_title",
+    "meta_description",
+    "h1",
+    "intro",
+    "call_to_action",
+    "why_it_matters",
+    "signs_section",
+    "process_section",
+    "prep_section",
+    "faqs",
+    "city_name",
+    "service_name",
+    "phone",
+    "license_operator",
+    "unsafe_phrases",
+    "county_county",
+    "placeholders",
+    "hero_assigned",
+    "hero_reviewed",
+    "hero_alt_text",
+    "assigned_images_reviewed",
+    "preview_route",
+)
+
+CITY_SERVICE_PUBLIC_CTA_POLICY = {
+    "schema": "atlas-city-service-public-cta-policy@1",
+    "nonpublic_draft_fields": ("internal_notes", "status"),
+    "public_generated_page_fields": (
+        "page_title",
+        "meta_title",
+        "meta_description",
+        "h1",
+    ),
+    "governed_text_normalization": "NFKC_trim_casefold",
+    "ownership": ("company_or_brand", "service", "city"),
+    "governed_contact_channels": ("phone", "public_email", "website_public_url"),
+    "configured_invalid_contact": "does_not_become_unconfigured",
+    "public_email_syntax": "single_ascii_mailbox_with_dot_domain",
+    "safe_destination_schemes": ("http", "https", "mailto", "tel"),
+    "bare_domain_destinations": "validated_as_public_url_destinations",
+    "public_url_syntax": "validated_http_origin_host_labels_port_and_controls",
+    "unicode_phone_separators": "normalized_before_exact_governed_comparison",
+    "safe_internal_destination_prefixes": ("/", "#"),
+    "private_delivery_keys": ("recipient_email", "from_email"),
+    "credential_visibility": "configured_values_absent_from_ordinary_public_fields",
+    "public_marker_values": (*PLACEHOLDER_PATTERNS, "demo"),
+    "malformed_constructs": ("||", ";;", ",,", "()", "[]", "{}"),
+}
+
+CITY_SERVICE_CHECK_REMEDIATION = {
+    "cta_ownership": (
+        "content",
+        "Identify the governed company or brand, assigned service, and assigned city in the CTA.",
+    ),
+    "cta_contact": (
+        "business_info",
+        "Use a configured public phone, public contact email, or governed Website URL.",
+    ),
+    "cta_destinations": (
+        "business_info",
+        "Remove ungoverned contact details and use only safe governed or internal destinations.",
+    ),
+    "cta_private_delivery": (
+        "business_info",
+        "Keep private recipient and From configuration out of public draft fields.",
+    ),
+    "cta_credentials": (
+        "business_info",
+        "Remove automatic credential output unless an approved public Credentials component is configured.",
+    ),
+    "cta_format": (
+        "content",
+        "Correct malformed separators, empty groups, or dangling conjunctions in the CTA.",
+    ),
+    "cta_public_markers": (
+        "content",
+        "Replace placeholder or demo content with reviewed public CTA copy.",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -230,18 +321,22 @@ def _content_hash(page: GeneratedPage) -> str:
 
 
 def _qa_ruleset_hash(contract: PageTypeReviewContract) -> str:
-    return _canonical_hash(
-        {
-            "algorithm_key": PAGE_QA_ALGORITHM_KEY,
-            "algorithm_version": PAGE_QA_ALGORITHM_VERSION,
-            "ruleset_key": PAGE_QA_RULESET_KEY,
-            "ruleset_version": PAGE_QA_RULESET_VERSION,
-            "contract": asdict(contract),
-            "forbidden_phrases": sorted(FORBIDDEN_PHRASES),
-            "placeholder_patterns": list(PLACEHOLDER_PATTERNS),
-            "check_remediation": CHECK_REMEDIATION,
-        }
-    )
+    payload = {
+        "algorithm_key": PAGE_QA_ALGORITHM_KEY,
+        "algorithm_version": PAGE_QA_ALGORITHM_VERSION,
+        "ruleset_key": PAGE_QA_RULESET_KEY,
+        "ruleset_version": PAGE_QA_RULESET_VERSION,
+        "contract": asdict(contract),
+        "forbidden_phrases": sorted(FORBIDDEN_PHRASES),
+        "placeholder_patterns": list(PLACEHOLDER_PATTERNS),
+        "check_remediation": CHECK_REMEDIATION,
+    }
+    if contract.schema == "legacy-city-service-v1":
+        # Bind the City-Service-only policy without changing any unrelated page
+        # type's durable QA identity.
+        payload["city_service_public_cta_policy"] = CITY_SERVICE_PUBLIC_CTA_POLICY
+        payload["city_service_check_remediation"] = CITY_SERVICE_CHECK_REMEDIATION
+    return _canonical_hash(payload)
 
 
 def _semantic_qa_source_snapshot(
@@ -249,6 +344,7 @@ def _semantic_qa_source_snapshot(
     page: GeneratedPage,
     *,
     contract: PageTypeReviewContract | None = None,
+    legacy_city_service_policy: bool = False,
 ) -> dict[str, Any]:
     """Build a remap-stable snapshot of only inputs consumed by page QA."""
 
@@ -326,16 +422,29 @@ def _semantic_qa_source_snapshot(
             default=_json_default,
         )
     )
+    business_snapshot = {
+        "company_name": business.company_name,
+        "brand_name": website_context.brand.public_name,
+        "phone": business.phone,
+        "license_number": business.license_number,
+        "certified_operator": business.certified_operator,
+    }
+    if contract.schema == "legacy-city-service-v1" and not legacy_city_service_policy:
+        # Public CTA email validation consumes this value.  Scope the added
+        # input to City-Service so every unrelated QA source hash stays exact.
+        business_snapshot["public_email"] = business.email
+
+    page_snapshot = {
+        "page_type": page.page_type,
+        "page_title": page.page_title,
+        "page_slug": page.page_slug,
+        "meta_title": page.meta_title,
+        "meta_description": page.meta_description,
+        "h1": page.h1,
+        "draft_content": page.draft_content or {},
+    }
     return {
-        "page": {
-            "page_type": page.page_type,
-            "page_title": page.page_title,
-            "page_slug": page.page_slug,
-            "meta_title": page.meta_title,
-            "meta_description": page.meta_description,
-            "h1": page.h1,
-            "draft_content": page.draft_content or {},
-        },
+        "page": page_snapshot,
         "website": (
             {
                 "website_name": website.website_name,
@@ -350,13 +459,7 @@ def _semantic_qa_source_snapshot(
             if website
             else None
         ),
-        "business": {
-            "company_name": business.company_name,
-            "brand_name": website_context.brand.public_name,
-            "phone": business.phone,
-            "license_number": business.license_number,
-            "certified_operator": business.certified_operator,
-        },
+        "business": business_snapshot,
         "service": (
             {"service_name": service.service_name, "service_slug": service.service_slug}
             if service
@@ -559,6 +662,19 @@ def _utc(value: datetime) -> datetime:
 
 
 def evaluate_page_qa(session: Session, page_id: int) -> PageQAResult:
+    return _evaluate_page_qa(
+        session,
+        page_id,
+        legacy_city_service_policy=False,
+    )
+
+
+def _evaluate_page_qa(
+    session: Session,
+    page_id: int,
+    *,
+    legacy_city_service_policy: bool,
+) -> PageQAResult:
     page = session.get(GeneratedPage, page_id)
     if not page:
         raise HTTPException(status_code=404, detail="Generated page not found")
@@ -575,6 +691,7 @@ def evaluate_page_qa(session: Session, page_id: int) -> PageQAResult:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     evaluator_inputs = evaluator_snapshot.payload()
     page_inputs = evaluator_inputs["page"]
+    website = evaluator_inputs["website"]
     business = evaluator_inputs["business"]
     service = evaluator_inputs["service"]
     city = evaluator_inputs["city"]
@@ -726,43 +843,66 @@ def evaluate_page_qa(session: Session, page_id: int) -> PageQAResult:
             fail_message="The assigned service name is missing from the draft.",
         )
 
-    phone_present = bool(
-        business
-        and any(
-            candidate in _digits(public_text)
-            for candidate in _phone_candidates(business.get("phone"))
+    if (
+        contract.schema == "legacy-city-service-v1"
+        and not legacy_city_service_policy
+    ):
+        _evaluate_city_service_public_cta(
+            checks,
+            draft=draft,
+            page_public_fields={
+                "page_title": page_inputs.get("page_title"),
+                "meta_title": page_inputs.get("meta_title"),
+                "meta_description": page_inputs.get("meta_description"),
+                "h1": page_inputs.get("h1"),
+            },
+            business=business,
+            website=website,
+            service=service,
+            city=city,
         )
-    )
-    _check(
-        checks,
-        key="phone",
-        label="Phone number present",
-        passed=phone_present,
-        pass_message="Business phone number appears in the draft.",
-        fail_message="Business phone number is missing from the draft.",
-    )
-
-    if contract.schema == "legacy-city-service-v1":
-        required_operator_values = [
-            value
-            for value in (
-                business.get("license_number") if business else None,
-                business.get("certified_operator") if business else None,
+    else:
+        phone_present = bool(
+            business
+            and any(
+                candidate in _digits(public_text)
+                for candidate in _phone_candidates(business.get("phone"))
             )
-            if _has_text(value)
-        ]
-        operator_present = all(
-            value.lower() in public_text_lower for value in required_operator_values
         )
         _check(
             checks,
-            key="license_operator",
-            label="License and operator information",
-            passed=operator_present,
-            pass_message="Configured license and operator information appears in the draft.",
-            fail_message="Configured license or certified operator information is missing.",
-            severity="warning",
+            key="phone",
+            label="Phone number present",
+            passed=phone_present,
+            pass_message="Business phone number appears in the draft.",
+            fail_message="Business phone number is missing from the draft.",
         )
+        if contract.schema == "legacy-city-service-v1":
+            required_operator_values = [
+                value
+                for value in (
+                    business.get("license_number") if business else None,
+                    business.get("certified_operator") if business else None,
+                )
+                if _has_text(value)
+            ]
+            operator_present = all(
+                value.lower() in public_text_lower
+                for value in required_operator_values
+            )
+            _check(
+                checks,
+                key="license_operator",
+                label="License and operator information",
+                passed=operator_present,
+                pass_message=(
+                    "Configured license and operator information appears in the draft."
+                ),
+                fail_message=(
+                    "Configured license or certified operator information is missing."
+                ),
+                severity="warning",
+            )
 
     unsafe_found = [phrase for phrase in FORBIDDEN_PHRASES if phrase in public_text_lower]
     _check(
@@ -1155,6 +1295,121 @@ def _normalized_page_qa_projection(result: PageQAResult) -> dict[str, Any]:
     return values
 
 
+def _qa_record_projection_matches_page(
+    page: GeneratedPage,
+    record: GeneratedPageQAResult,
+) -> bool:
+    try:
+        result = _record_as_result(record)
+        expected_projection = _normalized_page_qa_projection(result)
+        raw_projection = page.qa_result
+        if not isinstance(raw_projection, dict) or set(raw_projection) != set(
+            expected_projection
+        ):
+            return False
+        raw_exact_projection = {
+            key: value for key, value in raw_projection.items() if key != "checked_at"
+        }
+        expected_exact_projection = {
+            key: value
+            for key, value in expected_projection.items()
+            if key != "checked_at"
+        }
+        if raw_exact_projection != expected_exact_projection:
+            return False
+        projection = PageQAResult.model_validate(
+            {**raw_projection, "persisted": True}
+        )
+        normalized_projection = _normalized_page_qa_projection(projection)
+    except Exception:
+        return False
+    return bool(
+        normalized_projection == expected_projection
+        and page.qa_status == record.readiness_status
+        and page.qa_checked_at is not None
+        and _utc(page.qa_checked_at) == _utc(record.evaluated_at)
+    )
+
+
+def is_exact_legacy_city_service_qa_predecessor(
+    session: Session,
+    page: GeneratedPage,
+    record: GeneratedPageQAResult,
+) -> bool:
+    """Recognize only the frozen, identity-exact pre-policy QA evidence.
+
+    This is a one-way transition predicate for the guarded automatic CTA
+    refresh. It deliberately does not make legacy evidence current or ready.
+    """
+
+    if page.id is None or page.page_type != "city_service":
+        return False
+    try:
+        contract = review_contract_for(page)
+        if contract.schema != "legacy-city-service-v1":
+            return False
+        current_records = _current_qa_records(session, page.id)
+        authoritative = authoritative_page_qa_state(session, page)
+        legacy_source = _semantic_qa_source_snapshot(
+            session,
+            page,
+            contract=contract,
+            legacy_city_service_policy=True,
+        )
+        expected_legacy_result = _evaluate_page_qa(
+            session,
+            page.id,
+            legacy_city_service_policy=True,
+        )
+        raw_check_payload = record.check_payload
+        if not isinstance(raw_check_payload, list):
+            return False
+        checks = [
+            QACheckItem.model_validate(value)
+            for value in raw_check_payload
+        ]
+    except (HTTPException, ValueError, TypeError):
+        return False
+
+    if (
+        len(current_records) != 1
+        or current_records[0].id != record.id
+        or record.lifecycle_status != "current"
+        or record.website_id != authoritative.website_id
+        or record.site_plan_id != authoritative.site_plan_id
+        or record.planned_page_id != authoritative.planned_page_id
+        or record.latest_generated_page_revision_id
+        != authoritative.latest_generated_page_revision_id
+        or record.content_hash != authoritative.content_hash
+        or record.page_composition_id != authoritative.page_composition_id
+        or record.composition_version != authoritative.composition_version
+        or record.composition_source_hash != authoritative.composition_source_hash
+        or record.qa_algorithm_key != PAGE_QA_ALGORITHM_KEY
+        or record.qa_algorithm_version != PAGE_QA_ALGORITHM_VERSION
+        or record.qa_ruleset_key != PAGE_QA_RULESET_KEY
+        or record.qa_ruleset_version != PAGE_QA_RULESET_VERSION
+        or record.qa_ruleset_hash != LEGACY_CITY_SERVICE_QA_RULESET_HASH
+        or record.source_hash != _canonical_hash(legacy_source)
+        or record.result_hash
+        != qa_result_record_hash(record.model_dump(mode="python"))
+        or not _qa_record_projection_matches_page(page, record)
+    ):
+        return False
+
+    expected_check_payload = [
+        item.model_dump(mode="json") for item in expected_legacy_result.checks
+    ]
+    return bool(
+        tuple(item.key for item in checks) == LEGACY_CITY_SERVICE_QA_CHECK_KEYS
+        and len(checks) == len(LEGACY_CITY_SERVICE_QA_CHECK_KEYS)
+        and raw_check_payload == expected_check_payload
+        and record.passed_count == expected_legacy_result.passed_count
+        and record.warning_count == expected_legacy_result.warning_count
+        and record.failed_count == expected_legacy_result.failed_count
+        and record.readiness_status == expected_legacy_result.readiness_status
+    )
+
+
 def effective_page_qa_state(
     session: Session,
     page_or_id: GeneratedPage | int,
@@ -1293,6 +1548,12 @@ def effective_page_qa_state(
             expected_projection
         ):
             raise ValueError("Generated Page QA projection shape is not exact.")
+        raw_exact_projection = {
+            key: value for key, value in raw_projection.items() if key != "checked_at"
+        }
+        expected_exact_projection = {
+            key: value for key, value in expected_projection.items() if key != "checked_at"
+        }
         projection = PageQAResult.model_validate(
             {**raw_projection, "persisted": True}
         )
@@ -1304,7 +1565,8 @@ def effective_page_qa_state(
             record,
         )
     if (
-        normalized_projection != expected_projection
+        raw_exact_projection != expected_exact_projection
+        or normalized_projection != expected_projection
         or page.qa_status != record.readiness_status
         or page.qa_checked_at is None
         or _utc(page.qa_checked_at) != _utc(record.evaluated_at)
@@ -1420,6 +1682,585 @@ def _batch_response(
     )
 
 
+def _evaluate_city_service_public_cta(
+    checks: list[QACheckItem],
+    *,
+    draft: Mapping[str, Any],
+    page_public_fields: Mapping[str, Any] | None = None,
+    business: Mapping[str, Any] | None,
+    website: Mapping[str, Any] | None,
+    service: Mapping[str, Any] | None,
+    city: Mapping[str, Any] | None,
+) -> None:
+    """Evaluate the governed ordinary-public City-Service CTA contract.
+
+    Internal notes and draft workflow status are deliberately outside the
+    public projection. Credential checks compare only exact configured source
+    values; they do not redact rendered text or use a credential keyword list.
+    """
+
+    public_draft = {
+        key: value
+        for key, value in draft.items()
+        if key not in CITY_SERVICE_PUBLIC_CTA_POLICY["nonpublic_draft_fields"]
+    }
+    public_projection = {
+        "draft": public_draft,
+        "generated_page": dict(page_public_fields or {}),
+    }
+    public_text = " ".join(_iter_strings(public_projection))
+    public_text_folded = _normalized_governed_text(public_text)
+    cta = draft.get("call_to_action")
+    cta_text = cta.strip() if isinstance(cta, str) else ""
+    cta_folded = cta_text.casefold()
+
+    company_values = [
+        value.casefold()
+        for value in (
+            business.get("company_name") if business else None,
+            business.get("brand_name") if business else None,
+        )
+        if _has_text(value)
+    ]
+    ownership_present = bool(company_values) and any(
+        value in cta_folded for value in company_values
+    )
+    ownership_present = bool(
+        ownership_present
+        and service
+        and _has_text(service.get("service_name"))
+        and service["service_name"].casefold() in cta_folded
+        and city
+        and _has_text(city.get("city_name"))
+        and city["city_name"].casefold() in cta_folded
+    )
+    _check(
+        checks,
+        key="cta_ownership",
+        label="Governed CTA ownership",
+        passed=ownership_present,
+        pass_message="CTA identifies the governed company, service, and city.",
+        fail_message="CTA does not identify the governed company, service, and city.",
+    )
+
+    cta_contact_tokens = _public_contact_tokens(cta_text)
+    cta_email_tokens = _public_email_tokens(cta_contact_tokens)
+    cta_destination_tokens = _public_destination_tokens(cta_contact_tokens)
+    cta_phone_scan_text = cta_text.casefold()
+    for token in [*cta_email_tokens, *cta_destination_tokens]:
+        cta_phone_scan_text = cta_phone_scan_text.replace(token.casefold(), " ")
+    cta_phone_tokens = _public_phone_tokens(cta_phone_scan_text)
+
+    public_contact_tokens = _public_contact_tokens(public_text)
+    public_email_tokens = _public_email_tokens(public_contact_tokens)
+    public_destination_tokens = _public_destination_tokens(public_contact_tokens)
+    public_phone_scan_text = public_text.casefold()
+    for token in [*public_email_tokens, *public_destination_tokens]:
+        public_phone_scan_text = public_phone_scan_text.replace(token.casefold(), " ")
+    public_phone_tokens = _public_phone_tokens(public_phone_scan_text)
+    raw_governed_phone = (
+        str(business.get("phone") or "").strip() if business else ""
+    )
+    governed_phone_values = set(_phone_candidates(raw_governed_phone))
+    raw_governed_email = (
+        str(business.get("public_email") or "").strip().casefold()
+        if business
+        else ""
+    )
+    governed_email = _normalized_public_email(raw_governed_email) or ""
+    governed_public_url = (
+        str(website.get("public_url") or "").strip() if website else ""
+    )
+
+    governed_phone_present = bool(
+        governed_phone_values.intersection(cta_phone_tokens)
+        or any(
+            token.casefold().startswith("tel:")
+            and _is_safe_public_destination(
+                token,
+                public_url=governed_public_url,
+                public_email=governed_email,
+                phone_values=governed_phone_values,
+            )
+            for token in cta_destination_tokens
+        )
+    )
+    governed_email_present = bool(
+        governed_email and governed_email in cta_email_tokens
+    )
+    governed_url_present = bool(
+        governed_public_url
+        and any(
+            _is_governed_public_url_destination(
+                token,
+                public_url=governed_public_url,
+            )
+            for token in cta_destination_tokens
+        )
+    )
+    configured_contact_count = sum(
+        bool(value)
+        for value in (
+            raw_governed_phone,
+            raw_governed_email,
+            governed_public_url,
+        )
+    )
+    contact_present = bool(
+        configured_contact_count == 0
+        or governed_phone_present
+        or governed_email_present
+        or governed_url_present
+    )
+    _check(
+        checks,
+        key="cta_contact",
+        label="Governed public CTA contact",
+        passed=contact_present,
+        pass_message=(
+            "CTA uses a configured public contact channel."
+            if configured_contact_count
+            else "No public contact channel is configured; CTA ownership remains explicit."
+        ),
+        fail_message="CTA is missing a configured public contact channel.",
+    )
+
+    email_destinations_safe = all(
+        token == governed_email for token in public_email_tokens
+    )
+    phone_destinations_safe = all(
+        token in governed_phone_values for token in public_phone_tokens
+    )
+    other_destinations_safe = all(
+        _is_safe_public_destination(
+            token,
+            public_url=governed_public_url,
+            public_email=governed_email,
+            phone_values=governed_phone_values,
+        )
+        for token in public_destination_tokens
+    )
+    _check(
+        checks,
+        key="cta_destinations",
+        label="Governed public contact details and destinations",
+        passed=(
+            email_destinations_safe
+            and phone_destinations_safe
+            and other_destinations_safe
+        ),
+        pass_message="Public draft fields contain only governed contact details and safe destinations.",
+        fail_message="A public draft field contains an ungoverned contact detail or unsafe destination.",
+    )
+
+    private_keys = {
+        str(value).casefold()
+        for value in CITY_SERVICE_PUBLIC_CTA_POLICY["private_delivery_keys"]
+    }
+    _check(
+        checks,
+        key="cta_private_delivery",
+        label="Private delivery configuration absent",
+        passed=not _contains_mapping_key(public_draft, private_keys),
+        pass_message="Public draft fields contain no private delivery configuration.",
+        fail_message="Public draft fields contain private recipient or From configuration.",
+    )
+
+    governed_credentials = [
+        _normalized_governed_text(value)
+        for value in (
+            business.get("license_number") if business else None,
+            business.get("certified_operator") if business else None,
+        )
+        if _has_text(value)
+    ]
+    leaked_credentials = [
+        value for value in governed_credentials if value in public_text_folded
+    ]
+    _check(
+        checks,
+        key="cta_credentials",
+        label="No automatic public credential output",
+        passed=not leaked_credentials,
+        pass_message="Governed credential values remain outside ordinary public draft fields.",
+        fail_message="An ordinary public draft field exposes a governed credential value.",
+    )
+
+    _check(
+        checks,
+        key="cta_format",
+        label="Well-formed CTA copy",
+        passed=not _cta_has_malformed_separators(cta_text),
+        pass_message="CTA separators and conjunctions are well formed.",
+        fail_message="CTA contains a malformed separator, empty group, or dangling conjunction.",
+    )
+
+    marker_values = CITY_SERVICE_PUBLIC_CTA_POLICY["public_marker_values"]
+    marker_found = any(
+        marker.casefold() in cta_folded
+        for marker in marker_values
+        if marker.casefold() != "demo"
+    ) or "demo" in _plain_words(cta_text)
+    _check(
+        checks,
+        key="cta_public_markers",
+        label="No placeholder or demo CTA output",
+        passed=not marker_found,
+        pass_message="CTA contains no placeholder or demo output.",
+        fail_message="CTA contains placeholder or demo output.",
+    )
+
+
+def _public_contact_tokens(value: str) -> list[str]:
+    normalized = unicodedata.normalize("NFKC", value)
+    variants = [normalized]
+    without_url_controls = normalized.translate(
+        {ord("\t"): None, ord("\r"): None, ord("\n"): None}
+    )
+    if without_url_controls != normalized:
+        # WHATWG URL parsing strips these controls. Preserve a second token
+        # view so a construct such as `/\t/host` remains `//host` and fails
+        # the governed internal-destination check instead of splitting into
+        # two apparently safe path fragments.
+        variants.append(without_url_controls)
+
+    tokens: list[str] = []
+    for translated in variants:
+        for character in '<>()[]{}"\'':
+            translated = translated.replace(character, " ")
+        tokens.extend(
+            token.strip(".,!?;")
+            for token in translated.split()
+            if token.strip(".,!?;")
+        )
+    return tokens
+
+
+def _public_email_tokens(tokens: list[str]) -> set[str]:
+    values: set[str] = set()
+    for token in tokens:
+        if "@" not in token:
+            continue
+        separated = token
+        for separator in "?&=,;":
+            separated = separated.replace(separator, " ")
+        for candidate in separated.split():
+            if "@" not in candidate:
+                continue
+            if candidate.casefold().startswith("mailto:"):
+                candidate = candidate[7:]
+            if candidate.count("@") != 1:
+                values.add(candidate.casefold())
+                continue
+            local, domain = candidate.rsplit("@", 1)
+            # Retain malformed email-like identities so the governed allowlist
+            # comparison fails closed instead of silently discarding them.
+            values.add(candidate.casefold())
+            if not local or not domain or "." not in domain:
+                continue
+    return values
+
+
+def _looks_like_uri(token: str) -> bool:
+    candidate = _whatwg_trimmed_destination_token(token)
+    lowered = candidate.casefold()
+    if lowered.startswith(("/", "#", "\\")):
+        return len(candidate) > 1
+    if lowered.startswith("www.") or "://" in lowered:
+        return True
+    if _looks_like_bare_domain(candidate):
+        return True
+    if ":" not in candidate:
+        return False
+    scheme, _separator, remainder = candidate.partition(":")
+    valid_scheme = bool(
+        scheme
+        and scheme[0].isalpha()
+        and all(character.isalnum() or character in "+-." for character in scheme)
+    )
+    if not valid_scheme:
+        return False
+    if remainder:
+        return True
+    return scheme.casefold() in {
+        *CITY_SERVICE_PUBLIC_CTA_POLICY["safe_destination_schemes"],
+        "data",
+        "javascript",
+        "vbscript",
+    }
+
+
+def _whatwg_trimmed_destination_token(token: str) -> str:
+    # WHATWG trims leading/trailing ASCII whitespace and C0 controls before
+    # parsing. Classification must observe that browser-equivalent token so
+    # a control-prefixed network path cannot disappear from destination QA.
+    return token.strip("".join(chr(value) for value in range(0x21)))
+
+
+def _looks_like_bare_domain(token: str) -> bool:
+    candidate = _bare_domain_candidate(token)
+    return bool(
+        candidate is not None
+        and "@" not in candidate
+        and "://" not in candidate
+        and _normalized_public_url(candidate)
+    )
+
+
+def _bare_domain_candidate(token: str) -> str | None:
+    candidate = unicodedata.normalize("NFKC", token)
+    if candidate.endswith(":"):
+        candidate = candidate[:-1]
+    return None if candidate.endswith(":") else candidate
+
+
+def _public_destination_tokens(tokens: list[str]) -> list[str]:
+    return [token for token in tokens if _looks_like_uri(token)]
+
+
+def _public_phone_tokens(value: str) -> set[str]:
+    value = unicodedata.normalize("NFKC", value)
+    values: set[str] = set()
+    allowed = set("0123456789+()-. \u00a0\u2007\u2009\u202f\u2010\u2011\u2012\u2013\u2014\u2212")
+    candidate: list[str] = []
+
+    def flush() -> None:
+        digits = _digits("".join(candidate))
+        if len(digits) >= 7:
+            values.add(digits)
+        candidate.clear()
+
+    for index, character in enumerate(value):
+        if character in allowed:
+            candidate.append(character)
+        elif (
+            character == "/"
+            and index > 0
+            and index + 1 < len(value)
+            and value[index - 1].isdigit()
+            and value[index + 1].isdigit()
+        ):
+            candidate.append(character)
+        else:
+            flush()
+    flush()
+    return values
+
+
+def _normalized_public_email(value: str) -> str | None:
+    candidate = unicodedata.normalize("NFKC", value).strip().casefold()
+    if (
+        not candidate
+        or len(candidate) > 254
+        or candidate.count("@") != 1
+        or any(character.isspace() for character in candidate)
+        or any(character in "?&=,;:/#" for character in candidate)
+    ):
+        return None
+    local, domain = candidate.rsplit("@", 1)
+    if (
+        not local
+        or len(local) > 64
+        or local.startswith(".")
+        or local.endswith(".")
+        or ".." in local
+        or not domain
+        or len(domain) > 253
+    ):
+        return None
+    local_allowed = set(
+        "abcdefghijklmnopqrstuvwxyz0123456789.!#$%&'*+-/=?^_`{|}~"
+    )
+    if any(character not in local_allowed for character in local):
+        return None
+    labels = domain.split(".")
+    if len(labels) < 2 or any(not label for label in labels):
+        return None
+    for label in labels:
+        if (
+            len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or any(
+                not (character.isascii() and (character.isalnum() or character == "-"))
+                for character in label
+            )
+        ):
+            return None
+    if len(labels[-1]) < 2 or not all(character.isalpha() for character in labels[-1]):
+        return None
+    return candidate
+
+
+def _normalized_public_url(value: str) -> tuple[str, str, int] | None:
+    candidate = value.strip()
+    if (
+        not candidate
+        or any(ord(character) < 33 for character in candidate)
+        or "\\" in candidate
+    ):
+        return None
+    if "://" not in candidate:
+        candidate = f"https://{candidate}"
+    try:
+        parsed = urlsplit(candidate)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or not hostname
+    ):
+        return None
+    hostname = hostname.casefold()
+    if hostname.startswith("[") or ":" in hostname:
+        return None
+    if all(character.isdigit() or character == "." for character in hostname):
+        try:
+            ipaddress.ip_address(hostname)
+        except ValueError:
+            return None
+    elif not _valid_public_domain(hostname):
+        return None
+    scheme = parsed.scheme.casefold()
+    return scheme, hostname, port or (443 if scheme == "https" else 80)
+
+
+def _valid_public_domain(hostname: str) -> bool:
+    labels = hostname.split(".")
+    if len(labels) < 2 or any(not label for label in labels):
+        return False
+    labels_valid = all(
+        len(label) <= 63
+        and not label.startswith("-")
+        and not label.endswith("-")
+        and all(
+            character.isascii()
+            and (character.isalnum() or character == "-")
+            for character in label
+        )
+        for label in labels
+    )
+    top_level = labels[-1]
+    return bool(
+        labels_valid
+        and len(top_level) >= 2
+        and (
+            all(character.isascii() and character.isalpha() for character in top_level)
+            or top_level.startswith("xn--")
+        )
+    )
+
+
+def _is_safe_public_destination(
+    token: str,
+    *,
+    public_url: str,
+    public_email: str,
+    phone_values: set[str],
+) -> bool:
+    lowered = token.casefold()
+    if "\\" in token:
+        return False
+    if lowered.startswith("#"):
+        return len(token) > 1
+    if lowered.startswith("/"):
+        return len(token) > 1 and not lowered.startswith("//")
+    if lowered.startswith("mailto:"):
+        parsed = urlsplit(token)
+        return bool(
+            public_email
+            and parsed.scheme.casefold() == "mailto"
+            and parsed.path.casefold() == public_email
+            and not parsed.query
+            and not parsed.fragment
+            and "," not in parsed.path
+            and ";" not in parsed.path
+        )
+    if lowered.startswith("tel:"):
+        destination = _digits(token[4:])
+        return bool(destination and destination in phone_values)
+
+    return _is_governed_public_url_destination(token, public_url=public_url)
+
+
+def _is_governed_public_url_destination(
+    token: str,
+    *,
+    public_url: str,
+) -> bool:
+    expected_origin = _normalized_public_url(public_url)
+    candidate = token
+    if token.casefold().startswith("www."):
+        candidate = f"https://{token}"
+    elif _looks_like_bare_domain(token):
+        bare_domain = _bare_domain_candidate(token)
+        if bare_domain is None:
+            return False
+        candidate = f"https://{bare_domain}"
+    candidate_origin = _normalized_public_url(candidate)
+    return bool(expected_origin is not None and candidate_origin == expected_origin)
+
+
+def _contains_mapping_key(value: Any, keys: set[str]) -> bool:
+    if isinstance(value, Mapping):
+        return any(
+            str(key).casefold() in keys or _contains_mapping_key(nested, keys)
+            for key, nested in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_mapping_key(nested, keys) for nested in value)
+    return False
+
+
+def _plain_words(value: str) -> list[str]:
+    translated = value.casefold()
+    for character in ",.;:!?()[]{}|/\\":
+        translated = translated.replace(character, " ")
+    return translated.split()
+
+
+def _normalized_governed_text(value: str) -> str:
+    return unicodedata.normalize("NFKC", value).strip().casefold()
+
+
+def _cta_has_malformed_separators(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return True
+    folded = stripped.casefold()
+    if any(
+        construct in folded
+        for construct in CITY_SERVICE_PUBLIC_CTA_POLICY["malformed_constructs"]
+    ):
+        return True
+    words = _plain_words(stripped)
+    if not words or words[0] in {"and", "or"} or words[-1] in {"and", "or"}:
+        return True
+    if any(
+        left in {"and", "or"} and right in {"and", "or"}
+        for left, right in zip(words, words[1:])
+    ):
+        return True
+    if stripped.endswith(("/", "|", ",", ";")):
+        return True
+    compact = "".join(character for character in folded if not character.isspace())
+    if any(
+        separator + punctuation in compact
+        for separator in (",", ";", "|")
+        for punctuation in (".", "!", "?")
+    ):
+        return True
+    return any(
+        stripped.count(left) != stripped.count(right)
+        for left, right in (("(", ")"), ("[", "]"), ("{", "}"))
+    )
+
+
 def _required(
     checks: list[QACheckItem],
     key: str,
@@ -1446,9 +2287,12 @@ def _check(
     fail_message: str,
     severity: str = "blocker",
 ) -> None:
-    issue_location, suggested_fix = CHECK_REMEDIATION.get(
+    issue_location, suggested_fix = CITY_SERVICE_CHECK_REMEDIATION.get(
         key,
-        ("content", "Review this item and correct the related page information."),
+        CHECK_REMEDIATION.get(
+            key,
+            ("content", "Review this item and correct the related page information."),
+        ),
     )
     checks.append(
         QACheckItem(

@@ -45,6 +45,7 @@ from app.services.draft_generation import (
     DraftGenerationError,
     UnsafeContentError,
     assemble_generation_prompt,
+    build_automatic_public_call_to_action,
     generate_batch,
     generate_page_draft,
     get_draft_provider,
@@ -2255,28 +2256,504 @@ def test_approval_queue_detects_blocked_page() -> None:
     assert item.needs_manual_review is True
 
 
-def test_approval_queue_detects_warnings() -> None:
+def test_approval_queue_blocks_governed_credential_leakage() -> None:
     with TestClient(app):
         with Session(engine) as session:
             page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
             page = _ensure_complete_page(session, page)
             business = session.get(Business, page.business_id)
             assert business is not None
-            business.license_number = "TEST-LICENSE-NOT-IN-DRAFT"
-            business.certified_operator = "TEST-OPERATOR-NOT-IN-DRAFT"
+            business.license_number = "SYNTHETIC-CREDENTIAL-42"
+            business.certified_operator = "Synthetic Credential Owner"
+            draft = deepcopy(page.draft_content or {})
+            draft["call_to_action"] = (
+                f"{draft['call_to_action']} {business.license_number}; "
+                f"{business.certified_operator}."
+            )
+            page.draft_content = draft
             page.status = "draft"
             session.add(business)
             session.add(page)
             session.flush()
             qa = save_page_qa(session, page.id, commit=False)
-            assert qa.readiness_status == "needs_review"
+            assert qa.readiness_status == "blocked"
 
             item = _approval_queue_item(session, page.id)
             session.rollback()
 
-    assert item.has_warnings is True
-    assert item.has_blockers is False
+    credential_check = next(check for check in qa.checks if check.key == "cta_credentials")
+    assert credential_check.status == "fail"
+    assert item.has_warnings is False
+    assert item.has_blockers is True
     assert item.is_ready_for_approval is False
+
+
+def test_city_service_qa_keeps_credentials_internal_without_public_output() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            business = session.get(Business, page.business_id)
+            assert business is not None
+            business.license_number = "SYNTHETIC-INTERNAL-CREDENTIAL-84"
+            business.certified_operator = "Synthetic Internal Operator"
+            license_number = business.license_number
+            certified_operator = business.certified_operator
+            context = load_generation_context(session, page.id)
+            draft = deepcopy(page.draft_content or {})
+            draft["call_to_action"] = build_automatic_public_call_to_action(context)
+            draft["internal_notes"] = (
+                f"Governed internally: {business.license_number}; "
+                f"{business.certified_operator}."
+            )
+            page.draft_content = draft
+            session.add(business)
+            session.add(page)
+            session.flush()
+
+            qa = evaluate_page_qa(session, page.id)
+            session.rollback()
+
+    public_fields = {
+        key: value
+        for key, value in draft.items()
+        if key not in {"internal_notes", "status"}
+    }
+    serialized_public = json.dumps(public_fields, sort_keys=True)
+    credential_check = next(check for check in qa.checks if check.key == "cta_credentials")
+    assert license_number in draft["internal_notes"]
+    assert certified_operator in draft["internal_notes"]
+    assert license_number not in serialized_public
+    assert certified_operator not in serialized_public
+    assert credential_check.status == "pass"
+    assert qa.readiness_status == "ready"
+
+
+@pytest.mark.parametrize(
+    "public_field",
+    [
+        "hero_subheadline",
+        "service_explanation",
+        "local_city_section",
+        "why_choose_section",
+    ],
+)
+def test_city_service_qa_rejects_credentials_in_public_editor_fields(
+    public_field: str,
+) -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            business = session.get(Business, page.business_id)
+            assert business is not None
+            business.license_number = "SYNTHETIC-PUBLIC-LEAK-126"
+            business.certified_operator = "Synthetic Public Leak Operator"
+            draft = deepcopy(page.draft_content or {})
+            draft[public_field] = (
+                f"Public copy exposing {business.license_number} and "
+                f"{business.certified_operator}."
+            )
+            page.draft_content = draft
+            session.add(business)
+            session.add(page)
+            session.flush()
+
+            qa = evaluate_page_qa(session, page.id)
+            session.rollback()
+
+    credential_check = next(
+        check for check in qa.checks if check.key == "cta_credentials"
+    )
+    assert credential_check.status == "fail"
+    assert credential_check.issue_location == "business_info"
+    assert "Credentials component" in credential_check.suggested_fix
+    assert qa.readiness_status == "blocked"
+
+
+def test_city_service_qa_normalizes_padded_governed_credentials_before_leak_check() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            business = session.get(Business, page.business_id)
+            assert business is not None
+            business.license_number = "  SYNTHETIC-PADDED-CREDENTIAL-42  "
+            business.certified_operator = "  Synthetic  Padded Operator  "
+            draft = deepcopy(page.draft_content or {})
+            draft["intro"] = (
+                f"{draft['intro']} SYNTHETIC-PADDED-CREDENTIAL-42; "
+                "Synthetic Padded Operator."
+            )
+            page.draft_content = draft
+            session.add(business)
+            session.add(page)
+            session.flush()
+
+            qa = evaluate_page_qa(session, page.id)
+            session.rollback()
+
+    credential_check = next(
+        check for check in qa.checks if check.key == "cta_credentials"
+    )
+    assert credential_check.status == "fail"
+    assert qa.readiness_status == "blocked"
+
+
+@pytest.mark.parametrize(
+    ("public_value_kind", "expected_key"),
+    [
+        ("ungoverned_contact", "cta_destinations"),
+        ("governed_credential", "cta_credentials"),
+    ],
+)
+def test_city_service_qa_scans_generated_page_public_metadata_fields(
+    public_value_kind: str,
+    expected_key: str,
+) -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            business = session.get(Business, page.business_id)
+            assert business is not None
+            business.license_number = "SYNTHETIC-METADATA-CREDENTIAL-42"
+            page.meta_description = (
+                "Synthetic metadata private-delivery@example.invalid."
+                if public_value_kind == "ungoverned_contact"
+                else "Synthetic metadata SYNTHETIC-METADATA-CREDENTIAL-42."
+            )
+            session.add(business)
+            session.add(page)
+            session.flush()
+
+            qa = evaluate_page_qa(session, page.id)
+            session.rollback()
+
+    check = next(item for item in qa.checks if item.key == expected_key)
+    assert check.status == "fail"
+    assert qa.readiness_status == "blocked"
+
+
+@pytest.mark.parametrize(
+    ("cta_suffix", "expected_key"),
+    [
+        (" or", "cta_format"),
+        (" private-delivery@example.invalid", "cta_destinations"),
+        (" (202) 555-0147", "cta_destinations"),
+        (" javascript:alert", "cta_destinations"),
+        (" javascript:", "cta_destinations"),
+        (" mailto:", "cta_destinations"),
+        (" tel:", "cta_destinations"),
+        (" evil.example/path", "cta_destinations"),
+        (" evil.com", "cta_destinations"),
+        (" evil.example:8443/path", "cta_destinations"),
+        (" 192.0.2.1/path", "cta_destinations"),
+        (" evil.xn--p1ai/path", "cta_destinations"),
+        (" 202\u2011555\u20110147", "cta_destinations"),
+        (" 202\u2013555\u00a00147", "cta_destinations"),
+        (" \uff12\uff10\uff12\uff0d\uff15\uff15\uff15\uff0d\uff10\uff11\uff14\uff17", "cta_destinations"),
+        (" DEMO", "cta_public_markers"),
+    ],
+)
+def test_city_service_qa_rejects_malformed_or_ungoverned_cta_content(
+    cta_suffix: str,
+    expected_key: str,
+) -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            context = load_generation_context(session, page.id)
+            draft = deepcopy(page.draft_content or {})
+            draft["call_to_action"] = (
+                build_automatic_public_call_to_action(context) + cta_suffix
+            )
+            page.draft_content = draft
+            session.add(page)
+            session.flush()
+
+            qa = evaluate_page_qa(session, page.id)
+            session.rollback()
+
+    expected = next(check for check in qa.checks if check.key == expected_key)
+    assert expected.status == "fail"
+    assert qa.readiness_status == "blocked"
+
+
+def test_city_service_qa_accepts_governed_public_email_contact() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            business = session.get(Business, page.business_id)
+            service = session.get(Service, page.service_id)
+            city = session.get(City, page.city_id)
+            assert business is not None
+            assert service is not None
+            assert city is not None
+            business.email = "public-contact@example.test"
+            draft = deepcopy(page.draft_content or {})
+            draft["call_to_action"] = (
+                f"To discuss {service.service_name.lower()} in {city.city_name}, "
+                f"contact {business.company_name} at {business.email}."
+            )
+            page.draft_content = draft
+            session.add(business)
+            session.add(page)
+            session.flush()
+
+            qa = evaluate_page_qa(session, page.id)
+            session.rollback()
+
+    contact_check = next(check for check in qa.checks if check.key == "cta_contact")
+    destination_check = next(
+        check for check in qa.checks if check.key == "cta_destinations"
+    )
+    assert contact_check.status == "pass"
+    assert destination_check.status == "pass"
+    assert qa.readiness_status == "ready"
+
+
+@pytest.mark.parametrize(
+    "malformed_email",
+    [
+        "public-contact@@example.test",
+        "public-contact@example",
+        "public contact@example.test",
+        "mailto:public-contact@example.test",
+    ],
+)
+def test_city_service_qa_rejects_malformed_configured_public_email(
+    malformed_email: str,
+) -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            business = session.get(Business, page.business_id)
+            service = session.get(Service, page.service_id)
+            city = session.get(City, page.city_id)
+            assert business is not None
+            assert service is not None
+            assert city is not None
+            business.email = malformed_email
+            draft = deepcopy(page.draft_content or {})
+            draft["call_to_action"] = (
+                f"To discuss {service.service_name.lower()} in {city.city_name}, "
+                f"contact {business.company_name} at {malformed_email}."
+            )
+            page.draft_content = draft
+            session.add(business)
+            session.add(page)
+            session.flush()
+
+            qa = evaluate_page_qa(session, page.id)
+            session.rollback()
+
+    contact_check = next(check for check in qa.checks if check.key == "cta_contact")
+    destination_check = next(
+        check for check in qa.checks if check.key == "cta_destinations"
+    )
+    assert contact_check.status == "fail"
+    assert destination_check.status == "fail"
+    assert qa.readiness_status == "blocked"
+
+
+def test_city_service_qa_accepts_governed_public_url_but_not_internal_only() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            business = session.get(Business, page.business_id)
+            service = session.get(Service, page.service_id)
+            city = session.get(City, page.city_id)
+            context = load_generation_context(session, page.id)
+            assert business is not None
+            assert service is not None
+            assert city is not None
+            draft = deepcopy(page.draft_content or {})
+            draft["call_to_action"] = (
+                f"To discuss {service.service_name.lower()} in {city.city_name}, "
+                f"contact {business.company_name} through "
+                f"{context.website_context.website.public_url}."
+            )
+            page.draft_content = draft
+            session.add(business)
+            session.add(page)
+            session.flush()
+            governed_url_qa = evaluate_page_qa(session, page.id)
+
+            draft["call_to_action"] = (
+                f"To discuss {service.service_name.lower()} in {city.city_name}, "
+                f"contact {business.company_name} through #estimate."
+            )
+            page.draft_content = draft
+            session.add(page)
+            session.flush()
+            internal_only_qa = evaluate_page_qa(session, page.id)
+            session.rollback()
+
+    governed_contact = next(
+        check for check in governed_url_qa.checks if check.key == "cta_contact"
+    )
+    internal_contact = next(
+        check for check in internal_only_qa.checks if check.key == "cta_contact"
+    )
+    internal_destination = next(
+        check for check in internal_only_qa.checks if check.key == "cta_destinations"
+    )
+    assert governed_contact.status == "pass"
+    assert governed_url_qa.readiness_status == "ready"
+    assert internal_contact.status == "fail"
+    assert internal_destination.status == "pass"
+    assert internal_only_qa.readiness_status == "blocked"
+
+
+@pytest.mark.parametrize("private_key", ["recipient_email", "from_email"])
+def test_city_service_qa_rejects_private_delivery_keys_in_public_fields(
+    private_key: str,
+) -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            draft = deepcopy(page.draft_content or {})
+            assert draft["faq_items"]
+            draft["faq_items"][0][private_key] = "private-delivery@example.invalid"
+            page.draft_content = draft
+            session.add(page)
+            session.flush()
+
+            qa = evaluate_page_qa(session, page.id)
+            session.rollback()
+
+    private_check = next(
+        check for check in qa.checks if check.key == "cta_private_delivery"
+    )
+    assert private_check.status == "fail"
+    assert qa.readiness_status == "blocked"
+
+
+@pytest.mark.parametrize("public_field", ["intro", "faq_answer"])
+def test_city_service_qa_rejects_ungoverned_email_in_rendered_public_values(
+    public_field: str,
+) -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            draft = deepcopy(page.draft_content or {})
+            leaked_value = "private-delivery@example.invalid"
+            if public_field == "intro":
+                draft["intro"] = f"{draft['intro']} {leaked_value}"
+            else:
+                draft["faq_items"][0]["answer"] = (
+                    f"{draft['faq_items'][0]['answer']} {leaked_value}"
+                )
+            page.draft_content = draft
+            session.add(page)
+            session.flush()
+
+            qa = evaluate_page_qa(session, page.id)
+            session.rollback()
+
+    destination_check = next(
+        check for check in qa.checks if check.key == "cta_destinations"
+    )
+    assert destination_check.status == "fail"
+    assert qa.readiness_status == "blocked"
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "mailto:public-contact@example.test?bcc=private-delivery@example.invalid",
+        "mailto:public-contact@example.test?from=private-delivery@example.invalid",
+        "public-contact@@example.test",
+    ],
+)
+def test_city_service_qa_rejects_mailto_query_or_malformed_email_smuggling(
+    destination: str,
+) -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            business = session.get(Business, page.business_id)
+            service = session.get(Service, page.service_id)
+            city = session.get(City, page.city_id)
+            assert business is not None
+            assert service is not None
+            assert city is not None
+            business.email = "public-contact@example.test"
+            draft = deepcopy(page.draft_content or {})
+            draft["call_to_action"] = (
+                f"To discuss {service.service_name.lower()} in {city.city_name}, "
+                f"contact {business.company_name} at {destination}."
+            )
+            page.draft_content = draft
+            session.add(business)
+            session.add(page)
+            session.flush()
+
+            qa = evaluate_page_qa(session, page.id)
+            session.rollback()
+
+    destination_check = next(
+        check for check in qa.checks if check.key == "cta_destinations"
+    )
+    assert destination_check.status == "fail"
+    assert qa.readiness_status == "blocked"
+
+
+def test_city_service_qa_accepts_exact_mailto_and_multi_phone_configuration() -> None:
+    with TestClient(app):
+        with Session(engine) as session:
+            page = _page_by_slug(session, "drywood-termite-tenting-orlando-fl")
+            page = _ensure_complete_page(session, page)
+            business = session.get(Business, page.business_id)
+            service = session.get(Service, page.service_id)
+            city = session.get(City, page.city_id)
+            assert business is not None
+            assert service is not None
+            assert city is not None
+            business.email = "public-contact@example.test"
+            original_phone = business.phone
+            draft = deepcopy(page.draft_content or {})
+            prefix = (
+                f"To discuss {service.service_name.lower()} in {city.city_name}, "
+                f"contact {business.company_name}"
+            )
+            draft["call_to_action"] = (
+                f"{prefix} at mailto:{business.email}."
+            )
+            page.draft_content = draft
+            session.add(business)
+            session.add(page)
+            session.flush()
+            mailto_qa = evaluate_page_qa(session, page.id)
+
+            business.phone = f"{original_phone} / 407-555-0101"
+            business.email = None
+            draft["call_to_action"] = f"{prefix} at {business.phone}."
+            page.draft_content = draft
+            session.add(business)
+            session.add(page)
+            session.flush()
+            multi_phone_qa = evaluate_page_qa(session, page.id)
+            session.rollback()
+
+    for result in (mailto_qa, multi_phone_qa):
+        contact_check = next(
+            check for check in result.checks if check.key == "cta_contact"
+        )
+        destination_check = next(
+            check for check in result.checks if check.key == "cta_destinations"
+        )
+        assert contact_check.status == "pass"
+        assert destination_check.status == "pass"
+        assert result.readiness_status == "ready"
 
 
 def test_approval_queue_detects_edit_after_last_qa() -> None:

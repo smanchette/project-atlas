@@ -14,6 +14,8 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from app.models import (
     ApprovalAudit,
     Business,
+    City,
+    County,
     GeneratedPage,
     GeneratedPageQAResult,
     GeneratedPageRevision,
@@ -22,11 +24,13 @@ from app.models import (
     PageCompositionRevision,
     PageImageAssignment,
     PlannedPage,
+    Service,
     SitePlan,
     Website,
     WordPressDraftAudit,
 )
 from app.schemas.entities import GeneratedPageUpdate
+from app.schemas.qa import QACheckItem
 from app.services import page_qa as page_qa_service
 from app.services.page_qa import (
     _record_as_result,
@@ -40,6 +44,7 @@ from app.services.page_qa import (
     resolve_qa_composition_revision,
     save_page_qa,
 )
+from app.services.page_type_review import CITY_SERVICE_CONTRACT, PLANNED_PAGE_CONTRACTS
 from app.services.page_composition_history import (
     advance_composition_revision,
     canonical_payload_hash,
@@ -53,6 +58,20 @@ from app.services.website_readiness import evaluate_website_readiness
 from app.services.wordpress_drafts import dry_run_wordpress_draft
 
 
+EXPECTED_NON_CITY_RULESET_HASHES = {
+    "about": "8209af7b1cb695805fdbbb64b33c57a8ea09656f4e42e665ec42c1d9bd334d11",
+    "contact": "0d16343c42f630e388961b188c8f611a5b122e2e734cba947883203aee66f79e",
+    "county": "9feb447a6ce0f63240362f6013044958a6bb8ac32c4d00c7b273bd585b366341",
+    "faq": "6208c14ed7a3f07a06b2bce1a0eec4d3ccf071d5b9a64641d8e58901fd34db83",
+    "home": "8d4253d1c2127f9367ca7d487208c5a428f0f37eda1e51c96859e5fbb98e7bf3",
+    "informational": "ea187e65c4b408595c5770527e6fa6f9269a02d13fbbeaca9e253adde715d11f",
+    "service": "bd70184abb78dcd6f6dc80e2c596816c2c8078ae2e8629def3991b657529d67b",
+}
+EXPECTED_NON_CITY_RULESET_AGGREGATE = (
+    "a221abe857021477e3774e05b7d4c0c97206a19a9ad63738487e333f615892a4"
+)
+
+
 @pytest.fixture
 def db_session():
     engine = create_engine(
@@ -64,6 +83,43 @@ def db_session():
     with Session(engine) as session:
         yield session
     engine.dispose()
+
+
+def test_city_service_public_cta_policy_changes_only_city_ruleset_identity() -> None:
+    def legacy_ruleset_hash(contract) -> str:
+        return page_qa_service._canonical_hash(
+            {
+                "algorithm_key": page_qa_service.PAGE_QA_ALGORITHM_KEY,
+                "algorithm_version": page_qa_service.PAGE_QA_ALGORITHM_VERSION,
+                "ruleset_key": page_qa_service.PAGE_QA_RULESET_KEY,
+                "ruleset_version": page_qa_service.PAGE_QA_RULESET_VERSION,
+                "contract": page_qa_service.asdict(contract),
+                "forbidden_phrases": sorted(page_qa_service.FORBIDDEN_PHRASES),
+                "placeholder_patterns": list(page_qa_service.PLACEHOLDER_PATTERNS),
+                "check_remediation": page_qa_service.CHECK_REMEDIATION,
+            }
+        )
+
+    non_city_hashes = {
+        page_type: page_qa_service._qa_ruleset_hash(contract)
+        for page_type, contract in sorted(PLANNED_PAGE_CONTRACTS.items())
+    }
+    assert non_city_hashes == EXPECTED_NON_CITY_RULESET_HASHES
+    assert (
+        page_qa_service._canonical_hash(non_city_hashes)
+        == EXPECTED_NON_CITY_RULESET_AGGREGATE
+    )
+    for page_type, contract in PLANNED_PAGE_CONTRACTS.items():
+        assert legacy_ruleset_hash(contract) == EXPECTED_NON_CITY_RULESET_HASHES[
+            page_type
+        ]
+
+    legacy_city_hash = legacy_ruleset_hash(CITY_SERVICE_CONTRACT)
+    assert (
+        legacy_city_hash
+        == page_qa_service.LEGACY_CITY_SERVICE_QA_RULESET_HASH
+    )
+    assert page_qa_service._qa_ruleset_hash(CITY_SERVICE_CONTRACT) != legacy_city_hash
 
 
 @pytest.fixture(autouse=True)
@@ -200,6 +256,135 @@ def _scope(
     return business, website, plan, planned, page, composition
 
 
+def _city_service_scope(
+    session: Session,
+    *,
+    suffix: str,
+) -> tuple[Business, Website, SitePlan, PlannedPage, GeneratedPage, PageComposition]:
+    business, website, plan, planned, page, composition = _scope(
+        session,
+        suffix=suffix,
+    )
+    business.email = f"public-{suffix}@example.test"
+    business.license_number = f"SYNTHETIC-LICENSE-{suffix}"
+    business.certified_operator = f"Synthetic Operator {suffix}"
+    service = Service(
+        business_id=business.id,
+        service_name=f"Synthetic Property Care {suffix}",
+        service_slug=f"synthetic-property-care-{suffix}",
+    )
+    county = County(county_name=f"Synthetic County {suffix}", state="FL")
+    session.add(service)
+    session.add(county)
+    session.flush()
+    city = City(
+        county_id=county.id,
+        city_name=f"Example City {suffix}",
+        city_slug=f"example-city-{suffix}",
+        state="FL",
+    )
+    session.add(city)
+    session.flush()
+
+    title = f"Synthetic Property Care in Example City {suffix}"
+    legacy_cta = (
+        f"To discuss {service.service_name.lower()} in {city.city_name}, contact "
+        f"{business.company_name} at {business.phone} or {business.email}. "
+        f"Florida license {business.license_number}; certified operator "
+        f"{business.certified_operator}."
+    )
+    page.page_type = "city_service"
+    page.service_id = service.id
+    page.city_id = city.id
+    page.county_id = county.id
+    page.page_title = title
+    page.meta_title = title
+    page.meta_description = "Synthetic City-Service QA fixture."
+    page.h1 = title
+    page.draft_content = {
+        "title": title,
+        "meta_title": title,
+        "meta_description": page.meta_description,
+        "h1": title,
+        "intro": f"Synthetic introduction for {service.service_name} in {city.city_name}.",
+        "why_it_matters": "Synthetic why-it-matters content.",
+        "signs_section": "Synthetic signs content.",
+        "process_section": "Synthetic process content.",
+        "prep_section": "Synthetic preparation content.",
+        "realtor_property_manager_section": "Synthetic coordination content.",
+        "faq_items": [
+            {
+                "question": "What is the synthetic service process?",
+                "answer": "The synthetic service follows reviewed preparation steps.",
+            }
+        ],
+        "call_to_action": legacy_cta,
+        "internal_notes": (
+            f"Internal credentials: {business.license_number}; "
+            f"{business.certified_operator}."
+        ),
+        "status": "draft",
+    }
+    planned.page_type = "city_service"
+    planned.service_id = service.id
+    planned.city_id = city.id
+    planned.county_id = county.id
+    planned.working_name = title
+    session.add(business)
+    session.add(page)
+    session.add(planned)
+    snapshot = deepcopy(composition.source_snapshot)
+    snapshot["draft_hash"] = page_qa_service._content_hash(page)
+    snapshot["fixture_revision"] = "city_service"
+    now = datetime.now(UTC)
+    advance_composition_revision(
+        session,
+        composition,
+        generated_components=composition.generated_components,
+        operator_decisions=composition.operator_decisions,
+        source_snapshot=snapshot,
+        source_hash=canonical_payload_hash(snapshot),
+        generated_at=now,
+        decided_by=composition.decided_by,
+        decided_at=composition.decided_at,
+        recorded_at=now,
+        recorded_by="test:durable-page-qa-identity",
+        record_source="test_city_fixture",
+    )
+    session.commit()
+    return business, website, plan, planned, page, composition
+
+
+def _freeze_exact_legacy_city_service_qa(
+    session: Session,
+    page: GeneratedPage,
+) -> GeneratedPageQAResult:
+    save_page_qa(session, page.id)
+    record = _current_record(session, page.id)
+    legacy_source = page_qa_service._semantic_qa_source_snapshot(
+        session,
+        page,
+        contract=CITY_SERVICE_CONTRACT,
+        legacy_city_service_policy=True,
+    )
+    record.source_hash = page_qa_service._canonical_hash(legacy_source)
+    record.qa_ruleset_hash = page_qa_service.LEGACY_CITY_SERVICE_QA_RULESET_HASH
+    legacy_result = page_qa_service._evaluate_page_qa(
+        session,
+        page.id,
+        legacy_city_service_policy=True,
+    )
+    record.check_payload = [
+        item.model_dump(mode="json") for item in legacy_result.checks
+    ]
+    record.passed_count = legacy_result.passed_count
+    record.warning_count = legacy_result.warning_count
+    record.failed_count = legacy_result.failed_count
+    record.readiness_status = legacy_result.readiness_status
+    _project_record(session, page, record)
+    return record
+
+
 def _current_record(session: Session, page_id: int) -> GeneratedPageQAResult:
     return session.exec(
         select(GeneratedPageQAResult).where(
@@ -247,6 +432,270 @@ def _project_record(
     session.add(record)
     session.add(page)
     session.flush()
+
+
+def _synthetic_city_cta_checks(cta: str) -> dict[str, QACheckItem]:
+    checks: list[QACheckItem] = []
+    page_qa_service._evaluate_city_service_public_cta(
+        checks,
+        draft={"call_to_action": cta},
+        business={
+            "company_name": "Synthetic Home Services",
+            "brand_name": "Synthetic Home Services",
+            "phone": "555-010-2200",
+            "public_email": "hello@synthetic.example",
+            "license_number": "SYNTHETIC-LICENSE-42",
+            "certified_operator": "Synthetic Operator",
+        },
+        website={"public_url": "https://synthetic.example"},
+        service={"service_name": "Synthetic Property Care"},
+        city={"city_name": "Example City"},
+    )
+    return {check.key: check for check in checks}
+
+
+def test_city_service_qa_does_not_treat_invalid_configured_phone_as_unconfigured() -> None:
+    checks: list[QACheckItem] = []
+    page_qa_service._evaluate_city_service_public_cta(
+        checks,
+        draft={
+            "call_to_action": (
+                "To discuss Synthetic Property Care in Example City, "
+                "contact Synthetic Home Services."
+            )
+        },
+        business={
+            "company_name": "Synthetic Home Services",
+            "brand_name": "Synthetic Home Services",
+            "phone": "123",
+            "public_email": "",
+            "license_number": "SYNTHETIC-LICENSE-42",
+            "certified_operator": "Synthetic Operator",
+        },
+        website={"public_url": ""},
+        service={"service_name": "Synthetic Property Care"},
+        city={"city_name": "Example City"},
+    )
+
+    by_key = {check.key: check for check in checks}
+    assert by_key["cta_ownership"].status == "pass"
+    assert by_key["cta_contact"].status == "fail"
+
+
+def test_city_service_qa_rejects_malformed_configured_public_url() -> None:
+    checks: list[QACheckItem] = []
+    malformed_url = "https://synthetic..example"
+    page_qa_service._evaluate_city_service_public_cta(
+        checks,
+        draft={
+            "call_to_action": (
+                "To discuss Synthetic Property Care in Example City, "
+                f"contact Synthetic Home Services through {malformed_url}."
+            )
+        },
+        business={
+            "company_name": "Synthetic Home Services",
+            "brand_name": "Synthetic Home Services",
+            "phone": "",
+            "public_email": "",
+            "license_number": "SYNTHETIC-LICENSE-42",
+            "certified_operator": "Synthetic Operator",
+        },
+        website={"public_url": malformed_url},
+        service={"service_name": "Synthetic Property Care"},
+        city={"city_name": "Example City"},
+    )
+
+    by_key = {check.key: check for check in checks}
+    assert by_key["cta_contact"].status == "fail"
+    assert by_key["cta_destinations"].status == "fail"
+
+
+def test_exact_legacy_city_service_qa_predecessor_accepts_one_frozen_blocked_row(
+    db_session: Session,
+) -> None:
+    *_, page, _ = _city_service_scope(db_session, suffix="legacy-exact")
+    record = _freeze_exact_legacy_city_service_qa(db_session, page)
+    effective = effective_page_qa_state(db_session, page.id)
+
+    assert record.readiness_status == "blocked"
+    assert effective.current is False
+    assert effective.classification == "stale_qa_algorithm"
+    assert page_qa_service.is_exact_legacy_city_service_qa_predecessor(
+        db_session,
+        page,
+        record,
+    )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "ruleset_hash",
+        "source_hash",
+        "check_order",
+        "check_payload_shape",
+        "check_payload_extra_field",
+        "projection",
+        "projection_nested_extra",
+        "lifecycle",
+        "duplicate_current",
+        "non_city_page",
+    ],
+)
+def test_exact_legacy_city_service_qa_predecessor_rejects_identity_tampering(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    *_, page, _ = _city_service_scope(db_session, suffix=f"legacy-{tamper}")
+    record = _freeze_exact_legacy_city_service_qa(db_session, page)
+
+    if tamper == "ruleset_hash":
+        record.qa_ruleset_hash = "f" * 64
+        _project_record(db_session, page, record)
+    elif tamper == "source_hash":
+        record.source_hash = "e" * 64
+        _project_record(db_session, page, record)
+    elif tamper == "check_order":
+        payload = deepcopy(record.check_payload or [])
+        payload[0], payload[1] = payload[1], payload[0]
+        record.check_payload = payload
+        _project_record(db_session, page, record)
+    elif tamper == "check_payload_shape":
+        payload = deepcopy(record.check_payload or [])
+        payload[0]["message"] = "Rehashed but noncanonical legacy message."
+        payload[0]["severity"] = "warning"
+        record.check_payload = payload
+        _project_record(db_session, page, record)
+    elif tamper == "check_payload_extra_field":
+        payload = deepcopy(record.check_payload or [])
+        payload[0]["unexpected"] = "rehashed extra field"
+        record.check_payload = payload
+        _project_record(db_session, page, record)
+    elif tamper == "projection":
+        projection = deepcopy(page.qa_result or {})
+        projection["source_hash"] = "d" * 64
+        page.qa_result = projection
+        db_session.add(page)
+        db_session.flush()
+    elif tamper == "projection_nested_extra":
+        projection = deepcopy(page.qa_result or {})
+        projection["checks"][0]["unexpected"] = "nested projection tamper"
+        page.qa_result = projection
+        db_session.add(page)
+        db_session.flush()
+    elif tamper == "lifecycle":
+        record.lifecycle_status = "superseded"
+        _project_record(db_session, page, record)
+    elif tamper == "duplicate_current":
+        monkeypatch.setattr(
+            page_qa_service,
+            "_current_qa_records",
+            lambda *_: [record, record.model_copy(deep=True)],
+        )
+    elif tamper == "non_city_page":
+        page.page_type = "informational"
+        db_session.add(page)
+        db_session.flush()
+
+    assert not page_qa_service.is_exact_legacy_city_service_qa_predecessor(
+        db_session,
+        page,
+        record,
+    )
+
+
+def test_public_email_changes_stale_only_city_service_qa_source_identity(
+    db_session: Session,
+) -> None:
+    informational_business, *_, informational_page, _ = _scope(
+        db_session,
+        suffix="email-non-city",
+    )
+    city_business, *_, city_page, _ = _city_service_scope(
+        db_session,
+        suffix="email-city",
+    )
+    informational_business.email = "before-non-city@example.test"
+    city_business.email = "before-city@example.test"
+    db_session.add(informational_business)
+    db_session.add(city_business)
+    db_session.commit()
+    save_page_qa(db_session, informational_page.id)
+    save_page_qa(db_session, city_page.id)
+
+    informational_business.email = "after-non-city@example.test"
+    city_business.email = "after-city@example.test"
+    db_session.add(informational_business)
+    db_session.add(city_business)
+    db_session.flush()
+
+    informational_state = effective_page_qa_state(db_session, informational_page.id)
+    city_state = effective_page_qa_state(db_session, city_page.id)
+
+    assert informational_state.classification == "current_exact_identity_match"
+    assert city_state.classification == "otherwise_invalid"
+    assert city_state.reasons == ("QA evaluator inputs changed after evaluation.",)
+
+
+@pytest.mark.parametrize(
+    ("governed_value", "replacement"),
+    [
+        ("Synthetic Home Services", "Different Synthetic Company"),
+        ("Synthetic Property Care", "Different Synthetic Service"),
+        ("Example City", "Alternate Municipality"),
+    ],
+)
+def test_city_service_cta_ownership_rejects_each_substituted_governed_identity(
+    governed_value: str,
+    replacement: str,
+) -> None:
+    baseline = (
+        "To discuss Synthetic Property Care in Example City, contact "
+        "Synthetic Home Services at 555-010-2200."
+    )
+    checks = _synthetic_city_cta_checks(baseline.replace(governed_value, replacement))
+
+    assert checks["cta_ownership"].status == "fail"
+    assert checks["cta_contact"].status == "pass"
+
+
+@pytest.mark.parametrize(
+    ("destination", "expected_status"),
+    [
+        ("tel:5550102200", "pass"),
+        ("https://synthetic.example/request", "pass"),
+        ("/request-estimate", "pass"),
+        ("#estimate", "pass"),
+        (r"/\evil.example", "fail"),
+        (r"\\evil.example", "fail"),
+        ("/\t/evil.example", "fail"),
+        ("/\r/evil.example", "fail"),
+        ("/\n/evil.example", "fail"),
+        ("\x00//evil.example", "fail"),
+        ("\x01//evil.example", "fail"),
+        ("\x07//evil.example", "fail"),
+        ("\x1f//evil.example", "fail"),
+        ("\x00\\\\evil.example", "fail"),
+        ("\x00javascript:alert", "fail"),
+        ("synthetic.example::", "fail"),
+        ("https://different.example/request", "fail"),
+    ],
+)
+def test_city_service_cta_destination_policy_is_governed_and_origin_exact(
+    destination: str,
+    expected_status: str,
+) -> None:
+    cta = (
+        "To discuss Synthetic Property Care in Example City, contact "
+        f"Synthetic Home Services at 555-010-2200 or {destination}."
+    )
+    checks = _synthetic_city_cta_checks(cta)
+
+    assert checks["cta_ownership"].status == "pass"
+    assert checks["cta_contact"].status == "pass"
+    assert checks["cta_destinations"].status == expected_status
 
 
 def test_requested_page_binding_returns_only_the_requested_current_result(
@@ -706,6 +1155,27 @@ def test_full_generated_page_projection_must_match_durable_result(
     save_page_qa(db_session, page.id)
     projection = deepcopy(page.qa_result or {})
     projection[field] = tampered_value
+    page.qa_result = projection
+    db_session.add(page)
+    db_session.flush()
+
+    state = effective_page_qa_state(db_session, page.id)
+
+    assert state.current is False
+    assert state.ready is False
+    assert state.classification == "otherwise_invalid"
+    assert state.reasons == (
+        "Generated Page QA projection does not match its durable QA result.",
+    )
+
+
+def test_nested_generated_page_projection_tamper_fails_closed(
+    db_session: Session,
+) -> None:
+    *_, page, _ = _scope(db_session, suffix="projection-nested-extra")
+    save_page_qa(db_session, page.id)
+    projection = deepcopy(page.qa_result or {})
+    projection["checks"][0]["unexpected"] = "nested projection tamper"
     page.qa_result = projection
     db_session.add(page)
     db_session.flush()

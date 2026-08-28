@@ -21,7 +21,12 @@ from app.models import (
     Website,
     WebsiteIdentity,
 )
-from app.services.draft_generation import generate_page_draft, load_generation_context
+from app.services.draft_generation import (
+    assemble_generation_prompt,
+    build_automatic_public_call_to_action,
+    generate_page_draft,
+    load_generation_context,
+)
 from app.services.page_export import build_page_export_package
 from app.services.page_queue import build_city_service_page_payload, create_city_service_page_queue
 from app.services.website_context import build_website_context
@@ -247,6 +252,49 @@ def test_fictional_company_isolated_across_queue_generation_export_and_context()
             generation_context = load_generation_context(session, page.id)
             generated = generate_page_draft(session, page.id)
             package = build_page_export_package(session, page.id)
+
+            expected_public_cta = (
+                f"To discuss exterior home care in {city.city_name}, contact {business.company_name} "
+                f"at {business.phone} or {business.email}."
+            )
+            assert generated.draft_content["call_to_action"] == expected_public_cta
+            assert "EX-100" not in generated.draft_content["call_to_action"]
+            assert "Casey Example" not in generated.draft_content["call_to_action"]
+            assert "Example License" not in generated.draft_content["call_to_action"]
+            assert "certified operator" not in generated.draft_content["call_to_action"].lower()
+            assert "information available on request" not in generated.draft_content["call_to_action"]
+            assert generation_context.business.license_number == "EX-100"
+            assert generation_context.business.certified_operator == "Casey Example"
+            prompt = assemble_generation_prompt(generation_context)
+            assert "License: EX-100" in prompt
+            assert "Certified operator: Casey Example" in prompt
+
+            generation_context.business.phone = "(555) 010-2020"
+            generation_context.business.email = None
+            generation_context.website_context.website.public_url = ""
+            assert build_automatic_public_call_to_action(generation_context).endswith(
+                "at (555) 010-2020."
+            )
+            generation_context.business.phone = None
+            generation_context.business.email = f"hello-{suffix}@northstar.example"
+            assert build_automatic_public_call_to_action(generation_context).endswith(
+                f"at hello-{suffix}@northstar.example."
+            )
+            generation_context.business.email = None
+            generation_context.website_context.website.public_url = (
+                f"https://{suffix}.northstar.example"
+            )
+            assert build_automatic_public_call_to_action(generation_context).endswith(
+                f"through https://{suffix}.northstar.example."
+            )
+            generation_context.website_context.website.public_url = ""
+            no_contact_cta = build_automatic_public_call_to_action(generation_context)
+            assert no_contact_cta == (
+                f"To discuss exterior home care in {city.city_name}, contact {business.company_name}."
+            )
+            assert "the office" not in no_contact_cta
+            assert "company website" not in no_contact_cta
+            assert " or " not in no_contact_cta
 
             combined = json.dumps(
                 {

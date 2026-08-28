@@ -131,24 +131,76 @@ def save_manual_draft(
     if not changed_fields:
         raise HTTPException(status_code=400, detail="No draft changes were provided")
 
-    changed_at = datetime.now(UTC)
-    revision = GeneratedPageRevision(
-        generated_page_id=page.id or page_id,
-        created_at=changed_at,
+    revision = append_generated_page_revision(
+        session,
+        page,
+        before=before,
+        after=merged,
+        changed_fields=changed_fields,
+        rendered_content=rendered_content,
         created_by=(payload.created_by or "").strip() or None,
         reason=(payload.reason or "").strip() or None,
-        draft_hash_before=draft_content_hash(before),
-        draft_hash_after=draft_content_hash(merged),
-        draft_content_before=before,
-        draft_content_after=deepcopy(merged),
-        changed_fields=changed_fields,
     )
 
-    page.draft_content = merged
-    page.h1 = merged["h1"]
-    page.page_title = merged["title"]
-    page.meta_title = merged["meta_title"]
-    page.meta_description = merged["meta_description"]
+    qa_result = save_page_qa(session, page_id, commit=False) if run_qa else None
+    session.commit()
+    session.refresh(page)
+    session.refresh(revision)
+    return page, revision, qa_result
+
+
+def append_generated_page_revision(
+    session: Session,
+    page: GeneratedPage,
+    *,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    changed_fields: list[str],
+    rendered_content: str,
+    created_by: str | None,
+    reason: str | None,
+    changed_at: datetime | None = None,
+) -> GeneratedPageRevision:
+    """Append one normal draft revision without owning the caller transaction.
+
+    The caller must lock and validate ``page`` before calling this low-level
+    persistence seam.  Keeping the commit boundary outside this function lets
+    governed batch operations reuse the same revision shape atomically while
+    preserving the existing manual editor's behavior.
+    """
+
+    page_id = page.id
+    if page_id is None:
+        raise RuntimeError("Generated Page revision requires a persisted page.")
+    if not changed_fields:
+        raise RuntimeError("Generated Page revision requires at least one changed field.")
+    before_hash = draft_content_hash(before)
+    after_hash = draft_content_hash(after)
+    if (
+        not isinstance(page.draft_content, dict)
+        or draft_content_hash(page.draft_content) != before_hash
+    ):
+        raise RuntimeError("Generated Page revision before-state differs from the locked page.")
+    if before_hash == after_hash:
+        raise RuntimeError("Generated Page revision requires a changed draft hash.")
+    changed_at = changed_at or datetime.now(UTC)
+    revision = GeneratedPageRevision(
+        generated_page_id=page_id,
+        created_at=changed_at,
+        created_by=created_by,
+        reason=reason,
+        draft_hash_before=before_hash,
+        draft_hash_after=after_hash,
+        draft_content_before=deepcopy(before),
+        draft_content_after=deepcopy(after),
+        changed_fields=list(changed_fields),
+    )
+
+    page.draft_content = deepcopy(after)
+    page.h1 = after["h1"]
+    page.page_title = after["title"]
+    page.meta_title = after["meta_title"]
+    page.meta_description = after["meta_description"]
     page.content_body = rendered_content
     page.qa_status = "not_run"
     page.qa_result = None
@@ -157,12 +209,7 @@ def save_manual_draft(
     session.add(page)
     session.add(revision)
     session.flush()
-
-    qa_result = save_page_qa(session, page_id, commit=False) if run_qa else None
-    session.commit()
-    session.refresh(page)
-    session.refresh(revision)
-    return page, revision, qa_result
+    return revision
 
 
 def _normalized_editable_fields(raw: dict[str, Any]) -> dict[str, Any]:

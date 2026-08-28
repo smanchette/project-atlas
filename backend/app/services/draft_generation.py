@@ -174,6 +174,28 @@ def assemble_generation_prompt(context: GenerationContext) -> str:
     )
 
 
+def build_automatic_public_call_to_action(context: GenerationContext) -> str:
+    """Build the governed public contact sentence for an automatic city-service draft."""
+    business = context.business
+    service = context.service.service_name.lower()
+    city = context.city.city_name
+    company = business.company_name
+    phone = (business.phone or "").strip()
+    email = (business.email or "").strip()
+    public_url = (context.website_context.website.public_url or "").strip()
+    prefix = f"To discuss {service} in {city}, contact {company}"
+
+    if phone and email:
+        return f"{prefix} at {phone} or {email}."
+    if phone:
+        return f"{prefix} at {phone}."
+    if email:
+        return f"{prefix} at {email}."
+    if public_url:
+        return f"{prefix} through {public_url}."
+    return f"{prefix}."
+
+
 class DeterministicMockProvider:
     name = "mock"
 
@@ -186,7 +208,6 @@ class DeterministicMockProvider:
         website = context.website_context
         short_brand_name = website_config_value(website, "short_brand_name", website.brand.public_name)
         state_name = website_config_value(website, "state_name", context.city.state)
-        license_label = website_config_value(website, "license_label", "License")
         customer_text = ", ".join(context.customer_types[:-1]) + f", and {context.customer_types[-1]}"
         values = {
             "company_name": business.company_name,
@@ -257,13 +278,7 @@ class DeterministicMockProvider:
             ),
             realtor_property_manager_section=realtor_template.format(**values),
             faq_items=_faq_items(context),
-            call_to_action=(
-                f"To discuss {service.lower()} in {city}, contact {business.company_name} at "
-                f"{business.phone or 'the office'} or "
-                f"{business.email or website.website.public_url or 'through the company website'}. "
-                f"{license_label} {business.license_number or 'information available on request'}; "
-                f"certified operator {business.certified_operator or 'information available on request'}."
-            ),
+            call_to_action=build_automatic_public_call_to_action(context),
             internal_notes=(
                 f"Deterministic mock draft assembled from {len(context.knowledge_blocks)} active knowledge blocks. "
                 "Human review is required before approval. No external AI service was called."
