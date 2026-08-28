@@ -5,7 +5,10 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy import event, inspect
+from sqlmodel import Session
 
+from app.db.session import engine
 from app.services import automatic_cta_refresh as refresh_service
 from app.models import Business, City, County, GeneratedPage, Service
 from app.schemas.generation import DraftContent
@@ -195,6 +198,166 @@ def _manifest() -> dict[str, Any]:
     return manifest
 
 
+def _synthetic_entry(classification: str, ordinal: int) -> dict[str, Any]:
+    entry = deepcopy(_manifest()["entries"][0])
+    entry.update(
+        {
+            "planned_page_id": 100 + ordinal,
+            "generated_page_id": 200 + ordinal,
+            "composition_id": 300 + ordinal,
+            "composition_revision_id": 400 + ordinal,
+            "qa_result_id": 500 + ordinal,
+            "generated_page_revision_id": 600 + ordinal,
+            "classification": classification,
+        }
+    )
+    if classification == EXCLUDED_CLASSIFICATION:
+        entry["page_type"] = "service"
+        for key in (
+            "expected_corrected_cta_sha256",
+            "expected_after_draft_sha256",
+            "expected_after_content_body_sha256",
+            "credential_source_fingerprint",
+        ):
+            entry[key] = None
+    return entry
+
+
+def _manifest_for_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    manifest = _manifest()
+    ordered = sorted(deepcopy(entries), key=lambda entry: entry["planned_page_id"])
+    counts: dict[str, int] = {}
+    for entry in ordered:
+        classification = str(entry["classification"])
+        counts[classification] = counts.get(classification, 0) + 1
+    manifest.update(
+        {
+            "current_generated_page_count": len(ordered),
+            "eligible_count": counts.get(AUTOMATIC_CLASSIFICATION, 0),
+            "custom_copy_exclusion_count": counts.get(
+                refresh_service.CUSTOM_CLASSIFICATION,
+                0,
+            ),
+            "already_corrected_count": counts.get(
+                refresh_service.ALREADY_CORRECTED_CLASSIFICATION,
+                0,
+            ),
+            "classification_counts": dict(sorted(counts.items())),
+            "inventory_sha256": _canonical_hash(ordered),
+            "entries": ordered,
+        }
+    )
+    manifest["manifest_sha256"] = automatic_cta_refresh_manifest_sha256(manifest)
+    return manifest
+
+
+def _install_read_only_rehearsal_seams(
+    monkeypatch: pytest.MonkeyPatch,
+    manifest: dict[str, Any],
+    *,
+    legacy_state: str = "before",
+) -> tuple[dict[str, list[str]], dict[str, dict[int, Any]]]:
+    observed = {
+        "classifications": [],
+        "corrected_identities": [],
+        "other_identities": [],
+    }
+    locked = {
+        "generated_pages": {
+            entry["generated_page_id"]: SimpleNamespace(
+                id=entry["generated_page_id"],
+                page_type=entry["page_type"],
+            )
+            for entry in manifest["entries"]
+        },
+        "planned_pages": {
+            entry["planned_page_id"]: SimpleNamespace(id=entry["planned_page_id"])
+            for entry in manifest["entries"]
+        },
+        "compositions": {
+            entry["composition_id"]: SimpleNamespace(id=entry["composition_id"])
+            for entry in manifest["entries"]
+        },
+    }
+    monkeypatch.setattr(refresh_service, "_lock_authoritative_source_tables", lambda *_: None)
+    monkeypatch.setattr(refresh_service, "_assert_global_generated_page_inventory", lambda *_: None)
+    monkeypatch.setattr(refresh_service, "_lock_manifest_scope", lambda *_args, **_kwargs: locked)
+    monkeypatch.setattr(
+        refresh_service,
+        "_assert_current_source_classification",
+        lambda _session, entry, _page: observed["classifications"].append(
+            entry["classification"]
+        ),
+    )
+    monkeypatch.setattr(
+        refresh_service,
+        "_assert_exact_corrected_identity",
+        lambda _session, entry, _page, _planned, _composition: observed[
+            "corrected_identities"
+        ].append(entry["classification"]),
+    )
+    monkeypatch.setattr(
+        refresh_service,
+        "_assert_exact_before_identity",
+        lambda _session, entry, _page, _planned, _composition: observed[
+            "other_identities"
+        ].append(entry["classification"]),
+    )
+    monkeypatch.setattr(
+        refresh_service,
+        "_eligible_state",
+        lambda _session, entry, page, _planned, _composition: (
+            legacy_state,
+            {
+                "entry": entry,
+                "page": page,
+                "before": {"call_to_action": "Synthetic legacy CTA."},
+                "after": {"call_to_action": "Synthetic corrected CTA."},
+                "rendered_content": "Synthetic corrected render.",
+            }
+            if legacy_state == "before"
+            else None,
+        ),
+    )
+    return observed, locked
+
+
+def _forbid_refresh_writers(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_writer(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("A refresh writer was called on a fail-closed or no-op path.")
+
+    monkeypatch.setattr(refresh_service, "append_generated_page_revision", fail_writer)
+    monkeypatch.setattr(refresh_service, "refresh_site_plan_compositions", fail_writer)
+    monkeypatch.setattr(refresh_service, "save_page_qa", fail_writer)
+
+
+def _application_database_state(session: Session) -> dict[str, Any]:
+    connection = session.connection()
+    table_names = sorted(inspect(connection).get_table_names())
+    counts = {
+        table_name: int(
+            connection.exec_driver_sql(
+                f'SELECT COUNT(*) FROM "{table_name.replace(chr(34), chr(34) * 2)}"'
+            ).scalar_one()
+        )
+        for table_name in table_names
+    }
+    internal_tables = set(
+        inspect(connection).get_table_names(sqlite_include_internal=True)
+    )
+    sequences = (
+        [
+            tuple(row)
+            for row in connection.exec_driver_sql(
+                "SELECT name, seq FROM sqlite_sequence ORDER BY name"
+            ).all()
+        ]
+        if "sqlite_sequence" in internal_tables
+        else None
+    )
+    return {"counts": counts, "sequences": sequences}
+
+
 def _draft(cta: str) -> dict[str, Any]:
     return DraftContent(
         title="Synthetic Title",
@@ -211,6 +374,389 @@ def _draft(cta: str) -> dict[str, Any]:
         call_to_action=cta,
         internal_notes="Synthetic internal note.",
     ).model_dump(mode="json")
+
+
+def _corrected_runtime() -> tuple[GenerationContext, GeneratedPage, dict[str, Any]]:
+    context = _context()
+    page = context.page
+    corrected = build_automatic_public_call_to_action(context)
+    draft = _draft(corrected)
+    page.draft_content = draft
+    page.page_title = draft["title"]
+    page.meta_title = draft["meta_title"]
+    page.meta_description = draft["meta_description"]
+    page.h1 = draft["h1"]
+    page.content_body = "Synthetic canonical rendered content."
+    page.status = "approved"
+    page.updated_at = datetime(2026, 8, 28, 7, 30, tzinfo=UTC)
+    entry = _synthetic_entry(
+        refresh_service.ALREADY_CORRECTED_CLASSIFICATION,
+        1,
+    )
+    entry.update(
+        {
+            "current_cta_sha256": refresh_service._text_hash(corrected),
+            "expected_corrected_cta_sha256": refresh_service._text_hash(corrected),
+            "current_draft_sha256": refresh_service.draft_content_hash(draft),
+            "expected_after_draft_sha256": refresh_service.draft_content_hash(draft),
+            "current_content_body_sha256": refresh_service._text_hash(
+                page.content_body
+            ),
+            "expected_after_content_body_sha256": refresh_service._text_hash(
+                page.content_body
+            ),
+            "credential_source_fingerprint": (
+                refresh_service._credential_source_fingerprint(context)
+            ),
+        }
+    )
+    return context, page, entry
+
+
+def test_complete_all_legacy_manifest_remains_dry_run_eligible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _manifest_for_entries(
+        [
+            _synthetic_entry(AUTOMATIC_CLASSIFICATION, 1),
+            _synthetic_entry(AUTOMATIC_CLASSIFICATION, 2),
+            _synthetic_entry(EXCLUDED_CLASSIFICATION, 3),
+        ]
+    )
+    observed, _locked = _install_read_only_rehearsal_seams(monkeypatch, manifest)
+    _forbid_refresh_writers(monkeypatch)
+
+    result = refresh_service.rehearse_automatic_cta_refresh(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        manifest,
+        dry_run=True,
+    )
+
+    assert result == {
+        "status": "DRY_RUN",
+        "manifest_sha256": manifest["manifest_sha256"],
+        "eligible_count": 2,
+        "expected_generated_page_revisions": 2,
+        "expected_composition_revisions": 2,
+        "expected_qa_rows": 2,
+        "writes": 0,
+    }
+    assert observed == {
+        "classifications": [
+            AUTOMATIC_CLASSIFICATION,
+            AUTOMATIC_CLASSIFICATION,
+            EXCLUDED_CLASSIFICATION,
+        ],
+        "corrected_identities": [],
+        "other_identities": [EXCLUDED_CLASSIFICATION],
+    }
+
+
+def test_complete_all_legacy_manifest_preserves_successful_apply_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _manifest_for_entries(
+        [
+            _synthetic_entry(AUTOMATIC_CLASSIFICATION, 1),
+            _synthetic_entry(AUTOMATIC_CLASSIFICATION, 2),
+            _synthetic_entry(EXCLUDED_CLASSIFICATION, 3),
+        ]
+    )
+    _observed, _locked = _install_read_only_rehearsal_seams(monkeypatch, manifest)
+    appended: list[int] = []
+    after_checks: list[int] = []
+
+    def append_revision(
+        _session: Any,
+        page: Any,
+        **_kwargs: Any,
+    ) -> Any:
+        appended.append(page.id)
+        return SimpleNamespace(id=700 + page.id)
+
+    monkeypatch.setattr(
+        refresh_service,
+        "append_generated_page_revision",
+        append_revision,
+    )
+    monkeypatch.setattr(
+        refresh_service,
+        "refresh_site_plan_compositions",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            blocked=False,
+            created=0,
+            refreshed=2,
+            unchanged=1,
+        ),
+    )
+    monkeypatch.setattr(
+        refresh_service,
+        "save_page_qa",
+        lambda _session, page_id, **_kwargs: SimpleNamespace(
+            qa_result_id=800 + page_id
+        ),
+    )
+    monkeypatch.setattr(
+        refresh_service,
+        "_assert_exact_after_identity",
+        lambda _session, _entry, page, _revision, _qa_id: after_checks.append(
+            page.id
+        ),
+    )
+
+    class ApplySession:
+        flush_count = 0
+
+        def flush(self) -> None:
+            self.flush_count += 1
+
+    session = ApplySession()
+    result = refresh_service.rehearse_automatic_cta_refresh(
+        session,  # type: ignore[arg-type]
+        manifest,
+    )
+
+    assert result == {
+        "status": "APPLIED_PENDING_CALLER_COMMIT",
+        "manifest_sha256": manifest["manifest_sha256"],
+        "eligible_count": 2,
+        "generated_page_revisions_created": 2,
+        "composition_revisions_created": 2,
+        "qa_rows_created": 2,
+        "composition_created": 0,
+        "composition_refreshed": 2,
+        "composition_unchanged": 1,
+        "writes": 6,
+    }
+    assert appended == [201, 202]
+    assert after_checks == [201, 202]
+    assert session.flush_count == 1
+
+
+@pytest.mark.parametrize("governed_count", [1, 3])
+def test_fresh_all_corrected_manifest_uses_generic_counts_and_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    governed_count: int,
+) -> None:
+    corrected = refresh_service.ALREADY_CORRECTED_CLASSIFICATION
+    manifest = _manifest_for_entries(
+        [
+            *[
+                _synthetic_entry(corrected, ordinal)
+                for ordinal in range(1, governed_count + 1)
+            ],
+            _synthetic_entry(EXCLUDED_CLASSIFICATION, governed_count + 1),
+        ]
+    )
+    observed, _locked = _install_read_only_rehearsal_seams(monkeypatch, manifest)
+    _forbid_refresh_writers(monkeypatch)
+
+    result = refresh_service.rehearse_automatic_cta_refresh(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        manifest,
+    )
+
+    assert result == {
+        "status": "UNCHANGED",
+        "manifest_sha256": manifest["manifest_sha256"],
+        "governed_target_count": governed_count,
+        "corrected_count": governed_count,
+        "legacy_count": 0,
+        "custom_count": 0,
+        "mixed_count": 0,
+        "eligible_count": 0,
+        "page_writes": 0,
+        "revision_writes": 0,
+        "composition_writes": 0,
+        "qa_writes": 0,
+        "generated_page_revisions_created": 0,
+        "composition_revisions_created": 0,
+        "qa_rows_created": 0,
+        "writes": 0,
+    }
+    assert observed == {
+        "classifications": [
+            *[corrected for _ in range(governed_count)],
+            EXCLUDED_CLASSIFICATION,
+        ],
+        "corrected_identities": [corrected for _ in range(governed_count)],
+        "other_identities": [EXCLUDED_CLASSIFICATION],
+    }
+
+
+def test_all_corrected_noop_preserves_all_table_counts_and_supported_sequences(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    corrected = refresh_service.ALREADY_CORRECTED_CLASSIFICATION
+    manifest = _manifest_for_entries(
+        [
+            _synthetic_entry(corrected, 1),
+            _synthetic_entry(corrected, 2),
+        ]
+    )
+    _observed, locked = _install_read_only_rehearsal_seams(monkeypatch, manifest)
+    _forbid_refresh_writers(monkeypatch)
+    locked_before = deepcopy(locked)
+    observed_dml: list[str] = []
+
+    def capture_dml(
+        _connection: Any,
+        _cursor: Any,
+        statement: str,
+        _parameters: Any,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        operation = statement.lstrip().partition(" ")[0].upper()
+        if operation in {"INSERT", "UPDATE", "DELETE"}:
+            observed_dml.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture_dml)
+    try:
+        with Session(engine) as session:
+            before = _application_database_state(session)
+            result = refresh_service.rehearse_automatic_cta_refresh(
+                session,
+                manifest,
+            )
+            pending_orm_state = {
+                "new": list(session.new),
+                "dirty": list(session.dirty),
+                "deleted": list(session.deleted),
+            }
+            after = _application_database_state(session)
+            session.rollback()
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_dml)
+
+    assert result["status"] == "UNCHANGED"
+    assert result["writes"] == 0
+    assert before["counts"] == after["counts"]
+    assert before["sequences"] == after["sequences"]
+    assert pending_orm_state == {"new": [], "dirty": [], "deleted": []}
+    assert locked == locked_before
+    assert observed_dml == []
+
+
+@pytest.mark.parametrize(
+    ("entries", "message"),
+    [
+        (
+            [
+                _synthetic_entry(AUTOMATIC_CLASSIFICATION, 1),
+                _synthetic_entry(refresh_service.ALREADY_CORRECTED_CLASSIFICATION, 2),
+            ],
+            "Mixed legacy/corrected",
+        ),
+        (
+            [
+                _synthetic_entry(refresh_service.ALREADY_CORRECTED_CLASSIFICATION, 1),
+                _synthetic_entry(refresh_service.CUSTOM_CLASSIFICATION, 2),
+            ],
+            "Custom or uncertain",
+        ),
+        (
+            [_synthetic_entry(EXCLUDED_CLASSIFICATION, 1)],
+            "no governed City-Service",
+        ),
+    ],
+)
+def test_mixed_custom_and_empty_governed_states_fail_before_writer_or_lock_seams(
+    monkeypatch: pytest.MonkeyPatch,
+    entries: list[dict[str, Any]],
+    message: str,
+) -> None:
+    manifest = _manifest_for_entries(entries)
+    _forbid_refresh_writers(monkeypatch)
+    monkeypatch.setattr(
+        refresh_service,
+        "_lock_authoritative_source_tables",
+        lambda *_: pytest.fail("A fail-closed state reached the database lock seam."),
+    )
+
+    with pytest.raises(AutomaticCTARefreshError, match=message):
+        refresh_service.rehearse_automatic_cta_refresh(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            manifest,
+        )
+
+
+def test_old_preapply_manifest_rejects_corrected_runtime_state_before_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _manifest_for_entries(
+        [_synthetic_entry(AUTOMATIC_CLASSIFICATION, 1)]
+    )
+    context, page, _corrected_entry = _corrected_runtime()
+    entry = manifest["entries"][0]
+    locked = {
+        "generated_pages": {entry["generated_page_id"]: page},
+        "planned_pages": {
+            entry["planned_page_id"]: SimpleNamespace(id=entry["planned_page_id"])
+        },
+        "compositions": {
+            entry["composition_id"]: SimpleNamespace(id=entry["composition_id"])
+        },
+    }
+    monkeypatch.setattr(refresh_service, "_lock_authoritative_source_tables", lambda *_: None)
+    monkeypatch.setattr(refresh_service, "_assert_global_generated_page_inventory", lambda *_: None)
+    monkeypatch.setattr(refresh_service, "_lock_manifest_scope", lambda *_args, **_kwargs: locked)
+    monkeypatch.setattr(refresh_service, "load_generation_context", lambda *_: context)
+    monkeypatch.setattr(
+        refresh_service,
+        "render_content_body",
+        lambda *_: page.content_body,
+    )
+    _forbid_refresh_writers(monkeypatch)
+
+    with pytest.raises(AutomaticCTARefreshError, match="classification changed"):
+        refresh_service.rehearse_automatic_cta_refresh(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            manifest,
+        )
+
+
+def test_refingerprinted_legacy_credential_source_tamper_rejects_before_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _context()
+    page = context.page
+    draft = _draft(legacy_automatic_public_call_to_action(context))
+    page.draft_content = draft
+    page.page_title = draft["title"]
+    page.meta_title = draft["meta_title"]
+    page.meta_description = draft["meta_description"]
+    page.h1 = draft["h1"]
+    page.content_body = "Synthetic canonical legacy render."
+    entry = _synthetic_entry(AUTOMATIC_CLASSIFICATION, 1)
+    entry["credential_source_fingerprint"] = "b" * 64
+    manifest = _manifest_for_entries([entry])
+    validate_automatic_cta_refresh_manifest(manifest)
+    locked = {
+        "generated_pages": {entry["generated_page_id"]: page},
+        "planned_pages": {
+            entry["planned_page_id"]: SimpleNamespace(id=entry["planned_page_id"])
+        },
+        "compositions": {
+            entry["composition_id"]: SimpleNamespace(id=entry["composition_id"])
+        },
+    }
+    monkeypatch.setattr(refresh_service, "_lock_authoritative_source_tables", lambda *_: None)
+    monkeypatch.setattr(refresh_service, "_assert_global_generated_page_inventory", lambda *_: None)
+    monkeypatch.setattr(refresh_service, "_lock_manifest_scope", lambda *_args, **_kwargs: locked)
+    monkeypatch.setattr(refresh_service, "load_generation_context", lambda *_: context)
+    monkeypatch.setattr(
+        refresh_service,
+        "render_content_body",
+        lambda *_: page.content_body,
+    )
+    _forbid_refresh_writers(monkeypatch)
+
+    with pytest.raises(AutomaticCTARefreshError, match="credential source identity"):
+        refresh_service.rehearse_automatic_cta_refresh(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            manifest,
+        )
 
 
 def test_legacy_identity_is_exact_and_corrected_generation_retains_internal_facts() -> None:
@@ -233,6 +779,236 @@ def test_legacy_identity_is_exact_and_corrected_generation_retains_internal_fact
     assert "SYN-LICENSE-42" not in corrected
     assert "Synthetic Operator" not in corrected
     assert "certified operator" not in corrected.lower()
+
+
+@pytest.mark.parametrize("governed_count", [1, 3])
+def test_manifest_builder_binds_generic_fresh_corrected_current_identities(
+    monkeypatch: pytest.MonkeyPatch,
+    governed_count: int,
+) -> None:
+    plan = SimpleNamespace(id=17, website_id=16, version=4)
+    contexts: dict[int, GenerationContext] = {}
+    pages: dict[int, GeneratedPage] = {}
+    planned_pages: list[Any] = []
+    planned_by_page: dict[int, Any] = {}
+    compositions_by_page: dict[int, Any] = {}
+    composition_revisions: dict[int, Any] = {}
+    revisions: dict[int, Any] = {}
+    qa_results: dict[int, Any] = {}
+    rendered_by_title: dict[str, str] = {}
+    for ordinal in range(1, governed_count + 1):
+        context = _context()
+        page = context.page
+        page.id = 200 + ordinal
+        corrected = build_automatic_public_call_to_action(context)
+        draft = _draft(corrected)
+        draft["title"] = f"Synthetic Title {ordinal}"
+        page.draft_content = draft
+        page.page_title = draft["title"]
+        page.meta_title = draft["meta_title"]
+        page.meta_description = draft["meta_description"]
+        page.h1 = draft["h1"]
+        page.content_body = f"Synthetic canonical rendered content {ordinal}."
+        page.status = "approved"
+        page.updated_at = datetime(2026, 8, 28, 8, ordinal, tzinfo=UTC)
+        planned = SimpleNamespace(
+            id=100 + ordinal,
+            website_id=plan.website_id,
+            site_plan_id=plan.id,
+            generated_page_id=page.id,
+        )
+        composition = SimpleNamespace(
+            id=300 + ordinal,
+            composition_version=ordinal + 2,
+            source_hash=f"{ordinal:x}" * 64,
+        )
+        contexts[page.id] = context
+        pages[page.id] = page
+        planned_pages.append(planned)
+        planned_by_page[page.id] = planned
+        compositions_by_page[page.id] = composition
+        composition_revisions[composition.id] = SimpleNamespace(
+            id=400 + ordinal,
+            revision_hash=f"{ordinal + 3:x}" * 64,
+        )
+        revisions[page.id] = SimpleNamespace(id=500 + ordinal)
+        qa_results[page.id] = SimpleNamespace(
+            id=600 + ordinal,
+            result_hash=f"{ordinal + 6:x}" * 64,
+        )
+        rendered_by_title[draft["title"]] = page.content_body
+
+    class ManifestBuilderSession:
+        exec_count = 0
+
+        def get(self, model: Any, identity: int) -> Any:
+            if model is refresh_service.SitePlan:
+                assert identity == plan.id
+                return plan
+            assert model is GeneratedPage and identity in pages
+            return pages[identity]
+
+        def exec(self, _statement: Any) -> Any:
+            self.exec_count += 1
+            if self.exec_count == 1:
+                return SimpleNamespace(all=lambda: planned_pages)
+            planned = planned_pages[self.exec_count - 2]
+            composition = compositions_by_page[planned.generated_page_id]
+            return SimpleNamespace(one_or_none=lambda: composition)
+
+    monkeypatch.setattr(
+        refresh_service,
+        "current_composition_revision",
+        lambda _session, composition: composition_revisions[composition.id],
+    )
+    monkeypatch.setattr(
+        refresh_service,
+        "_current_qa",
+        lambda _session, page_id: qa_results[page_id],
+    )
+    monkeypatch.setattr(
+        refresh_service,
+        "_generated_page_revision_history_identity",
+        lambda _session, page_id, **_kwargs: (revisions[page_id], "e" * 64),
+    )
+    monkeypatch.setattr(
+        refresh_service,
+        "read_composition_for_generated_page",
+        lambda _session, page_id: SimpleNamespace(
+            effective_components=[
+                SimpleNamespace(
+                    instance_key="final_cta",
+                    resolved_data={
+                        "body": pages[page_id].draft_content["call_to_action"]
+                    },
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        refresh_service,
+        "load_generation_context",
+        lambda _session, page_id: contexts[page_id],
+    )
+    monkeypatch.setattr(
+        refresh_service,
+        "render_content_body",
+        lambda draft, _website_context: rendered_by_title[draft.title],
+    )
+    qa_legacy_options: list[bool] = []
+
+    def require_current_qa(*_args: Any, **kwargs: Any) -> None:
+        qa_legacy_options.append(
+            kwargs.get("allow_exact_legacy_city_service_predecessor", False)
+        )
+
+    monkeypatch.setattr(refresh_service, "_require_effective_qa", require_current_qa)
+    monkeypatch.setattr(refresh_service, "_protected_planned_page_hash", lambda *_: HASH)
+
+    manifest = refresh_service.build_automatic_cta_refresh_manifest(
+        ManifestBuilderSession(),  # type: ignore[arg-type]
+        plan.id,
+        task_identity="synthetic-corrected-current-state",
+        created_at=datetime(2026, 8, 28, 8, 0, tzinfo=UTC),
+    )
+    entry = manifest["entries"][0]
+
+    assert manifest["website_id"] == plan.website_id
+    assert manifest["site_plan_id"] == plan.id
+    assert manifest["site_plan_version"] == plan.version
+    assert manifest["source_owner"] == SOURCE_OWNER
+    assert manifest["legacy_source_commit"] == LEGACY_SOURCE_COMMIT
+    assert manifest["current_generated_page_count"] == governed_count
+    assert manifest["eligible_count"] == 0
+    assert manifest["already_corrected_count"] == governed_count
+    assert manifest["classification_counts"] == {
+        refresh_service.ALREADY_CORRECTED_CLASSIFICATION: governed_count
+    }
+    for entry in manifest["entries"]:
+        page = pages[entry["generated_page_id"]]
+        context = contexts[page.id]
+        composition = compositions_by_page[page.id]
+        composition_revision = composition_revisions[composition.id]
+        revision = revisions[page.id]
+        qa = qa_results[page.id]
+        assert entry["classification"] == refresh_service.ALREADY_CORRECTED_CLASSIFICATION
+        assert entry["website_id"] == plan.website_id
+        assert entry["site_plan_id"] == plan.id
+        assert entry["planned_page_id"] == planned_by_page[page.id].id
+        assert entry["generated_page_id"] == page.id
+        assert entry["page_protected_sha256"] == refresh_service._protected_page_hash(page)
+        assert entry["planned_page_sha256"] == HASH
+        assert entry["current_cta_sha256"] == entry["expected_corrected_cta_sha256"]
+        assert entry["current_draft_sha256"] == entry["expected_after_draft_sha256"]
+        assert (
+            entry["current_content_body_sha256"]
+            == entry["expected_after_content_body_sha256"]
+        )
+        assert entry["credential_source_fingerprint"] == (
+            refresh_service._credential_source_fingerprint(context)
+        )
+        assert entry["generated_page_revision_id"] == revision.id
+        assert entry["generated_page_revision_sha256"] == "e" * 64
+        assert entry["composition_id"] == composition.id
+        assert entry["composition_version"] == composition.composition_version
+        assert entry["composition_source_sha256"] == composition.source_hash
+        assert entry["composition_revision_id"] == composition_revision.id
+        assert entry["composition_revision_sha256"] == composition_revision.revision_hash
+        assert entry["qa_result_id"] == qa.id
+        assert entry["qa_result_sha256"] == qa.result_hash
+    assert qa_legacy_options == [False] * governed_count
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "expected_corrected_cta_sha256",
+        "expected_after_draft_sha256",
+        "expected_after_content_body_sha256",
+        "credential_source_fingerprint",
+    ],
+)
+def test_refingerprinted_corrected_source_tampering_rejects_at_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    context, page, entry = _corrected_runtime()
+    entry[field] = "b" * 64
+    manifest = _manifest_for_entries([entry])
+    validate_automatic_cta_refresh_manifest(manifest)
+    monkeypatch.setattr(refresh_service, "load_generation_context", lambda *_: context)
+    monkeypatch.setattr(
+        refresh_service,
+        "render_content_body",
+        lambda *_: page.content_body,
+    )
+
+    with pytest.raises(AutomaticCTARefreshError, match="source identity changed"):
+        refresh_service._assert_current_source_classification(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            manifest["entries"][0],
+            page,
+        )
+
+
+def test_incorrect_corrected_cta_reclassifies_as_custom_and_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, page, entry = _corrected_runtime()
+    page.draft_content["call_to_action"] = "Synthetic divergent CTA."
+    monkeypatch.setattr(refresh_service, "load_generation_context", lambda *_: context)
+    monkeypatch.setattr(
+        refresh_service,
+        "render_content_body",
+        lambda *_: page.content_body,
+    )
+
+    with pytest.raises(AutomaticCTARefreshError, match="classification changed"):
+        refresh_service._assert_current_source_classification(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            entry,
+            page,
+        )
 
 
 def test_structured_classifier_rejects_governed_credentials_outside_the_cta() -> None:
@@ -332,6 +1108,7 @@ def test_exact_before_identity_rechecks_the_frozen_legacy_qa_transition(
     composition_revision = SimpleNamespace(id=21, revision_hash=HASH)
     qa = SimpleNamespace(id=22, result_hash=HASH)
     entry = {
+        "classification": AUTOMATIC_CLASSIFICATION,
         "current_draft_sha256": refresh_service.draft_content_hash(draft),
         "page_updated_at": _timestamp(updated_at),
         "current_content_body_sha256": refresh_service._text_hash(page.content_body),
@@ -382,6 +1159,17 @@ def test_exact_before_identity_rechecks_the_frozen_legacy_qa_transition(
 
     assert observed == {"allow_legacy": True}
 
+    entry["classification"] = refresh_service.ALREADY_CORRECTED_CLASSIFICATION
+    _assert_exact_before_identity(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        entry,
+        page,  # type: ignore[arg-type]
+        planned,  # type: ignore[arg-type]
+        composition,  # type: ignore[arg-type]
+    )
+    assert observed == {"allow_legacy": False}
+    entry["classification"] = AUTOMATIC_CLASSIFICATION
+
     monkeypatch.setattr(
         refresh_service,
         "_generated_page_revision_history_identity",
@@ -395,6 +1183,104 @@ def test_exact_before_identity_rechecks_the_frozen_legacy_qa_transition(
             planned,  # type: ignore[arg-type]
             composition,  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.parametrize("stale_identity", ["revision", "composition", "qa", "draft"])
+def test_corrected_noop_rejects_stale_bound_identity_or_unrelated_draft_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    stale_identity: str,
+) -> None:
+    updated_at = datetime(2026, 8, 28, 7, 45, tzinfo=UTC)
+    draft = {
+        "intro": "Synthetic unchanged introduction.",
+        "call_to_action": "Synthetic corrected CTA.",
+    }
+    current_draft_sha256 = refresh_service.draft_content_hash(draft)
+    current_content_sha256 = refresh_service._text_hash("Synthetic rendered body.")
+    current_cta_sha256 = refresh_service._text_hash(draft["call_to_action"])
+    page = SimpleNamespace(
+        id=15,
+        draft_content=deepcopy(draft),
+        updated_at=updated_at,
+        content_body="Synthetic rendered body.",
+    )
+    planned = SimpleNamespace(id=18)
+    composition = SimpleNamespace(
+        id=20,
+        composition_version=3,
+        source_hash="b" * 64,
+    )
+    revision = SimpleNamespace(id=19)
+    composition_revision = SimpleNamespace(id=21, revision_hash="c" * 64)
+    qa = SimpleNamespace(id=22, result_hash="d" * 64)
+    entry = {
+        "classification": refresh_service.ALREADY_CORRECTED_CLASSIFICATION,
+        "current_draft_sha256": current_draft_sha256,
+        "expected_after_draft_sha256": current_draft_sha256,
+        "page_updated_at": _timestamp(updated_at),
+        "current_content_body_sha256": current_content_sha256,
+        "expected_after_content_body_sha256": current_content_sha256,
+        "current_cta_sha256": current_cta_sha256,
+        "expected_corrected_cta_sha256": current_cta_sha256,
+        "generated_page_revision_id": revision.id,
+        "generated_page_revision_sha256": HASH,
+        "composition_version": composition.composition_version,
+        "composition_source_sha256": composition.source_hash,
+        "composition_revision_id": composition_revision.id,
+        "composition_revision_sha256": composition_revision.revision_hash,
+        "qa_result_id": qa.id,
+        "qa_result_sha256": qa.result_hash,
+    }
+    observed: dict[str, bool] = {}
+    monkeypatch.setattr(refresh_service, "_assert_common_identity", lambda *_: None)
+    monkeypatch.setattr(
+        refresh_service,
+        "read_composition_for_generated_page",
+        lambda *_: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        refresh_service,
+        "_generated_page_revision_history_identity",
+        lambda *_args, **_kwargs: (revision, HASH),
+    )
+    monkeypatch.setattr(
+        refresh_service,
+        "current_composition_revision",
+        lambda *_: composition_revision,
+    )
+    monkeypatch.setattr(refresh_service, "_current_qa", lambda *_: qa)
+
+    def require_qa(*_args: Any, **kwargs: Any) -> None:
+        observed["allow_legacy"] = kwargs.get(
+            "allow_exact_legacy_city_service_predecessor",
+            False,
+        )
+
+    monkeypatch.setattr(refresh_service, "_require_effective_qa", require_qa)
+
+    if stale_identity == "revision":
+        monkeypatch.setattr(
+            refresh_service,
+            "_generated_page_revision_history_identity",
+            lambda *_args, **_kwargs: (revision, "e" * 64),
+        )
+    elif stale_identity == "composition":
+        composition.composition_version += 1
+    elif stale_identity == "qa":
+        qa.id += 1
+    else:
+        page.draft_content["intro"] = "Synthetic unrelated drift."
+
+    with pytest.raises(AutomaticCTARefreshError, match="before-state identity"):
+        refresh_service._assert_exact_corrected_identity(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            entry,
+            page,  # type: ignore[arg-type]
+            planned,  # type: ignore[arg-type]
+            composition,  # type: ignore[arg-type]
+        )
+
+    assert observed == {"allow_legacy": False}
 
 
 @pytest.mark.parametrize(
@@ -500,6 +1386,50 @@ def test_manifest_allowlist_and_hash_validation_fail_closed() -> None:
     wrong_counts["manifest_sha256"] = automatic_cta_refresh_manifest_sha256(wrong_counts)
     with pytest.raises(AutomaticCTARefreshError, match="classification counts"):
         validate_automatic_cta_refresh_manifest(wrong_counts)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [("website_id", 99), ("site_plan_id", 99)],
+)
+def test_manifest_rejects_refingerprinted_entry_hierarchy_tamper(
+    field: str,
+    replacement: int,
+) -> None:
+    manifest = _manifest()
+    manifest["entries"][0][field] = replacement
+    manifest["inventory_sha256"] = _canonical_hash(manifest["entries"])
+    manifest["manifest_sha256"] = automatic_cta_refresh_manifest_sha256(manifest)
+
+    with pytest.raises(AutomaticCTARefreshError, match="entry hierarchy"):
+        validate_automatic_cta_refresh_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "website_id",
+        "site_plan_id",
+        "site_plan_version",
+        "current_generated_page_count",
+        "eligible_count",
+        "custom_copy_exclusion_count",
+        "already_corrected_count",
+        "classification_counts",
+    ],
+)
+def test_manifest_rejects_refingerprinted_boolean_integer_tamper(field: str) -> None:
+    manifest = _manifest()
+    if field == "classification_counts":
+        manifest[field][AUTOMATIC_CLASSIFICATION] = True
+    elif field in {"custom_copy_exclusion_count", "already_corrected_count"}:
+        manifest[field] = False
+    else:
+        manifest[field] = True
+    manifest["manifest_sha256"] = automatic_cta_refresh_manifest_sha256(manifest)
+
+    with pytest.raises(AutomaticCTARefreshError, match="integer|count values"):
+        validate_automatic_cta_refresh_manifest(manifest)
 
 
 def test_manifest_rejects_inconsistent_revision_identity_even_when_rehashed() -> None:

@@ -231,6 +231,23 @@ def validate_automatic_cta_refresh_manifest(manifest: Mapping[str, Any]) -> None
         raise AutomaticCTARefreshError("Refresh manifest source identity differs.")
     if not isinstance(manifest.get("task_identity"), str) or not str(manifest["task_identity"]).strip():
         raise AutomaticCTARefreshError("Refresh manifest task identity is missing.")
+    for key in ("website_id", "site_plan_id", "site_plan_version"):
+        value = manifest.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise AutomaticCTARefreshError(
+                f"Refresh manifest integer identity is invalid: {key}."
+            )
+    for key in (
+        "current_generated_page_count",
+        "eligible_count",
+        "custom_copy_exclusion_count",
+        "already_corrected_count",
+    ):
+        value = manifest.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise AutomaticCTARefreshError(
+                f"Refresh manifest integer count is invalid: {key}."
+            )
     entries = manifest.get("entries")
     if not isinstance(entries, list) or not entries:
         raise AutomaticCTARefreshError("Refresh manifest entries are missing.")
@@ -253,6 +270,13 @@ def validate_automatic_cta_refresh_manifest(manifest: Mapping[str, Any]) -> None
         classification_counts[classification] = classification_counts.get(classification, 0) + 1
     if manifest.get("classification_counts") != dict(sorted(classification_counts.items())):
         raise AutomaticCTARefreshError("Refresh manifest classification counts differ.")
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 1
+        for value in manifest["classification_counts"].values()
+    ):
+        raise AutomaticCTARefreshError(
+            "Refresh manifest classification count values are invalid."
+        )
     if manifest.get("eligible_count") != len(eligible):
         raise AutomaticCTARefreshError("Refresh manifest eligible count differs.")
     if manifest.get("custom_copy_exclusion_count") != len(custom):
@@ -268,6 +292,13 @@ def validate_automatic_cta_refresh_manifest(manifest: Mapping[str, Any]) -> None
         raise AutomaticCTARefreshError("Refresh manifest hash verification failed.")
     for entry in entries:
         _validate_manifest_entry(entry)
+        if (
+            entry["website_id"] != manifest["website_id"]
+            or entry["site_plan_id"] != manifest["site_plan_id"]
+        ):
+            raise AutomaticCTARefreshError(
+                "Refresh manifest entry hierarchy differs from its Website/Site Plan."
+            )
 
 
 def rehearse_automatic_cta_refresh(
@@ -283,16 +314,37 @@ def rehearse_automatic_cta_refresh(
     validate_automatic_cta_refresh_manifest(manifest)
     if failure_point is not None and failure_point not in FAILURE_POINTS:
         raise AutomaticCTARefreshError("Unknown automatic CTA refresh failure point.")
-    if int(manifest["custom_copy_exclusion_count"]) != 0:
-        raise AutomaticCTARefreshError("Custom or uncertain City-Service CTA ownership blocks refresh.")
-    if int(manifest["already_corrected_count"]) != 0:
-        raise AutomaticCTARefreshError("Manifest was not captured from one exact legacy before-state.")
-    eligible_entries = [
+    legacy_entries = [
         entry for entry in manifest["entries"]
         if entry["classification"] == AUTOMATIC_CLASSIFICATION
     ]
-    if not eligible_entries:
-        raise AutomaticCTARefreshError("Refresh manifest contains no eligible automatic CTA pages.")
+    corrected_entries = [
+        entry for entry in manifest["entries"]
+        if entry["classification"] == ALREADY_CORRECTED_CLASSIFICATION
+    ]
+    custom_entries = [
+        entry for entry in manifest["entries"]
+        if entry["classification"] == CUSTOM_CLASSIFICATION
+    ]
+    governed_target_count = (
+        len(legacy_entries) + len(corrected_entries) + len(custom_entries)
+    )
+    if custom_entries:
+        raise AutomaticCTARefreshError("Custom or uncertain City-Service CTA ownership blocks refresh.")
+    if governed_target_count == 0:
+        raise AutomaticCTARefreshError("Refresh manifest contains no governed City-Service CTA pages.")
+    if legacy_entries and corrected_entries:
+        raise AutomaticCTARefreshError(
+            "Mixed legacy/corrected automatic CTA state blocks the complete batch."
+        )
+
+    state_counts = {
+        "governed_target_count": governed_target_count,
+        "corrected_count": len(corrected_entries),
+        "legacy_count": len(legacy_entries),
+        "custom_count": len(custom_entries),
+        "mixed_count": 0,
+    }
 
     _lock_authoritative_source_tables(session)
     _assert_global_generated_page_inventory(session, manifest)
@@ -304,6 +356,9 @@ def rehearse_automatic_cta_refresh(
         planned = locked["planned_pages"][entry["planned_page_id"]]
         composition = locked["compositions"][entry["composition_id"]]
         _assert_current_source_classification(session, entry, page)
+        if entry["classification"] == ALREADY_CORRECTED_CLASSIFICATION:
+            _assert_exact_corrected_identity(session, entry, page, planned, composition)
+            continue
         if entry["classification"] != AUTOMATIC_CLASSIFICATION:
             _assert_exact_before_identity(session, entry, page, planned, composition)
             continue
@@ -312,21 +367,28 @@ def rehearse_automatic_cta_refresh(
         if values is not None:
             prepared.append(values)
 
-    if any(state == "unexpected" for state in states):
-        raise AutomaticCTARefreshError("A governed CTA is neither the exact before-state nor exact refresh after-state.")
-    if len(set(states)) != 1:
-        raise AutomaticCTARefreshError("Mixed before/after automatic CTA state blocks the complete batch.")
-    if states[0] == "after":
+    if corrected_entries:
         return {
             "status": "UNCHANGED",
             "manifest_sha256": manifest["manifest_sha256"],
-            "eligible_count": len(eligible_entries),
+            **state_counts,
+            "eligible_count": 0,
+            "page_writes": 0,
+            "revision_writes": 0,
+            "composition_writes": 0,
+            "qa_writes": 0,
             "generated_page_revisions_created": 0,
             "composition_revisions_created": 0,
             "qa_rows_created": 0,
             "writes": 0,
         }
-    if len(prepared) != len(eligible_entries):
+    if any(state == "unexpected" for state in states):
+        raise AutomaticCTARefreshError("A governed CTA is neither the exact before-state nor exact refresh after-state.")
+    if any(state != "before" for state in states):
+        raise AutomaticCTARefreshError(
+            "A legacy manifest no longer binds one exact legacy before-state."
+        )
+    if len(prepared) != len(legacy_entries):
         raise AutomaticCTARefreshError("Prepared automatic CTA set is incomplete.")
     if dry_run:
         return {
@@ -491,19 +553,7 @@ def _manifest_entry(
         expected_corrected_cta_hash = _text_hash(corrected)
         expected_after_draft_hash = draft_content_hash(expected)
         expected_after_content_body_hash = _text_hash(rendered)
-        credential_source_fingerprint = _canonical_hash(
-            {
-                "license_label": website_config_value(
-                    context.website_context,
-                    "license_label",
-                    "License",
-                ),
-                "legacy_source_commit": LEGACY_SOURCE_COMMIT,
-                "legacy_source_license_label": "Florida license",
-                "license_number": context.business.license_number,
-                "certified_operator": context.business.certified_operator,
-            }
-        )
+        credential_source_fingerprint = _credential_source_fingerprint(context)
 
     _require_effective_qa(
         session,
@@ -749,7 +799,10 @@ def _assert_common_identity(
 ) -> None:
     if (
         page.id != entry["generated_page_id"]
+        or page.website_id != entry["website_id"]
         or planned.id != entry["planned_page_id"]
+        or planned.website_id != entry["website_id"]
+        or planned.site_plan_id != entry["site_plan_id"]
         or planned.generated_page_id != page.id
         or page.page_type != entry["page_type"]
         or page.status != entry["page_status"]
@@ -782,7 +835,9 @@ def _assert_exact_before_identity(
         session,
         page,
         qa,
-        allow_exact_legacy_city_service_predecessor=True,
+        allow_exact_legacy_city_service_predecessor=(
+            entry.get("classification") == AUTOMATIC_CLASSIFICATION
+        ),
     )
     if (
         draft_content_hash(page.draft_content or {}) != entry["current_draft_sha256"]
@@ -799,6 +854,27 @@ def _assert_exact_before_identity(
         or qa.result_hash != entry["qa_result_sha256"]
     ):
         raise AutomaticCTARefreshError("Manifest before-state identity is stale.")
+
+
+def _assert_exact_corrected_identity(
+    session: Session,
+    entry: Mapping[str, Any],
+    page: GeneratedPage,
+    planned: PlannedPage,
+    composition: PageComposition,
+) -> None:
+    """Validate one freshly captured current corrected state without a write seam."""
+
+    _assert_exact_before_identity(session, entry, page, planned, composition)
+    if (
+        entry["current_cta_sha256"] != entry["expected_corrected_cta_sha256"]
+        or entry["current_draft_sha256"] != entry["expected_after_draft_sha256"]
+        or entry["current_content_body_sha256"]
+        != entry["expected_after_content_body_sha256"]
+    ):
+        raise AutomaticCTARefreshError(
+            "Manifest corrected-state identity does not bind its current deterministic output."
+        )
 
 
 def _assert_exact_after_identity(
@@ -1217,6 +1293,22 @@ def _public_page_fields_match_draft(page: GeneratedPage) -> bool:
     )
 
 
+def _credential_source_fingerprint(context: GenerationContext) -> str:
+    return _canonical_hash(
+        {
+            "license_label": website_config_value(
+                context.website_context,
+                "license_label",
+                "License",
+            ),
+            "legacy_source_commit": LEGACY_SOURCE_COMMIT,
+            "legacy_source_license_label": "Florida license",
+            "license_number": context.business.license_number,
+            "certified_operator": context.business.certified_operator,
+        }
+    )
+
+
 def _city_service_source_classification(
     *,
     current_cta: str,
@@ -1248,8 +1340,11 @@ def _assert_current_source_classification(
     entry: Mapping[str, Any],
     page: GeneratedPage,
 ) -> None:
+    context: GenerationContext | None = None
+    corrected: str | None = None
+    canonical_current: str | None = None
     if page.page_type != "city_service":
-        expected = EXCLUDED_CLASSIFICATION
+        expected_classification = EXCLUDED_CLASSIFICATION
     else:
         if not isinstance(page.draft_content, dict):
             raise AutomaticCTARefreshError(
@@ -1259,14 +1354,15 @@ def _assert_current_source_classification(
         current_cta = page.draft_content.get("call_to_action")
         if not isinstance(current_cta, str) or not current_cta.strip():
             raise AutomaticCTARefreshError(f"Generated Page {page.id} has a blank CTA.")
+        corrected = build_automatic_public_call_to_action(context)
         canonical_current = render_content_body(
             DraftContent.model_validate(page.draft_content),
             context.website_context,
         )
-        expected = _city_service_source_classification(
+        expected_classification = _city_service_source_classification(
             current_cta=current_cta,
             legacy_cta=legacy_automatic_public_call_to_action(context),
-            corrected_cta=build_automatic_public_call_to_action(context),
+            corrected_cta=corrected,
             canonical_content_matches=canonical_current == (page.content_body or ""),
             public_page_fields_match_draft=_public_page_fields_match_draft(page),
             governed_credentials_outside_cta=(
@@ -1276,10 +1372,33 @@ def _assert_current_source_classification(
                 )
             ),
         )
-    if entry.get("classification") != expected:
+    if entry.get("classification") != expected_classification:
         raise AutomaticCTARefreshError(
             f"Generated Page {page.id} source classification changed after manifest capture."
         )
+    if (
+        context is not None
+        and entry.get("credential_source_fingerprint")
+        != _credential_source_fingerprint(context)
+    ):
+        raise AutomaticCTARefreshError(
+            "Governed credential source identity changed after manifest capture."
+        )
+    if expected_classification == ALREADY_CORRECTED_CLASSIFICATION:
+        if context is None or corrected is None or canonical_current is None:
+            raise AutomaticCTARefreshError(
+                "Corrected CTA source identity could not be reconstructed."
+            )
+        if (
+            entry.get("expected_corrected_cta_sha256") != _text_hash(corrected)
+            or entry.get("expected_after_draft_sha256")
+            != draft_content_hash(page.draft_content or {})
+            or entry.get("expected_after_content_body_sha256")
+            != _text_hash(canonical_current)
+        ):
+            raise AutomaticCTARefreshError(
+                "Corrected CTA source identity changed after manifest capture."
+            )
 
 
 def _inject(requested: str | None, current: str) -> None:
