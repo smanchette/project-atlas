@@ -15,8 +15,9 @@ define('ATLAS_PERFORMANCE_LOCAL_V5_STYLESHEET', dirname(__DIR__) . '/assets/perf
 define('ATLAS_PERFORMANCE_LOCAL_V5_SCRIPT', dirname(__DIR__) . '/assets/performance-local-v5.js');
 define('ATLAS_PERFORMANCE_LOCAL_V5_FORM_DELIVERY_MODULE', __DIR__ . '/performance-local-v5-form-delivery.php');
 
-function atlas_performance_local_v5_is_local_rehearsal(): bool {
-    return function_exists('wp_get_environment_type') && wp_get_environment_type() === 'local';
+function atlas_performance_local_v5_environment_is_allowed(): bool {
+    return function_exists('wp_get_environment_type')
+        && in_array(wp_get_environment_type(), ['local', 'staging'], true);
 }
 
 function atlas_performance_local_v5_exact_record($value, array $expected_keys): bool {
@@ -490,7 +491,7 @@ function atlas_performance_local_v5_validate_payload($payload): array {
         'navigation', 'page', 'sticky_action', 'hero', 'sections', 'related_pages',
         'faq', 'optional_modules', 'form', 'conditional', 'footer', 'theme',
     ];
-    if (!atlas_performance_local_v5_is_local_rehearsal()) { $errors[] = 'WordPress environment is not local.'; }
+    if (!atlas_performance_local_v5_environment_is_allowed()) { $errors[] = 'WordPress environment is not allowed.'; }
     if (!atlas_performance_local_v5_exact_record($payload, $top_level)) {
         return array_merge($errors, ['Payload keys differ from the exact V5 rehearsal contract.']);
     }
@@ -558,7 +559,7 @@ function atlas_performance_local_v5_payload_is_valid($payload): bool {
 }
 
 function atlas_performance_local_v5_register_meta(): void {
-    if (!atlas_performance_local_v5_is_local_rehearsal()) { return; }
+    if (!atlas_performance_local_v5_environment_is_allowed()) { return; }
     register_post_meta('page', ATLAS_PERFORMANCE_LOCAL_V5_META_KEY, [
         'type' => 'object',
         'single' => true,
@@ -575,7 +576,7 @@ function atlas_performance_local_v5_register_meta(): void {
 add_action('init', 'atlas_performance_local_v5_register_meta');
 
 function atlas_performance_local_v5_public_page_request(): bool {
-    return atlas_performance_local_v5_is_local_rehearsal()
+    return atlas_performance_local_v5_environment_is_allowed()
         && !is_admin()
         && !wp_doing_ajax()
         && !wp_doing_cron()

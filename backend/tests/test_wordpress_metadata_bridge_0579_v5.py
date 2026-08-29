@@ -78,7 +78,9 @@ def test_all_unchanged_renderer_functions_and_template_remain_byte_exact() -> No
     new = RENDERER.read_text(encoding="utf-8")
     old_names = set(re.findall(r"function (atlas_performance_local_v5_[a-z0-9_]+)\(", old))
     new_names = set(re.findall(r"function (atlas_performance_local_v5_[a-z0-9_]+)\(", new))
-    assert old_names == new_names
+    old_environment_helper = "atlas_performance_local_v5_is_local_rehearsal"
+    new_environment_helper = "atlas_performance_local_v5_environment_is_allowed"
+    assert old_names - {old_environment_helper} == new_names - {new_environment_helper}
     changed = {
         "atlas_performance_local_v5_runtime_files",
         "atlas_performance_local_v5_website",
@@ -86,10 +88,49 @@ def test_all_unchanged_renderer_functions_and_template_remain_byte_exact() -> No
         "atlas_performance_local_v5_render_final_conversion",
         "atlas_performance_local_v5_render_form",
         "atlas_performance_local_v5_render_footer",
+        "atlas_performance_local_v5_validate_payload",
+        "atlas_performance_local_v5_register_meta",
+        "atlas_performance_local_v5_public_page_request",
+        old_environment_helper,
     }
     for name in sorted(old_names - changed):
         assert _function(new, name) == _function(old, name), name
+    for name in (
+        "atlas_performance_local_v5_validate_payload",
+        "atlas_performance_local_v5_register_meta",
+        "atlas_performance_local_v5_public_page_request",
+    ):
+        expected = _function(old, name).replace(old_environment_helper, new_environment_helper)
+        if name == "atlas_performance_local_v5_validate_payload":
+            expected = expected.replace(
+                "WordPress environment is not local.",
+                "WordPress environment is not allowed.",
+            )
+        assert _function(new, name) == expected, name
     assert TEMPLATE.read_bytes() == (SOURCE_0578 / "templates/performance-local-v5-page.php").read_bytes()
+
+
+def test_0579_environment_gate_is_one_strict_local_or_staging_decision() -> None:
+    source = RENDERER.read_text(encoding="utf-8")
+    helper = _function(source, "atlas_performance_local_v5_environment_is_allowed")
+    assert helper == """function atlas_performance_local_v5_environment_is_allowed(): bool {
+    return function_exists('wp_get_environment_type')
+        && in_array(wp_get_environment_type(), ['local', 'staging'], true);
+}"""
+    assert source.count("atlas_performance_local_v5_environment_is_allowed(") == 4
+    assert "atlas_performance_local_v5_is_local_rehearsal" not in source
+    assert source.count("wp_get_environment_type") == 2
+    for forbidden in (
+        "HTTP_HOST", "SERVER_NAME", "home_url", "get_option", "apply_filters",
+        "production", "development",
+    ):
+        assert forbidden not in helper
+
+    delivery = DELIVERY.read_text(encoding="utf-8")
+    assert "wp_get_environment_type" not in delivery
+    assert "atlas_performance_local_v5_environment_is_allowed" not in delivery
+    assert "atlas_performance_local_v5_payload_is_valid($payload)" in delivery
+    assert "atlas_performance_local_v5_form_delivery_configuration_errors($config, $payload)" in delivery
 
 
 def test_inert_form_branch_retains_the_0578_runtime_contract_in_one_template() -> None:
