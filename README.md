@@ -1,6 +1,6 @@
 # Project Atlas
 
-Project Atlas is a local SEO publishing platform foundation for service businesses. Version 0.12 adds a QA remediation workspace, manual review notes, approval audit snapshots, and a separate media backup download.
+Project Atlas is a website-production platform for service businesses. The architecture-building phase is complete, and the current priority is controlled Flo-Zone WordPress staging and the first small website-production batch.
 
 The initial seeded business is Flo-Zone Pest And Termite Solutions Inc, but the app structure is business-agnostic so future companies and industries can be added without changing core code.
 
@@ -17,13 +17,15 @@ Project Atlas is a local SEO and service-business publishing platform for Flo-Zo
 
 WordPress Sandbox, Draft Queue, Draft Review, and Export Package tools are also part of the platform.
 
-### Current verified version
+### Current production checkpoint
 
-- Latest checkpoint: v0.59.54
-- Backend tests verified: 556 passed, 1 intentional platform-specific skip
-- Frontend build verified
-- Machine setup hardened
-- Restore drill documented
+- Active local Atlas migration: `20260820_0048`
+- Approved presentation: Performance Local V5; no V6 is required
+- Current WordPress staging target: Metadata Bridge 0.57.9
+- Next controlled sequence: install and activate 0.57.9 in staging, register and select V5, render and review Page 41, configure the real staging form, perform one controlled receipt test, and approve a first small production batch
+- No staging installation, real form delivery, publication, or deployment has occurred
+
+See `docs/PROJECT_ATLAS_ROADMAP.md` for the current production plan and `docs/PROJECT_ATLAS_CHANGELOG.md` for completed milestones.
 
 ### Protected paths
 
@@ -76,10 +78,6 @@ cd ..
 ### Verify backend tests
 
 docker exec atlas_backend sh -lc "PYTHONPATH=/app pytest"
-
-Expected backend result as of v0.59.54:
-
-556 passed, 1 intentional platform-specific skip
 
 ### Git safety check
 
@@ -504,4 +502,4 @@ docker compose up --build -d
 docker compose exec backend python -m app.db.seed
 ```
 
-The app applies additive schema guards during startup. Alembic migrations are included through `backend/alembic/versions/20260701_0010_qa_remediation_approval_audits.py`.
+The app applies additive schema guards during startup. Alembic migrations are included through `backend/alembic/versions/20260820_0048_append_only_page_composition_history.py`.

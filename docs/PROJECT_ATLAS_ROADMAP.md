@@ -18,7 +18,7 @@ The Roadmap is expected to change as the project advances. If the Roadmap confli
 
 ## Current Product Direction
 
-Atlas is moving from infrastructure-heavy development into a website-production-first phase.
+Atlas has left the architecture-building phase and is ready to make websites. The current phase is website-production-first, beginning with controlled Flo-Zone WordPress staging.
 
 The immediate product milestone is:
 
@@ -34,13 +34,15 @@ boundaries, or APIs rather than shared database access.
 
 ---
 
-## Phase 1: Complete the WordPress Foundation
+## Phase 1: WordPress Foundation Ready for Website Production
 
 ### Objective
 
-Finish the current Bootstrap, Metadata Bridge, rendering, verification, recovery, and audit lifecycle only to the degree required for safe full-site production.
+Maintain the Bootstrap, Metadata Bridge, rendering, verification, recovery, and audit foundation required for safe website production without reopening generalized infrastructure work.
 
-### Current known checkpoint
+### Historical pre-staging checkpoint
+
+The following checkpoint is retained as historical context and is not the current production state:
 
 - Runtime: v0.59.93
 - Audit ID 1: `authorization_retired`
@@ -50,14 +52,13 @@ Finish the current Bootstrap, Metadata Bridge, rendering, verification, recovery
 - Rendering: disabled
 - WordPress content and settings: unchanged
 
-### Completion conditions
+### Current status
 
-- Audit ID 2 is safely reconciled
-- Bootstrap establishment is durably verified
-- Required Metadata Bridge and rendering work is completed
-- Deployment, rollback, and recovery are safe
-- No unresolved recovery condition remains
-- Additional infrastructure is deferred unless needed for full-site generation
+- The guarded foundation required to begin controlled website production is complete.
+- Performance Local V5 is the approved presentation; no V6 is required.
+- Metadata Bridge 0.57.9 is the current staging target. Version 0.57.8 introduced the contained V5 renderer, and 0.57.9 added WordPress-native email delivery within the same plugin family.
+- Additional infrastructure remains deferred unless the website-production workflow proves it necessary.
+- No Metadata Bridge 0.57.9 staging installation or activation, V5 registration or selection, real form delivery, publication, or deployment has occurred.
 
 ---
 
@@ -66,6 +67,15 @@ Finish the current Bootstrap, Metadata Bridge, rendering, verification, recovery
 ### Objective
 
 Use Flo-Zone Pest And Termite Solutions Inc. as the first complete real-world website produced and managed through Atlas.
+
+### Current status and immediate priority
+
+- The active automatic CTA correction is complete for 55 City-Service pages. The ten non-City-Service pages were excluded, and the final all-corrected replay returned `UNCHANGED` with zero persistent changes. This milestone is permanently closed; no further replay is planned.
+- Page 41 is the completed City-Service media pilot. Its current QA identity must be re-queried during staging work before it is called staging-ready.
+- Media placement remains for 54 additional City-Service pages; Page 41 media must not be reused automatically.
+- The ten non-City-Service pages still need a practical staging and rendering decision. The full set of 65 pages has not been rendered through V5 or declared publication-ready.
+- The immediate sequence is Flo-Zone WordPress staging; Metadata Bridge 0.57.9 installation and activation; V5 registration and selection; Page 41 rendering and visual review; real staging form configuration; one controlled receipt test; and a first small website-production batch.
+- Governed content and media scale only after the first batch is approved. No staging installation, real form delivery, publication, or deployment has occurred.
 
 ### Required scope
 

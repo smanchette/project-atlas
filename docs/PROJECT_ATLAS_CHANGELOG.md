@@ -721,15 +721,90 @@ performed.
 
 ---
 
+## Approved Performance Local V5 WordPress Production Foundation
+
+Approved Performance Local V5 as the production presentation; no V6 is
+required. The approved foundation includes the responsive V5 layouts, sticky
+phone and Special/Estimate rows, conditional Estimate and Special surfaces,
+optional Review/Trust and Location/Map modules, the contained WordPress V5
+renderer, and the protected WordPress-native email form.
+
+Metadata Bridge 0.57.8 introduced the contained V5 renderer in commit
+`6ce8949da855fd441d945dac6f918c6c5581a059`. Metadata Bridge 0.57.9 added
+WordPress-native email delivery in commit
+`bb53469baed52a73f11a4e3b7782bfd505922eb6`. Both capabilities remain inside
+the existing Metadata Bridge plugin family; they do not create a second plugin,
+a separate WordPress Theme, or another form architecture.
+
+The delivery contract uses option `_project_atlas_estimate_form_delivery_v1`,
+schema `project-atlas-estimate-form-delivery@1`, REST route
+`POST /wp-json/project-atlas/v4/performance-local-v5/estimate`, and signed-token
+schema `project-atlas-performance-local-v5-form-token@1`. Validated delivery
+uses WordPress `wp_mail()` and a Website-configured private recipient. Atlas
+does not own direct SMTP or SMTP credentials, and the public contact email,
+private delivery recipient, and private From email remain separate. Staging
+installation, delivery configuration, a controlled real receipt test,
+publication, and deployment remain pending.
+
+---
+
+## Active Automatic CTA Correction and Final No-Op Replay
+
+Completed the revision-safe automatic CTA correction for the 55 City-Service
+pages while excluding Home, About, Contact, FAQ, Service, and the Orange,
+Seminole, Volusia, Lake, and Flagler County pages. Active Atlas remains at
+migration `20260820_0048` with 65 Generated Pages, 78 Generated Page revisions,
+65 composition heads, 121 immutable composition revisions, and 135 QA rows:
+65 current, 56 superseded, and 14 historical-unbound. The final classification
+is 55 corrected and 10 excluded, with zero legacy, custom, mixed, or partial
+pages. All 55 corrected pages retain public contact information; no automatic
+license/operator clause, blank or malformed corrected CTA, private recipient,
+or private From value remains in public output.
+
+The final active all-corrected replay completed on 2026-08-28 at 23:48:39 EDT.
+One service invocation returned canonical result `UNCHANGED`. The fresh
+manifest identity is
+`final-active-all-corrected-replay-20260829T034628186701Z`, captured at
+`2026-08-29T03:46:28.186701+00:00`, with manifest SHA-256
+`330b5676e934e07c59885abb4e86a0f808ea4d08c7eb04c4a38998c728452611` and
+inventory SHA-256
+`bdd47b4c9fdfa16704190587023bb269b0db041b58c75bdccb097de7199bd594`.
+Page writes, Generated Page revisions, composition revisions, QA rows, DML,
+application flushes, sequence movement, and supported application-state count
+movement were all zero. The CTA-refresh milestone is permanently closed and
+must not be replayed again.
+
+The retained recovery identities for this completed operation are:
+
+- Pre-apply PostgreSQL dump
+  `.runtime/active-automatic-cta-refresh/20260828_005211_active_cta_refresh/preapply-postgresql/atlas-preapply-20260828T051155Z.dump`,
+  1,260,636 bytes, SHA-256
+  `06f96434949643994e3d4c08fe264b9690d478adee3bb72897c05d475d1725ec`.
+- Post-apply Backup 0.59
+  `.runtime/active-automatic-cta-refresh/20260828_005211_active_cta_refresh/postapply-backup-059/atlas-backup-2026-08-28-052604.json`,
+  28,269,748 bytes, SHA-256
+  `9b4795cb1ba327b15cf78a1c6c7133a53c54f5a1cb2ba1296c1af687e579c529`.
+- Sanitized receipt
+  `.runtime/active-automatic-cta-refresh/20260828_005211_active_cta_refresh/automatic-cta-refresh-receipt.json`,
+  10,363 bytes, SHA-256
+  `e4eff4026e69fa9b072459b9a5fcc62d9219cbc2c7e9e752281c879983af0278`.
+
+No runtime or recovery artifact was modified, moved, regenerated, committed, or
+uploaded while documenting these identities.
+
+---
+
 ## Next Planned Milestones
 
-1. Reconcile Audit ID 2 under v0.59.93.
-2. Complete remaining Bootstrap and rendering foundation only as required.
-3. Complete the full Flo-Zone website.
-4. Convert that process into a repeatable company-onboarding and website-generation workflow.
-5. Build a second company website.
-6. Improve templates, QA, speed, and operator controls.
-7. Expand advanced SaaS, maintenance, integration, and intelligence capabilities later.
+1. Establish the Flo-Zone WordPress staging boundary, then install and activate Metadata Bridge 0.57.9.
+2. Register and select the approved Performance Local V5 presentation.
+3. Render and visually review Page 41, re-querying its current QA identity during staging work.
+4. Configure the real staging form and complete one controlled receipt test.
+5. Produce and approve the first small website-production batch.
+6. Scale governed content and media, including 54 remaining City-Service media placements, and make a practical staging/rendering decision for the ten non-City-Service pages.
+7. Convert the approved process into a repeatable company-onboarding and website-generation workflow.
+8. Build a second company website, then improve templates, QA, speed, and operator controls.
+9. Expand advanced SaaS, maintenance, integration, and intelligence capabilities later.
 
 ---
 
