@@ -143,7 +143,11 @@ class ThemeFamilyComponentContract(BaseModel):
     variant: str = Field(min_length=1, max_length=120)
     responsive_visibility: ResponsiveVisibility
     theme_compatibility: tuple[
-        Literal["performance-local@2", "performance-local@3"], ...
+        Literal[
+            "performance-local@2",
+            "performance-local@3",
+            "performance-local@5",
+        ], ...
     ]
     content_source: Literal[
         "governed_semantic_composition",
@@ -816,7 +820,7 @@ def validate_component_payload(
     elif component_key == "compact_estimate_form":
         model = (
             CompactEstimateFormConfigurationV3
-            if component_contract_version == 3
+            if component_contract_version in {3, 5}
             else CompactEstimateFormConfiguration
         )
     else:

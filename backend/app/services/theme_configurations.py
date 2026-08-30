@@ -2347,7 +2347,7 @@ def _validate_provider_state(
 ) -> None:
     if component_key != "compact_estimate_form":
         return
-    if component_contract_version == 3:
+    if component_contract_version in {3, 5}:
         return
     configuration = CompactEstimateFormConfiguration.model_validate(payload)
     validate_provider_disabled_form(configuration)

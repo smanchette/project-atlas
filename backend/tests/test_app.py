@@ -3929,6 +3929,8 @@ def test_wordpress_api_exposes_only_controlled_publish_and_existing_write_routes
         ("/api/wordpress/metadata/reconciliation/apply/{page_id}", "POST"),
             ("/api/wordpress/metadata/rollback/dry-run/{page_id}", "POST"),
             ("/api/wordpress/metadata/rollback/apply/{page_id}", "POST"),
+            ("/api/wordpress/performance-local-v5/staging/dry-run/{page_id}", "POST"),
+            ("/api/wordpress/performance-local-v5/staging/apply/{page_id}", "POST"),
             ("/api/wordpress/metadata/staging/preflight/{page_id}", "POST"),
             ("/api/wordpress/metadata/staging/apply/{page_id}", "POST"),
             ("/api/wordpress/metadata/rendering/preflight/{page_id}", "POST"),

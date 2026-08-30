@@ -48,7 +48,18 @@ _secret_lock = Lock()
 _application_password: str | None = None
 
 
-def read_wordpress_settings(session: Session) -> WordPressSettingsRead:
+def read_wordpress_settings(
+    session: Session,
+    *,
+    include_secret_presence: bool = True,
+) -> WordPressSettingsRead:
+    """Read persisted WordPress settings with optional process-secret probing.
+
+    Callers performing a guaranteed no-network inspection can opt out of even
+    checking process memory or the environment for an application password.
+    Existing callers retain the prior behavior by default.
+    """
+
     values = {
         setting.setting_key: setting.setting_value or ""
         for setting in session.exec(
@@ -64,7 +75,9 @@ def read_wordpress_settings(session: Session) -> WordPressSettingsRead:
         site_url=values.get(SITE_URL_KEY, ""),
         username=values.get(USERNAME_KEY, ""),
         publishing_mode=mode,
-        has_application_password=bool(_get_application_password()),
+        has_application_password=(
+            bool(_get_application_password()) if include_secret_presence else False
+        ),
     )
 
 

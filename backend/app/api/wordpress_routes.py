@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlmodel import Session
 
 from app.db.session import get_session
@@ -119,6 +119,20 @@ from app.schemas.wordpress import (
     WordPressHeadingCorrectionReconcileResult,
     WordPressHeadingCorrectionVerification,
     WordPressHeadingCorrectionVerifyRequest,
+)
+from app.schemas.performance_local_v5_staging import (
+    PerformanceLocalV5StagingApplyRequest,
+    PerformanceLocalV5StagingApplyResult,
+    PerformanceLocalV5StagingDryRun,
+    PerformanceLocalV5StagingDryRunRequest,
+)
+from app.services.performance_local_v5_staging import (
+    apply_performance_local_v5_staging,
+    dry_run_performance_local_v5_staging,
+)
+from app.services.form_submission_gateway import (
+    FormGatewayError,
+    require_local_operator_request,
 )
 from app.services.wordpress_draft_review import (
     check_live_wordpress_draft_status,
@@ -926,3 +940,51 @@ def metadata_rollback_dry_run(page_id: int, payload: WordPressMetadataBackupProo
 @router.post("/metadata/rollback/apply/{page_id}", response_model=WordPressMetadataRollbackResult)
 def metadata_rollback_apply(page_id: int, payload: WordPressMetadataRollbackRequest, session: Session = Depends(get_session)) -> WordPressMetadataRollbackResult:
     return rollback_wordpress_metadata(session, page_id, payload)
+
+
+@router.post(
+    "/performance-local-v5/staging/dry-run/{page_id}",
+    response_model=PerformanceLocalV5StagingDryRun,
+)
+def performance_local_v5_staging_dry_run(
+    page_id: int,
+    payload: PerformanceLocalV5StagingDryRunRequest,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> PerformanceLocalV5StagingDryRun:
+    try:
+        require_local_operator_request(request)
+    except FormGatewayError as exc:
+        raise _local_staging_route_unavailable() from exc
+    return dry_run_performance_local_v5_staging(
+        session,
+        page_id,
+        no_network=payload.no_network,
+    )
+
+
+@router.post(
+    "/performance-local-v5/staging/apply/{page_id}",
+    response_model=PerformanceLocalV5StagingApplyResult,
+)
+def performance_local_v5_staging_apply(
+    page_id: int,
+    payload: PerformanceLocalV5StagingApplyRequest,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> PerformanceLocalV5StagingApplyResult:
+    try:
+        require_local_operator_request(request)
+    except FormGatewayError as exc:
+        raise _local_staging_route_unavailable() from exc
+    return apply_performance_local_v5_staging(session, page_id, payload)
+
+
+def _local_staging_route_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail={
+            "code": "local_staging_route_unavailable",
+            "message": "The local staging route is unavailable.",
+        },
+    )
