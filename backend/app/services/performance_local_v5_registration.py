@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import or_
 from sqlmodel import Session, select
 
 from app.models import (
@@ -48,9 +49,12 @@ PERFORMANCE_LOCAL_V5_CONTRACT_FINGERPRINT = theme_service.canonical_json_hash(
     PERFORMANCE_LOCAL_V5_COMPONENT_CONTRACTS
 )
 
-_COMPONENT_KEYS = frozenset(
-    {"campaign_banner", "sticky_mobile_action_bar", "compact_estimate_form"}
+_COMPONENT_ORDER = (
+    "compact_estimate_form",
+    "campaign_banner",
+    "sticky_mobile_action_bar",
 )
+_COMPONENT_KEYS = frozenset(_COMPONENT_ORDER)
 
 
 class PerformanceLocalV5RegistrationError(ValueError):
@@ -168,11 +172,7 @@ def apply_performance_local_v5_registration(
         )
 
         created_components: dict[str, WebsiteThemeComponentConfiguration] = {}
-        for key in (
-            "compact_estimate_form",
-            "campaign_banner",
-            "sticky_mobile_action_bar",
-        ):
+        for key in _COMPONENT_ORDER:
             source = source_components[key]
             contract = _component_contract(key)
             destination = (
@@ -628,6 +628,117 @@ def _validate_applied_graph(
     )
     if len(active) != 1 or active[0].id != selection.id:
         raise PerformanceLocalV5RegistrationError("Website active selection is not singular.")
+    _validate_v5_audit_graph(
+        session,
+        version=version,
+        configuration=configuration,
+        components=components,
+    )
+
+
+def _validate_v5_audit_graph(
+    session: Session,
+    *,
+    version: ThemeFamilyVersion,
+    configuration: WebsiteThemeConfiguration,
+    components: dict[str, WebsiteThemeComponentConfiguration],
+) -> None:
+    """Require the exact canonical V5 audit graph using durable target identities."""
+
+    component_ids = {_id(components[key]) for key in _COMPONENT_ORDER}
+    try:
+        theme_service._require_audit_coverage(
+            session,
+            families=[],
+            versions=[version],
+            configurations=[configuration],
+            components=[components[key] for key in _COMPONENT_ORDER],
+        )
+        audits = list(
+            session.exec(
+                select(ThemeConfigurationAudit)
+                .where(
+                    or_(
+                        ThemeConfigurationAudit.theme_family_version_id
+                        == _id(version),
+                        ThemeConfigurationAudit.website_theme_configuration_id
+                        == _id(configuration),
+                        ThemeConfigurationAudit.component_configuration_id.in_(
+                            component_ids
+                        ),
+                    )
+                )
+                .order_by(
+                    ThemeConfigurationAudit.created_at,
+                    ThemeConfigurationAudit.id,
+                )
+            ).all()
+        )
+        for audit in audits:
+            theme_service._validate_audit(audit)
+    except theme_service.ThemeConfigurationError as exc:
+        raise PerformanceLocalV5RegistrationError(
+            "V5 audit graph is not exact."
+        ) from exc
+
+    component_keys_by_id = {
+        _id(components[key]): key for key in _COMPONENT_ORDER
+    }
+
+    def natural_identity(audit: ThemeConfigurationAudit) -> tuple[str, str, str]:
+        if audit.theme_family_version_id == _id(version):
+            target_type = "theme_family_version"
+            target = f"performance-local@{version.version}"
+        elif audit.website_theme_configuration_id == _id(configuration):
+            target_type = "website_theme_configuration"
+            target = f"{configuration.configuration_key}@{configuration.version}"
+        elif audit.component_configuration_id in component_keys_by_id:
+            target_type = "component_configuration"
+            key = component_keys_by_id[audit.component_configuration_id]
+            target = f"{configuration.configuration_key}:{key}@{components[key].revision}"
+        else:  # pragma: no cover - query and canonical target validation guard this
+            raise PerformanceLocalV5RegistrationError(
+                "V5 audit graph is not exact."
+            )
+        return target_type, target, audit.action_type
+
+    version_target = f"performance-local@{version.version}"
+    configuration_target = (
+        f"{configuration.configuration_key}@{configuration.version}"
+    )
+    component_targets = {
+        key: f"{configuration.configuration_key}:{key}@{components[key].revision}"
+        for key in _COMPONENT_ORDER
+    }
+    expected = [
+        ("theme_family_version", version_target, "family_version_registered"),
+        (
+            "website_theme_configuration",
+            configuration_target,
+            "website_draft_created",
+        ),
+        *[
+            ("component_configuration", component_targets[key], "component_created")
+            for key in _COMPONENT_ORDER
+        ],
+        ("theme_family_version", version_target, "family_version_approved"),
+        (
+            "website_theme_configuration",
+            configuration_target,
+            "website_configuration_approved",
+        ),
+        (
+            "website_theme_configuration",
+            configuration_target,
+            "website_configuration_activated",
+        ),
+        *[
+            ("component_configuration", component_targets[key], "component_activated")
+            for key in _COMPONENT_ORDER
+        ],
+    ]
+    if [natural_identity(audit) for audit in audits] != expected:
+        raise PerformanceLocalV5RegistrationError("V5 audit graph is not exact.")
 
 
 def _source_v3_graph(

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import or_
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -23,6 +24,7 @@ from app.models import (
     PlannedPageMediaRequirement,
     SitePlan,
     Theme,
+    ThemeConfigurationAudit,
     ThemeFamilyVersion,
     Website,
     WebsiteMediaPlanningRecord,
@@ -57,6 +59,7 @@ from app.services.performance_local_v5_registration import (
     PERFORMANCE_LOCAL_V5_CONFIGURATION_KEY,
     PERFORMANCE_LOCAL_V5_FAMILY_VERSION,
     PERFORMANCE_LOCAL_V5_THEME_KEY,
+    PerformanceLocalV5RegistrationError,
     apply_performance_local_v5_registration,
     plan_performance_local_v5_registration,
 )
@@ -325,6 +328,68 @@ def _seed_v3_graph(session: Session) -> tuple[int, int, int]:
             ),
         )
     return website.id, v2.id, v3.id
+
+
+def _v5_audits(
+    session: Session,
+    *,
+    version_id: int,
+    configuration_id: int,
+    component_ids: list[int],
+) -> list[ThemeConfigurationAudit]:
+    return list(
+        session.exec(
+            select(ThemeConfigurationAudit)
+            .where(
+                or_(
+                    ThemeConfigurationAudit.theme_family_version_id == version_id,
+                    ThemeConfigurationAudit.website_theme_configuration_id
+                    == configuration_id,
+                    ThemeConfigurationAudit.component_configuration_id.in_(
+                        component_ids
+                    ),
+                )
+            )
+            .order_by(
+                ThemeConfigurationAudit.created_at,
+                ThemeConfigurationAudit.id,
+            )
+        ).all()
+    )
+
+
+def _v5_audit_natural_identities(
+    session: Session,
+    *,
+    version_id: int,
+    configuration_id: int,
+    component_ids: list[int],
+) -> list[tuple[str, str]]:
+    components = {
+        item.id: item.component_key
+        for item in session.exec(
+            select(WebsiteThemeComponentConfiguration).where(
+                WebsiteThemeComponentConfiguration.id.in_(component_ids)
+            )
+        ).all()
+    }
+    identities: list[tuple[str, str]] = []
+    for audit in _v5_audits(
+        session,
+        version_id=version_id,
+        configuration_id=configuration_id,
+        component_ids=component_ids,
+    ):
+        theme_service._validate_audit(audit)
+        assert audit.snapshot_hash != theme_service.canonical_json_hash(audit.snapshot)
+        if audit.theme_family_version_id == version_id:
+            target = "family_version"
+        elif audit.website_theme_configuration_id == configuration_id:
+            target = "configuration"
+        else:
+            target = components[audit.component_configuration_id]
+        identities.append((target, audit.action_type))
+    return identities
 
 
 def write_built_payload_json(
@@ -1217,6 +1282,18 @@ def test_wordpress_media_path_is_never_synthesized() -> None:
 
 def test_registration_plan_apply_and_repeat_are_deterministic(session: Session) -> None:
     website_id, v2_id, v3_id = _seed_v3_graph(session)
+    durable_insert_models = (
+        ThemeFamilyVersion,
+        WebsiteThemeConfiguration,
+        WebsiteThemeComponentConfiguration,
+        ThemeConfigurationAudit,
+        Theme,
+        WebsiteThemeSelection,
+    )
+    durable_counts_before = {
+        model: len(session.exec(select(model)).all())
+        for model in durable_insert_models
+    }
     preserved_versions_before = {
         item.id: deepcopy(item.model_dump())
         for item in session.exec(
@@ -1250,6 +1327,13 @@ def test_registration_plan_apply_and_repeat_are_deterministic(session: Session) 
         )
     ).one()
     default_theme_before = deepcopy(default_theme.model_dump())
+    prior_selection = session.exec(
+        select(WebsiteThemeSelection).where(
+            WebsiteThemeSelection.website_id == website_id,
+            WebsiteThemeSelection.status == "active",
+        )
+    ).one()
+    prior_selection_before = deepcopy(prior_selection.model_dump())
     pending_before = (set(session.new), set(session.dirty), set(session.deleted))
 
     planned = plan_performance_local_v5_registration(session, website_id)
@@ -1265,7 +1349,53 @@ def test_registration_plan_apply_and_repeat_are_deterministic(session: Session) 
     )
     assert applied.status == "APPLIED"
     assert len(applied.identity.component_configuration_ids) == 3
-    assert applied.audit_ids
+    assert len(applied.audit_ids) == 6
+    assert applied.identity.theme_family_version_id is not None
+    assert applied.identity.website_theme_configuration_id is not None
+    assert _v5_audit_natural_identities(
+        session,
+        version_id=applied.identity.theme_family_version_id,
+        configuration_id=applied.identity.website_theme_configuration_id,
+        component_ids=applied.identity.component_configuration_ids,
+    ) == [
+        ("family_version", "family_version_registered"),
+        ("configuration", "website_draft_created"),
+        ("compact_estimate_form", "component_created"),
+        ("campaign_banner", "component_created"),
+        ("sticky_mobile_action_bar", "component_created"),
+        ("family_version", "family_version_approved"),
+        ("configuration", "website_configuration_approved"),
+        ("configuration", "website_configuration_activated"),
+        ("compact_estimate_form", "component_activated"),
+        ("campaign_banner", "component_activated"),
+        ("sticky_mobile_action_bar", "component_activated"),
+    ]
+    durable_count_deltas = {
+        model: len(session.exec(select(model)).all()) - durable_counts_before[model]
+        for model in durable_insert_models
+    }
+    assert durable_count_deltas == {
+        ThemeFamilyVersion: 1,
+        WebsiteThemeConfiguration: 1,
+        WebsiteThemeComponentConfiguration: 3,
+        ThemeConfigurationAudit: 11,
+        Theme: 1,
+        WebsiteThemeSelection: 1,
+    }
+    assert sum(durable_count_deltas.values()) == 18
+    replaced_selection = session.get(WebsiteThemeSelection, prior_selection.id)
+    assert replaced_selection is not None
+    assert replaced_selection.status == "replaced"
+    assert replaced_selection.version == 1
+    assert replaced_selection.theme_id == prior_selection_before["theme_id"]
+
+    durable_before_replay = {
+        model: [
+            deepcopy(item.model_dump())
+            for item in session.exec(select(model).order_by(model.id)).all()
+        ]
+        for model in durable_insert_models
+    }
 
     unchanged = plan_performance_local_v5_registration(session, website_id)
     repeated = apply_performance_local_v5_registration(
@@ -1277,6 +1407,13 @@ def test_registration_plan_apply_and_repeat_are_deterministic(session: Session) 
     assert repeated.status == "UNCHANGED"
     assert repeated.identity == applied.identity
     assert repeated.audit_ids == []
+    assert {
+        model: [
+            item.model_dump()
+            for item in session.exec(select(model).order_by(model.id)).all()
+        ]
+        for model in durable_insert_models
+    } == durable_before_replay
 
     session.expire_all()
     assert {
@@ -1336,6 +1473,114 @@ def test_registration_plan_apply_and_repeat_are_deterministic(session: Session) 
             )
         ).all()
     ) == 1
+
+
+def test_registration_genuine_audit_mismatch_fails_closed_and_rolls_back(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    website_id, _, _ = _seed_v3_graph(session)
+    preserved_models = (
+        ThemeFamilyVersion,
+        WebsiteThemeConfiguration,
+        WebsiteThemeComponentConfiguration,
+        ThemeConfigurationAudit,
+        Theme,
+        WebsiteThemeSelection,
+    )
+    durable_before = {
+        model: [
+            deepcopy(item.model_dump())
+            for item in session.exec(select(model).order_by(model.id)).all()
+        ]
+        for model in preserved_models
+    }
+    append_audit = theme_service._append_audit
+
+    def append_one_wrong_action(*args: object, **kwargs: object) -> ThemeConfigurationAudit:
+        snapshot = kwargs.get("snapshot")
+        if (
+            kwargs.get("action_type") == "component_activated"
+            and isinstance(snapshot, dict)
+            and snapshot.get("component_key") == "campaign_banner"
+        ):
+            kwargs["action_type"] = "component_created"
+        return append_audit(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(theme_service, "_append_audit", append_one_wrong_action)
+
+    with pytest.raises(
+        PerformanceLocalV5RegistrationError,
+        match="V5 audit graph is not exact",
+    ):
+        apply_performance_local_v5_registration(
+            session,
+            website_id,
+            actor="Disposable V5 Registration Test",
+        )
+
+    assert {
+        model: [
+            item.model_dump()
+            for item in session.exec(select(model).order_by(model.id)).all()
+        ]
+        for model in preserved_models
+    } == durable_before
+    assert not session.exec(
+        select(ThemeFamilyVersion).where(
+            ThemeFamilyVersion.version == PERFORMANCE_LOCAL_V5_FAMILY_VERSION
+        )
+    ).all()
+    assert not session.exec(
+        select(Theme).where(Theme.theme_key == PERFORMANCE_LOCAL_V5_THEME_KEY)
+    ).all()
+
+
+def test_registration_replay_rejects_a_corrupted_audit_envelope(
+    session: Session,
+) -> None:
+    website_id, _, _ = _seed_v3_graph(session)
+    applied = apply_performance_local_v5_registration(
+        session,
+        website_id,
+        actor="Disposable V5 Registration Test",
+    )
+    assert applied.identity.theme_family_version_id is not None
+    assert applied.identity.website_theme_configuration_id is not None
+    audit = _v5_audits(
+        session,
+        version_id=applied.identity.theme_family_version_id,
+        configuration_id=applied.identity.website_theme_configuration_id,
+        component_ids=applied.identity.component_configuration_ids,
+    )[0]
+    audit.snapshot = {**audit.snapshot, "deliberate_test_tamper": True}
+    session.add(audit)
+    session.commit()
+    counts_before = {
+        model: len(session.exec(select(model)).all())
+        for model in (
+            ThemeFamilyVersion,
+            WebsiteThemeConfiguration,
+            WebsiteThemeComponentConfiguration,
+            ThemeConfigurationAudit,
+            Theme,
+            WebsiteThemeSelection,
+        )
+    }
+
+    plan = plan_performance_local_v5_registration(session, website_id)
+
+    assert plan.status == "CONFLICT"
+    assert any("audit graph is not exact" in blocker for blocker in plan.blockers)
+    with pytest.raises(PerformanceLocalV5RegistrationError):
+        apply_performance_local_v5_registration(
+            session,
+            website_id,
+            actor="Disposable V5 Registration Test",
+        )
+    assert {
+        model: len(session.exec(select(model)).all()) for model in counts_before
+    } == counts_before
 
 
 def test_partial_v5_registration_is_a_conflict(session: Session) -> None:
