@@ -27,6 +27,8 @@ from app.models import (
     ThemeConfigurationAudit,
     ThemeFamilyVersion,
     Website,
+    WebsiteIdentity,
+    WebsiteIdentityAssetAssignment,
     WebsiteMediaPlanningRecord,
     WebsiteThemeComponentConfiguration,
     WebsiteThemeConfiguration,
@@ -43,7 +45,9 @@ from app.schemas.theme_families import (
 )
 from app.schemas.performance_local_v5 import (
     PerformanceLocalV5PayloadBuild,
+    PerformanceLocalV5PreparedPayload,
     PerformanceLocalV5SourceBindings,
+    PerformanceLocalV5VerifiedMediaMap,
 )
 from app.services import theme_configurations as theme_service
 from app.services import performance_local_v5_payload as payload_service
@@ -53,7 +57,9 @@ from app.services.performance_local_v5_payload import (
     _verified_wordpress_media_path,
     build_performance_local_v5_staging_payload,
     canonical_performance_local_v5_json,
+    finalize_performance_local_v5_staging_payload,
     performance_local_v5_payload_sha256,
+    prepare_performance_local_v5_staging_payload,
 )
 from app.services.performance_local_v5_registration import (
     PERFORMANCE_LOCAL_V5_CONFIGURATION_KEY,
@@ -665,7 +671,16 @@ def _seed_builder_scope(
         )
         media_rows.append((requirement, image, assignment, authorization, target))
 
+    identity = WebsiteIdentity(
+        website_id=website.id,
+        display_name=brand.brand_name,
+        status="active",
+        approved_at=now,
+    )
+    session.add(identity)
+    session.flush()
     logo_rows = {}
+    logo_assignments = {}
     for role, checksum in (("header_logo", "7" * 64), ("footer_logo", "8" * 64)):
         asset = BrandAsset(
             business_id=business.id,
@@ -699,6 +714,21 @@ def _seed_builder_scope(
         session.add(asset)
         session.flush()
         logo_rows[role] = asset
+        assignment = WebsiteIdentityAssetAssignment(
+            website_identity_id=identity.id,
+            website_id=website.id,
+            brand_id=brand.id,
+            brand_asset_id=asset.id,
+            slot=role,
+            version=1,
+            status="active",
+            assigned_by="Disposable Builder",
+            rationale="Exact disposable governed logo assignment.",
+            assigned_at=now,
+        )
+        session.add(assignment)
+        session.flush()
+        logo_assignments[role] = assignment
 
     header_assets = {
         "header_logo": {
@@ -945,8 +975,129 @@ def _seed_builder_scope(
         media_rows=media_rows,
         authorizations=authorizations,
         logo_rows=logo_rows,
+        logo_assignments=logo_assignments,
         header_assets=header_assets,
         footer_assets=footer_assets,
+    )
+
+
+def _verified_media_mapping(
+    prepared: PerformanceLocalV5PreparedPayload,
+    *,
+    staging_origin: str = "https://staging.example.test",
+) -> dict:
+    entries: list[dict] = []
+    for index, item in enumerate(prepared.required_media, start=1):
+        entries.append(
+            {
+                "governed_asset_class": "page_media",
+                "requirement_id": item.requirement_id,
+                "placement_key": item.placement_key,
+                "target_component_instance_key": item.target_component_instance_key,
+                "assignment_id": item.assignment_id,
+                "assignment_version": item.assignment_version,
+                "authorization_id": item.authorization_id,
+                "authorization_version": item.authorization_version,
+                "authorization_fingerprint": item.authorization_fingerprint,
+                "governed_asset_id": item.image_metadata_id,
+                "governed_asset_key": item.media_key,
+                "governed_asset_version": item.media_version,
+                "expected_sha256": item.checksum_sha256,
+                "expected_mime_type": item.source_mime_type,
+                "expected_width": item.source_width,
+                "expected_height": item.source_height,
+                "wordpress_attachment_id": 500 + index,
+                "wordpress_original_url": (
+                    f"{staging_origin}/wp-content/uploads/2026/08/"
+                    f"{item.source_filename}"
+                ),
+                "observed_sha256": item.checksum_sha256,
+                "observed_mime_type": item.source_mime_type,
+                "observed_width": item.source_width,
+                "observed_height": item.source_height,
+            }
+        )
+    for index, item in enumerate(prepared.required_logo_media, start=4):
+        assert item.assignment_id is not None
+        assert item.assignment_version is not None
+        entries.append(
+            {
+                "governed_asset_class": "brand_asset",
+                "requirement_id": None,
+                "placement_key": item.role,
+                "target_component_instance_key": item.target_component_instance_key,
+                "assignment_id": item.assignment_id,
+                "assignment_version": item.assignment_version,
+                "authorization_id": None,
+                "authorization_version": None,
+                "authorization_fingerprint": None,
+                "governed_asset_id": item.brand_asset_id,
+                "governed_asset_key": item.asset_key,
+                "governed_asset_version": item.asset_version,
+                "expected_sha256": item.checksum_sha256,
+                "expected_mime_type": item.source_mime_type,
+                "expected_width": item.source_width,
+                "expected_height": item.source_height,
+                "wordpress_attachment_id": 500 + index,
+                "wordpress_original_url": (
+                    f"{staging_origin}/wp-content/uploads/2026/08/"
+                    f"{item.source_filename}"
+                ),
+                "observed_sha256": item.checksum_sha256,
+                "observed_mime_type": item.source_mime_type,
+                "observed_width": item.source_width,
+                "observed_height": item.source_height,
+            }
+        )
+    return {
+        "mapping_schema": (
+            "project-atlas-performance-local-v5-verified-media-map@1"
+        ),
+        "context": {
+            "website_id": prepared.website_id,
+            "planned_page_id": prepared.planned_page_id,
+            "generated_page_id": prepared.generated_page_id,
+            "wordpress_post_id": prepared.wordpress_post_id,
+            "staging_origin": staging_origin,
+            "source_bindings": prepared.source_bindings.model_dump(mode="json"),
+        },
+        "entries": entries,
+    }
+
+
+def _mapping_entry(mapping: dict, placement_key: str) -> dict:
+    return next(
+        item
+        for item in mapping["entries"]
+        if item["placement_key"] == placement_key
+    )
+
+
+def _reseal_prepared(
+    prepared: PerformanceLocalV5PreparedPayload,
+    **updates,
+) -> PerformanceLocalV5PreparedPayload:
+    candidate = prepared.model_copy(update=updates)
+    preparation = {
+        "website_id": candidate.website_id,
+        "planned_page_id": candidate.planned_page_id,
+        "generated_page_id": candidate.generated_page_id,
+        "wordpress_post_id": candidate.wordpress_post_id,
+        "metadata_key": candidate.metadata_key,
+        "payload_schema": candidate.payload_schema,
+        "payload_template": candidate.payload_template,
+        "source_bindings": candidate.source_bindings.model_dump(mode="json"),
+        "required_media": [
+            item.model_dump(mode="json") for item in candidate.required_media
+        ],
+        "required_logo_media": [
+            item.model_dump(mode="json") for item in candidate.required_logo_media
+        ],
+    }
+    return candidate.model_copy(
+        update={
+            "preparation_sha256": performance_local_v5_payload_sha256(preparation)
+        }
     )
 
 
@@ -1009,6 +1160,403 @@ def test_page_41_current_source_identity_fixture_is_exact() -> None:
         bindings.page_composition_revision_id,
         bindings.qa_result_id,
     ) == (64, 41, 9, 107, 121)
+
+
+def test_prepare_finalize_accepts_date_paths_binds_map_hash_and_is_deterministic(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_builder_scope(session, monkeypatch)
+    pending_before = (set(session.new), set(session.dirty), set(session.deleted))
+    table_counts_before = {
+        model: len(session.exec(select(model)).all())
+        for model in (
+            GeneratedPage,
+            GeneratedPageRevision,
+            PageComposition,
+            PlannedPageMediaRequirement,
+            ImageMetadata,
+            PageImageAssignment,
+            WebsiteIdentityAssetAssignment,
+        )
+    }
+
+    prepared = prepare_performance_local_v5_staging_payload(session, 41)
+    repeated_prepared = prepare_performance_local_v5_staging_payload(session, 41)
+    mapping = _verified_media_mapping(prepared)
+    finalized = finalize_performance_local_v5_staging_payload(
+        prepared,
+        mapping,
+        expected_staging_origin="https://staging.example.test",
+    )
+    reordered_mapping = deepcopy(mapping)
+    reordered_mapping["entries"].reverse()
+    repeated_finalized = finalize_performance_local_v5_staging_payload(
+        repeated_prepared,
+        reordered_mapping,
+        expected_staging_origin="https://staging.example.test",
+    )
+
+    assert prepared.model_dump(mode="json") == repeated_prepared.model_dump(mode="json")
+    assert finalized.model_dump(mode="json") == repeated_finalized.model_dump(
+        mode="json"
+    )
+    assert performance_local_v5_payload_sha256(mapping) != (
+        performance_local_v5_payload_sha256(reordered_mapping)
+    )
+    assert prepared.template_sha256 == performance_local_v5_payload_sha256(
+        prepared.payload_template
+    )
+    prepared_media = [*prepared.required_media, *prepared.required_logo_media]
+    assert all(
+        item.payload_src.startswith(payload_service._PREPARED_TOKEN_PREFIX)
+        for item in prepared_media
+    )
+    for item in prepared_media:
+        with pytest.raises(PerformanceLocalV5PayloadError):
+            _upload_path(item.payload_src, "prepared media sentinel")
+    mapping_hash = performance_local_v5_payload_sha256(mapping)
+    mapping_inputs = [
+        item
+        for item in finalized.payload["payload_identity"]["frozen_inputs"]
+        if item["path"] == payload_service._VERIFIED_MEDIA_FROZEN_INPUT
+    ]
+    assert mapping_inputs == [
+        {
+            "path": payload_service._VERIFIED_MEDIA_FROZEN_INPUT,
+            "sha256": mapping_hash,
+        }
+    ]
+    all_media = [*finalized.required_media, *finalized.required_logo_media]
+    assert len(all_media) == 5
+    assert all(item.ready for item in all_media)
+    assert all(item.blocker is None for item in all_media)
+    assert all(item.verification_source == "verified_media_mapping" for item in all_media)
+    assert all(
+        item.payload_src.startswith("/wp-content/uploads/2026/08/")
+        for item in all_media
+    )
+    assert payload_service._PREPARED_TOKEN_PREFIX not in canonical_performance_local_v5_json(
+        finalized.payload
+    ).decode("utf-8")
+    assert (set(session.new), set(session.dirty), set(session.deleted)) == pending_before
+    assert {
+        model: len(session.exec(select(model)).all()) for model in table_counts_before
+    } == table_counts_before
+
+
+@pytest.mark.parametrize("tamper", ["payload_template", "preparation_identity"])
+def test_finalize_rejects_tampered_prepared_payload(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    _seed_builder_scope(session, monkeypatch)
+    prepared = prepare_performance_local_v5_staging_payload(session, 41)
+    mapping = _verified_media_mapping(prepared)
+    if tamper == "payload_template":
+        payload_template = deepcopy(prepared.payload_template)
+        payload_template["page"]["h1"] += " tampered"
+        prepared = prepared.model_copy(
+            update={"payload_template": payload_template}
+        )
+    else:
+        required_media = list(prepared.required_media)
+        required_media[0] = required_media[0].model_copy(
+            update={"media_key": required_media[0].media_key + "-tampered"}
+        )
+        prepared = prepared.model_copy(update={"required_media": required_media})
+
+    with pytest.raises(PerformanceLocalV5PayloadError) as rejected:
+        finalize_performance_local_v5_staging_payload(
+            prepared,
+            mapping,
+            expected_staging_origin="https://staging.example.test",
+        )
+
+    assert rejected.value.code == "performance_local_v5_payload_template_invalid"
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code"),
+    [
+        ("missing", "performance_local_v5_verified_media_mapping_invalid"),
+        ("extra", "performance_local_v5_verified_media_mapping_invalid"),
+        ("duplicate", "performance_local_v5_verified_media_mapping_invalid"),
+        ("context_bool_id", "performance_local_v5_verified_media_mapping_invalid"),
+        (
+            "context_numeric_string",
+            "performance_local_v5_verified_media_mapping_invalid",
+        ),
+        (
+            "source_binding_bool_id",
+            "performance_local_v5_verified_media_mapping_invalid",
+        ),
+        (
+            "source_binding_numeric_string",
+            "performance_local_v5_verified_media_mapping_invalid",
+        ),
+        (
+            "entry_bool_attachment_id",
+            "performance_local_v5_verified_media_mapping_invalid",
+        ),
+        (
+            "entry_numeric_string",
+            "performance_local_v5_verified_media_mapping_invalid",
+        ),
+        ("unknown_map_field", "performance_local_v5_verified_media_mapping_invalid"),
+        (
+            "unknown_context_field",
+            "performance_local_v5_verified_media_mapping_invalid",
+        ),
+        (
+            "unknown_source_binding_field",
+            "performance_local_v5_verified_media_mapping_invalid",
+        ),
+        ("unknown_entry_field", "performance_local_v5_verified_media_mapping_invalid"),
+        ("stale_context", "performance_local_v5_verified_media_mapping_stale"),
+        ("stale_governed_field", "performance_local_v5_verified_media_mapping_stale"),
+        ("hash_mismatch", "performance_local_v5_verified_media_mapping_mismatch"),
+        ("mime_mismatch", "performance_local_v5_verified_media_mapping_mismatch"),
+        ("dimension_mismatch", "performance_local_v5_verified_media_mapping_mismatch"),
+        ("invalid_origin", "performance_local_v5_verified_media_mapping_invalid"),
+        ("invalid_hostname", "performance_local_v5_verified_media_mapping_invalid"),
+        ("stale_origin", "performance_local_v5_verified_media_mapping_stale"),
+        ("cross_origin", "performance_local_v5_verified_media_mapping_invalid"),
+        (
+            "noncanonical_entry_origin",
+            "performance_local_v5_verified_media_mapping_invalid",
+        ),
+        ("invalid_path", "performance_local_v5_verified_media_mapping_invalid"),
+        ("double_slash", "performance_local_v5_verified_media_mapping_invalid"),
+        ("query", "performance_local_v5_verified_media_mapping_invalid"),
+        ("ambiguous_attachment", "performance_local_v5_verified_media_mapping_ambiguous"),
+        ("ambiguous_url", "performance_local_v5_verified_media_mapping_ambiguous"),
+    ],
+)
+def test_finalize_rejects_inexact_or_ambiguous_verified_media_maps_without_writes(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    expected_code: str,
+) -> None:
+    _seed_builder_scope(session, monkeypatch)
+    prepared = prepare_performance_local_v5_staging_payload(session, 41)
+    mapping = _verified_media_mapping(prepared)
+    pending_before = (set(session.new), set(session.dirty), set(session.deleted))
+
+    if case == "missing":
+        mapping["entries"].pop()
+    elif case == "extra":
+        extra = deepcopy(mapping["entries"][0])
+        extra["governed_asset_id"] = 999_999
+        extra["wordpress_attachment_id"] = 999_999
+        extra["wordpress_original_url"] = (
+            "https://staging.example.test/wp-content/uploads/2026/08/extra.webp"
+        )
+        mapping["entries"].append(extra)
+    elif case == "duplicate":
+        mapping["entries"][-1] = deepcopy(mapping["entries"][0])
+    elif case == "context_bool_id":
+        mapping["context"]["website_id"] = True
+    elif case == "context_numeric_string":
+        mapping["context"]["planned_page_id"] = str(
+            mapping["context"]["planned_page_id"]
+        )
+    elif case == "source_binding_bool_id":
+        mapping["context"]["source_bindings"]["qa_result_id"] = True
+    elif case == "source_binding_numeric_string":
+        mapping["context"]["source_bindings"]["composition_version"] = str(
+            mapping["context"]["source_bindings"]["composition_version"]
+        )
+    elif case == "entry_bool_attachment_id":
+        mapping["entries"][0]["wordpress_attachment_id"] = True
+    elif case == "entry_numeric_string":
+        mapping["entries"][0]["assignment_id"] = str(
+            mapping["entries"][0]["assignment_id"]
+        )
+    elif case == "unknown_map_field":
+        mapping["unexpected"] = "rejected"
+    elif case == "unknown_context_field":
+        mapping["context"]["unexpected"] = "rejected"
+    elif case == "unknown_source_binding_field":
+        mapping["context"]["source_bindings"]["unexpected"] = "rejected"
+    elif case == "unknown_entry_field":
+        mapping["entries"][0]["unexpected"] = "rejected"
+    elif case == "stale_context":
+        mapping["context"]["source_bindings"]["qa_result_id"] += 1
+    elif case == "stale_governed_field":
+        mapping["entries"][0]["governed_asset_key"] += "-stale"
+    elif case == "hash_mismatch":
+        mapping["entries"][0]["observed_sha256"] = "f" * 64
+    elif case == "mime_mismatch":
+        mapping["entries"][0]["observed_mime_type"] = "image/png"
+    elif case == "dimension_mismatch":
+        mapping["entries"][0]["observed_width"] += 1
+    elif case == "invalid_origin":
+        mapping["context"]["staging_origin"] = "http://staging.example.test"
+    elif case == "invalid_hostname":
+        mapping["context"]["staging_origin"] = "https://staging-.example.test"
+    elif case == "stale_origin":
+        mapping["context"]["staging_origin"] = "https://other.example.test"
+    elif case == "cross_origin":
+        mapping["entries"][0]["wordpress_original_url"] = (
+            "https://other.example.test/wp-content/uploads/2026/08/hero-desktop.webp"
+        )
+    elif case == "noncanonical_entry_origin":
+        mapping["entries"][0]["wordpress_original_url"] = (
+            "https://STAGING.EXAMPLE.TEST/wp-content/uploads/2026/08/hero-desktop.webp"
+        )
+    elif case == "invalid_path":
+        mapping["entries"][0]["wordpress_original_url"] = (
+            "https://staging.example.test/wp-content/uploads/unmanaged/hero.webp"
+        )
+    elif case == "double_slash":
+        mapping["entries"][0]["wordpress_original_url"] = (
+            "https://staging.example.test/wp-content/uploads/2026//hero.webp"
+        )
+    elif case == "query":
+        mapping["entries"][0]["wordpress_original_url"] += "?size=full"
+    elif case == "ambiguous_attachment":
+        header = _mapping_entry(mapping, "header_logo")
+        footer = _mapping_entry(mapping, "footer_logo")
+        footer["wordpress_attachment_id"] = header["wordpress_attachment_id"]
+    elif case == "ambiguous_url":
+        header = _mapping_entry(mapping, "header_logo")
+        footer = _mapping_entry(mapping, "footer_logo")
+        footer["wordpress_original_url"] = header["wordpress_original_url"]
+    else:  # pragma: no cover - the parameter table is exhaustive
+        raise AssertionError(case)
+
+    with pytest.raises(PerformanceLocalV5PayloadError) as rejected:
+        finalize_performance_local_v5_staging_payload(
+            prepared,
+            mapping,
+            expected_staging_origin="https://staging.example.test",
+        )
+
+    assert rejected.value.code == expected_code
+    assert (set(session.new), set(session.dirty), set(session.deleted)) == pending_before
+
+
+def test_finalize_revalidates_preconstructed_mapping_instances_strictly(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_builder_scope(session, monkeypatch)
+    prepared = prepare_performance_local_v5_staging_payload(session, 41)
+    mapping = PerformanceLocalV5VerifiedMediaMap.model_validate(
+        _verified_media_mapping(prepared)
+    )
+    invalid_entry = mapping.entries[0].model_copy(
+        update={"wordpress_attachment_id": True}
+    )
+    invalid_mapping = mapping.model_copy(
+        update={"entries": [invalid_entry, *mapping.entries[1:]]}
+    )
+
+    with pytest.raises(PerformanceLocalV5PayloadError) as rejected:
+        finalize_performance_local_v5_staging_payload(
+            prepared,
+            invalid_mapping,
+            expected_staging_origin="https://staging.example.test",
+        )
+
+    assert (
+        rejected.value.code
+        == "performance_local_v5_verified_media_mapping_invalid"
+    )
+
+
+@pytest.mark.parametrize(
+    ("reuse_mode", "accepted"),
+    [
+        ("exact_attachment_and_url", True),
+        ("same_url_different_attachment", False),
+        ("same_attachment_different_url", False),
+    ],
+)
+def test_finalize_allows_only_one_exact_attachment_url_pair_for_intentional_reuse(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    reuse_mode: str,
+    accepted: bool,
+) -> None:
+    _seed_builder_scope(session, monkeypatch)
+    prepared = prepare_performance_local_v5_staging_payload(session, 41)
+    first, second, third = prepared.required_media
+    reused_second = second.model_copy(
+        update={
+            "image_metadata_id": first.image_metadata_id,
+            "media_key": first.media_key,
+            "media_version": first.media_version,
+            "source_filename": first.source_filename,
+            "source_mime_type": first.source_mime_type,
+            "source_width": first.source_width,
+            "source_height": first.source_height,
+            "checksum_sha256": first.checksum_sha256,
+        }
+    )
+    prepared = _reseal_prepared(
+        prepared,
+        required_media=[first, reused_second, third],
+    )
+    mapping = _verified_media_mapping(prepared)
+    first_entry = mapping["entries"][0]
+    second_entry = mapping["entries"][1]
+    if reuse_mode == "exact_attachment_and_url":
+        second_entry["wordpress_attachment_id"] = first_entry[
+            "wordpress_attachment_id"
+        ]
+    elif reuse_mode == "same_attachment_different_url":
+        second_entry["wordpress_attachment_id"] = first_entry[
+            "wordpress_attachment_id"
+        ]
+        second_entry["wordpress_original_url"] = (
+            "https://staging.example.test/wp-content/uploads/2026/08/reused-hero.webp"
+        )
+    elif reuse_mode != "same_url_different_attachment":  # pragma: no cover
+        raise AssertionError(reuse_mode)
+
+    if accepted:
+        finalized = finalize_performance_local_v5_staging_payload(
+            prepared,
+            mapping,
+            expected_staging_origin="https://staging.example.test",
+        )
+        assert finalized.required_media[0].wordpress_media_id == (
+            finalized.required_media[1].wordpress_media_id
+        )
+        assert finalized.required_media[0].payload_src == (
+            finalized.required_media[1].payload_src
+        )
+    else:
+        with pytest.raises(PerformanceLocalV5PayloadError) as rejected:
+            finalize_performance_local_v5_staging_payload(
+                prepared,
+                mapping,
+                expected_staging_origin="https://staging.example.test",
+            )
+        assert (
+            rejected.value.code
+            == "performance_local_v5_verified_media_mapping_ambiguous"
+        )
+
+
+def test_payload_preparation_rejects_cross_scope_logo_assignment(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scope = _seed_builder_scope(session, monkeypatch)
+    assignment = scope.logo_assignments["header_logo"]
+    assignment.brand_id += 1000
+    session.add(assignment)
+    session.flush()
+
+    with pytest.raises(PerformanceLocalV5PayloadError) as rejected:
+        prepare_performance_local_v5_staging_payload(session, 41)
+
+    assert rejected.value.code == "performance_local_v5_logo_identity_blocked"
 
 
 def test_disposable_builder_binds_current_v9_content_cta_media_and_writes_nothing(
@@ -1082,6 +1630,14 @@ def test_disposable_builder_binds_current_v9_content_cta_media_and_writes_nothin
         ("why-it-matters.webp", "image/webp", 1600, 900, True),
         ("what-to-look-for.webp", "image/webp", 1600, 900, True),
     }
+    assert all(
+        item.verification_source == "persisted_atlas"
+        and item.observed_remote_sha256 == item.checksum_sha256
+        and item.observed_remote_mime_type == item.source_mime_type
+        and item.observed_remote_width == item.source_width
+        and item.observed_remote_height == item.source_height
+        for item in build.required_media
+    )
     assert len(build.required_logo_media) == 2
     assert {item.role for item in build.required_logo_media} == {
         "header_logo",
@@ -1092,6 +1648,21 @@ def test_disposable_builder_binds_current_v9_content_cta_media_and_writes_nothin
         item.blocker for item in build.required_logo_media
     } == {"REMOTE_MEDIA_SYNC_REQUIRED"}
     assert all(item.payload_src for item in build.required_logo_media)
+    assert {
+        (item.role, item.assignment_id, item.assignment_version)
+        for item in build.required_logo_media
+    } == {
+        (
+            role,
+            scope.logo_assignments[role].id,
+            scope.logo_assignments[role].version,
+        )
+        for role in ("header_logo", "footer_logo")
+    }
+    assert not any(
+        item["path"] == payload_service._VERIFIED_MEDIA_FROZEN_INPUT
+        for item in build.payload["payload_identity"]["frozen_inputs"]
+    )
     serialized = canonical_performance_local_v5_json(build.payload).decode("utf-8")
     for private_key in ("recipient_email", "from_email", "provider_secret_reference"):
         assert private_key not in serialized

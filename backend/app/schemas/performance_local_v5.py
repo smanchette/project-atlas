@@ -9,7 +9,11 @@ from sqlmodel import Field, SQLModel
 class PerformanceLocalV5SourceBindings(SQLModel):
     """Exact current Atlas records consumed by one V5 payload build."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        revalidate_instances="always",
+    )
 
     generated_page_revision_id: int = Field(gt=0)
     generated_page_revision_hash: str = Field(min_length=64, max_length=64)
@@ -58,6 +62,11 @@ class PerformanceLocalV5MediaIdentity(SQLModel):
     wordpress_media_id: int | None = None
     wordpress_media_url: str | None = None
     payload_src: str | None = None
+    verification_source: Literal["persisted_atlas", "verified_media_mapping"] | None = None
+    observed_remote_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    observed_remote_mime_type: str | None = None
+    observed_remote_width: int | None = Field(default=None, gt=0)
+    observed_remote_height: int | None = Field(default=None, gt=0)
     ready: bool = False
     blocker: str | None = None
 
@@ -68,6 +77,9 @@ class PerformanceLocalV5LogoIdentity(SQLModel):
     model_config = ConfigDict(extra="forbid")
 
     role: Literal["header_logo", "footer_logo"]
+    target_component_instance_key: Literal["website_header", "website_footer"]
+    assignment_id: int | None = Field(default=None, gt=0)
+    assignment_version: int | None = Field(default=None, gt=0)
     brand_asset_id: int = Field(gt=0)
     asset_key: str
     asset_version: int = Field(gt=0)
@@ -77,9 +89,111 @@ class PerformanceLocalV5LogoIdentity(SQLModel):
     source_width: int = Field(gt=0)
     source_height: int = Field(gt=0)
     governed_asset_url: str
+    wordpress_media_id: int | None = None
+    wordpress_media_url: str | None = None
     payload_src: str | None = None
+    verification_source: Literal["persisted_atlas", "verified_media_mapping"] | None = None
+    observed_remote_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    observed_remote_mime_type: str | None = None
+    observed_remote_width: int | None = Field(default=None, gt=0)
+    observed_remote_height: int | None = Field(default=None, gt=0)
     ready: bool = False
     blocker: str | None = None
+
+
+class PerformanceLocalV5VerifiedMediaContext(SQLModel):
+    """Exact current activation context bound to a nondurable browser proof."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        revalidate_instances="always",
+    )
+
+    website_id: int = Field(gt=0)
+    planned_page_id: int = Field(gt=0)
+    generated_page_id: int = Field(gt=0)
+    wordpress_post_id: int = Field(gt=0)
+    staging_origin: str
+    source_bindings: PerformanceLocalV5SourceBindings
+
+
+class PerformanceLocalV5VerifiedMediaEntry(SQLModel):
+    """One exact governed asset and its browser-observed WordPress original."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        revalidate_instances="always",
+    )
+
+    governed_asset_class: Literal["page_media", "brand_asset"]
+    requirement_id: int | None = Field(default=None, gt=0)
+    placement_key: str
+    target_component_instance_key: str
+    assignment_id: int = Field(gt=0)
+    assignment_version: int = Field(gt=0)
+    authorization_id: int | None = Field(default=None, gt=0)
+    authorization_version: int | None = Field(default=None, gt=0)
+    authorization_fingerprint: str | None = Field(
+        default=None, min_length=64, max_length=64
+    )
+    governed_asset_id: int = Field(gt=0)
+    governed_asset_key: str
+    governed_asset_version: int = Field(gt=0)
+    expected_sha256: str = Field(min_length=64, max_length=64)
+    expected_mime_type: str
+    expected_width: int = Field(gt=0)
+    expected_height: int = Field(gt=0)
+    wordpress_attachment_id: int = Field(gt=0)
+    wordpress_original_url: str
+    observed_sha256: str = Field(min_length=64, max_length=64)
+    observed_mime_type: str
+    observed_width: int = Field(gt=0)
+    observed_height: int = Field(gt=0)
+
+
+class PerformanceLocalV5VerifiedMediaMap(SQLModel):
+    """Strict nondurable media proof accepted only by V5 payload finalization."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        revalidate_instances="always",
+    )
+
+    mapping_schema: Literal[
+        "project-atlas-performance-local-v5-verified-media-map@1"
+    ] = "project-atlas-performance-local-v5-verified-media-map@1"
+    context: PerformanceLocalV5VerifiedMediaContext
+    entries: list[PerformanceLocalV5VerifiedMediaEntry]
+
+
+class PerformanceLocalV5PreparedPayload(SQLModel):
+    """Current governed V5 template that is deliberately not deployable."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        revalidate_instances="always",
+    )
+
+    website_id: int = Field(gt=0)
+    planned_page_id: int = Field(gt=0)
+    generated_page_id: int = Field(gt=0)
+    wordpress_post_id: int = Field(gt=0)
+    metadata_key: Literal["_project_atlas_performance_local_v5_v1"]
+    payload_schema: Literal["project-atlas-performance-local-v5-wordpress@1"]
+    payload_template: dict[str, Any]
+    template_sha256: str = Field(min_length=64, max_length=64)
+    preparation_sha256: str = Field(min_length=64, max_length=64)
+    source_bindings: PerformanceLocalV5SourceBindings
+    required_media: list[PerformanceLocalV5MediaIdentity]
+    required_logo_media: list[PerformanceLocalV5LogoIdentity]
 
 
 class PerformanceLocalV5PayloadBuild(SQLModel):

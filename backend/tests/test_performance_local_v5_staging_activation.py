@@ -149,7 +149,7 @@ def _media(
 def _remote(*, metadata_exists: bool = False) -> PerformanceLocalV5RemoteInspection:
     return PerformanceLocalV5RemoteInspection(
         route_schema="project-atlas-performance-local-v5-page-payload-route@1",
-        metadata_bridge_version="0.57.10",
+        metadata_bridge_version="0.57.11",
         environment_type="staging",
         home=SITE,
         siteurl=SITE,
@@ -169,7 +169,7 @@ def _remote(*, metadata_exists: bool = False) -> PerformanceLocalV5RemoteInspect
 def _applied(request_identity: str) -> PerformanceLocalV5RemoteApplyResult:
     return PerformanceLocalV5RemoteApplyResult(
         route_schema="project-atlas-performance-local-v5-page-payload-route@1",
-        metadata_bridge_version="0.57.10",
+        metadata_bridge_version="0.57.11",
         status="APPLIED",
         post_id=8,
         prior_sha256=None,
@@ -775,7 +775,7 @@ def test_apply_rebuilds_and_posts_only_exact_custom_route_envelope(monkeypatch):
         sent["envelope"] = envelope
         return PerformanceLocalV5RemoteApplyResult(
             route_schema="project-atlas-performance-local-v5-page-payload-route@1",
-            metadata_bridge_version="0.57.10",
+            metadata_bridge_version="0.57.11",
             status="APPLIED",
             post_id=8,
             prior_sha256=None,
@@ -1174,6 +1174,26 @@ def test_exact_reconciled_media_mapping_binds_full_source_identity():
     assert result[0].source_file_name == "page-41-hero.jpg"
     assert result[0].source_mime_type == "image/jpeg"
     assert (result[0].source_width, result[0].source_height) == (1440, 1000)
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/wp-content/uploads/atlas-v5/page-41-hero.jpg", True),
+        ("/wp-content/uploads/2026/08/page-41-hero.jpg", True),
+        ("/wp-content/uploads/2026/00/page-41-hero.jpg", False),
+        ("/wp-content/uploads/2026/13/page-41-hero.jpg", False),
+        ("/wp-content/uploads/2026/08/nested/page-41-hero.jpg", False),
+        ("/wp-content/uploads/arbitrary/page-41-hero.jpg", False),
+        ("/wp-content/uploads/2026/08/page%2D41.jpg", False),
+        ("/wp-content/uploads/2026/08/../page-41-hero.jpg", False),
+    ],
+)
+def test_remote_media_readiness_uses_exact_safe_upload_path_contract(
+    path: str,
+    expected: bool,
+):
+    assert service._safe_wordpress_upload_path(path) is expected
 
 
 def test_governed_logo_url_without_transport_proof_is_blocked_but_identity_is_bound():

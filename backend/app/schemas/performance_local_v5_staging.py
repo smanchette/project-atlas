@@ -13,7 +13,7 @@ V5_META_KEY = "_project_atlas_performance_local_v5_v1"
 V5_PAYLOAD_SCHEMA = "project-atlas-performance-local-v5-wordpress@1"
 V5_ROUTE_SCHEMA = "project-atlas-performance-local-v5-page-payload-route@1"
 V5_REQUEST_SCHEMA = "project-atlas-performance-local-v5-page-payload-request@1"
-V5_PLUGIN_VERSION = "0.57.10"
+V5_PLUGIN_VERSION = "0.57.11"
 
 
 class PerformanceLocalV5StagingDryRunRequest(SQLModel):
@@ -102,7 +102,7 @@ class PerformanceLocalV5StagingDryRun(SQLModel):
     payload_schema: Literal["project-atlas-performance-local-v5-wordpress@1"] = (
         V5_PAYLOAD_SCHEMA
     )
-    plugin_version: Literal["0.57.10"] = V5_PLUGIN_VERSION
+    plugin_version: Literal["0.57.11"] = V5_PLUGIN_VERSION
     identity: PerformanceLocalV5PageIdentity | None = None
     registration: PerformanceLocalV5RegistrationIdentity
     payload_sha256: str | None = None
@@ -125,7 +125,7 @@ class PerformanceLocalV5StagingApplyResult(SQLModel):
     payload_schema: Literal["project-atlas-performance-local-v5-wordpress@1"] = (
         V5_PAYLOAD_SCHEMA
     )
-    plugin_version: Literal["0.57.10"] = V5_PLUGIN_VERSION
+    plugin_version: Literal["0.57.11"] = V5_PLUGIN_VERSION
     identity: PerformanceLocalV5PageIdentity
     registration: PerformanceLocalV5RegistrationIdentity
     payload_sha256: str = Field(min_length=64, max_length=64)
@@ -145,7 +145,7 @@ class PerformanceLocalV5RemoteInspection(SQLModel):
     model_config = ConfigDict(extra="forbid")
 
     route_schema: Literal["project-atlas-performance-local-v5-page-payload-route@1"]
-    metadata_bridge_version: Literal["0.57.10"]
+    metadata_bridge_version: Literal["0.57.11"]
     environment_type: str
     home: str
     siteurl: str
@@ -167,7 +167,7 @@ class PerformanceLocalV5RemoteApplyResult(SQLModel):
     model_config = ConfigDict(extra="forbid")
 
     route_schema: Literal["project-atlas-performance-local-v5-page-payload-route@1"]
-    metadata_bridge_version: Literal["0.57.10"]
+    metadata_bridge_version: Literal["0.57.11"]
     status: Literal["APPLIED", "UNCHANGED"]
     post_id: int
     prior_sha256: str | None = Field(default=None, min_length=64, max_length=64)

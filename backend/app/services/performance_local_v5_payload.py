@@ -25,6 +25,8 @@ from app.models import (
     ThemeFamily,
     ThemeFamilyVersion,
     Website,
+    WebsiteIdentity,
+    WebsiteIdentityAssetAssignment,
     WebsiteThemeComponentConfiguration,
     WebsiteThemeConfiguration,
 )
@@ -32,8 +34,11 @@ from app.schemas.performance_local_v5 import (
     PerformanceLocalV5LogoIdentity,
     PerformanceLocalV5MediaIdentity,
     PerformanceLocalV5PayloadBuild,
+    PerformanceLocalV5PreparedPayload,
     PerformanceLocalV5SourceBindings,
     PerformanceLocalV5UnavailablePayloadIdentity,
+    PerformanceLocalV5VerifiedMediaEntry,
+    PerformanceLocalV5VerifiedMediaMap,
 )
 from app.services import theme_configurations as theme_service
 from app.services.page_composition import (
@@ -70,6 +75,14 @@ _FORM_COMPONENT_KEYS = frozenset(
     {"campaign_banner", "compact_estimate_form", "sticky_mobile_action_bar"}
 )
 _ESTIMATE_DESTINATION = "/request-an-estimate/"
+_VERIFIED_MEDIA_MAP_SCHEMA = (
+    "project-atlas-performance-local-v5-verified-media-map@1"
+)
+_VERIFIED_MEDIA_FROZEN_INPUT = (
+    "browser/verified-media-map/" + _VERIFIED_MEDIA_MAP_SCHEMA
+)
+_PREPARED_MAPPING_SHA256 = "PROJECT_ATLAS_UNFINALIZED_VERIFIED_MEDIA_MAP"
+_PREPARED_TOKEN_PREFIX = "project-atlas-unfinalized-media:"
 
 
 class PerformanceLocalV5PayloadError(ValueError):
@@ -180,6 +193,248 @@ def build_performance_local_v5_staging_payload(
     return result
 
 
+def prepare_performance_local_v5_staging_payload(
+    session: Session,
+    page_id: int,
+) -> PerformanceLocalV5PreparedPayload:
+    """Prepare current governed payload bytes without inventing remote media.
+
+    The returned object is intentionally a template: its five media paths and
+    verified-map frozen input are deterministic sentinels.  Only
+    :func:`finalize_performance_local_v5_staging_payload` can turn it into a
+    deployable payload, after validating an exact browser-observed media map.
+    """
+
+    pending_before = _pending_identity(session)
+    try:
+        with session.no_autoflush:
+            built = _build(session, page_id, prepared=True)
+    except (PageCompositionError, PageCompositionHistoryError, ValueError) as exc:
+        if isinstance(exc, PerformanceLocalV5PayloadError):
+            raise
+        raise PerformanceLocalV5PayloadError(str(exc)) from exc
+    if _pending_identity(session) != pending_before:
+        raise PerformanceLocalV5PayloadError(
+            "V5 payload preparation attempted to stage an Atlas write.",
+            code="performance_local_v5_payload_write_detected",
+        )
+    preparation = {
+        "website_id": built.website_id,
+        "planned_page_id": built.planned_page_id,
+        "generated_page_id": built.generated_page_id,
+        "wordpress_post_id": built.wordpress_post_id,
+        "metadata_key": built.metadata_key,
+        "payload_schema": built.payload_schema,
+        "payload_template": built.payload,
+        "source_bindings": built.source_bindings.model_dump(mode="json"),
+        "required_media": [
+            item.model_dump(mode="json") for item in built.required_media
+        ],
+        "required_logo_media": [
+            item.model_dump(mode="json") for item in built.required_logo_media
+        ],
+    }
+    return PerformanceLocalV5PreparedPayload(
+        website_id=built.website_id,
+        planned_page_id=built.planned_page_id,
+        generated_page_id=built.generated_page_id,
+        wordpress_post_id=built.wordpress_post_id,
+        metadata_key=built.metadata_key,
+        payload_schema=built.payload_schema,
+        payload_template=built.payload,
+        template_sha256=built.payload_sha256,
+        preparation_sha256=performance_local_v5_payload_sha256(preparation),
+        source_bindings=built.source_bindings,
+        required_media=built.required_media,
+        required_logo_media=built.required_logo_media,
+    )
+
+
+def finalize_performance_local_v5_staging_payload(
+    prepared: PerformanceLocalV5PreparedPayload,
+    verified_media_mapping: PerformanceLocalV5VerifiedMediaMap | dict[str, Any],
+    *,
+    expected_staging_origin: str,
+) -> PerformanceLocalV5PayloadBuild:
+    """Finalize exactly one prepared payload with a strict nondurable map."""
+
+    try:
+        mapping = PerformanceLocalV5VerifiedMediaMap.model_validate(
+            verified_media_mapping
+        )
+    except ValueError as exc:
+        raise PerformanceLocalV5PayloadError(
+            "The verified media mapping does not match its exact typed contract.",
+            status_code=422,
+            code="performance_local_v5_verified_media_mapping_invalid",
+        ) from exc
+
+    if performance_local_v5_payload_sha256(prepared.payload_template) != prepared.template_sha256:
+        raise PerformanceLocalV5PayloadError(
+            "The prepared V5 payload template changed before finalization.",
+            code="performance_local_v5_payload_template_invalid",
+        )
+    preparation = {
+        "website_id": prepared.website_id,
+        "planned_page_id": prepared.planned_page_id,
+        "generated_page_id": prepared.generated_page_id,
+        "wordpress_post_id": prepared.wordpress_post_id,
+        "metadata_key": prepared.metadata_key,
+        "payload_schema": prepared.payload_schema,
+        "payload_template": prepared.payload_template,
+        "source_bindings": prepared.source_bindings.model_dump(mode="json"),
+        "required_media": [
+            item.model_dump(mode="json") for item in prepared.required_media
+        ],
+        "required_logo_media": [
+            item.model_dump(mode="json") for item in prepared.required_logo_media
+        ],
+    }
+    if performance_local_v5_payload_sha256(preparation) != prepared.preparation_sha256:
+        raise PerformanceLocalV5PayloadError(
+            "The prepared V5 activation identity changed before finalization.",
+            code="performance_local_v5_payload_template_invalid",
+        )
+    origin = _verified_staging_origin(expected_staging_origin)
+    observed_origin = _verified_staging_origin(mapping.context.staging_origin)
+    if observed_origin != origin or mapping.context.staging_origin != origin:
+        raise PerformanceLocalV5PayloadError(
+            "The verified media map targets a different staging origin.",
+            code="performance_local_v5_verified_media_mapping_stale",
+        )
+    expected_context = {
+        "website_id": prepared.website_id,
+        "planned_page_id": prepared.planned_page_id,
+        "generated_page_id": prepared.generated_page_id,
+        "wordpress_post_id": prepared.wordpress_post_id,
+        "source_bindings": prepared.source_bindings.model_dump(mode="json"),
+    }
+    observed_context = mapping.context.model_dump(mode="json")
+    observed_context.pop("staging_origin", None)
+    if observed_context != expected_context:
+        raise PerformanceLocalV5PayloadError(
+            "The verified media mapping is stale for the prepared activation context.",
+            code="performance_local_v5_verified_media_mapping_stale",
+        )
+
+    normalized_mapping = mapping.model_copy(
+        update={"entries": sorted(mapping.entries, key=_verified_media_entry_sort_key)}
+    )
+    entries = _validated_verified_media_entries(prepared, normalized_mapping, origin)
+    mapping_sha256 = performance_local_v5_payload_sha256(
+        normalized_mapping.model_dump(mode="json")
+    )
+    payload = deepcopy(prepared.payload_template)
+    replacements: dict[str, str] = {}
+    finalized_media: list[PerformanceLocalV5MediaIdentity] = []
+    finalized_logos: list[PerformanceLocalV5LogoIdentity] = []
+
+    for item in prepared.required_media:
+        entry = entries[("page_media", item.requirement_id)]
+        path = _verified_wordpress_original_path(
+            entry.wordpress_original_url,
+            origin,
+        )
+        replacements[_prepared_media_path(item)] = path
+        finalized_media.append(
+            item.model_copy(
+                update={
+                    "wordpress_media_id": entry.wordpress_attachment_id,
+                    "wordpress_media_url": entry.wordpress_original_url,
+                    "payload_src": path,
+                    "verification_source": "verified_media_mapping",
+                    "observed_remote_sha256": entry.observed_sha256,
+                    "observed_remote_mime_type": entry.observed_mime_type,
+                    "observed_remote_width": entry.observed_width,
+                    "observed_remote_height": entry.observed_height,
+                    "ready": True,
+                    "blocker": None,
+                }
+            )
+        )
+    for item in prepared.required_logo_media:
+        entry = entries[("brand_asset", item.role)]
+        path = _verified_wordpress_original_path(
+            entry.wordpress_original_url,
+            origin,
+        )
+        replacements[_prepared_logo_path(item)] = path
+        finalized_logos.append(
+            item.model_copy(
+                update={
+                    "wordpress_media_id": entry.wordpress_attachment_id,
+                    "wordpress_media_url": entry.wordpress_original_url,
+                    "payload_src": path,
+                    "verification_source": "verified_media_mapping",
+                    "observed_remote_sha256": entry.observed_sha256,
+                    "observed_remote_mime_type": entry.observed_mime_type,
+                    "observed_remote_width": entry.observed_width,
+                    "observed_remote_height": entry.observed_height,
+                    "ready": True,
+                    "blocker": None,
+                }
+            )
+        )
+
+    expected_occurrences = {
+        _prepared_media_path(item): 1 for item in prepared.required_media
+    }
+    expected_occurrences.update(
+        {
+            _prepared_logo_path(item): 2 if item.role == "footer_logo" else 1
+            for item in prepared.required_logo_media
+        }
+    )
+    observed_occurrences: dict[str, int] = {key: 0 for key in replacements}
+    payload = _replace_prepared_media_tokens(
+        payload,
+        replacements,
+        observed_occurrences,
+    )
+    if observed_occurrences != expected_occurrences:
+        raise PerformanceLocalV5PayloadError(
+            "The prepared V5 media placeholders differ from the exact payload contract.",
+            code="performance_local_v5_payload_template_invalid",
+        )
+
+    frozen_inputs = _objects(
+        _object(payload.get("payload_identity"), "payload identity").get(
+            "frozen_inputs"
+        ),
+        "payload frozen inputs",
+    )
+    mapping_inputs = [
+        item for item in frozen_inputs if item.get("path") == _VERIFIED_MEDIA_FROZEN_INPUT
+    ]
+    if len(mapping_inputs) != 1 or mapping_inputs[0].get("sha256") != _PREPARED_MAPPING_SHA256:
+        raise PerformanceLocalV5PayloadError(
+            "The prepared verified-media frozen input is missing or changed.",
+            code="performance_local_v5_payload_template_invalid",
+        )
+    mapping_inputs[0]["sha256"] = mapping_sha256
+    if _contains_prepared_media_token(payload):
+        raise PerformanceLocalV5PayloadError(
+            "The finalized V5 payload still contains a media placeholder.",
+            code="performance_local_v5_payload_template_invalid",
+        )
+    _reject_private_delivery(payload)
+    return PerformanceLocalV5PayloadBuild(
+        website_id=prepared.website_id,
+        planned_page_id=prepared.planned_page_id,
+        generated_page_id=prepared.generated_page_id,
+        wordpress_post_id=prepared.wordpress_post_id,
+        metadata_key=prepared.metadata_key,
+        payload_schema=prepared.payload_schema,
+        template_value=None,
+        template_path=PERFORMANCE_LOCAL_V5_TEMPLATE_PATH,
+        payload=payload,
+        payload_sha256=performance_local_v5_payload_sha256(payload),
+        source_bindings=prepared.source_bindings,
+        required_media=finalized_media,
+        required_logo_media=finalized_logos,
+    )
+
+
 def inspect_performance_local_v5_media_identities(
     session: Session,
     page_id: int,
@@ -209,7 +464,12 @@ def inspect_performance_local_v5_media_identities(
     )
 
 
-def _build(session: Session, page_id: int) -> PerformanceLocalV5PayloadBuild:
+def _build(
+    session: Session,
+    page_id: int,
+    *,
+    prepared: bool = False,
+) -> PerformanceLocalV5PayloadBuild:
     page = session.get(GeneratedPage, page_id)
     if page is None or page.id is None:
         raise PerformanceLocalV5PayloadError(
@@ -355,11 +615,20 @@ def _build(session: Session, page_id: int) -> PerformanceLocalV5PayloadBuild:
         header=header,
         footer=footer_source,
     )
+    if prepared:
+        media_identities = [
+            item.model_copy(update={"payload_src": _prepared_media_path(item)})
+            for item in media_identities
+        ]
+        logo_identities = [
+            item.model_copy(update={"payload_src": _prepared_logo_path(item)})
+            for item in logo_identities
+        ]
     missing_media = [item for item in media_identities if not item.ready]
     unusable_logo_paths = [
         item for item in logo_identities if item.payload_src is None
     ]
-    if missing_media or unusable_logo_paths:
+    if not prepared and (missing_media or unusable_logo_paths):
         raise PerformanceLocalV5PayloadError(
             "One or more governed page-media identities require exact remote "
             "media sync, or a governed Brand-Asset path cannot satisfy the "
@@ -527,6 +796,13 @@ def _build(session: Session, page_id: int) -> PerformanceLocalV5PayloadBuild:
             for item in media_identities
         ],
     ]
+    if prepared:
+        payload_identity_inputs.append(
+            {
+                "path": _VERIFIED_MEDIA_FROZEN_INPUT,
+                "sha256": _PREPARED_MAPPING_SHA256,
+            }
+        )
 
     payload = {
         "schema_version": PERFORMANCE_LOCAL_V5_SCHEMA,
@@ -920,6 +1196,23 @@ def _current_media_identities(
                 wordpress_media_id=image.wordpress_media_id,
                 wordpress_media_url=image.wordpress_media_url,
                 payload_src=wordpress_path,
+                verification_source=(
+                    "persisted_atlas" if wordpress_path is not None else None
+                ),
+                observed_remote_sha256=(
+                    image.wordpress_media_checksum
+                    if wordpress_path is not None
+                    else None
+                ),
+                observed_remote_mime_type=(
+                    image.mime_type if wordpress_path is not None else None
+                ),
+                observed_remote_width=(
+                    image.width if wordpress_path is not None else None
+                ),
+                observed_remote_height=(
+                    image.height if wordpress_path is not None else None
+                ),
                 ready=wordpress_path is not None,
                 blocker=(
                     None
@@ -943,6 +1236,17 @@ def _current_logo_identities(
     header: dict[str, Any],
     footer: dict[str, Any],
 ) -> list[PerformanceLocalV5LogoIdentity]:
+    identity_rows = list(
+        session.exec(
+            select(WebsiteIdentity).where(WebsiteIdentity.website_id == website.id)
+        ).all()
+    )
+    identity = _exactly_one(identity_rows, "current Website Identity")
+    if identity.id is None:
+        raise PerformanceLocalV5PayloadError(
+            "The current Website Identity has no durable identity.",
+            code="performance_local_v5_logo_identity_blocked",
+        )
     identities: list[PerformanceLocalV5LogoIdentity] = []
     for role, source in (("header_logo", header), ("footer_logo", footer)):
         resolved_assets = _object(source.get("identity_assets"), "identity assets")
@@ -980,9 +1284,43 @@ def _current_logo_identities(
                 code="performance_local_v5_logo_identity_blocked",
             )
         payload_src = _verified_brand_asset_path(governed_url)
+        assignment_rows = list(
+            session.exec(
+                select(WebsiteIdentityAssetAssignment).where(
+                    WebsiteIdentityAssetAssignment.website_identity_id == identity.id,
+                    WebsiteIdentityAssetAssignment.slot == role,
+                    WebsiteIdentityAssetAssignment.status == "active",
+                )
+            ).all()
+        )
+        if len(assignment_rows) > 1:
+            raise PerformanceLocalV5PayloadError(
+                f"The governed {role} has more than one active identity assignment.",
+                code="performance_local_v5_logo_identity_blocked",
+            )
+        assignment = assignment_rows[0] if assignment_rows else None
+        if assignment is not None and (
+            assignment.id is None
+            or assignment.website_id != website.id
+            or assignment.brand_id != brand.id
+            or assignment.brand_asset_id != asset.id
+            or type(assignment.version) is not int
+            or assignment.version <= 0
+        ):
+            raise PerformanceLocalV5PayloadError(
+                f"The governed {role} assignment differs from the resolved Brand Asset.",
+                code="performance_local_v5_logo_identity_blocked",
+            )
         identities.append(
             PerformanceLocalV5LogoIdentity(
                 role=role,
+                target_component_instance_key=(
+                    "website_header" if role == "header_logo" else "website_footer"
+                ),
+                assignment_id=assignment.id if assignment is not None else None,
+                assignment_version=(
+                    assignment.version if assignment is not None else None
+                ),
                 brand_asset_id=asset.id,
                 asset_key=_text(asset.asset_key, f"{role} Brand Asset key"),
                 asset_version=asset.version,
@@ -1036,6 +1374,211 @@ def _media_components_by_target(
             "The City-Service page does not resolve the exact three governed media placements."
         )
     return by_target
+
+
+def _validated_verified_media_entries(
+    prepared: PerformanceLocalV5PreparedPayload,
+    mapping: PerformanceLocalV5VerifiedMediaMap,
+    origin: str,
+) -> dict[tuple[str, int | str], PerformanceLocalV5VerifiedMediaEntry]:
+    expected: dict[tuple[str, int | str], dict[str, Any]] = {}
+    for item in prepared.required_media:
+        expected[("page_media", item.requirement_id)] = {
+            "governed_asset_class": "page_media",
+            "requirement_id": item.requirement_id,
+            "placement_key": item.placement_key,
+            "target_component_instance_key": item.target_component_instance_key,
+            "assignment_id": item.assignment_id,
+            "assignment_version": item.assignment_version,
+            "authorization_id": item.authorization_id,
+            "authorization_version": item.authorization_version,
+            "authorization_fingerprint": item.authorization_fingerprint,
+            "governed_asset_id": item.image_metadata_id,
+            "governed_asset_key": item.media_key,
+            "governed_asset_version": item.media_version,
+            "expected_sha256": item.checksum_sha256,
+            "expected_mime_type": item.source_mime_type,
+            "expected_width": item.source_width,
+            "expected_height": item.source_height,
+        }
+    for item in prepared.required_logo_media:
+        if item.assignment_id is None or item.assignment_version is None:
+            raise PerformanceLocalV5PayloadError(
+                f"The current {item.role} lacks one exact active Website identity assignment.",
+                code="performance_local_v5_logo_identity_blocked",
+            )
+        expected[("brand_asset", item.role)] = {
+            "governed_asset_class": "brand_asset",
+            "requirement_id": None,
+            "placement_key": item.role,
+            "target_component_instance_key": item.target_component_instance_key,
+            "assignment_id": item.assignment_id,
+            "assignment_version": item.assignment_version,
+            "authorization_id": None,
+            "authorization_version": None,
+            "authorization_fingerprint": None,
+            "governed_asset_id": item.brand_asset_id,
+            "governed_asset_key": item.asset_key,
+            "governed_asset_version": item.asset_version,
+            "expected_sha256": item.checksum_sha256,
+            "expected_mime_type": item.source_mime_type,
+            "expected_width": item.source_width,
+            "expected_height": item.source_height,
+        }
+    if len(expected) != 5:
+        raise PerformanceLocalV5PayloadError(
+            "The prepared City-Service payload does not require the exact five governed assets.",
+            code="performance_local_v5_verified_media_mapping_invalid",
+        )
+    if len(mapping.entries) != len(expected):
+        raise PerformanceLocalV5PayloadError(
+            "The verified media mapping is incomplete or contains an unknown asset.",
+            code="performance_local_v5_verified_media_mapping_invalid",
+        )
+
+    observed: dict[
+        tuple[str, int | str], PerformanceLocalV5VerifiedMediaEntry
+    ] = {}
+    attachment_owners: dict[int, tuple[Any, ...]] = {}
+    url_owners: dict[str, tuple[Any, ...]] = {}
+    attachment_urls: dict[int, str] = {}
+    url_attachments: dict[str, int] = {}
+    for entry in mapping.entries:
+        key: tuple[str, int | str] = (
+            ("page_media", entry.requirement_id or 0)
+            if entry.governed_asset_class == "page_media"
+            else ("brand_asset", entry.placement_key)
+        )
+        if key in observed or key not in expected:
+            raise PerformanceLocalV5PayloadError(
+                "The verified media mapping contains a duplicate or unknown governed asset.",
+                code="performance_local_v5_verified_media_mapping_invalid",
+            )
+        exact_fields = {
+            name: getattr(entry, name) for name in expected[key]
+        }
+        if exact_fields != expected[key]:
+            raise PerformanceLocalV5PayloadError(
+                "A verified media entry differs from its current governed Atlas identity.",
+                code="performance_local_v5_verified_media_mapping_stale",
+            )
+        _sha(entry.expected_sha256, "expected media checksum")
+        _sha(entry.observed_sha256, "observed media checksum")
+        _image_mime_type(entry.expected_mime_type, "expected media MIME type")
+        _image_mime_type(entry.observed_mime_type, "observed media MIME type")
+        if (
+            entry.expected_sha256 != entry.observed_sha256
+            or entry.expected_mime_type != entry.observed_mime_type
+            or entry.expected_width != entry.observed_width
+            or entry.expected_height != entry.observed_height
+        ):
+            raise PerformanceLocalV5PayloadError(
+                "Browser-observed media bytes, MIME type, or dimensions differ from Atlas.",
+                code="performance_local_v5_verified_media_mapping_mismatch",
+            )
+        _verified_wordpress_original_path(entry.wordpress_original_url, origin)
+        governed_owner = (
+            entry.governed_asset_class,
+            entry.governed_asset_id,
+            entry.governed_asset_key,
+            entry.governed_asset_version,
+            entry.expected_sha256,
+            entry.expected_mime_type,
+            entry.expected_width,
+            entry.expected_height,
+        )
+        prior_attachment_owner = attachment_owners.setdefault(
+            entry.wordpress_attachment_id, governed_owner
+        )
+        prior_url_owner = url_owners.setdefault(
+            entry.wordpress_original_url, governed_owner
+        )
+        prior_attachment_url = attachment_urls.setdefault(
+            entry.wordpress_attachment_id, entry.wordpress_original_url
+        )
+        prior_url_attachment = url_attachments.setdefault(
+            entry.wordpress_original_url, entry.wordpress_attachment_id
+        )
+        if (
+            prior_attachment_owner != governed_owner
+            or prior_url_owner != governed_owner
+            or prior_attachment_url != entry.wordpress_original_url
+            or prior_url_attachment != entry.wordpress_attachment_id
+        ):
+            raise PerformanceLocalV5PayloadError(
+                "A WordPress attachment, original URL, and governed asset must map one-to-one.",
+                code="performance_local_v5_verified_media_mapping_ambiguous",
+            )
+        observed[key] = entry
+    if set(observed) != set(expected):
+        raise PerformanceLocalV5PayloadError(
+            "The verified media mapping does not contain the exact governed asset set.",
+            code="performance_local_v5_verified_media_mapping_invalid",
+        )
+    header = next(
+        item for item in mapping.entries if item.placement_key == "header_logo"
+    )
+    footer = next(
+        item for item in mapping.entries if item.placement_key == "footer_logo"
+    )
+    if (
+        header.governed_asset_id == footer.governed_asset_id
+        or header.wordpress_attachment_id == footer.wordpress_attachment_id
+        or header.wordpress_original_url == footer.wordpress_original_url
+    ):
+        raise PerformanceLocalV5PayloadError(
+            "The governed header and footer logos must remain distinct.",
+            code="performance_local_v5_verified_media_mapping_ambiguous",
+        )
+    return observed
+
+
+def _verified_media_entry_sort_key(
+    entry: PerformanceLocalV5VerifiedMediaEntry,
+) -> tuple[int, int, int]:
+    if entry.governed_asset_class == "page_media":
+        return (0, entry.requirement_id or 0, entry.governed_asset_id)
+    role_order = 0 if entry.placement_key == "header_logo" else 1
+    return (1, role_order, entry.governed_asset_id)
+
+
+def _prepared_media_path(item: PerformanceLocalV5MediaIdentity) -> str:
+    suffix = PurePosixPath(item.source_filename).suffix.lower()
+    return f"{_PREPARED_TOKEN_PREFIX}page_requirement_{item.requirement_id}{suffix}"
+
+
+def _prepared_logo_path(item: PerformanceLocalV5LogoIdentity) -> str:
+    suffix = PurePosixPath(item.source_filename).suffix.lower()
+    return f"{_PREPARED_TOKEN_PREFIX}brand_role_{item.role}{suffix}"
+
+
+def _replace_prepared_media_tokens(
+    value: Any,
+    replacements: dict[str, str],
+    counts: dict[str, int],
+) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _replace_prepared_media_tokens(nested, replacements, counts)
+            for key, nested in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _replace_prepared_media_tokens(nested, replacements, counts)
+            for nested in value
+        ]
+    if isinstance(value, str) and value in replacements:
+        counts[value] += 1
+        return replacements[value]
+    return value
+
+
+def _contains_prepared_media_token(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_prepared_media_token(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_prepared_media_token(item) for item in value)
+    return isinstance(value, str) and _PREPARED_TOKEN_PREFIX in value
 
 
 def _form_payload(source: dict[str, Any]) -> dict[str, Any]:
@@ -1140,8 +1683,13 @@ def _media(source: dict[str, Any], payload_src: str | None) -> dict[str, Any]:
             "Governed media lacks an exact verified WordPress upload identity.",
             code="REMOTE_MEDIA_SYNC_REQUIRED",
         )
+    resolved_src = (
+        payload_src
+        if payload_src.startswith(_PREPARED_TOKEN_PREFIX)
+        else _upload_path(payload_src, "verified WordPress media path")
+    )
     return {
-        "src": _upload_path(payload_src, "verified WordPress media path"),
+        "src": resolved_src,
         "alt": _text(source.get("alt_text"), "media alt text"),
         "title": _optional_text(source.get("image_title"), "media title"),
         "focal_x": focal_x,
@@ -1159,8 +1707,13 @@ def _logo(
             f"Governed {key} lacks an exact verified Bridge upload identity.",
             code="REMOTE_MEDIA_SYNC_REQUIRED",
         )
+    resolved_src = (
+        payload_src
+        if payload_src.startswith(_PREPARED_TOKEN_PREFIX)
+        else _upload_path(payload_src, f"verified {key} asset")
+    )
     return {
-        "src": _upload_path(payload_src, f"verified {key} asset"),
+        "src": resolved_src,
         "alt": _text(asset.get("accessibility_description"), f"{key} alt text"),
     }
 
@@ -1263,20 +1816,42 @@ def _upload_path(value: Any, label: str) -> str:
             code="REMOTE_MEDIA_SYNC_REQUIRED",
         )
     path = parsed.path
-    if not path.startswith("/wp-content/uploads/atlas-v5/"):
+    if not _safe_wordpress_upload_path(path):
         raise PerformanceLocalV5PayloadError(
             f"{label} is not an exact Bridge-compatible governed upload path.",
             code="REMOTE_MEDIA_SYNC_REQUIRED",
         )
-    relative = path.removeprefix("/wp-content/uploads/atlas-v5/")
+    return path
+
+
+def _safe_wordpress_upload_path(path: str) -> bool:
+    prefix = "/wp-content/uploads/"
+    if (
+        not isinstance(path, str)
+        or not path.startswith(prefix)
+        or "%" in path
+        or "\\" in path
+        or _CONTROL_OR_HTML.search(path)
+    ):
+        return False
+    relative = path.removeprefix(prefix)
+    parts = tuple(relative.split("/"))
     if (
         not relative
-        or "\\" in relative
-        or any(part in {"", ".", ".."} for part in PurePosixPath(relative).parts)
-        or any(not _SAFE_BASENAME.fullmatch(part) for part in PurePosixPath(relative).parts)
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(not _SAFE_BASENAME.fullmatch(part) for part in parts)
     ):
-        raise PerformanceLocalV5PayloadError(f"{label} has an unsafe upload path.")
-    if PurePosixPath(relative).suffix.lower() not in {
+        return False
+    if parts[0] == "atlas-v5":
+        if len(parts) < 2:
+            return False
+    elif not (
+        len(parts) == 3
+        and re.fullmatch(r"[1-9][0-9]{3}", parts[0])
+        and re.fullmatch(r"(?:0[1-9]|1[0-2])", parts[1])
+    ):
+        return False
+    if PurePosixPath(parts[-1]).suffix.lower() not in {
         ".avif",
         ".jpeg",
         ".jpg",
@@ -1284,8 +1859,91 @@ def _upload_path(value: Any, label: str) -> str:
         ".svg",
         ".webp",
     }:
-        raise PerformanceLocalV5PayloadError(f"{label} has an unsupported image type.")
-    return path
+        return False
+    return True
+
+
+def _verified_staging_origin(value: Any) -> str:
+    source = _text(value, "verified staging origin")
+    try:
+        parsed = urlsplit(source)
+        port = parsed.port
+    except ValueError as exc:
+        raise PerformanceLocalV5PayloadError(
+            "The verified staging origin is invalid.",
+            code="performance_local_v5_verified_media_mapping_invalid",
+        ) from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+        or not re.fullmatch(r"[A-Za-z0-9.-]+", parsed.hostname)
+    ):
+        raise PerformanceLocalV5PayloadError(
+            "The verified staging origin must be one exact HTTPS origin.",
+            code="performance_local_v5_verified_media_mapping_invalid",
+        )
+    host = parsed.hostname.lower().rstrip(".")
+    labels = host.split(".")
+    if (
+        not host
+        or any(
+            not label
+            or label.startswith("-")
+            or label.endswith("-")
+            or len(label) > 63
+            for label in labels
+        )
+        or len(host) > 253
+    ):
+        raise PerformanceLocalV5PayloadError(
+            "The verified staging hostname is invalid.",
+            code="performance_local_v5_verified_media_mapping_invalid",
+        )
+    if port not in {None, 443}:
+        return f"https://{host}:{port}"
+    return f"https://{host}"
+
+
+def _verified_wordpress_original_path(value: Any, expected_origin: str) -> str:
+    source = _text(value, "WordPress original source URL")
+    try:
+        parsed = urlsplit(source)
+    except ValueError as exc:
+        raise PerformanceLocalV5PayloadError(
+            "The WordPress original source URL is invalid.",
+            code="performance_local_v5_verified_media_mapping_invalid",
+        ) from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise PerformanceLocalV5PayloadError(
+            "The WordPress original source URL must be exact HTTPS without query or fragment.",
+            code="performance_local_v5_verified_media_mapping_invalid",
+        )
+    observed_origin = _verified_staging_origin(
+        f"{parsed.scheme}://{parsed.netloc}"
+    )
+    exact_origin = f"{parsed.scheme}://{parsed.netloc}"
+    if (
+        observed_origin != expected_origin
+        or exact_origin != expected_origin
+        or not _safe_wordpress_upload_path(parsed.path)
+    ):
+        raise PerformanceLocalV5PayloadError(
+            "The WordPress original source URL is outside the verified uploads contract.",
+            code="performance_local_v5_verified_media_mapping_invalid",
+        )
+    return parsed.path
 
 
 def _verified_wordpress_media_path(image: ImageMetadata) -> str | None:

@@ -986,7 +986,7 @@ def _media_readiness(
             and parsed_media_url is not None
             and parsed_media_url[0] == target_origin
             and parsed_media_url[1] == payload_src
-            and str(payload_src).startswith("/wp-content/uploads/atlas-v5/")
+            and _safe_wordpress_upload_path(str(payload_src))
             and media_status in {
                 "uploaded",
                 "verified",
@@ -1147,11 +1147,33 @@ def _safe_media_url(value: Any) -> tuple[str, str] | None:
         or parsed.password
         or parsed.query
         or parsed.fragment
-        or not parsed.path.startswith("/wp-content/uploads/atlas-v5/")
+        or not _safe_wordpress_upload_path(parsed.path)
     ):
         return None
     origin = _normalized_origin(value)
     return (origin, parsed.path) if origin else None
+
+
+def _safe_wordpress_upload_path(path: str) -> bool:
+    """Mirror the narrow Bridge upload-path contract for remote readiness."""
+
+    if not isinstance(path, str) or "%" in path or "\\" in path:
+        return False
+    legacy = re.fullmatch(
+        r"/wp-content/uploads/atlas-v5/"
+        r"[A-Za-z0-9][A-Za-z0-9._-]*"
+        r"(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*"
+        r"\.(?:avif|jpe?g|png|svg|webp)",
+        path,
+        flags=re.IGNORECASE,
+    )
+    dated = re.fullmatch(
+        r"/wp-content/uploads/[1-9][0-9]{3}/(?:0[1-9]|1[0-2])/"
+        r"[A-Za-z0-9][A-Za-z0-9._-]*\.(?:avif|jpe?g|png|svg|webp)",
+        path,
+        flags=re.IGNORECASE,
+    )
+    return legacy is not None or dated is not None
 
 
 def _remote_inspection_gates(
