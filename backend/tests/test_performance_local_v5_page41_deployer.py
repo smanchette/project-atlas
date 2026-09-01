@@ -133,6 +133,7 @@ def _prepared_payload() -> PerformanceLocalV5PreparedPayload:
             "footer_logo": {"src": tokens["footer_logo"]},
         },
         "hero": {"media": {"src": tokens["city-service-hero"]}},
+        "numeric_tokens": {"fractional": 1.5, "preserved_zero": 16.0},
         "sections": [
             {
                 "key": "why_it_matters",
@@ -214,7 +215,7 @@ function imageDimensions(bytes, mime) {
 }
 
 const corePage = {id: CONFIG.wordpress_post_id, type: "page", status: "publish", slug: CONFIG.expected_post.slug, title: {raw: CONFIG.expected_post.title}, content: {raw: "Protected body"}, excerpt: {raw: "Protected excerpt"}, featured_media: 41, author: 1, parent: 0, menu_order: 0, template: ""};
-const remote = {media: [], payload: null, mediaWrites: 0, metadataWrites: 0, metadataPostCalls: 0, apiCalls: 0, mode: "normal", coreReads: 0, dimensionReads: 0};
+const remote = {media: [], payload: null, payloadCanonical: null, mediaWrites: 0, metadataWrites: 0, metadataPostCalls: 0, apiCalls: 0, mode: "normal", coreReads: 0, dimensionReads: 0};
 function atlasIdentity() {
   if (!remote.payload) return null;
   return {
@@ -233,7 +234,7 @@ async function apiFetch(options) {
     return value;
   }
   if (options.path === CONFIG.private_route && options.method === "GET") {
-    const digest = remote.payload ? sha(canonical(remote.payload)) : null;
+    const digest = remote.payloadCanonical === null ? null : sha(remote.payloadCanonical);
     const inspection = {
       route_schema: "project-atlas-performance-local-v5-page-payload-route@1",
       metadata_bridge_version: CONFIG.expected_bridge_version,
@@ -272,9 +273,15 @@ async function apiFetch(options) {
     remote.metadataPostCalls += 1;
     if (typeof options.body !== "string" || options.headers["Content-Type"] !== "application/json") throw new Error("raw JSON body contract changed");
     const envelope = JSON.parse(options.body);
-    const digest = sha(canonical(envelope.payload));
-    const unchanged = remote.payload !== null && canonical(remote.payload) === canonical(envelope.payload);
-    if (!unchanged) { remote.payload = envelope.payload; remote.metadataWrites += 1; }
+    const payloadPrefix = '"payload":';
+    const payloadStart = options.body.indexOf(payloadPrefix);
+    const payloadEnd = options.body.lastIndexOf(`,"planned_page_id":${CONFIG.planned_page_id},"request_identity":`);
+    if (payloadStart < 0 || payloadEnd <= payloadStart + payloadPrefix.length) throw new Error("raw canonical payload boundary changed");
+    const payloadCanonical = options.body.slice(payloadStart + payloadPrefix.length, payloadEnd);
+    if (JSON.stringify(JSON.parse(payloadCanonical)) !== JSON.stringify(envelope.payload)) throw new Error("raw canonical payload value changed");
+    const digest = sha(payloadCanonical);
+    const unchanged = remote.payloadCanonical !== null && remote.payloadCanonical === payloadCanonical;
+    if (!unchanged) { remote.payload = envelope.payload; remote.payloadCanonical = payloadCanonical; remote.metadataWrites += 1; }
     return {route_schema: "project-atlas-performance-local-v5-page-payload-route@1", status: unchanged ? "UNCHANGED" : "APPLIED", post_id: CONFIG.wordpress_post_id, prior_sha256: unchanged ? digest : null, resulting_sha256: digest, website_id: CONFIG.website_id, planned_page_id: CONFIG.planned_page_id, generated_page_id: CONFIG.generated_page_id, request_identity: envelope.request_identity, metadata_valid: true, metadata_bridge_version: CONFIG.expected_bridge_version};
   }
   throw new Error(`unexpected apiFetch ${options.method} ${options.path}`);
