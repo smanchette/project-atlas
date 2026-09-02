@@ -883,7 +883,7 @@ test("V5 styles are additive, namespace-only, responsive, and never target the s
   assert.ok(cityMarker > 0 && conditionalMarker > cityMarker && optionalModuleMarker > conditionalMarker);
   assert.equal(
     createHash("sha256").update(css.slice(cityMarker, conditionalMarker)).digest("hex"),
-    "d715988e8c7cabf0db264d8533cd7ee14963dce92c6469295fd18121eb41a564",
+    "130a5f1936565386f4edb8ff8b1364ca235dd5e1ee316baeece440534731e07e",
   );
   assert.equal(
     createHash("sha256").update(css.slice(conditionalMarker, optionalModuleMarker)).digest("hex"),
@@ -972,6 +972,39 @@ test("V5 top conversion positioning is viewport-owned, flow-reserved, and offset
   const cityHeader = cssRule(v5, ".performanceLocalV5CityServicePreview .performanceLocalHeader");
   assert.match(cityHeader, /position:\s*absolute/);
   assert.doesNotMatch(cityHeader, /position:\s*fixed/);
+});
+
+test("V5 top-interface labels use one real-weight system typography treatment", () => {
+  const css = source("src/styles.css");
+  const marker = css.indexOf("/* Performance Local V5 City-Service: approved top conversion and over-photo hero preview. */");
+  assert.ok(marker > 0);
+  const city = css.slice(marker);
+  const selector = [
+    ".performanceLocalV5StickyPhoneBar a,",
+    ".performanceLocalV5StickyActionBanner a,",
+    ".performanceLocalV5CityServicePreview .performanceLocalDesktopNavigation :where(a, span, button),",
+    ".performanceLocalV5CityServicePreview .performanceLocalDrawerList :where(a, span, button)",
+  ].join("\n");
+  const interfaceTypography = cssRule(city, selector);
+
+  assert.match(interfaceTypography, /font-family:\s*var\(--atlas-font-body, system-ui, sans-serif\)/);
+  assert.match(interfaceTypography, /font-style:\s*normal/);
+  assert.match(interfaceTypography, /font-synthesis:\s*none/);
+  assert.match(interfaceTypography, /font-weight:\s*700/);
+  assert.match(interfaceTypography, /text-shadow:\s*none/);
+  assert.match(interfaceTypography, /-webkit-text-stroke:\s*0/);
+  assert.match(interfaceTypography, /filter:\s*none/);
+  assert.match(interfaceTypography, /opacity:\s*1/);
+  assert.doesNotMatch(interfaceTypography, /transform|font-size|line-height|letter-spacing/);
+
+  const heroButton = cssRule(css, [
+    ".performanceLocalButton,",
+    ".performanceLocalStickyActions > a,",
+    ".performanceLocalCampaign a,",
+    ".performanceLocalEstimateForm button",
+  ].join("\n"));
+  assert.match(heroButton, /font-weight:\s*850/);
+  assert.doesNotMatch(heroButton, /font-synthesis/);
 });
 
 test("footer collision boundary is fail-closed and deterministic", () => {

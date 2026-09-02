@@ -11385,6 +11385,20 @@ th {
   letter-spacing: 0.018em;
 }
 
+.performanceLocalV5StickyPhoneBar a,
+.performanceLocalV5StickyActionBanner a,
+.performanceLocalV5CityServicePreview .performanceLocalDesktopNavigation :where(a, span, button),
+.performanceLocalV5CityServicePreview .performanceLocalDrawerList :where(a, span, button) {
+  font-family: var(--atlas-font-body, system-ui, sans-serif);
+  font-style: normal;
+  font-synthesis: none;
+  font-weight: 700;
+  text-shadow: none;
+  -webkit-text-stroke: 0;
+  filter: none;
+  opacity: 1;
+}
+
 .performanceLocalV5StickyPhoneBar a:hover,
 .performanceLocalV5StickyActionBanner a:hover {
   background: rgb(255 255 255 / 10%);

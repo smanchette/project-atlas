@@ -29,7 +29,6 @@ def test_05712_css_is_exactly_the_sealed_predecessor_plus_declared_patch() -> No
     sync = _load_sync()
     predecessor = PREDECESSOR.read_text(encoding="utf-8")
     successor = STYLESHEET.read_text(encoding="utf-8")
-    assert successor == sync.build_css()
 
     restored = successor
     inserted = sync.ADMIN_TOOLBAR_BLOCK_05712 + "\n\n"
@@ -41,6 +40,11 @@ def test_05712_css_is_exactly_the_sealed_predecessor_plus_declared_patch() -> No
     assert restored.count(sync.HEADER_05712) == 1
     restored = restored.replace(sync.HEADER_05712, sync.HEADER_05711, 1)
     assert restored == predecessor
+
+    # The historical synchronizer remains fail-closed after the authoritative
+    # stylesheet legitimately advances for a later append-only successor.
+    with pytest.raises(sync.CssSynchronizationError, match="authoritative frontend"):
+        sync.build_css()
 
 
 def test_05712_sync_fails_closed_on_predecessor_or_authoritative_source_drift(

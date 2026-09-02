@@ -6,6 +6,7 @@
   var STYLESHEET_HASH_BY_VERSION = Object.freeze({
     "0.57.11": "3a227011edb8dcd56e6a30ba701dddc488c7bb1b3c5556530c49cb4b39a4445e",
     "0.57.12": "b0834b9e8fde7dee64d645fe831a8e862736006a15b21b0e7cf8b14e15fe49e3",
+    "0.57.13": "b4158eb11a2d53b8c06c1bfcec8ccda4ce8329e65514b8c3a0aa9f58ad30f82f",
   });
   var AUTORUN_ATTRIBUTE = "data-atlas-v5-sticky-proof-result";
   var AUTORUN_PARAMETERS = Object.freeze({
@@ -14,7 +15,7 @@
     session: "atlas-sticky-session",
     secondary: "atlas-sticky-secondary",
   });
-  var SUPPORTED_VERSIONS = ["0.57.11", "0.57.12"];
+  var SUPPORTED_VERSIONS = ["0.57.11", "0.57.12", "0.57.13"];
   var VIEWPORTS = [
     { width: 1440, height: 1000 },
     { width: 1280, height: 800 },

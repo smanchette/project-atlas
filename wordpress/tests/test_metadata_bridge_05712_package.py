@@ -164,9 +164,8 @@ def test_05712_source_inventory_is_regular_contained_and_symbolic_link_free() ->
 
 
 def test_05712_build_inputs_have_an_exact_lf_checkout_contract() -> None:
-    assert tuple(GITATTRIBUTES.read_text(encoding="utf-8").splitlines()) == (
-        EXPECTED_LF_ATTRIBUTES
-    )
+    attributes = tuple(GITATTRIBUTES.read_text(encoding="utf-8").splitlines())
+    assert attributes[: len(EXPECTED_LF_ATTRIBUTES)] == EXPECTED_LF_ATTRIBUTES
 
 
 def test_05712_builder_is_deterministic_portable_and_actual_archive_exact(
@@ -220,9 +219,9 @@ def test_05712_checksum_is_one_exact_append_to_the_sealed_canonical_prefix() -> 
     archive_path = "wordpress/dist/project-atlas-metadata-bridge-0.57.12.zip"
     expected_line = f"{_sha256(ZIP)}  {archive_path}"
     lines = CHECKSUMS.read_text(encoding="utf-8").splitlines()
-    assert lines[-1] == expected_line
     assert lines.count(expected_line) == 1
-    canonical_prefix = ("\n".join(lines[:-1]) + "\n").encode("utf-8")
+    entry_index = lines.index(expected_line)
+    canonical_prefix = ("\n".join(lines[:entry_index]) + "\n").encode("utf-8")
     assert len(canonical_prefix) == SEALED_CHECKSUM_PREFIX_CANONICAL_SIZE
     assert _sha256_bytes(canonical_prefix) == SEALED_CHECKSUM_PREFIX_CANONICAL_SHA256
 
