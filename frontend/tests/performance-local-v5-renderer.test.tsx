@@ -853,12 +853,12 @@ test("V5 styles are additive, namespace-only, responsive, and never target the s
   assert.match(v5, /\.performanceLocalV5StructuredBody\[data-v5-structured-group-count="1"\] > :only-child[\s\S]*?grid-column:\s*1 \/ -1/);
   assert.match(v5, /@media \(max-width:\s*900px\)[\s\S]*?\.performanceLocalV5FinalGrid[\s\S]*?\.performanceLocalV5FormGrid[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)/);
   assert.match(v5, /\.performanceLocalV5FormCompact[\s\S]*?padding:\s*clamp\(/);
-  assert.match(v5, /\.performanceLocalV5TopConversionStack[\s\S]*?position:\s*sticky[\s\S]*?height:\s*var\(--plv5-city-stack-height\)/);
+  assert.match(v5, /\.performanceLocalV5TopConversionStack[\s\S]*?position:\s*fixed[\s\S]*?height:\s*var\(--plv5-city-stack-height\)/);
   assert.match(v5, /--plv5-city-stack-height:\s*calc\(/);
   assert.match(v5, /\.performanceLocalV5CityServicePreview \.performanceLocalHeader[\s\S]*?position:\s*absolute/);
   assert.match(v5, /\.performanceLocalV5CityServicePreview \.performanceLocalHeroMedia[\s\S]*?position:\s*absolute/);
   assert.match(v5, /\.performanceLocalV5CityServicePreview \.performanceLocalHeroMedia img[\s\S]*?object-fit:\s*cover !important/);
-  assert.match(v5, /\.performanceLocalEstimateForm[\s\S]*?scroll-margin-block-start:\s*calc\(var\(--plv5-city-stack-height\) \+ 16px\)/);
+  assert.match(v5, /\.performanceLocalEstimateForm[\s\S]*?scroll-margin-block-start:\s*calc\([\s\S]*?var\(--plv5-viewport-top-offset\)[\s\S]*?var\(--plv5-city-stack-height\)[\s\S]*?16px[\s\S]*?\)/);
   assert.match(v5, /\.performanceLocalHeader:has\(\.performanceLocalDrawerBackdrop\)[\s\S]*?backdrop-filter:\s*none/);
   assert.match(v5, /@media \(max-width:\s*1100px\)[\s\S]*?object-position:\s*43% 50% !important/);
   assert.match(v5, /@media \(max-width:\s*760px\)[\s\S]*?object-position:\s*10% 50% !important/);
@@ -883,12 +883,95 @@ test("V5 styles are additive, namespace-only, responsive, and never target the s
   assert.ok(cityMarker > 0 && conditionalMarker > cityMarker && optionalModuleMarker > conditionalMarker);
   assert.equal(
     createHash("sha256").update(css.slice(cityMarker, conditionalMarker)).digest("hex"),
-    "faab9fa07f79266de787dee4f5a3e3d507e3240ceee3fc7b8a23c52234246164",
+    "d715988e8c7cabf0db264d8533cd7ee14963dce92c6469295fd18121eb41a564",
   );
   assert.equal(
     createHash("sha256").update(css.slice(conditionalMarker, optionalModuleMarker)).digest("hex"),
-    "dafebebae01b635ccca23b645003cdfac5b239ba55f8ca0ec58a9dd859d03853",
+    "74f95cc1eea6c52822b3a6761291eed71c649252ca6272f52c7cebe474bdfc0e",
   );
+});
+
+test("V5 top conversion positioning is viewport-owned, flow-reserved, and offset-safe", () => {
+  const css = source("src/styles.css");
+  const marker = css.indexOf("/* Performance Local V5:");
+  assert.ok(marker > 0);
+  const v5 = css.slice(marker);
+
+  const cityRoot = cssRule(v5, ".performanceLocalV5CityServicePreview");
+  const conditionalRoot = cssRule(v5, ".performanceLocalV5ConditionalPage");
+  for (const rootRule of [cityRoot, conditionalRoot]) {
+    assert.match(rootRule, /--plv5-viewport-top-offset:\s*0px/);
+    assert.match(rootRule, /padding-block-start:\s*var\(--plv5-city-stack-height\)/);
+  }
+
+  const stack = cssRule(v5, ".performanceLocalV5TopConversionStack");
+  assert.match(stack, /position:\s*fixed/);
+  assert.doesNotMatch(stack, /position:\s*sticky/);
+  assert.match(stack, /top:\s*var\(--plv5-viewport-top-offset\)/);
+  assert.match(stack, /right:\s*0/);
+  assert.match(stack, /left:\s*0/);
+  assert.match(stack, /height:\s*var\(--plv5-city-stack-height\)/);
+
+  const disabledRoots = cssRule(v5, [
+    '.performanceLocalV5CityServicePreview[data-v5-top-action-enabled="false"],',
+    '.performanceLocalV5ConditionalPage[data-v5-top-action-enabled="false"]',
+  ].join("\n"));
+  assert.match(disabledRoots, /--plv5-city-action-height:\s*0px/);
+  const disabledStack = cssRule(v5, '.performanceLocalV5TopConversionStack[data-v5-top-action-enabled="false"]');
+  assert.match(disabledStack, /height:\s*calc\(var\(--plv5-city-phone-height\) \+ var\(--plv5-city-safe-top\)\)/);
+  assert.match(disabledStack, /grid-template-rows:\s*calc\(var\(--plv5-city-phone-height\) \+ var\(--plv5-city-safe-top\)\)/);
+
+  const adminSelector = [
+    "body.admin-bar .performanceLocalV5CityServicePreview,",
+    "body.admin-bar .performanceLocalV5ConditionalPage",
+  ].join("\n");
+  assert.match(cssRule(v5, adminSelector), /--plv5-viewport-top-offset:\s*32px/);
+  const mobileAdminMarker = v5.indexOf("@media screen and (max-width: 782px)");
+  assert.ok(mobileAdminMarker > 0);
+  const mobileAdminSelector = adminSelector.split("\n").map((selector) => `  ${selector}`).join("\n");
+  assert.match(cssRule(v5.slice(mobileAdminMarker), mobileAdminSelector), /--plv5-viewport-top-offset:\s*46px/);
+
+  const narrowAdminMarker = v5.indexOf("@media screen and (max-width: 600px)");
+  assert.ok(narrowAdminMarker > mobileAdminMarker);
+  const narrowAdmin = v5.slice(narrowAdminMarker);
+  const narrowAdminRoots = cssRule(narrowAdmin, mobileAdminSelector);
+  assert.match(narrowAdminRoots, /--plv5-viewport-top-offset:\s*0px/);
+  assert.match(narrowAdminRoots, /padding-block-start:\s*0/);
+  const narrowAdminStackSelector = [
+    "  body.admin-bar .performanceLocalV5CityServicePreview .performanceLocalV5TopConversionStack,",
+    "  body.admin-bar .performanceLocalV5ConditionalPage .performanceLocalV5TopConversionStack",
+  ].join("\n");
+  const narrowAdminStack = cssRule(narrowAdmin, narrowAdminStackSelector);
+  assert.match(narrowAdminStack, /position:\s*sticky/);
+  assert.doesNotMatch(narrowAdminStack, /position:\s*fixed/);
+
+  const cityAnchors = cssRule(v5, [
+    ".performanceLocalV5CityServicePreview #main-content,",
+    ".performanceLocalV5CityServicePreview .performanceLocalEstimateForm,",
+    ".performanceLocalV5CityServicePreview .performanceLocalEstimateForm :where(input, textarea, button)",
+  ].join("\n"));
+  assert.match(cityAnchors, /scroll-margin-block-start:\s*calc\([\s\S]*?var\(--plv5-viewport-top-offset\)[\s\S]*?var\(--plv5-city-stack-height\)[\s\S]*?16px[\s\S]*?\)/);
+
+  const conditionalHeader = cssRule(v5, ".performanceLocalV5ConditionalPage .performanceLocalV5Header");
+  assert.match(conditionalHeader, /top:\s*calc\(var\(--plv5-viewport-top-offset\) \+ var\(--plv5-city-stack-height\)\)/);
+  const releasedConditionalHeader = cssRule(v5, [
+    '.performanceLocalV5ConditionalPage[data-v5-menu-open="true"] .performanceLocalV5Header,',
+    '.performanceLocalV5ConditionalPage[data-v5-form-focus-risk="true"] .performanceLocalV5Header',
+  ].join("\n"));
+  assert.match(releasedConditionalHeader, /top:\s*var\(--plv5-viewport-top-offset\)/);
+  const conditionalAnchors = cssRule(v5, [
+    ".performanceLocalV5ConditionalPage #performance-local-v5-conditional-main,",
+    ".performanceLocalV5ConditionalPage .performanceLocalV5Form,",
+    ".performanceLocalV5ConditionalPage .performanceLocalV5Form :where(input, textarea, button)",
+  ].join("\n"));
+  assert.match(conditionalAnchors, /scroll-margin-block-start:\s*calc\([\s\S]*?var\(--plv5-viewport-top-offset\)[\s\S]*?var\(--plv5-city-stack-height\)[\s\S]*?94px[\s\S]*?\)/);
+
+  const v5Header = cssRule(v5, ".performanceLocalV5Header");
+  assert.match(v5Header, /position:\s*sticky/);
+  assert.doesNotMatch(v5Header, /position:\s*fixed/);
+  const cityHeader = cssRule(v5, ".performanceLocalV5CityServicePreview .performanceLocalHeader");
+  assert.match(cityHeader, /position:\s*absolute/);
+  assert.doesNotMatch(cityHeader, /position:\s*fixed/);
 });
 
 test("footer collision boundary is fail-closed and deterministic", () => {
@@ -1617,6 +1700,17 @@ function estimateForm(): PerformanceLocalEstimateFormConfiguration {
 
 function source(path: string): string {
   return readFileSync(join(root, path), "utf8");
+}
+
+function cssRule(css: string, selector: string): string {
+  const normalizedCss = css.replace(/\r\n/g, "\n");
+  const marker = `${selector.replace(/\r\n/g, "\n")} {`;
+  const start = normalizedCss.indexOf(marker);
+  assert.ok(start >= 0, `Missing CSS rule: ${selector}`);
+  const bodyStart = start + marker.length;
+  const end = normalizedCss.indexOf("}", bodyStart);
+  assert.ok(end > bodyStart, `Unterminated CSS rule: ${selector}`);
+  return normalizedCss.slice(bodyStart, end);
 }
 
 function count(value: string, needle: string): number {

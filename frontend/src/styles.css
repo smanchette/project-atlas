@@ -11297,21 +11297,25 @@ th {
   --plv5-city-phone-height: 44px;
   --plv5-city-action-height: 52px;
   --plv5-city-safe-top: env(safe-area-inset-top, 0px);
+  --plv5-viewport-top-offset: 0px;
   --plv5-city-stack-height: calc(
     var(--plv5-city-phone-height) +
     var(--plv5-city-action-height) +
     var(--plv5-city-safe-top)
   );
   min-width: 0;
+  padding-block-start: var(--plv5-city-stack-height);
   background: var(--atlas-color-background, #fff);
   font-family: var(--atlas-font-body, Inter, ui-sans-serif, system-ui, sans-serif);
   scroll-padding-block-start: var(--plv5-city-stack-height);
 }
 
 .performanceLocalV5TopConversionStack {
-  position: sticky;
+  position: fixed;
   z-index: 130;
-  top: 0;
+  top: var(--plv5-viewport-top-offset);
+  right: 0;
+  left: 0;
   display: grid;
   width: 100%;
   height: var(--plv5-city-stack-height);
@@ -11407,6 +11411,7 @@ th {
 
 .performanceLocalV5CityServicePreview .performanceLocalSkipLink {
   z-index: 180;
+  top: calc(var(--plv5-viewport-top-offset) + 8px);
 }
 
 .performanceLocalV5CityServicePreview .performanceLocalHeader {
@@ -11581,7 +11586,11 @@ th {
 .performanceLocalV5CityServicePreview #main-content,
 .performanceLocalV5CityServicePreview .performanceLocalEstimateForm,
 .performanceLocalV5CityServicePreview .performanceLocalEstimateForm :where(input, textarea, button) {
-  scroll-margin-block-start: calc(var(--plv5-city-stack-height) + 16px);
+  scroll-margin-block-start: calc(
+    var(--plv5-viewport-top-offset) +
+    var(--plv5-city-stack-height) +
+    16px
+  );
 }
 
 .performanceLocalV5CityServicePreview .performanceLocalStickyActions {
@@ -11797,23 +11806,26 @@ th {
   --plv5-city-phone-height: 44px;
   --plv5-city-action-height: 52px;
   --plv5-city-safe-top: env(safe-area-inset-top, 0px);
+  --plv5-viewport-top-offset: 0px;
   --plv5-city-stack-height: calc(
     var(--plv5-city-phone-height) +
     var(--plv5-city-action-height) +
     var(--plv5-city-safe-top)
   );
   min-width: 0;
+  padding-block-start: var(--plv5-city-stack-height);
   background: var(--plv5-cream);
   scroll-padding-block-start: calc(var(--plv5-city-stack-height) + 94px);
 }
 
 .performanceLocalV5ConditionalPage .performanceLocalV5SkipLink {
   z-index: 180;
+  top: calc(var(--plv5-viewport-top-offset) + 12px);
 }
 
 .performanceLocalV5ConditionalPage .performanceLocalV5Header {
   z-index: 120;
-  top: var(--plv5-city-stack-height);
+  top: calc(var(--plv5-viewport-top-offset) + var(--plv5-city-stack-height));
 }
 
 .performanceLocalV5ConditionalPage[data-v5-menu-open="true"] .performanceLocalV5TopConversionStack,
@@ -11826,13 +11838,42 @@ th {
 
 .performanceLocalV5ConditionalPage[data-v5-menu-open="true"] .performanceLocalV5Header,
 .performanceLocalV5ConditionalPage[data-v5-form-focus-risk="true"] .performanceLocalV5Header {
-  top: 0;
+  top: var(--plv5-viewport-top-offset);
 }
 
 .performanceLocalV5ConditionalPage #performance-local-v5-conditional-main,
 .performanceLocalV5ConditionalPage .performanceLocalV5Form,
 .performanceLocalV5ConditionalPage .performanceLocalV5Form :where(input, textarea, button) {
-  scroll-margin-block-start: calc(var(--plv5-city-stack-height) + 94px);
+  scroll-margin-block-start: calc(
+    var(--plv5-viewport-top-offset) +
+    var(--plv5-city-stack-height) +
+    94px
+  );
+}
+
+body.admin-bar .performanceLocalV5CityServicePreview,
+body.admin-bar .performanceLocalV5ConditionalPage {
+  --plv5-viewport-top-offset: 32px;
+}
+
+@media screen and (max-width: 782px) {
+  body.admin-bar .performanceLocalV5CityServicePreview,
+  body.admin-bar .performanceLocalV5ConditionalPage {
+    --plv5-viewport-top-offset: 46px;
+  }
+}
+
+@media screen and (max-width: 600px) {
+  body.admin-bar .performanceLocalV5CityServicePreview,
+  body.admin-bar .performanceLocalV5ConditionalPage {
+    --plv5-viewport-top-offset: 0px;
+    padding-block-start: 0;
+  }
+
+  body.admin-bar .performanceLocalV5CityServicePreview .performanceLocalV5TopConversionStack,
+  body.admin-bar .performanceLocalV5ConditionalPage .performanceLocalV5TopConversionStack {
+    position: sticky;
+  }
 }
 
 .performanceLocalV5ConditionalMain {
