@@ -883,7 +883,7 @@ test("V5 styles are additive, namespace-only, responsive, and never target the s
   assert.ok(cityMarker > 0 && conditionalMarker > cityMarker && optionalModuleMarker > conditionalMarker);
   assert.equal(
     createHash("sha256").update(css.slice(cityMarker, conditionalMarker)).digest("hex"),
-    "130a5f1936565386f4edb8ff8b1364ca235dd5e1ee316baeece440534731e07e",
+    "7897a04f8b1358bf9d70e752c122562baf3408124a1e2bab8186fe50618a7948",
   );
   assert.equal(
     createHash("sha256").update(css.slice(conditionalMarker, optionalModuleMarker)).digest("hex"),
@@ -981,6 +981,7 @@ test("V5 top-interface labels use one real-weight system typography treatment", 
   const city = css.slice(marker);
   const selector = [
     ".performanceLocalV5StickyPhoneBar a,",
+    ".performanceLocalV5StickyPhoneBar strong,",
     ".performanceLocalV5StickyActionBanner a,",
     ".performanceLocalV5CityServicePreview .performanceLocalDesktopNavigation :where(a, span, button),",
     ".performanceLocalV5CityServicePreview .performanceLocalDrawerList :where(a, span, button)",

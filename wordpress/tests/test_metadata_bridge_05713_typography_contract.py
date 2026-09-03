@@ -38,11 +38,11 @@ def test_05713_css_is_exactly_the_sealed_05712_typography_patch() -> None:
     sync = _load_sync()
     predecessor = PREDECESSOR.read_text(encoding="utf-8")
     successor = STYLESHEET.read_text(encoding="utf-8")
-    assert successor == sync.build_css()
     assert _sha256(PREDECESSOR) == sync.PREDECESSOR_SHA256
-    assert _sha256(FRONTEND) == sync.AUTHORITATIVE_SOURCE_SHA256
+    assert _sha256(STYLESHEET) == (
+        "b4158eb11a2d53b8c06c1bfcec8ccda4ce8329e65514b8c3a0aa9f58ad30f82f"
+    )
     assert successor.count(sync.TYPOGRAPHY_BLOCK_05713) == 1
-    assert FRONTEND.read_text(encoding="utf-8").count(sync.TYPOGRAPHY_BLOCK_05713) == 1
 
     restored = successor.replace(
         "\n\n" + sync.TYPOGRAPHY_BLOCK_05713,
@@ -50,6 +50,11 @@ def test_05713_css_is_exactly_the_sealed_05712_typography_patch() -> None:
         1,
     ).replace(sync.HEADER_05713, sync.HEADER_05712, 1)
     assert restored == predecessor
+
+    # The historical synchronizer remains fail-closed after the authoritative
+    # stylesheet legitimately advances for an append-only successor.
+    with pytest.raises(sync.CssSynchronizationError, match="authoritative frontend"):
+        sync.build_css()
 
 
 def test_05713_interface_typography_is_real_weight_local_and_geometry_neutral() -> None:

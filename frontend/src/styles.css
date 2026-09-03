@@ -11386,6 +11386,7 @@ th {
 }
 
 .performanceLocalV5StickyPhoneBar a,
+.performanceLocalV5StickyPhoneBar strong,
 .performanceLocalV5StickyActionBanner a,
 .performanceLocalV5CityServicePreview .performanceLocalDesktopNavigation :where(a, span, button),
 .performanceLocalV5CityServicePreview .performanceLocalDrawerList :where(a, span, button) {

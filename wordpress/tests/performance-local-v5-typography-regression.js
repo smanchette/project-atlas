@@ -7,9 +7,11 @@
   var STYLESHEET_HASH_BY_VERSION = Object.freeze({
     "0.57.12": "b0834b9e8fde7dee64d645fe831a8e862736006a15b21b0e7cf8b14e15fe49e3",
     "0.57.13": "b4158eb11a2d53b8c06c1bfcec8ccda4ce8329e65514b8c3a0aa9f58ad30f82f",
+    "0.57.14": "aa5c45c69c7a2ce4998a4af38f1c32ef3483fff2871da210eabd3635d199bbde",
   });
   var SELECTORS = Object.freeze({
     sticky_phone: ".performanceLocalV5StickyPhoneBar a",
+    sticky_phone_number: ".performanceLocalV5StickyPhoneBar strong",
     sticky_action: ".performanceLocalV5StickyActionBanner a",
     nav_home: '.performanceLocalDesktopNavigation a[href="/"]',
     nav_service: '.performanceLocalDesktopNavigation a[href="/drywood-termite-tenting/"]',
@@ -167,7 +169,7 @@
         font_family: target.font_family,
         resolved_loaded_font: target.resolved_loaded_font,
       });
-      if (expectedVersion === "0.57.13") {
+      if (expectedVersion === "0.57.13" || expectedVersion === "0.57.14") {
         add(assertions, name + ".system_family", /system-ui/.test(target.font_family), target.font_family);
         add(assertions, name + ".real_weight", target.font_weight === "700", target.font_weight);
         add(assertions, name + ".no_synthesis", target.font_synthesis === "none", target.font_synthesis);
@@ -179,6 +181,47 @@
         add(assertions, name + ".no_clipping", target.clipped === false, target.rect);
       }
     });
+
+    var phoneNumber = targets.sticky_phone_number;
+    add(assertions, "sticky_phone_number.exists_once", phoneNumber.count === 1, {
+      count: phoneNumber.count,
+    });
+    if (expectedVersion === "0.57.13") {
+      add(assertions, "baseline_05713.phone_parent_700_nested_900",
+        targets.sticky_phone.font_weight === "700" && phoneNumber.font_weight === "900", {
+          parent: targets.sticky_phone.font_weight,
+          nested: phoneNumber.font_weight,
+        });
+    }
+    if (expectedVersion === "0.57.14") {
+      add(assertions, "successor_05714.phone_parent_nested_match",
+        targets.sticky_phone.font_family === phoneNumber.font_family
+          && targets.sticky_phone.font_weight === "700"
+          && phoneNumber.font_weight === "700", {
+          parent_family: targets.sticky_phone.font_family,
+          nested_family: phoneNumber.font_family,
+          parent_weight: targets.sticky_phone.font_weight,
+          nested_weight: phoneNumber.font_weight,
+        });
+      add(assertions, "successor_05714.phone_number_font_available",
+        phoneNumber.font_available === true, phoneNumber.resolved_loaded_font);
+      add(assertions, "successor_05714.phone_number_system_family",
+        /system-ui/.test(phoneNumber.font_family), phoneNumber.font_family);
+      add(assertions, "successor_05714.phone_number_no_synthesis",
+        phoneNumber.font_synthesis === "none", phoneNumber.font_synthesis);
+      add(assertions, "successor_05714.phone_number_no_shadow",
+        phoneNumber.text_shadow === "none", phoneNumber.text_shadow);
+      add(assertions, "successor_05714.phone_number_no_stroke",
+        /^0px(?:\s|$)/.test(phoneNumber.text_stroke), phoneNumber.text_stroke);
+      add(assertions, "successor_05714.phone_number_no_filter",
+        phoneNumber.filter === "none", phoneNumber.filter);
+      add(assertions, "successor_05714.phone_number_full_opacity",
+        phoneNumber.opacity === "1", phoneNumber.opacity);
+      add(assertions, "successor_05714.phone_number_no_scale",
+        phoneNumber.transform === "none", phoneNumber.transform);
+      add(assertions, "successor_05714.phone_number_no_clipping",
+        phoneNumber.clipped === false, phoneNumber.rect);
+    }
 
     if (expectedVersion === "0.57.12") {
       add(assertions, "baseline.sticky_uses_900", targets.sticky_phone.font_weight === "900"
