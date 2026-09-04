@@ -1674,6 +1674,98 @@ def test_disposable_builder_binds_current_v9_content_cta_media_and_writes_nothin
     } == table_counts_before
 
 
+def test_optional_customer_email_is_explicit_exact_and_write_free(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_builder_scope(session, monkeypatch)
+    pending_before = (set(session.new), set(session.dirty), set(session.deleted))
+
+    default = build_performance_local_v5_staging_payload(session, 41)
+    opted_in = build_performance_local_v5_staging_payload(
+        session,
+        41,
+        include_optional_customer_email=True,
+    )
+    prepared = prepare_performance_local_v5_staging_payload(
+        session,
+        41,
+        include_optional_customer_email=True,
+    )
+    finalized = finalize_performance_local_v5_staging_payload(
+        prepared,
+        _verified_media_mapping(prepared),
+        expected_staging_origin="https://staging.example.test",
+    )
+
+    exact_email_field = {
+        "field_key": "email",
+        "label": "Email",
+        "required": False,
+        "control": "input",
+        "input_type": "email",
+        "order": 6,
+        "maximum_length": 254,
+        "validation": {
+            "rule": "email_address",
+            "minimum_length": 3,
+            "maximum_length": 254,
+        },
+    }
+    default_fields = default.payload["form"]["fields"]
+    assert [field["field_key"] for field in default_fields] == [
+        "name",
+        "phone",
+        "postal-code",
+        "requested-service",
+        "message",
+    ]
+    assert opted_in.payload["form"]["fields"] == [*default_fields, exact_email_field]
+    assert prepared.payload_template["form"]["fields"] == [
+        *default_fields,
+        exact_email_field,
+    ]
+    assert finalized.payload["form"]["fields"][-1] == exact_email_field
+    assert performance_local_v5_payload_sha256(exact_email_field) == (
+        "3a6a994ed264fe231a227ecf336fe253fbbc4c86d2613d5087e203e306ab426f"
+    )
+    assert performance_local_v5_payload_sha256(
+        opted_in.payload["form"]["fields"]
+    ) == performance_local_v5_payload_sha256([*default_fields, exact_email_field])
+
+    default_without_fields = deepcopy(default.payload)
+    opted_in_without_fields = deepcopy(opted_in.payload)
+    default_without_fields["form"].pop("fields")
+    opted_in_without_fields["form"].pop("fields")
+    assert opted_in_without_fields == default_without_fields
+    assert opted_in.source_bindings == default.source_bindings
+    assert opted_in.required_media == default.required_media
+    assert opted_in.required_logo_media == default.required_logo_media
+    assert (set(session.new), set(session.dirty), set(session.deleted)) == pending_before
+
+
+@pytest.mark.parametrize("invalid_policy", [None, 0, 1, "true"])
+def test_optional_customer_email_policy_rejects_non_boolean_values(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_policy: object,
+) -> None:
+    _seed_builder_scope(session, monkeypatch)
+    pending_before = (set(session.new), set(session.dirty), set(session.deleted))
+
+    with pytest.raises(PerformanceLocalV5PayloadError) as rejected:
+        build_performance_local_v5_staging_payload(
+            session,
+            41,
+            include_optional_customer_email=invalid_policy,  # type: ignore[arg-type]
+        )
+
+    assert rejected.value.code == (
+        "performance_local_v5_optional_customer_email_policy_invalid"
+    )
+    assert (set(session.new), set(session.dirty), set(session.deleted)) == pending_before
+
+
 def test_disposable_builder_rejects_missing_and_stale_qa(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,

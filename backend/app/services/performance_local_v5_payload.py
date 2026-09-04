@@ -85,6 +85,25 @@ _PREPARED_MAPPING_SHA256 = "PROJECT_ATLAS_UNFINALIZED_VERIFIED_MEDIA_MAP"
 _PREPARED_TOKEN_PREFIX = "project-atlas-unfinalized-media:"
 
 
+def _optional_customer_email_field() -> dict[str, Any]:
+    """Return the exact opt-in sixth field accepted by the V5 Bridge contract."""
+
+    return {
+        "field_key": "email",
+        "label": "Email",
+        "required": False,
+        "control": "input",
+        "input_type": "email",
+        "order": 6,
+        "maximum_length": 254,
+        "validation": {
+            "rule": "email_address",
+            "minimum_length": 3,
+            "maximum_length": 254,
+        },
+    }
+
+
 class PerformanceLocalV5PayloadError(ValueError):
     """Fail-closed current-state V5 payload construction error."""
 
@@ -169,6 +188,8 @@ def performance_local_v5_payload_sha256(value: Any) -> str:
 def build_performance_local_v5_staging_payload(
     session: Session,
     page_id: int,
+    *,
+    include_optional_customer_email: bool = False,
 ) -> PerformanceLocalV5PayloadBuild:
     """Build one canonical current City-Service -> WordPress V5 metadata value.
 
@@ -180,7 +201,11 @@ def build_performance_local_v5_staging_payload(
     pending_before = _pending_identity(session)
     try:
         with session.no_autoflush:
-            result = _build(session, page_id)
+            result = _build(
+                session,
+                page_id,
+                include_optional_customer_email=include_optional_customer_email,
+            )
     except (PageCompositionError, PageCompositionHistoryError, ValueError) as exc:
         if isinstance(exc, PerformanceLocalV5PayloadError):
             raise
@@ -196,6 +221,8 @@ def build_performance_local_v5_staging_payload(
 def prepare_performance_local_v5_staging_payload(
     session: Session,
     page_id: int,
+    *,
+    include_optional_customer_email: bool = False,
 ) -> PerformanceLocalV5PreparedPayload:
     """Prepare current governed payload bytes without inventing remote media.
 
@@ -208,7 +235,12 @@ def prepare_performance_local_v5_staging_payload(
     pending_before = _pending_identity(session)
     try:
         with session.no_autoflush:
-            built = _build(session, page_id, prepared=True)
+            built = _build(
+                session,
+                page_id,
+                prepared=True,
+                include_optional_customer_email=include_optional_customer_email,
+            )
     except (PageCompositionError, PageCompositionHistoryError, ValueError) as exc:
         if isinstance(exc, PerformanceLocalV5PayloadError):
             raise
@@ -469,7 +501,13 @@ def _build(
     page_id: int,
     *,
     prepared: bool = False,
+    include_optional_customer_email: bool = False,
 ) -> PerformanceLocalV5PayloadBuild:
+    if type(include_optional_customer_email) is not bool:
+        raise PerformanceLocalV5PayloadError(
+            "The optional customer-email field policy must be explicit.",
+            code="performance_local_v5_optional_customer_email_policy_invalid",
+        )
     page = session.get(GeneratedPage, page_id)
     if page is None or page.id is None:
         raise PerformanceLocalV5PayloadError(
@@ -571,7 +609,10 @@ def _build(
     )
     form_source = form_components["compact_estimate_form"].configuration_payload
     action_source = form_components["sticky_mobile_action_bar"].configuration_payload
-    form = _form_payload(form_source)
+    form = _form_payload(
+        form_source,
+        include_optional_customer_email=include_optional_customer_email,
+    )
     call_label = _text(action_source.get("call_label"), "call label")
     estimate_action = _approved_estimate_action(form_components)
     estimate_label = estimate_action["label"]
@@ -1581,7 +1622,11 @@ def _contains_prepared_media_token(value: Any) -> bool:
     return isinstance(value, str) and _PREPARED_TOKEN_PREFIX in value
 
 
-def _form_payload(source: dict[str, Any]) -> dict[str, Any]:
+def _form_payload(
+    source: dict[str, Any],
+    *,
+    include_optional_customer_email: bool = False,
+) -> dict[str, Any]:
     fields = _objects(source.get("fields"), "form fields")
     if [item.get("field_key") for item in fields] != [
         "name",
@@ -1618,6 +1663,8 @@ def _form_payload(source: dict[str, Any]) -> dict[str, Any]:
                 },
             }
         )
+    if include_optional_customer_email:
+        normalized.append(_optional_customer_email_field())
     return {
         "state": "disabled",
         "anchor": "estimate-form",

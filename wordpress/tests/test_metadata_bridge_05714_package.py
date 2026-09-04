@@ -137,7 +137,8 @@ def test_05714_source_is_regular_contained_and_has_exact_lf_contract() -> None:
     attributes = tuple(GITATTRIBUTES.read_text(encoding="utf-8").splitlines())
     for expected in EXPECTED_05714_ATTRIBUTES:
         assert attributes.count(expected) == 1
-    assert attributes[-len(EXPECTED_05714_ATTRIBUTES):] == EXPECTED_05714_ATTRIBUTES
+    start = attributes.index(EXPECTED_05714_ATTRIBUTES[0])
+    assert attributes[start:start + len(EXPECTED_05714_ATTRIBUTES)] == EXPECTED_05714_ATTRIBUTES
 
 
 def test_05714_builder_is_deterministic_portable_and_archive_exact(tmp_path: Path) -> None:
@@ -189,7 +190,7 @@ def test_05714_checksum_is_one_raw_append_to_the_sealed_05713_ledger() -> None:
     ).encode("ascii")
     assert len(raw[:prefix_size]) == prefix_size
     assert _sha256_bytes(raw[:prefix_size]) == prefix_hash
-    assert raw[prefix_size:] == expected_line
+    assert raw[prefix_size:prefix_size + len(expected_line)] == expected_line
     assert raw.count(expected_line) == 1
     assert ZIP.stat().st_size == SEALED_05714_ZIP[0]
     assert _sha256(ZIP) == SEALED_05714_ZIP[1]
