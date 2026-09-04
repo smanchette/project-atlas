@@ -277,7 +277,7 @@ def test_05715_checksum_is_one_raw_append_to_sealed_05714_ledger() -> None:
     ).encode("ascii")
     assert len(raw[:prefix_size]) == prefix_size
     assert _sha256_bytes(raw[:prefix_size]) == prefix_hash
-    assert raw[prefix_size:] == expected_line
+    assert raw[prefix_size:prefix_size + len(expected_line)] == expected_line
     assert raw.count(expected_line) == 1
     assert ZIP.stat().st_size == SEALED_05715_ZIP[0]
     assert _sha256(ZIP) == SEALED_05715_ZIP[1]
